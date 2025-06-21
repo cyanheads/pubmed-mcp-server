@@ -9,6 +9,10 @@
 
 **Empower your AI agents and research tools with seamless PubMed integration!**
 
+<a href="https://glama.ai/mcp/servers/@cyanheads/pubmed-mcp-server">
+  <img width="380" height="200" src="https://glama.ai/mcp/servers/@cyanheads/pubmed-mcp-server/badge" alt="PubMed Server MCP server" />
+</a>
+
 An MCP (Model Context Protocol) server providing comprehensive access to PubMed's biomedical literature database. Enables LLMs and AI agents to search, retrieve, analyze, and visualize scientific publications through NCBI's E-utilities API with advanced research workflow capabilities.
 
 Built on the [`cyanheads/mcp-ts-template`](https://github.com/cyanheads/mcp-ts-template), this server follows a modular architecture with robust error handling, logging, and security features.
