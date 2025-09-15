@@ -24,9 +24,7 @@ import { startStdioTransport } from "./transports/stdio/index.js";
 
 type SdkToolSpec = Parameters<McpServer["registerTool"]>[1];
 type ServerIdentity = ConstructorParameters<typeof McpServer>[0];
-type McpServerOptions = NonNullable<
-  ConstructorParameters<typeof McpServer>[1]
->;
+type McpServerOptions = NonNullable<ConstructorParameters<typeof McpServer>[1]>;
 
 export interface DescribedTool extends SdkToolSpec {
   title: string;

@@ -2,6 +2,24 @@
 
 All notable changes to this project will be documented in this file.
 
+## [1.4.4] - 2025-09-15
+
+### Added
+
+- **Publishing Workflow**: Added a comprehensive guide (`docs/publishing-mcp-server-registry.md`) and an automated validation and publishing script (`scripts/validate-mcp-publish-schema.ts`) to streamline deployment to the MCP Registry.
+
+### Changed
+
+- **Dependencies**: Upgraded numerous dependencies to their latest versions for improved performance and security, including `@modelcontextprotocol/sdk` to `^1.18.0`, `hono` to `^4.9.7`, `axios` to `^1.12.2`, and `eslint` to `^9.35.0`.
+- **Configuration**:
+    - Added the `mcpName` field to `package.json` to define the canonical server identifier for the registry.
+    - Overhauled `.gitignore` with a more structured and comprehensive set of rules for better repository hygiene.
+- **Build**: Added an `overrides` section to `package.json` to manage sub-dependencies related to `patch-package`.
+
+### Removed
+
+- **TypeDoc Reference**: Deleted the outdated `typedoc-reference.md` from the documentation.
+
 ## [1.4.3] - 2025-08-08
 
 ### Changed
