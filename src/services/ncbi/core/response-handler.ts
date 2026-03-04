@@ -36,6 +36,11 @@ const NCBI_ARRAY_JPATHS = new Set([
   'DbInfo.LinkList.Link',
   'eSummaryResult.DocSum',
   'DocSum.Item',
+  // MeSH eFetch structures
+  'DescriptorRecordSet.DescriptorRecord',
+  'ConceptList.Concept',
+  'TermList.Term',
+  'TreeNumberList.TreeNumber',
 ]);
 
 /**
@@ -169,7 +174,10 @@ export class NcbiResponseHandler {
     if (retmode === 'xml') {
       logger.debug('Parsing XML response from NCBI.', { ...context, endpoint, retmode });
 
-      const validationResult = XMLValidator.validate(responseText);
+      // Strip DOCTYPE declarations before validation — NCBI MeSH eFetch (and others)
+      // include DTD references that XMLValidator rejects.
+      const xmlForValidation = responseText.replace(/<!DOCTYPE[^>]*>/gi, '');
+      const validationResult = XMLValidator.validate(xmlForValidation);
       if (validationResult !== true) {
         logger.error('Invalid XML response from NCBI.', {
           ...context,
