@@ -67,7 +67,7 @@ export class NcbiService {
       retstart: parseInt(esResult.RetStart, 10) || 0,
       ...(esResult.QueryKey !== undefined && { queryKey: esResult.QueryKey }),
       ...(esResult.WebEnv !== undefined && { webEnv: esResult.WebEnv }),
-      idList: esResult.IdList?.Id ?? [],
+      idList: (esResult.IdList?.Id ?? []).map(String),
       queryTranslation: esResult.QueryTranslation,
       ...(esResult.ErrorList !== undefined && { errorList: esResult.ErrorList }),
       ...(esResult.WarningList !== undefined && { warningList: esResult.WarningList }),

@@ -149,9 +149,27 @@ function parseSummaryRecords(data: unknown, ids: string[]): MeshRecord[] {
   return docSums.map((doc) => {
     const meshId = getText(doc.Id);
     const items = ensureArray(doc.Item) as Record<string, unknown>[];
+
+    // MeSH eSummary stores the descriptor name in DS_MeshTerms.
+    // For simple descriptors it's a String with #text; for multi-term descriptors
+    // it's a List with nested Item children — take the first child as the name.
     const nameItem = items.find((it) => getText(it['@_Name']) === 'DS_MeshTerms');
-    const name = nameItem ? getText(nameItem) : meshId;
-    return { meshId, name };
+    let name = '';
+    if (nameItem) {
+      const directText = getText(nameItem, '');
+      if (directText) {
+        name = directText;
+      } else {
+        // List-type Item: extract first nested sub-Item's text
+        const subItems = ensureArray((nameItem as Record<string, unknown>).Item) as Record<
+          string,
+          unknown
+        >[];
+        if (subItems.length > 0) name = getText(subItems[0]);
+      }
+    }
+
+    return { meshId, name: name || meshId };
   });
 }
 
