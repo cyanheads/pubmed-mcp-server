@@ -49,6 +49,8 @@ See [docs/tree.md](docs/tree.md) for the complete visual tree. Respect the estab
 | `src/storage/`                          | Storage abstractions and provider implementations (in-memory, filesystem, supabase, cloudflare).                                                                                                              |
 | `src/container/`                        | Dependency injection (custom typed container). `Token<T>` phantom branding, service registration/resolution. Zero external deps.                                                                              |
 | `src/utils/`                            | Global utilities: logging, performance, parsing, network, security, formatting, telemetry. Error handling is at `src/utils/internal/error-handler/`.                                                          |
+| `schemas/ncbi-dtd/`                     | NCBI E-utilities DTD files — XML schema definitions for ESearch, EFetch, ESummary, ELink, ESpell, EInfo, and PubMed article XML. Reference for building parsers.                                              |
+| `docs/ncbi/`                            | NCBI reference material (E-utilities help manual PDF). Offline reference for API behavior and field semantics.                                                                                                |
 | `tests/`                                | Unit/integration tests. Mirrors `src/` layout. Includes compliance suites.                                                                                                                                    |
 
 **File suffix conventions:**

@@ -247,6 +247,8 @@ bun run deploy:dev
 | `src/container` | DI container registrations and tokens. |
 | `src/utils` | Logging, error handling, security, parsing, formatting, telemetry. |
 | `src/config` | Environment variable parsing and validation with Zod. |
+| `schemas/ncbi-dtd` | NCBI E-utilities DTD files — XML schema definitions for ESearch, EFetch, ESummary, ELink, ESpell, EInfo, and PubMed article XML. |
+| `docs/ncbi` | NCBI reference material ([E-utilities help manual](docs/ncbi/eutilities-help.pdf)). |
 | `tests/` | Unit and integration tests, mirroring the `src/` structure. |
 
 ## Development guide
