@@ -1,47 +1,128 @@
 /**
- * @fileoverview Provides a utility for performance monitoring of tool execution.
- * This module introduces a higher-order function to wrap tool logic, measure its
- * execution time, and log a structured metrics event.
+ * @fileoverview Performance utility for tool execution with modern observability.
+ * Wraps tool logic to measure duration, payload sizes, and memory usage, and
+ * records results to OpenTelemetry plus structured logs. No manual spans beyond
+ * the single wrapper span here per project guidelines.
  * @module src/utils/internal/performance
  */
 
-import { SpanStatusCode, trace } from "@opentelemetry/api";
+import type { performance as PerfHooksPerformance } from 'node:perf_hooks';
+import { SpanStatusCode, trace } from '@opentelemetry/api';
+
+import { config } from '@/config/index.js';
+import { McpError } from '@/types-global/errors.js';
+import { logger } from '@/utils/internal/logger.js';
+import type { RequestContext } from '@/utils/internal/requestContext.js';
+import { createCounter, createHistogram } from '@/utils/telemetry/metrics.js';
 import {
   ATTR_CODE_FUNCTION,
   ATTR_CODE_NAMESPACE,
-} from "../telemetry/semconv.js";
-import { config } from "../../config/index.js";
-import { McpError } from "../../types-global/errors.js";
-import { logger } from "./logger.js";
-import { RequestContext } from "./requestContext.js";
+  ATTR_MCP_TOOL_DURATION_MS,
+  ATTR_MCP_TOOL_ERROR_CODE,
+  ATTR_MCP_TOOL_INPUT_BYTES,
+  ATTR_MCP_TOOL_MEMORY_HEAP_USED_AFTER,
+  ATTR_MCP_TOOL_MEMORY_HEAP_USED_BEFORE,
+  ATTR_MCP_TOOL_MEMORY_HEAP_USED_DELTA,
+  ATTR_MCP_TOOL_MEMORY_RSS_AFTER,
+  ATTR_MCP_TOOL_MEMORY_RSS_BEFORE,
+  ATTR_MCP_TOOL_MEMORY_RSS_DELTA,
+  ATTR_MCP_TOOL_NAME,
+  ATTR_MCP_TOOL_OUTPUT_BYTES,
+  ATTR_MCP_TOOL_SUCCESS,
+} from '@/utils/telemetry/semconv.js';
+
+// OTel metric instruments for tool execution (lazy-initialized on first use)
+let toolCallCounter: ReturnType<typeof createCounter> | undefined;
+let toolCallDuration: ReturnType<typeof createHistogram> | undefined;
+let toolCallErrors: ReturnType<typeof createCounter> | undefined;
+
+function getToolMetrics() {
+  toolCallCounter ??= createCounter('mcp.tool.calls', 'Total MCP tool invocations', '{calls}');
+  toolCallDuration ??= createHistogram('mcp.tool.duration', 'MCP tool execution duration', 'ms');
+  toolCallErrors ??= createCounter('mcp.tool.errors', 'Total MCP tool errors', '{errors}');
+  return { toolCallCounter, toolCallDuration, toolCallErrors };
+}
+
+// Environment-aware high-resolution timer
+let performanceNow: () => number = () => Date.now(); // Fallback
 
 /**
- * Calculates the size of a payload in bytes.
- * @param payload - The payload to measure.
- * @returns The size in bytes.
- * @private
+ * Initializes the high-resolution timer based on the environment.
+ * In a browser-like environment, it uses `globalThis.performance`.
+ * In Node.js, it dynamically imports `perf_hooks`.
  */
-function getPayloadSize(payload: unknown): number {
-  if (!payload) return 0;
-  try {
-    const stringified = JSON.stringify(payload);
-    return Buffer.byteLength(stringified, "utf8");
-  } catch {
-    return 0; // Could not stringify
+/**
+ * Dynamically loads Node's perf_hooks module. Exposed for testing to allow
+ * mocking the dynamic import path.
+ *
+ * @returns The Node.js perf_hooks performance interface promise.
+ */
+export async function loadPerfHooks(): Promise<{
+  performance: typeof PerfHooksPerformance;
+}> {
+  return await (import('node:perf_hooks') as Promise<{
+    performance: typeof PerfHooksPerformance;
+  }>);
+}
+
+export async function initHighResTimer(
+  perfLoader: typeof loadPerfHooks = loadPerfHooks,
+): Promise<void> {
+  // Use a type assertion to safely access `performance` on `globalThis`,
+  // which is present in browser-like environments (e.g., Cloudflare Workers)
+  // but not in Node.js's default global type.
+  const globalWithPerf = globalThis as {
+    performance?: { now: () => number };
+  };
+
+  if (typeof globalWithPerf.performance?.now === 'function') {
+    const perf = globalWithPerf.performance;
+    performanceNow = () => perf.now();
+  } else {
+    try {
+      const { performance: nodePerformance } = await perfLoader();
+      performanceNow = () => nodePerformance.now();
+    } catch (_e) {
+      performanceNow = () => Date.now();
+      logger.warning(
+        'Could not import perf_hooks, falling back to Date.now() for performance timing.',
+      );
+    }
   }
 }
 
-/**
- * A higher-order function that wraps a tool's core logic to measure its performance
- * and log a structured metrics event upon completion.
- *
- * @template T The expected return type of the tool's logic function.
- * @param toolLogicFn - The asynchronous tool logic function to be executed and measured.
- * @param context - The request context for the operation, used for logging and tracing.
- * @param inputPayload - The input payload to the tool for size calculation.
- * @returns A promise that resolves with the result of the tool logic function.
- * @throws Re-throws any error caught from the tool logic function after logging the failure.
- */
+export const nowMs = (): number => performanceNow();
+
+const toBytes = (payload: unknown): number => {
+  if (payload == null) return 0;
+  try {
+    const json = JSON.stringify(payload);
+    // Prefer Buffer when available (Node), otherwise TextEncoder (Web/Workers)
+    if (typeof Buffer !== 'undefined' && typeof Buffer.byteLength === 'function') {
+      return Buffer.byteLength(json, 'utf8');
+    }
+    if (typeof TextEncoder !== 'undefined') {
+      return new TextEncoder().encode(json).length;
+    }
+    return json.length;
+  } catch {
+    return 0;
+  }
+};
+
+const zeroMemory: NodeJS.MemoryUsage = {
+  rss: 0,
+  heapUsed: 0,
+  heapTotal: 0,
+  external: 0,
+  arrayBuffers: 0,
+};
+
+const getMemoryUsage = (): NodeJS.MemoryUsage =>
+  typeof process !== 'undefined' && typeof process.memoryUsage === 'function'
+    ? process.memoryUsage()
+    : zeroMemory;
+
 export async function measureToolExecution<T>(
   toolLogicFn: () => Promise<T>,
   context: RequestContext & { toolName: string },
@@ -51,67 +132,90 @@ export async function measureToolExecution<T>(
     config.openTelemetry.serviceName,
     config.openTelemetry.serviceVersion,
   );
+
   const { toolName } = context;
 
-  return tracer.startActiveSpan(`tool_execution:${toolName}`, async (span) => {
+  return await tracer.startActiveSpan(`tool_execution:${toolName}` as const, async (span) => {
+    // Pre-capture lightweight metrics
+    const memBefore = getMemoryUsage();
+    const t0 = nowMs();
+
     span.setAttributes({
       [ATTR_CODE_FUNCTION]: toolName,
-      [ATTR_CODE_NAMESPACE]: "mcp-tools",
-      "mcp.tool.input_bytes": getPayloadSize(inputPayload),
+      [ATTR_CODE_NAMESPACE]: 'mcp-tools',
+      [ATTR_MCP_TOOL_INPUT_BYTES]: toBytes(inputPayload),
+      [ATTR_MCP_TOOL_MEMORY_RSS_BEFORE]: memBefore.rss,
+      [ATTR_MCP_TOOL_MEMORY_HEAP_USED_BEFORE]: memBefore.heapUsed,
     });
 
-    const startTime = process.hrtime.bigint();
-    let isSuccess = false;
+    let ok = false;
     let errorCode: string | undefined;
-    let outputPayload: T | undefined;
+    let output: T | undefined;
 
     try {
       const result = await toolLogicFn();
-      isSuccess = true;
-      outputPayload = result;
+      ok = true;
+      output = result;
       span.setStatus({ code: SpanStatusCode.OK });
-      span.setAttribute("mcp.tool.output_bytes", getPayloadSize(outputPayload));
+      span.setAttribute(ATTR_MCP_TOOL_OUTPUT_BYTES, toBytes(output));
       return result;
-    } catch (error) {
-      if (error instanceof McpError) {
-        errorCode = error.code;
-      } else if (error instanceof Error) {
-        errorCode = "UNHANDLED_ERROR";
-      } else {
-        errorCode = "UNKNOWN_ERROR";
-      }
+    } catch (err) {
+      if (err instanceof McpError) errorCode = String(err.code);
+      else if (err instanceof Error) errorCode = 'UNHANDLED_ERROR';
+      else errorCode = 'UNKNOWN_ERROR';
 
-      if (error instanceof Error) {
-        span.recordException(error);
-      }
+      if (err instanceof Error) span.recordException(err);
       span.setStatus({
         code: SpanStatusCode.ERROR,
-        message: error instanceof Error ? error.message : String(error),
+        message: err instanceof Error ? err.message : String(err),
       });
-
-      throw error;
+      throw err;
     } finally {
-      const endTime = process.hrtime.bigint();
-      const durationMs = Number(endTime - startTime) / 1_000_000;
+      const t1 = nowMs();
+      const durationMs = Number((t1 - t0).toFixed(2));
+      const memAfter = getMemoryUsage();
+
+      const rssDelta = memAfter.rss - memBefore.rss;
+      const heapUsedDelta = memAfter.heapUsed - memBefore.heapUsed;
 
       span.setAttributes({
-        "mcp.tool.duration_ms": parseFloat(durationMs.toFixed(2)),
-        "mcp.tool.success": isSuccess,
+        [ATTR_MCP_TOOL_DURATION_MS]: durationMs,
+        [ATTR_MCP_TOOL_SUCCESS]: ok,
+        [ATTR_MCP_TOOL_MEMORY_RSS_AFTER]: memAfter.rss,
+        [ATTR_MCP_TOOL_MEMORY_HEAP_USED_AFTER]: memAfter.heapUsed,
+        [ATTR_MCP_TOOL_MEMORY_RSS_DELTA]: rssDelta,
+        [ATTR_MCP_TOOL_MEMORY_HEAP_USED_DELTA]: heapUsedDelta,
       });
-      if (errorCode) {
-        span.setAttribute("mcp.tool.error_code", errorCode);
-      }
-
+      if (errorCode) span.setAttribute(ATTR_MCP_TOOL_ERROR_CODE, errorCode);
       span.end();
 
-      logger.info("Tool execution finished.", {
+      // Record to OTel metric instruments (durable across restarts)
+      const m = getToolMetrics();
+      const metricAttrs = { [ATTR_MCP_TOOL_NAME]: toolName, [ATTR_MCP_TOOL_SUCCESS]: ok };
+      m.toolCallCounter.add(1, metricAttrs);
+      m.toolCallDuration.record(durationMs, metricAttrs);
+      if (!ok) m.toolCallErrors.add(1, { [ATTR_MCP_TOOL_NAME]: toolName });
+
+      logger.info('Tool execution finished.', {
         ...context,
         metrics: {
-          durationMs: parseFloat(durationMs.toFixed(2)),
-          isSuccess,
+          durationMs,
+          isSuccess: ok,
           errorCode,
-          inputBytes: getPayloadSize(inputPayload),
-          outputBytes: getPayloadSize(outputPayload),
+          inputBytes: toBytes(inputPayload),
+          outputBytes: toBytes(output),
+          memory: {
+            rss: {
+              before: memBefore.rss,
+              after: memAfter.rss,
+              delta: rssDelta,
+            },
+            heapUsed: {
+              before: memBefore.heapUsed,
+              after: memAfter.heapUsed,
+              delta: heapUsedDelta,
+            },
+          },
         },
       });
     }

@@ -1,214 +1,247 @@
 /**
  * @fileoverview OpenTelemetry SDK initialization and lifecycle management.
- * This file MUST be imported before any other module in the application's
- * entry point (`src/index.ts`) to ensure all modules are correctly instrumented.
- * It handles both the initialization (startup) and graceful shutdown of the SDK.
+ * Provides runtime-aware initialization with graceful degradation for Worker/Edge environments.
+ * Supports both Node.js (full NodeSDK) and serverless runtimes (lightweight telemetry).
  * @module src/utils/telemetry/instrumentation
  */
-import { DiagConsoleLogger, DiagLogLevel, diag } from "@opentelemetry/api";
-import { getNodeAutoInstrumentations } from "@opentelemetry/auto-instrumentations-node";
-import { WinstonInstrumentation } from "@opentelemetry/instrumentation-winston";
-import { OTLPMetricExporter } from "@opentelemetry/exporter-metrics-otlp-http";
-import { OTLPTraceExporter } from "@opentelemetry/exporter-trace-otlp-http";
-import { resourceFromAttributes } from "@opentelemetry/resources";
-import { PeriodicExportingMetricReader } from "@opentelemetry/sdk-metrics";
-import { NodeSDK } from "@opentelemetry/sdk-node";
-import {
-  BatchSpanProcessor,
-  ReadableSpan,
-  SpanProcessor,
-  TraceIdRatioBasedSampler,
-} from "@opentelemetry/sdk-trace-node";
-import {
-  ATTR_SERVICE_NAME,
-  ATTR_SERVICE_VERSION,
-} from "@opentelemetry/semantic-conventions/incubating";
-import path from "path";
-import winston from "winston";
-import { config } from "../../config/index.js";
 
+import { DiagConsoleLogger, DiagLogLevel, diag } from '@opentelemetry/api';
+import type { NodeSDK } from '@opentelemetry/sdk-node';
+import { config } from '@/config/index.js';
+
+import { runtimeCaps } from '@/utils/internal/runtime.js';
+
+// Node-specific imports are lazy-loaded to avoid Worker crashes
+// SDK instance is exported for internal access if needed
 export let sdk: NodeSDK | null = null;
 
-if (config.openTelemetry.enabled) {
-  // --- Custom Diagnostic Logger for OpenTelemetry ---
-  class OtelDiagnosticLogger extends DiagConsoleLogger {
-    private winstonLogger: winston.Logger;
-    constructor(logLevel: DiagLogLevel) {
-      super();
-      const logsDir = config.logsPath;
-      if (!logsDir) {
-        if (process.stdout.isTTY) {
-          console.error(
-            "OpenTelemetry Diagnostics: Log directory not available. Diagnostics will be written to console only.",
-          );
-        }
-        this.winstonLogger = winston.createLogger({
-          level: DiagLogLevel[logLevel].toLowerCase(),
-          transports: [new winston.transports.Console()],
-        });
-        return;
-      }
-      this.winstonLogger = winston.createLogger({
-        level: DiagLogLevel[logLevel].toLowerCase(),
-        format: winston.format.combine(
-          winston.format.timestamp(),
-          winston.format.json(),
-        ),
-        transports: [
-          new winston.transports.File({
-            filename: path.join(logsDir, "opentelemetry.log"),
-            maxsize: 5 * 1024 * 1024,
-            maxFiles: 3,
-          }),
-        ],
-      });
-    }
-    public override error = (message: string, ...args: unknown[]): void => {
-      this.winstonLogger.error(message, { args });
-    };
-    public override warn = (message: string, ...args: unknown[]): void => {
-      this.winstonLogger.warn(message, { args });
-    };
-    public override info = (message: string, ...args: unknown[]): void => {
-      this.winstonLogger.info(message, { args });
-    };
-    public override debug = (message: string, ...args: unknown[]): void => {
-      this.winstonLogger.debug(message, { args });
-    };
-    public override verbose = (message: string, ...args: unknown[]): void => {
-      this.winstonLogger.verbose(message, { args });
-    };
-  }
+// Initialization state management
+let isOtelInitialized = false;
+let initializationPromise: Promise<void> | null = null;
 
-  /**
-   * A custom SpanProcessor that writes ended spans to a log file using Winston.
-   */
-  class FileSpanProcessor implements SpanProcessor {
-    private traceLogger: winston.Logger;
-
-    constructor() {
-      const logsDir = config.logsPath;
-      if (!logsDir) {
-        diag.error(
-          "[FileSpanProcessor] Cannot initialize: logsPath is not available.",
-        );
-        this.traceLogger = winston.createLogger({ silent: true });
-        return;
-      }
-      this.traceLogger = winston.createLogger({
-        format: winston.format.json(),
-        transports: [
-          new winston.transports.File({
-            filename: path.join(logsDir, "traces.log"),
-            maxsize: 10 * 1024 * 1024, // 10MB
-            maxFiles: 5,
-          }),
-        ],
-      });
-    }
-
-    forceFlush(): Promise<void> {
-      return Promise.resolve();
-    }
-    onStart(_span: ReadableSpan): void {}
-    onEnd(span: ReadableSpan): void {
-      const loggableSpan = {
-        traceId: span.spanContext().traceId,
-        spanId: span.spanContext().spanId,
-        name: span.name,
-        kind: span.kind,
-        startTime: span.startTime,
-        endTime: span.endTime,
-        duration: span.duration,
-        status: span.status,
-        attributes: span.attributes,
-        events: span.events,
-      };
-      this.traceLogger.info(loggableSpan);
-    }
-    shutdown(): Promise<void> {
-      return new Promise((resolve) =>
-        this.traceLogger.on("finish", resolve).end(),
-      );
-    }
-  }
-
-  try {
-    const otelLogLevel =
-      DiagLogLevel[
-        config.openTelemetry.logLevel as keyof typeof DiagLogLevel
-      ] ?? DiagLogLevel.INFO;
-    diag.setLogger(new OtelDiagnosticLogger(otelLogLevel), otelLogLevel);
-
-    const resource = resourceFromAttributes({
-      [ATTR_SERVICE_NAME]: config.openTelemetry.serviceName,
-      [ATTR_SERVICE_VERSION]: config.openTelemetry.serviceVersion,
-      "deployment.environment.name": config.environment,
-    });
-
-    let spanProcessor: SpanProcessor;
-    if (config.openTelemetry.tracesEndpoint) {
-      diag.info(
-        `Using OTLP exporter for traces, endpoint: ${config.openTelemetry.tracesEndpoint}`,
-      );
-      const traceExporter = new OTLPTraceExporter({
-        url: config.openTelemetry.tracesEndpoint,
-      });
-      spanProcessor = new BatchSpanProcessor(traceExporter);
-    } else {
-      diag.info(
-        "No OTLP endpoint configured. Using FileSpanProcessor for local trace logging.",
-      );
-      spanProcessor = new FileSpanProcessor();
-    }
-
-    const metricReader = config.openTelemetry.metricsEndpoint
-      ? new PeriodicExportingMetricReader({
-          exporter: new OTLPMetricExporter({
-            url: config.openTelemetry.metricsEndpoint,
-          }),
-          exportIntervalMillis: 15000,
-        })
-      : undefined;
-
-    sdk = new NodeSDK({
-      resource,
-      spanProcessors: [spanProcessor],
-      metricReader,
-      sampler: new TraceIdRatioBasedSampler(config.openTelemetry.samplingRatio),
-      instrumentations: [
-        getNodeAutoInstrumentations({
-          "@opentelemetry/instrumentation-http": {
-            enabled: true,
-            ignoreIncomingRequestHook: (req) => req.url === "/healthz",
-          },
-          "@opentelemetry/instrumentation-fs": { enabled: false },
-        }),
-        new WinstonInstrumentation({
-          enabled: true,
-        }),
-      ],
-    });
-
-    sdk.start();
-    diag.info(
-      `OpenTelemetry initialized for ${config.openTelemetry.serviceName} v${config.openTelemetry.serviceVersion}`,
-    );
-  } catch (error) {
-    diag.error("Error initializing OpenTelemetry", error);
-    process.exit(1);
-  }
+/**
+ * Determines if the NodeSDK can be used in the current runtime.
+ * Returns false in Worker/Edge environments where Node modules are unavailable,
+ * and false on Bun where Node auto-instrumentations (http, etc.) silently no-op.
+ */
+function canUseNodeSDK(): boolean {
+  return (
+    runtimeCaps.isNode &&
+    !runtimeCaps.isBun &&
+    typeof process?.versions?.node === 'string' &&
+    typeof process.env === 'object'
+  );
 }
 
 /**
- * Gracefully shuts down the OpenTelemetry SDK.
- * This function is called during the application's shutdown sequence.
+ * Detects cloud platform and provider for resource attributes.
+ * Enriches telemetry with deployment environment metadata.
+ *
+ * @returns Record of cloud-related resource attributes
  */
-export async function shutdownOpenTelemetry() {
-  if (sdk) {
-    await sdk
-      .shutdown()
-      .then(() => diag.info("OpenTelemetry terminated"))
-      .catch((error) => diag.error("Error terminating OpenTelemetry", error));
+function detectCloudResource(): Record<string, string> {
+  const attrs: Record<string, string> = {};
+
+  // Cloudflare Workers
+  if (runtimeCaps.isWorkerLike) {
+    attrs['cloud.provider'] = 'cloudflare';
+    attrs['cloud.platform'] = 'cloudflare_workers';
+  }
+
+  // AWS Lambda
+  if (typeof process !== 'undefined' && process.env?.AWS_LAMBDA_FUNCTION_NAME) {
+    attrs['cloud.provider'] = 'aws';
+    attrs['cloud.platform'] = 'aws_lambda';
+    if (process.env.AWS_REGION) {
+      attrs['cloud.region'] = process.env.AWS_REGION;
+    }
+  }
+
+  // GCP Cloud Functions/Cloud Run
+  if (typeof process !== 'undefined' && (process.env?.FUNCTION_TARGET || process.env?.K_SERVICE)) {
+    attrs['cloud.provider'] = 'gcp';
+    attrs['cloud.platform'] = process.env.FUNCTION_TARGET ? 'gcp_cloud_functions' : 'gcp_cloud_run';
+    if (process.env.GCP_REGION) {
+      attrs['cloud.region'] = process.env.GCP_REGION;
+    }
+  }
+
+  attrs['deployment.environment.name'] = config.environment;
+
+  return attrs;
+}
+
+/**
+ * Initializes OpenTelemetry SDK with runtime-appropriate configuration.
+ * This function is idempotent and safe to call multiple times.
+ * Completes successfully even if telemetry is disabled or runtime is incompatible.
+ *
+ * @returns Promise that resolves when initialization is complete
+ *
+ * @example
+ * ```typescript
+ * // In application entry point (src/index.ts)
+ * await initializeOpenTelemetry();
+ * ```
+ */
+export async function initializeOpenTelemetry(): Promise<void> {
+  // Return existing promise if initialization in progress
+  if (initializationPromise) {
+    return await initializationPromise;
+  }
+
+  // Already initialized
+  if (isOtelInitialized) {
+    return;
+  }
+
+  initializationPromise = (async () => {
+    if (!config.openTelemetry.enabled) {
+      diag.info('OpenTelemetry disabled via configuration.');
+      isOtelInitialized = true;
+      return;
+    }
+
+    if (!canUseNodeSDK()) {
+      diag.info('NodeSDK unavailable in this runtime. Using lightweight telemetry mode.');
+      isOtelInitialized = true;
+      return;
+    }
+
+    isOtelInitialized = true;
+
+    try {
+      // Lazy-load Node-specific modules
+      const [
+        { getNodeAutoInstrumentations },
+        { OTLPMetricExporter },
+        { OTLPTraceExporter },
+        { PinoInstrumentation },
+        { resourceFromAttributes },
+        { PeriodicExportingMetricReader },
+        { NodeSDK },
+        { BatchSpanProcessor, TraceIdRatioBasedSampler },
+        { ATTR_SERVICE_NAME, ATTR_SERVICE_VERSION },
+      ] = await Promise.all([
+        import('@opentelemetry/auto-instrumentations-node'),
+        import('@opentelemetry/exporter-metrics-otlp-http'),
+        import('@opentelemetry/exporter-trace-otlp-http'),
+        import('@opentelemetry/instrumentation-pino'),
+        import('@opentelemetry/resources'),
+        import('@opentelemetry/sdk-metrics'),
+        import('@opentelemetry/sdk-node'),
+        import('@opentelemetry/sdk-trace-node'),
+        import('@opentelemetry/semantic-conventions/incubating'),
+      ]);
+
+      const otelLogLevelString =
+        config.openTelemetry.logLevel.toUpperCase() as keyof typeof DiagLogLevel;
+      const otelLogLevel = DiagLogLevel[otelLogLevelString] ?? DiagLogLevel.INFO;
+      diag.setLogger(new DiagConsoleLogger(), otelLogLevel);
+
+      const tracesEndpoint = config.openTelemetry.tracesEndpoint;
+      const metricsEndpoint = config.openTelemetry.metricsEndpoint;
+
+      if (!tracesEndpoint && !metricsEndpoint) {
+        diag.warn(
+          'OTEL_ENABLED is true, but no OTLP endpoint for traces or metrics is configured. OpenTelemetry will not export any telemetry.',
+        );
+      }
+
+      const resource = resourceFromAttributes({
+        [ATTR_SERVICE_NAME]: config.openTelemetry.serviceName,
+        [ATTR_SERVICE_VERSION]: config.openTelemetry.serviceVersion,
+        ...detectCloudResource(),
+      });
+
+      const spanProcessors: InstanceType<typeof BatchSpanProcessor>[] = [];
+      if (tracesEndpoint) {
+        diag.info(`Using OTLP exporter for traces, endpoint: ${tracesEndpoint}`);
+        const traceExporter = new OTLPTraceExporter({ url: tracesEndpoint });
+        spanProcessors.push(new BatchSpanProcessor(traceExporter));
+      } else {
+        diag.info('No OTLP traces endpoint configured. Traces will not be exported.');
+      }
+
+      const metricReader = metricsEndpoint
+        ? new PeriodicExportingMetricReader({
+            exporter: new OTLPMetricExporter({ url: metricsEndpoint }),
+            exportIntervalMillis: 15000,
+          })
+        : undefined;
+
+      sdk = new NodeSDK({
+        resource,
+        spanProcessors,
+        ...(metricReader && { metricReader }),
+        sampler: new TraceIdRatioBasedSampler(config.openTelemetry.samplingRatio),
+        instrumentations: [
+          getNodeAutoInstrumentations({
+            '@opentelemetry/instrumentation-http': {
+              enabled: true,
+              ignoreIncomingRequestHook: (req) => req.url === '/healthz',
+            },
+            '@opentelemetry/instrumentation-fs': { enabled: false },
+          }),
+          new PinoInstrumentation({
+            logHook: (_span, record) => {
+              record.trace_id = _span.spanContext().traceId;
+              record.span_id = _span.spanContext().spanId;
+            },
+          }),
+        ],
+      });
+
+      sdk.start();
+      diag.info(
+        `OpenTelemetry NodeSDK initialized for ${config.openTelemetry.serviceName} v${config.openTelemetry.serviceVersion}`,
+      );
+    } catch (error) {
+      diag.error('Error initializing OpenTelemetry', error);
+      sdk = null;
+      throw error;
+    }
+  })();
+
+  return initializationPromise;
+}
+
+/**
+ * Gracefully shuts down the OpenTelemetry SDK with timeout protection.
+ * This function is called during the application's shutdown sequence.
+ * Prevents hung processes by racing shutdown against a timeout.
+ *
+ * @param timeoutMs - Maximum time to wait for shutdown in milliseconds (default: 5000)
+ * @throws Error if shutdown times out or fails critically
+ *
+ * @example
+ * ```typescript
+ * // During application shutdown
+ * try {
+ *   await shutdownOpenTelemetry();
+ * } catch (error) {
+ *   console.error('Failed to shutdown telemetry:', error);
+ * }
+ * ```
+ */
+export async function shutdownOpenTelemetry(timeoutMs = 5000): Promise<void> {
+  if (!sdk) {
+    return;
+  }
+
+  try {
+    const shutdownPromise = sdk.shutdown();
+    const { promise: timeoutPromise, reject } = Promise.withResolvers<never>();
+    setTimeout(() => reject(new Error('OpenTelemetry SDK shutdown timeout')), timeoutMs);
+
+    await Promise.race([shutdownPromise, timeoutPromise]);
+    diag.info('OpenTelemetry SDK terminated successfully.');
+  } catch (error) {
+    diag.error('Error terminating OpenTelemetry SDK', error);
+    throw error; // Propagate for caller handling
+  } finally {
+    sdk = null;
+    isOtelInitialized = false;
+    initializationPromise = null;
   }
 }

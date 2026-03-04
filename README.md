@@ -1,252 +1,271 @@
 <div align="center">
+  <h1>pubmed-mcp-server</h1>
+  <p><b>MCP server for the NCBI E-utilities API. Search PubMed, fetch article metadata, generate citations, explore MeSH terms, and discover related research. Runs over stdio or HTTP. Deployable to Cloudflare Workers.</b></p>
+</div>
 
-# pubmed-mcp-server
+<div align="center">
 
-**Empower your AI agents and research tools with seamless PubMed integration!**
-
-[![TypeScript](https://img.shields.io/badge/TypeScript-^5.8.3-blue.svg?style=flat-square)](https://www.typescriptlang.org/)
-[![Model Context Protocol](https://img.shields.io/badge/MCP%20SDK-^1.18.0-green.svg?style=flat-square)](https://modelcontextprotocol.io/)
-[![Version](https://img.shields.io/badge/Version-1.4.4-blue.svg?style=flat-square)](./CHANGELOG.md)
-[![License](https://img.shields.io/badge/License-Apache%202.0-blue.svg?style=flat-square)](https://opensource.org/licenses/Apache-2.0)
-[![Status](https://img.shields.io/badge/Status-Stable-green.svg?style=flat-square)](https://github.com/cyanheads/pubmed-mcp-server/issues)
-[![GitHub](https://img.shields.io/github/stars/cyanheads/pubmed-mcp-server?style=social)](https://github.com/cyanheads/pubmed-mcp-server)
+[![npm](https://img.shields.io/npm/v/@cyanheads/pubmed-mcp-server?style=flat-square&logo=npm&logoColor=white)](https://www.npmjs.com/package/@cyanheads/pubmed-mcp-server) [![Version](https://img.shields.io/badge/Version-2.0.0-blue.svg?style=flat-square)](./CHANGELOG.md) [![MCP Spec](https://img.shields.io/badge/MCP%20Spec-2025--11--25-8A2BE2.svg?style=flat-square)](https://modelcontextprotocol.io/specification/2025-11-25) [![MCP SDK](https://img.shields.io/badge/MCP%20SDK-^1.27.1-green.svg?style=flat-square)](https://modelcontextprotocol.io/) [![License](https://img.shields.io/badge/License-Apache%202.0-orange.svg?style=flat-square)](./LICENSE) [![Status](https://img.shields.io/badge/Status-Stable-brightgreen.svg?style=flat-square)](https://github.com/cyanheads/pubmed-mcp-server/issues) [![TypeScript](https://img.shields.io/badge/TypeScript-^5.9.3-3178C6.svg?style=flat-square)](https://www.typescriptlang.org/) [![Bun](https://img.shields.io/badge/Bun-v1.3.2-blueviolet.svg?style=flat-square)](https://bun.sh/)
 
 </div>
 
-A production-grade Model Context Protocol (MCP) server that empowers AI agents and research tools with comprehensive access to PubMed. Enables advanced, automated workflows for searching, retrieving, analyzing, and visualizing biomedical and scientific literature via NCBI E-utilities.
+---
 
-Built on the [`cyanheads/mcp-ts-template`](https://github.com/cyanheads/mcp-ts-template), this server follows a modular architecture with robust error handling, logging, and security features.
+## Tools
 
-## 🚀 Core Capabilities: PubMed Tools 🛠️
+Seven tools for working with PubMed and NCBI data:
 
-This server equips your AI with specialized tools to interact with PubMed:
+| Tool | Description |
+|:---|:---|
+| `pubmed_search` | Search PubMed with query syntax, filters, date ranges, and optional brief summaries |
+| `pubmed_fetch` | Fetch full article metadata by PMIDs — abstract, authors, journal, MeSH terms, grants |
+| `pubmed_cite` | Generate formatted citations in APA 7th, MLA 9th, BibTeX, or RIS |
+| `pubmed_related` | Find similar articles, citing articles, or references for a given PMID |
+| `pubmed_spell` | Spell-check biomedical queries using NCBI's ESpell service |
+| `pubmed_trending` | Find recent publications in a topic, sorted by publication date |
+| `pubmed_mesh_lookup` | Search and explore MeSH vocabulary — tree numbers, scope notes, entry terms |
 
-| Tool Name                                                                        | Description                                                                             | Example                                                                                                  |
-| :------------------------------------------------------------------------------- | :-------------------------------------------------------------------------------------- | :------------------------------------------------------------------------------------------------------- |
-| [`pubmed_search_articles`](./src/mcp-server/tools/pubmedSearchArticles/)         | Searches PubMed for articles based on your query.                                       | [View Example](./examples/pubmed_search_articles_example.md)                                             |
-| [`pubmed_fetch_contents`](./src/mcp-server/tools/pubmedFetchContents/)           | Retrieves detailed information for PubMed articles.                                     | [View Example](./examples/pubmed_fetch_contents_example.md)                                              |
-| [`pubmed_article_connections`](./src/mcp-server/tools/pubmedArticleConnections/) | Finds related articles (cited by, similar, references) or formats citations for a PMID. | [Ex. 1](./examples/pubmed_article_connections_1.md), [Ex. 2](./examples/pubmed_article_connections_2.md) |
-| [`pubmed_research_agent`](./src/mcp-server/tools/pubmedResearchAgent/)           | Generates a standardized JSON research plan outline from component details.             | [View Example](./examples/pubmed_research_agent_example.md)                                              |
-| [`pubmed_generate_chart`](./src/mcp-server/tools/pubmedGenerateChart/)           | Generates a chart image (PNG) from given input data.                                    | [View Examples](./examples/generate_pubmed_chart/)                                                       |
+### `pubmed_search`
+
+Search PubMed with full NCBI query syntax and filters.
+
+- Free-text queries with PubMed's full boolean and field-tag syntax
+- Date range filtering by publication, modification, or Entrez date
+- Publication type filtering (Review, Clinical Trial, Meta-Analysis, etc.)
+- Sort by relevance, publication date, author, or journal
+- Optional brief summaries for top N results via ESummary
 
 ---
 
-## Table of Contents
+### `pubmed_fetch`
 
-| [Overview](#overview)           | [Features](#features)                          | [Installation](#installation) |
-| :------------------------------ | :--------------------------------------------- | :---------------------------- |
-| [Configuration](#configuration) | [Project Structure](#project-structure)        |
-| [Tools](#tools)                 | [Development & Testing](#development--testing) | [License](#license)           |
+Fetch full article metadata by PubMed IDs.
 
-## Overview
+- Batch fetch up to 200 articles at once (auto-switches to POST for large batches)
+- Returns structured data: title, abstract, authors with affiliations, journal info, DOI
+- Optional MeSH terms, grant information, and publication types
+- Handles PubMed's inconsistent XML (structured abstracts, missing fields, varying date formats)
 
-The PubMed MCP Server acts as a bridge, allowing applications (MCP Clients) that understand the Model Context Protocol (MCP) – like advanced AI assistants (LLMs), IDE extensions, or custom research tools – to interact directly and efficiently with PubMed's vast biomedical literature database.
+---
 
-Instead of complex API integration or manual searches, your tools can leverage this server to:
+### `pubmed_cite`
 
-- **Automate research workflows**: Search literature, fetch full article metadata, track citations, and generate research plans programmatically.
-- **Gain research insights**: Access detailed publication data, author information, journal details, MeSH terms, and citation networks without leaving the host application.
-- **Integrate PubMed into AI-driven research**: Enable LLMs to conduct literature reviews, analyze research trends, and support evidence-based decision making.
-- **Visualize research data**: Generate charts and visualizations from publication metadata and search results.
+Generate formatted citations for articles.
 
-Built on the robust `mcp-ts-template`, this server provides a standardized, secure, and efficient way to expose PubMed functionality via the MCP standard. It achieves this by integrating with NCBI's E-utilities API, ensuring compliance with rate limits and providing comprehensive error handling.
+- Four citation styles: APA 7th, MLA 9th, BibTeX, RIS
+- Request multiple styles per article in a single call
+- Hand-rolled formatters — zero external dependencies, fully Workers-compatible
+- Up to 20 articles per request
 
-> **Developer Note**: This repository includes a [.clinerules](.clinerules) file that serves as a developer cheat sheet for your LLM coding agent with quick reference for the codebase patterns, file locations, and code snippets.
+---
+
+### `pubmed_related`
+
+Find articles related to a source article via ELink.
+
+- Three relationship types: `similar` (content similarity), `cited_by`, `references`
+- Results enriched with title, authors, publication date, and source via ESummary
+- Similarity scores included for `similar` relationship type
+
+---
+
+### `pubmed_spell`
+
+Spell-check a biomedical query using NCBI's ESpell.
+
+- Returns the original query, corrected query, and whether a suggestion was found
+- Useful for query refinement before searching
+
+---
+
+### `pubmed_trending`
+
+Find recent publications in a topic, sorted by date.
+
+- Configurable look-back period (1–365 days)
+- Results include title, authors, publication date, source, and DOI
+- Convenience wrapper over date-filtered ESearch + ESummary
+
+---
+
+### `pubmed_mesh_lookup`
+
+Search and explore the MeSH (Medical Subject Headings) vocabulary.
+
+- Search MeSH terms by name
+- Optional detailed records with tree numbers, scope notes, and entry terms
+- Useful for building precise PubMed queries with controlled vocabulary
+
+## Resource and prompt
+
+| Type | Name | Description |
+|:---|:---|:---|
+| Resource | `pubmed://database/info` | PubMed database metadata via EInfo (field list, record count, last update) |
+| Prompt | `research_plan` | Generate a structured 4-phase biomedical research plan outline |
 
 ## Features
 
-### Core Utilities
+Built on [`mcp-ts-template`](https://github.com/cyanheads/mcp-ts-template) 3.0:
 
-Leverages the robust utilities provided by the `mcp-ts-template`:
+- Declarative tool definitions — single file per tool, framework handles registration and validation
+- Unified `McpError` error handling across all tools
+- Pluggable auth (`none`, `jwt`, `oauth`)
+- Swappable storage backends: `in-memory`, `filesystem`, `Supabase`, `Cloudflare KV/R2/D1`
+- Structured logging (Pino) with optional OpenTelemetry tracing
+- Typed DI container with `Token<T>` phantom branding
+- Runs locally (stdio/HTTP) or on Cloudflare Workers from the same codebase
 
-- **Logging**: Structured, configurable logging (file rotation, stdout JSON, MCP notifications) with sensitive data redaction.
-- **Error Handling**: Centralized error processing, standardized error types (`McpError`), and automatic logging.
-- **Configuration**: Environment variable loading (`dotenv`) with comprehensive validation using Zod.
-- **Input Validation/Sanitization**: Uses `zod` for schema validation and custom sanitization logic.
-- **Request Context**: Tracking and correlation of operations via unique request IDs using `AsyncLocalStorage`.
-- **Type Safety**: Strong typing enforced by TypeScript and Zod schemas.
-- **HTTP Transport**: High-performance HTTP server using **Hono**, featuring session management and authentication support.
-- **Authentication**: Robust authentication layer supporting JWT and OAuth 2.1, with fine-grained scope enforcement.
-- **Deployment**: Multi-stage `Dockerfile` for creating small, secure production images with native dependency support.
+PubMed-specific:
 
-### PubMed Integration
+- Complete NCBI E-utilities integration (ESearch, EFetch, ESummary, ELink, ESpell, EInfo)
+- Sequential request queue with configurable delay for NCBI rate limit compliance
+- NCBI-specific XML parser with `isArray` hints for PubMed's inconsistent XML structure
+- Hand-rolled citation formatters (APA, MLA, BibTeX, RIS) — zero deps, Workers-compatible
 
-- **NCBI E-utilities Integration**: Comprehensive access to ESearch, EFetch, ELink, and ESummary APIs with automatic XML parsing.
-- **Advanced Search Capabilities**: Complex query construction with date ranges, publication types, author filters, and MeSH term support.
-- **Full Article Metadata**: Retrieve complete publication data including abstracts, authors, affiliations, journal information, DOIs, and citation data.
-- **Citation Network Analysis**: Find related articles, citing articles, and reference lists through ELink integration.
-- **Research Planning**: Generate structured research plans with automated literature search strategies.
-- **Data Visualization**: Create PNG charts from publication metadata (bar, line, scatter, pie, bubble, radar, polarArea).
-- **Multiple Output Formats**: Support for JSON, MEDLINE text, full XML, and formatted citations (RIS, BibTeX, APA, MLA).
-- **Batch Processing**: Efficient handling of multiple PMIDs with pagination support.
+## Getting started
 
-## Installation
-
-### Prerequisites
-
-- [Node.js (>=20.0.0)](https://nodejs.org/)
-- [npm](https://www.npmjs.com/) (comes with Node.js)
-- **NCBI API Key** (recommended for higher rate limits) - [Get one here](https://ncbiinsights.ncbi.nlm.nih.gov/2017/11/02/new-api-keys-for-the-e-utilities/)
-
-### MCP Client Settings
-
-Add the following to your MCP client's configuration file (e.g., `cline_mcp_settings.json`).
-This configuration uses `npx` to run the server, which will automatically install the package if not already present.
-All environment variables are optional, but recommended for production use. NCBI API key is recommended to avoid rate limiting issues.
+Add the following to your MCP client configuration file.
 
 ```json
 {
   "mcpServers": {
-    "pubmed-mcp-server": {
-      "command": "npx",
-      "args": ["@cyanheads/pubmed-mcp-server"],
+    "pubmed": {
+      "type": "stdio",
+      "command": "bunx",
+      "args": ["@cyanheads/pubmed-mcp-server@latest"],
       "env": {
-        "MCP_LOG_LEVEL": "debug",
-        "MCP_TRANSPORT_TYPE": "http",
-        "MCP_HTTP_PORT": "3017",
-        "NCBI_API_KEY": "YOUR_NCBI_API_KEY_HERE"
+        "MCP_TRANSPORT_TYPE": "stdio",
+        "MCP_LOG_LEVEL": "info",
+        "NCBI_API_KEY": "your-key-here"
       }
     }
   }
 }
 ```
 
-### If running manually (not via MCP client for development or testing)
-
-#### Install via npm
+Or for Streamable HTTP:
 
 ```bash
-npm install @cyanheads/pubmed-mcp-server
+MCP_TRANSPORT_TYPE=http
+MCP_HTTP_PORT=3010
 ```
 
-#### Alternatively Install from Source
+### Prerequisites
 
-1.  Clone the repository:
-    ```bash
-    git clone https://github.com/cyanheads/pubmed-mcp-server.git
-    cd pubmed-mcp-server
-    ```
-2.  Install dependencies:
-    ```bash
-    npm install
-    ```
-3.  Build the project:
-    ```bash
-    npm run build
-    ```
+- [Bun v1.3.2](https://bun.sh/) or higher.
+- Optional: [NCBI API key](https://www.ncbi.nlm.nih.gov/account/settings/) for higher rate limits (10 req/s vs 3 req/s).
+
+### Installation
+
+1. **Clone the repository:**
+
+```sh
+git clone https://github.com/cyanheads/pubmed-mcp-server.git
+```
+
+2. **Navigate into the directory:**
+
+```sh
+cd pubmed-mcp-server
+```
+
+3. **Install dependencies:**
+
+```sh
+bun install
+```
 
 ## Configuration
 
-### Environment Variables
+All configuration is centralized and validated at startup in `src/config/index.ts`. Key environment variables:
 
-Configure the server using environment variables. For local development, these can be set in a `.env` file at the project root or directly in your environment. Otherwise, you can set them in your MCP client configuration as shown above.
+| Variable | Description | Default |
+|:---|:---|:---|
+| `MCP_TRANSPORT_TYPE` | Transport: `stdio` or `http` | `http` |
+| `MCP_HTTP_PORT` | HTTP server port | `3010` |
+| `MCP_AUTH_MODE` | Authentication: `none`, `jwt`, or `oauth` | `none` |
+| `MCP_LOG_LEVEL` | Log level (`debug`, `info`, `warning`, `error`, etc.) | `info` |
+| `STORAGE_PROVIDER_TYPE` | Storage backend: `in-memory`, `filesystem`, `supabase`, `cloudflare-kv/r2/d1` | `filesystem` |
+| `NCBI_API_KEY` | NCBI API key for higher rate limits (10 req/s vs 3 req/s) | none |
+| `NCBI_ADMIN_EMAIL` | Contact email sent with NCBI requests (recommended by NCBI) | none |
+| `NCBI_REQUEST_DELAY_MS` | Delay between NCBI requests in ms | 334 (100 with key) |
+| `NCBI_MAX_RETRIES` | Retry attempts for failed NCBI requests | 3 |
+| `NCBI_TIMEOUT_MS` | NCBI request timeout in ms | 30000 |
+| `OTEL_ENABLED` | Enable OpenTelemetry | `false` |
 
-| Variable              | Description                                                                              | Default       |
-| :-------------------- | :--------------------------------------------------------------------------------------- | :------------ |
-| `MCP_TRANSPORT_TYPE`  | Transport mechanism: `stdio` or `http`.                                                  | `stdio`       |
-| `MCP_HTTP_PORT`       | Port for the HTTP server (if `MCP_TRANSPORT_TYPE=http`).                                 | `3017`        |
-| `MCP_HTTP_HOST`       | Host address for the HTTP server (if `MCP_TRANSPORT_TYPE=http`).                         | `127.0.0.1`   |
-| `MCP_ALLOWED_ORIGINS` | Comma-separated list of allowed origins for CORS (if `MCP_TRANSPORT_TYPE=http`).         | (none)        |
-| `MCP_LOG_LEVEL`       | Logging level (`debug`, `info`, `notice`, `warning`, `error`, `crit`, `alert`, `emerg`). | `debug`       |
-| `MCP_AUTH_MODE`       | Authentication mode for HTTP: `jwt` or `oauth`.                                          | `jwt`         |
-| `MCP_AUTH_SECRET_KEY` | **Required for `jwt` auth.** Minimum 32-character secret key for JWT authentication.     | (none)        |
-| `NCBI_API_KEY`        | **Recommended.** Your NCBI API Key for higher rate limits and reliable access.           | (none)        |
-| `LOGS_DIR`            | Directory for log file storage.                                                          | `logs/`       |
-| `NODE_ENV`            | Runtime environment (`development`, `production`).                                       | `development` |
+## Running the server
 
-## Project Structure
+### Local development
 
-The codebase follows a modular structure within the `src/` directory:
+- **Build and run the production version**:
 
-```
-src/
-├── index.ts              # Entry point: Initializes and starts the server
-├── config/               # Configuration loading (env vars, package info)
-│   └── index.ts
-├── mcp-server/           # Core MCP server logic and capability registration
-│   ├── server.ts         # Server setup, capability registration
-│   ├── transports/       # Transport handling (stdio, http)
-│   └── tools/            # MCP Tool implementations (subdirs per tool)
-├── services/             # External service integrations
-│   └── NCBI/             # NCBI E-utilities API client and parsing
-├── types-global/         # Shared TypeScript type definitions
-└── utils/                # Common utility functions (logger, error handler, etc.)
-```
+  ```sh
+  # One-time build
+  bun run rebuild
 
-For a detailed file tree, run `npm run tree` or see [docs/tree.md](docs/tree.md).
+  # Run the built server
+  bun run start:http
+  # or
+  bun run start:stdio
+  ```
 
-## Tools
+- **Run checks and tests**:
+  ```sh
+  bun run devcheck  # Lints, formats, type-checks, and more
+  bun run test      # Runs the test suite
+  ```
 
-The PubMed MCP Server provides a comprehensive suite of tools for biomedical literature research, callable via the Model Context Protocol.
+### Cloudflare Workers
 
-| Tool Name                    | Description                                                            | Key Arguments                                                                                             |
-| :--------------------------- | :--------------------------------------------------------------------- | :-------------------------------------------------------------------------------------------------------- |
-| `pubmed_search_articles`     | Searches PubMed for articles using queries, filters, and date ranges.  | `queryTerm`, `maxResults?`, `sortBy?`, `dateRange?`, `filterByPublicationTypes?`, `fetchBriefSummaries?`  |
-| `pubmed_fetch_contents`      | Fetches detailed article information using PMIDs or search history.    | `pmids?`, `queryKey?`, `webEnv?`, `detailLevel?`, `includeMeshTerms?`, `includeGrantInfo?`                |
-| `pubmed_article_connections` | Finds related articles, citations, and references for a given PMID.    | `sourcePmid`, `relationshipType?`, `maxRelatedResults?`, `citationStyles?`                                |
-| `pubmed_research_agent`      | Generates structured research plans with literature search strategies. | `project_title_suggestion`, `primary_research_goal`, `research_keywords`, `organism_focus?`, `p1_*`, etc. |
-| `pubmed_generate_chart`      | Creates customizable PNG charts from structured publication data.      | `chartType`, `dataValues`, `xField`, `yField`, `title?`, `seriesField?`, `sizeField?`                     |
+1. **Build the Worker bundle**:
 
-_Note: All tools support comprehensive error handling and return structured JSON responses._
-
-## Examples
-
-Comprehensive usage examples for each tool are available in the [`examples/`](examples/) directory.
-
-- **`pubmed_search_articles`**: [View Example](./examples/pubmed_search_articles_example.md)
-- **`pubmed_fetch_contents`**: [View Example](./examples/pubmed_fetch_contents_example.md)
-- **`pubmed_article_connections`**: [Ex. 1](./examples/pubmed_article_connections_1.md), [Ex. 2](./examples/pubmed_article_connections_2.md)
-- **`pubmed_research_agent`**: [View Example](./examples/pubmed_research_agent_example.md)
-- **`pubmed_generate_chart`**: [View Examples](./examples/generate_pubmed_chart/)
-
-## Development & Testing
-
-### Development Scripts
-
-```bash
-# Build the project (compile TS to JS in dist/ and make executable)
-npm run build
-
-# Clean build artifacts
-npm run clean
-
-# Clean build artifacts and then rebuild the project
-npm run rebuild
-
-# Lint the codebase
-npm run lint
-
-# Format code with Prettier
-npm run format
-
-# Generate a file tree representation for documentation
-npm run tree
+```sh
+bun run build:worker
 ```
 
-### Running the Server
+2. **Run locally with Wrangler**:
 
-```bash
-# Start the server using stdio (default)
-npm start
-# Or explicitly:
-npm run start:stdio
+```sh
+bun run deploy:dev
+```
 
-# Start the server using HTTP transport
-npm run start:http
+3. **Deploy to Cloudflare**:
+    ```sh
+    bun run deploy:prod
+    ```
 
-# Test the server locally using the MCP inspector tool (stdio transport)
-npm run inspector
+## Project structure
 
-# Test the server locally using the MCP inspector tool (http transport)
-npm run inspector:http
+| Directory | Purpose |
+|:---|:---|
+| `src/mcp-server/tools` | Tool definitions (`*.tool.ts`). Seven PubMed tools. |
+| `src/mcp-server/resources` | Resource definitions. Database info resource. |
+| `src/mcp-server/prompts` | Prompt definitions. Research plan prompt. |
+| `src/mcp-server/transports` | HTTP and stdio transports, including auth middleware. |
+| `src/services/ncbi` | NCBI E-utilities service layer — API client, queue, parser, formatter. |
+| `src/storage` | `StorageService` abstraction and provider implementations. |
+| `src/container` | DI container registrations and tokens. |
+| `src/utils` | Logging, error handling, security, parsing, formatting, telemetry. |
+| `src/config` | Environment variable parsing and validation with Zod. |
+| `tests/` | Unit and integration tests, mirroring the `src/` structure. |
+
+## Development guide
+
+See [`CLAUDE.md`](./CLAUDE.md) for development guidelines and architectural rules. The short version:
+
+- Logic throws `McpError`, handlers catch — no `try/catch` in tool logic
+- Pass `RequestContext` through the call stack for logging and tracing
+- Register new tools and resources in the `index.ts` barrel files
+
+## Contributing
+
+Issues and pull requests are welcome. Run checks and tests before submitting:
+
+```sh
+bun run devcheck
+bun run test
 ```
 
 ## License
 
-This project is licensed under the Apache License 2.0 - see the [LICENSE](LICENSE) file for details.
-
----
-
-<div align="center">
-Built with the <a href="https://modelcontextprotocol.io/">Model Context Protocol</a>
-</div>
+This project is licensed under the Apache 2.0 License. See the [LICENSE](./LICENSE) file for details.

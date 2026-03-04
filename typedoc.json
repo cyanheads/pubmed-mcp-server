@@ -4,7 +4,7 @@
   "entryPointStrategy": "expand",
   "out": "docs/api",
   "readme": "README.md",
-  "name": "mcp-ts-template API Documentation",
+  "name": "pubmed-mcp-server API Documentation",
   "includeVersion": true,
   "excludePrivate": true,
   "excludeProtected": true,

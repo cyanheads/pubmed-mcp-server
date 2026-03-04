@@ -4,55 +4,51 @@
  * @module src/mcp-server/transports/auth/core/authUtils
  */
 
-import { BaseErrorCode, McpError } from "../../../../types-global/errors.js";
-import { logger, requestContextService } from "../../../../utils/index.js";
-import { authContext } from "./authContext.js";
+import { authContext } from '@/mcp-server/transports/auth/lib/authContext.js';
+import { JsonRpcErrorCode, McpError } from '@/types-global/errors.js';
+import { logger } from '@/utils/internal/logger.js';
+import { type RequestContext, requestContextService } from '@/utils/internal/requestContext.js';
 
 /**
  * Checks if the current authentication context contains all the specified scopes.
- * This function is designed to be called within tool or resource handlers to
- * enforce scope-based access control. It retrieves the authentication information
- * from `authContext` (AsyncLocalStorage).
+ * If no authentication context is found (i.e., auth is disabled), it defaults
+ * to allowing the operation, making it suitable for templates and demos.
+ * If auth is enabled, it strictly enforces scope checks.
  *
  * @param requiredScopes - An array of scope strings that are mandatory for the operation.
- * @throws {McpError} Throws an error with `BaseErrorCode.INTERNAL_ERROR` if the
- *   authentication context is missing, which indicates a server configuration issue.
- * @throws {McpError} Throws an error with `BaseErrorCode.FORBIDDEN` if one or
- *   more required scopes are not present in the validated token.
+ * @param parentContext - Optional parent request context for trace correlation.
+ * @throws {McpError} Throws an error with `JsonRpcErrorCode.Forbidden` if authentication
+ *   is active and one or more required scopes are not present in the validated token.
  */
-export function withRequiredScopes(requiredScopes: string[]): void {
-  const operationName = "withRequiredScopesCheck";
-  const initialContext = requestContextService.createRequestContext({
-    operation: operationName,
-    requiredScopes,
-  });
-
-  logger.debug("Performing scope authorization check.", initialContext);
+export function withRequiredScopes(requiredScopes: string[], parentContext?: RequestContext): void {
+  const initialContext = parentContext
+    ? {
+        ...parentContext,
+        operation: 'withRequiredScopesCheck',
+        requiredScopes,
+      }
+    : requestContextService.createRequestContext({
+        operation: 'withRequiredScopesCheck',
+        additionalContext: { requiredScopes },
+      });
 
   const store = authContext.getStore();
 
+  // If no auth store is found, it means auth is not configured. Default to allowed for template usability.
   if (!store || !store.authInfo) {
-    logger.crit(
-      "Authentication context is missing in withRequiredScopes. This is a server configuration error.",
+    logger.debug(
+      'No authentication context found. Defaulting to allowed for demonstration purposes.',
       initialContext,
     );
-    // This is a server-side logic error; the auth middleware should always populate this.
-    throw new McpError(
-      BaseErrorCode.INTERNAL_ERROR,
-      "Authentication context is missing. This indicates a server configuration error.",
-      {
-        ...initialContext,
-        error: "AuthStore not found in AsyncLocalStorage.",
-      },
-    );
+    return;
   }
+
+  logger.debug('Performing scope authorization check.', initialContext);
 
   const { scopes: grantedScopes, clientId, subject } = store.authInfo;
   const grantedScopeSet = new Set(grantedScopes);
 
-  const missingScopes = requiredScopes.filter(
-    (scope) => !grantedScopeSet.has(scope),
-  );
+  const missingScopes = requiredScopes.filter((scope) => !grantedScopeSet.has(scope));
 
   const finalContext = {
     ...initialContext,
@@ -63,16 +59,13 @@ export function withRequiredScopes(requiredScopes: string[]): void {
 
   if (missingScopes.length > 0) {
     const errorContext = { ...finalContext, missingScopes };
-    logger.warning(
-      "Authorization failed: Missing required scopes.",
-      errorContext,
-    );
+    logger.warning('Authorization failed: Missing required scopes.', errorContext);
     throw new McpError(
-      BaseErrorCode.FORBIDDEN,
-      `Insufficient permissions. Missing required scopes: ${missingScopes.join(", ")}`,
+      JsonRpcErrorCode.Forbidden,
+      `Insufficient permissions. Missing required scopes: ${missingScopes.join(', ')}`,
       errorContext,
     );
   }
 
-  logger.debug("Scope authorization successful.", finalContext);
+  logger.debug('Scope authorization successful.', finalContext);
 }

@@ -1,167 +1,537 @@
 # pubmed-mcp-server - Directory Structure
 
-Generated on: 2025-08-08 19:58:30
+Generated on: 2026-03-04 23:29:53
 
 ```
-pubmed-mcp-server
-├── .clinerules
-│   └── clinerules.md
-├── .github
-│   ├── workflows
-│   │   └── publish.yml
+pubmed-mcp-server/
+├── .github/
 │   └── FUNDING.yml
-├── docs
-│   ├── api-references
-│   │   └── typedoc-reference.md
-│   ├── project-spec.md
-│   └── tree.md
-├── examples
-│   ├── generate_pubmed_chart
-│   │   ├── bar_chart.png
-│   │   ├── doughnut_chart.png
-│   │   ├── line_chart.png
-│   │   ├── pie_chart.png
-│   │   ├── polar_chart.png
-│   │   ├── radar_chart.png
-│   │   └── scatter_plot.png
-│   ├── pubmed_article_connections_1.md
-│   ├── pubmed_article_connections_2.md
-│   ├── pubmed_fetch_contents_example.md
-│   ├── pubmed_research_agent_example.md
-│   └── pubmed_search_articles_example.md
-├── scripts
+├── .husky/
+│   └── pre-commit
+├── .storage/
+├── .vscode/
+│   └── settings.json
+├── docs/
+│   ├── ncbi/
+│   │   └── eutilities-help.pdf
+│   └── v2-handoff.md
+├── old_server/
+│   ├── examples/
+│   │   ├── generate_pubmed_chart/
+│   │   │   ├── bar_chart.png
+│   │   │   ├── doughnut_chart.png
+│   │   │   ├── line_chart.png
+│   │   │   ├── pie_chart.png
+│   │   │   ├── polar_chart.png
+│   │   │   ├── radar_chart.png
+│   │   │   └── scatter_plot.png
+│   │   ├── pubmed_article_connections_1.md
+│   │   ├── pubmed_article_connections_2.md
+│   │   ├── pubmed_fetch_contents_example.md
+│   │   ├── pubmed_research_agent_example.md
+│   │   └── pubmed_search_articles_example.md
+│   ├── src/
+│   │   ├── config/
+│   │   │   └── index.ts
+│   │   ├── mcp-server/
+│   │   │   ├── tools/
+│   │   │   │   ├── pubmedArticleConnections/
+│   │   │   │   │   ├── logic/
+│   │   │   │   │   │   ├── citationFormatter.ts
+│   │   │   │   │   │   ├── elinkHandler.ts
+│   │   │   │   │   │   ├── index.ts
+│   │   │   │   │   │   └── types.ts
+│   │   │   │   │   ├── index.ts
+│   │   │   │   │   └── registration.ts
+│   │   │   │   ├── pubmedFetchContents/
+│   │   │   │   │   ├── index.ts
+│   │   │   │   │   ├── logic.ts
+│   │   │   │   │   └── registration.ts
+│   │   │   │   ├── pubmedGenerateChart/
+│   │   │   │   │   ├── index.ts
+│   │   │   │   │   ├── logic.ts
+│   │   │   │   │   └── registration.ts
+│   │   │   │   ├── pubmedResearchAgent/
+│   │   │   │   │   ├── logic/
+│   │   │   │   │   │   ├── index.ts
+│   │   │   │   │   │   ├── inputSchema.ts
+│   │   │   │   │   │   ├── outputTypes.ts
+│   │   │   │   │   │   └── planOrchestrator.ts
+│   │   │   │   │   ├── index.ts
+│   │   │   │   │   ├── logic.ts
+│   │   │   │   │   └── registration.ts
+│   │   │   │   └── pubmedSearchArticles/
+│   │   │   │       ├── index.ts
+│   │   │   │       ├── logic.ts
+│   │   │   │       └── registration.ts
+│   │   │   ├── transports/
+│   │   │   │   ├── auth/
+│   │   │   │   │   ├── lib/
+│   │   │   │   │   │   ├── authContext.ts
+│   │   │   │   │   │   ├── authTypes.ts
+│   │   │   │   │   │   └── authUtils.ts
+│   │   │   │   │   ├── strategies/
+│   │   │   │   │   │   ├── authStrategy.ts
+│   │   │   │   │   │   ├── jwtStrategy.ts
+│   │   │   │   │   │   └── oauthStrategy.ts
+│   │   │   │   │   ├── authFactory.ts
+│   │   │   │   │   ├── authMiddleware.ts
+│   │   │   │   │   └── index.ts
+│   │   │   │   ├── core/
+│   │   │   │   │   ├── baseTransportManager.ts
+│   │   │   │   │   ├── headerUtils.ts
+│   │   │   │   │   ├── honoNodeBridge.ts
+│   │   │   │   │   ├── statefulTransportManager.ts
+│   │   │   │   │   ├── statelessTransportManager.ts
+│   │   │   │   │   └── transportTypes.ts
+│   │   │   │   ├── http/
+│   │   │   │   │   ├── httpErrorHandler.ts
+│   │   │   │   │   ├── httpTransport.ts
+│   │   │   │   │   ├── httpTypes.ts
+│   │   │   │   │   ├── index.ts
+│   │   │   │   │   └── mcpTransportMiddleware.ts
+│   │   │   │   └── stdio/
+│   │   │   │       ├── index.ts
+│   │   │   │       └── stdioTransport.ts
+│   │   │   └── server.ts
+│   │   ├── services/
+│   │   │   └── ncbi/
+│   │   │       ├── core/
+│   │   │       │   ├── ncbiConstants.ts
+│   │   │       │   ├── ncbiCoreApiClient.ts
+│   │   │       │   ├── ncbiRequestQueueManager.ts
+│   │   │       │   ├── ncbiResponseHandler.ts
+│   │   │       │   └── ncbiService.ts
+│   │   │       └── parsing/
+│   │   │           ├── eSummaryResultParser.ts
+│   │   │           ├── index.ts
+│   │   │           ├── pubmedArticleStructureParser.ts
+│   │   │           └── xmlGenericHelpers.ts
+│   │   ├── storage/
+│   │   ├── types-global/
+│   │   │   ├── errors.ts
+│   │   │   └── pubmedXml.ts
+│   │   ├── utils/
+│   │   │   ├── internal/
+│   │   │   │   ├── errorHandler.ts
+│   │   │   │   ├── index.ts
+│   │   │   │   ├── logger.ts
+│   │   │   │   ├── performance.ts
+│   │   │   │   └── requestContext.ts
+│   │   │   ├── metrics/
+│   │   │   │   ├── index.ts
+│   │   │   │   └── tokenCounter.ts
+│   │   │   ├── network/
+│   │   │   │   ├── fetchWithTimeout.ts
+│   │   │   │   └── index.ts
+│   │   │   ├── parsing/
+│   │   │   │   ├── dateParser.ts
+│   │   │   │   ├── index.ts
+│   │   │   │   └── jsonParser.ts
+│   │   │   ├── scheduling/
+│   │   │   │   ├── index.ts
+│   │   │   │   └── scheduler.ts
+│   │   │   ├── security/
+│   │   │   │   ├── idGenerator.ts
+│   │   │   │   ├── index.ts
+│   │   │   │   ├── rateLimiter.ts
+│   │   │   │   └── sanitization.ts
+│   │   │   ├── telemetry/
+│   │   │   │   ├── instrumentation.ts
+│   │   │   │   └── semconv.ts
+│   │   │   └── index.ts
+│   │   └── index.ts
+│   └── package.json
+├── schemas/
+│   ├── ncbi-dtd/
+│   │   ├── eInfo_020511.dtd
+│   │   ├── eLink_020511.dtd
+│   │   ├── ePost_020511.dtd
+│   │   ├── eSearch_020511.dtd
+│   │   ├── eSpell.dtd
+│   │   ├── eSummary_041029.dtd
+│   │   └── pubmed_250101.dtd
+│   └── cloudflare-d1-schema.sql
+├── scripts/
 │   ├── clean.ts
+│   ├── devcheck.ts
+│   ├── devdocs.ts
 │   ├── fetch-openapi-spec.ts
 │   ├── make-executable.ts
-│   └── tree.ts
-├── src
-│   ├── config
+│   ├── tree.ts
+│   └── update-coverage.ts
+├── src/
+│   ├── config/
 │   │   └── index.ts
-│   ├── mcp-server
-│   │   ├── tools
-│   │   │   ├── pubmedArticleConnections
-│   │   │   │   ├── logic
-│   │   │   │   │   ├── citationFormatter.ts
-│   │   │   │   │   ├── elinkHandler.ts
-│   │   │   │   │   ├── index.ts
-│   │   │   │   │   └── types.ts
+│   ├── container/
+│   │   ├── core/
+│   │   │   ├── container.ts
+│   │   │   └── tokens.ts
+│   │   ├── registrations/
+│   │   │   ├── core.ts
+│   │   │   └── mcp.ts
+│   │   ├── index.ts
+│   │   └── README.md
+│   ├── mcp-server/
+│   │   ├── prompts/
+│   │   │   ├── definitions/
 │   │   │   │   ├── index.ts
-│   │   │   │   └── registration.ts
-│   │   │   ├── pubmedFetchContents
+│   │   │   │   └── research-plan.prompt.ts
+│   │   │   ├── utils/
+│   │   │   │   └── promptDefinition.ts
+│   │   │   └── prompt-registration.ts
+│   │   ├── resources/
+│   │   │   ├── definitions/
+│   │   │   │   ├── database-info.resource.ts
+│   │   │   │   └── index.ts
+│   │   │   ├── utils/
+│   │   │   │   ├── resourceDefinition.ts
+│   │   │   │   └── resourceHandlerFactory.ts
+│   │   │   └── resource-registration.ts
+│   │   ├── roots/
+│   │   │   └── roots-registration.ts
+│   │   ├── tasks/
+│   │   │   ├── core/
+│   │   │   │   ├── storageBackedTaskStore.ts
+│   │   │   │   ├── taskManager.ts
+│   │   │   │   └── taskTypes.ts
+│   │   │   └── utils/
+│   │   │       └── taskToolDefinition.ts
+│   │   ├── tools/
+│   │   │   ├── definitions/
 │   │   │   │   ├── index.ts
-│   │   │   │   ├── logic.ts
-│   │   │   │   └── registration.ts
-│   │   │   ├── pubmedGenerateChart
-│   │   │   │   ├── index.ts
-│   │   │   │   ├── logic.ts
-│   │   │   │   └── registration.ts
-│   │   │   ├── pubmedResearchAgent
-│   │   │   │   ├── logic
-│   │   │   │   │   ├── index.ts
-│   │   │   │   │   ├── inputSchema.ts
-│   │   │   │   │   ├── outputTypes.ts
-│   │   │   │   │   └── planOrchestrator.ts
-│   │   │   │   ├── index.ts
-│   │   │   │   ├── logic.ts
-│   │   │   │   └── registration.ts
-│   │   │   └── pubmedSearchArticles
-│   │   │       ├── index.ts
-│   │   │       ├── logic.ts
-│   │   │       └── registration.ts
-│   │   ├── transports
-│   │   │   ├── auth
-│   │   │   │   ├── lib
+│   │   │   │   ├── pubmed-cite.tool.ts
+│   │   │   │   ├── pubmed-fetch.tool.ts
+│   │   │   │   ├── pubmed-mesh-lookup.tool.ts
+│   │   │   │   ├── pubmed-related.tool.ts
+│   │   │   │   ├── pubmed-search.tool.ts
+│   │   │   │   ├── pubmed-spell.tool.ts
+│   │   │   │   └── pubmed-trending.tool.ts
+│   │   │   ├── utils/
+│   │   │   │   ├── toolDefinition.ts
+│   │   │   │   └── toolHandlerFactory.ts
+│   │   │   └── tool-registration.ts
+│   │   ├── transports/
+│   │   │   ├── auth/
+│   │   │   │   ├── lib/
 │   │   │   │   │   ├── authContext.ts
 │   │   │   │   │   ├── authTypes.ts
-│   │   │   │   │   └── authUtils.ts
-│   │   │   │   ├── strategies
+│   │   │   │   │   ├── authUtils.ts
+│   │   │   │   │   ├── claimParser.ts
+│   │   │   │   │   └── withAuth.ts
+│   │   │   │   ├── strategies/
 │   │   │   │   │   ├── authStrategy.ts
 │   │   │   │   │   ├── jwtStrategy.ts
 │   │   │   │   │   └── oauthStrategy.ts
 │   │   │   │   ├── authFactory.ts
-│   │   │   │   ├── authMiddleware.ts
-│   │   │   │   └── index.ts
-│   │   │   ├── core
-│   │   │   │   ├── baseTransportManager.ts
-│   │   │   │   ├── headerUtils.ts
-│   │   │   │   ├── honoNodeBridge.ts
-│   │   │   │   ├── statefulTransportManager.ts
-│   │   │   │   ├── statelessTransportManager.ts
-│   │   │   │   └── transportTypes.ts
-│   │   │   ├── http
+│   │   │   │   └── authMiddleware.ts
+│   │   │   ├── http/
 │   │   │   │   ├── httpErrorHandler.ts
 │   │   │   │   ├── httpTransport.ts
 │   │   │   │   ├── httpTypes.ts
-│   │   │   │   ├── index.ts
-│   │   │   │   └── mcpTransportMiddleware.ts
-│   │   │   └── stdio
-│   │   │       ├── index.ts
-│   │   │       └── stdioTransport.ts
+│   │   │   │   ├── protectedResourceMetadata.ts
+│   │   │   │   ├── sessionIdUtils.ts
+│   │   │   │   └── sessionStore.ts
+│   │   │   ├── stdio/
+│   │   │   │   └── stdioTransport.ts
+│   │   │   ├── ITransport.ts
+│   │   │   └── manager.ts
+│   │   ├── README.md
 │   │   └── server.ts
-│   ├── services
-│   │   └── NCBI
-│   │       ├── core
-│   │       │   ├── ncbiConstants.ts
-│   │       │   ├── ncbiCoreApiClient.ts
-│   │       │   ├── ncbiRequestQueueManager.ts
-│   │       │   ├── ncbiResponseHandler.ts
-│   │       │   └── ncbiService.ts
-│   │       └── parsing
-│   │           ├── eSummaryResultParser.ts
-│   │           ├── index.ts
-│   │           ├── pubmedArticleStructureParser.ts
-│   │           └── xmlGenericHelpers.ts
-│   ├── types-global
-│   │   ├── declarations.d.ts
-│   │   ├── errors.ts
-│   │   └── pubmedXml.ts
-│   ├── utils
-│   │   ├── internal
-│   │   │   ├── errorHandler.ts
-│   │   │   ├── index.ts
+│   ├── services/
+│   │   ├── ncbi/
+│   │   │   ├── core/
+│   │   │   │   ├── api-client.ts
+│   │   │   │   ├── ncbi-service.ts
+│   │   │   │   ├── request-queue.ts
+│   │   │   │   └── response-handler.ts
+│   │   │   ├── formatting/
+│   │   │   │   └── citation-formatter.ts
+│   │   │   ├── parsing/
+│   │   │   │   ├── article-parser.ts
+│   │   │   │   ├── esummary-parser.ts
+│   │   │   │   └── xml-helpers.ts
+│   │   │   └── types.ts
+│   │   └── README.md
+│   ├── storage/
+│   │   ├── core/
+│   │   │   ├── IStorageProvider.ts
+│   │   │   ├── storageFactory.ts
+│   │   │   ├── StorageService.ts
+│   │   │   └── storageValidation.ts
+│   │   ├── providers/
+│   │   │   ├── cloudflare/
+│   │   │   │   ├── d1Provider.ts
+│   │   │   │   ├── kvProvider.ts
+│   │   │   │   └── r2Provider.ts
+│   │   │   ├── fileSystem/
+│   │   │   │   └── fileSystemProvider.ts
+│   │   │   ├── inMemory/
+│   │   │   │   └── inMemoryProvider.ts
+│   │   │   └── supabase/
+│   │   │       ├── supabase.types.ts
+│   │   │       └── supabaseProvider.ts
+│   │   └── README.md
+│   ├── types-global/
+│   │   └── errors.ts
+│   ├── utils/
+│   │   ├── formatting/
+│   │   │   ├── diffFormatter.ts
+│   │   │   ├── markdownBuilder.ts
+│   │   │   ├── tableFormatter.ts
+│   │   │   └── treeFormatter.ts
+│   │   ├── internal/
+│   │   │   ├── error-handler/
+│   │   │   │   ├── errorHandler.ts
+│   │   │   │   ├── helpers.ts
+│   │   │   │   ├── mappings.ts
+│   │   │   │   └── types.ts
+│   │   │   ├── encoding.ts
+│   │   │   ├── health.ts
 │   │   │   ├── logger.ts
 │   │   │   ├── performance.ts
-│   │   │   └── requestContext.ts
-│   │   ├── metrics
-│   │   │   ├── index.ts
+│   │   │   ├── requestContext.ts
+│   │   │   ├── runtime.ts
+│   │   │   └── startupBanner.ts
+│   │   ├── metrics/
 │   │   │   └── tokenCounter.ts
-│   │   ├── network
-│   │   │   ├── fetchWithTimeout.ts
-│   │   │   └── index.ts
-│   │   ├── parsing
+│   │   ├── network/
+│   │   │   └── fetchWithTimeout.ts
+│   │   ├── pagination/
+│   │   │   └── pagination.ts
+│   │   ├── parsing/
+│   │   │   ├── csvParser.ts
 │   │   │   ├── dateParser.ts
-│   │   │   ├── index.ts
-│   │   │   └── jsonParser.ts
-│   │   ├── scheduling
-│   │   │   ├── index.ts
+│   │   │   ├── frontmatterParser.ts
+│   │   │   ├── jsonParser.ts
+│   │   │   ├── pdfParser.ts
+│   │   │   ├── xmlParser.ts
+│   │   │   └── yamlParser.ts
+│   │   ├── scheduling/
 │   │   │   └── scheduler.ts
-│   │   ├── security
+│   │   ├── security/
 │   │   │   ├── idGenerator.ts
-│   │   │   ├── index.ts
 │   │   │   ├── rateLimiter.ts
 │   │   │   └── sanitization.ts
-│   │   ├── telemetry
+│   │   ├── telemetry/
+│   │   │   ├── index.ts
 │   │   │   ├── instrumentation.ts
-│   │   │   └── semconv.ts
+│   │   │   ├── metrics.ts
+│   │   │   ├── semconv.ts
+│   │   │   └── trace.ts
+│   │   └── types/
+│   │       └── guards.ts
+│   ├── index.ts
+│   └── worker.ts
+├── tests/
+│   ├── config/
+│   │   ├── index.int.test.ts
+│   │   └── index.test.ts
+│   ├── conformance/
+│   │   ├── helpers/
+│   │   │   ├── assertions.ts
+│   │   │   └── server-harness.ts
+│   │   ├── lifecycle.test.ts
+│   │   ├── prompts.test.ts
+│   │   ├── protocol-init.test.ts
+│   │   ├── resources.test.ts
+│   │   └── tools.test.ts
+│   ├── container/
+│   │   ├── registrations/
+│   │   │   ├── core.test.ts
+│   │   │   └── mcp.test.ts
+│   │   ├── container.test.ts
+│   │   ├── index.test.ts
+│   │   └── tokens.test.ts
+│   ├── fixtures/
 │   │   └── index.ts
-│   └── index.ts
+│   ├── mcp-server/
+│   │   ├── prompts/
+│   │   │   ├── definitions/
+│   │   │   ├── utils/
+│   │   │   │   └── promptDefinition.test.ts
+│   │   │   └── prompt-registration.test.ts
+│   │   ├── resources/
+│   │   │   ├── definitions/
+│   │   │   │   └── index.test.ts
+│   │   │   ├── schemas/
+│   │   │   │   ├── __snapshots__/
+│   │   │   │   │   └── schema-snapshots.test.ts.snap
+│   │   │   │   ├── json-schema-compatibility.test.ts
+│   │   │   │   └── schema-snapshots.test.ts
+│   │   │   ├── utils/
+│   │   │   │   ├── resourceDefinition.test.ts
+│   │   │   │   └── resourceHandlerFactory.test.ts
+│   │   │   └── resource-registration.test.ts
+│   │   ├── roots/
+│   │   │   └── roots-registration.test.ts
+│   │   ├── tasks/
+│   │   │   ├── core/
+│   │   │   │   ├── storageBackedTaskStore.test.ts
+│   │   │   │   └── taskManager.test.ts
+│   │   │   └── utils/
+│   │   │       └── taskToolDefinition.test.ts
+│   │   ├── tools/
+│   │   │   ├── definitions/
+│   │   │   │   └── index.test.ts
+│   │   │   ├── fuzz/
+│   │   │   │   └── tool-input-fuzz.test.ts
+│   │   │   ├── schemas/
+│   │   │   │   ├── __snapshots__/
+│   │   │   │   │   └── schema-snapshots.test.ts.snap
+│   │   │   │   ├── json-schema-compatibility.test.ts
+│   │   │   │   ├── schema-snapshots.test.ts
+│   │   │   │   └── zod4-compatibility.test.ts
+│   │   │   ├── utils/
+│   │   │   │   ├── toolDefinition.test.ts
+│   │   │   │   └── toolHandlerFactory.test.ts
+│   │   │   └── tool-registration.test.ts
+│   │   ├── transports/
+│   │   │   ├── auth/
+│   │   │   │   ├── lib/
+│   │   │   │   │   ├── authContext.test.ts
+│   │   │   │   │   ├── authTypes.test.ts
+│   │   │   │   │   ├── authUtils.test.ts
+│   │   │   │   │   ├── claimParser.test.ts
+│   │   │   │   │   └── withAuth.test.ts
+│   │   │   │   ├── strategies/
+│   │   │   │   │   ├── authStrategy.test.ts
+│   │   │   │   │   ├── jwtStrategy.test.ts
+│   │   │   │   │   └── oauthStrategy.test.ts
+│   │   │   │   ├── authFactory.test.ts
+│   │   │   │   └── authMiddleware.test.ts
+│   │   │   ├── http/
+│   │   │   │   ├── httpErrorHandler.test.ts
+│   │   │   │   ├── httpTransport.integration.test.ts
+│   │   │   │   ├── httpTransport.test.ts
+│   │   │   │   ├── httpTypes.test.ts
+│   │   │   │   ├── sessionIdUtils.test.ts
+│   │   │   │   └── sessionStore.test.ts
+│   │   │   ├── stdio/
+│   │   │   │   └── stdioTransport.test.ts
+│   │   │   ├── ITransport.test.ts
+│   │   │   └── manager.test.ts
+│   │   └── server.test.ts
+│   ├── mocks/
+│   │   ├── handlers.ts
+│   │   └── server.ts
+│   ├── scripts/
+│   │   └── devdocs.test.ts
+│   ├── services/
+│   │   └── ncbi/
+│   │       ├── core/
+│   │       │   ├── api-client.test.ts
+│   │       │   ├── ncbi-service.test.ts
+│   │       │   ├── request-queue.test.ts
+│   │       │   └── response-handler.test.ts
+│   │       ├── formatting/
+│   │       │   └── citation-formatter.test.ts
+│   │       └── parsing/
+│   │           ├── article-parser.test.ts
+│   │           ├── esummary-parser.test.ts
+│   │           └── xml-helpers.test.ts
+│   ├── storage/
+│   │   ├── core/
+│   │   │   ├── IStorageProvider.test.ts
+│   │   │   ├── storageFactory.test.ts
+│   │   │   └── storageValidation.test.ts
+│   │   ├── providers/
+│   │   │   ├── cloudflare/
+│   │   │   │   ├── d1Provider.test.ts
+│   │   │   │   ├── kvProvider.test.ts
+│   │   │   │   └── r2Provider.test.ts
+│   │   │   ├── fileSystem/
+│   │   │   │   └── fileSystemProvider.test.ts
+│   │   │   ├── inMemory/
+│   │   │   │   └── inMemoryProvider.test.ts
+│   │   │   └── supabase/
+│   │   │       ├── supabase.types.test.ts
+│   │   │       └── supabaseProvider.test.ts
+│   │   ├── storageProviderCompliance.test.ts
+│   │   └── StorageService.test.ts
+│   ├── types-global/
+│   │   └── errors.test.ts
+│   ├── utils/
+│   │   ├── formatting/
+│   │   │   ├── diffFormatter.test.ts
+│   │   │   ├── markdownBuilder.test.ts
+│   │   │   ├── tableFormatter.test.ts
+│   │   │   └── treeFormatter.test.ts
+│   │   ├── internal/
+│   │   │   ├── error-handler/
+│   │   │   │   ├── errorHandler.test.ts
+│   │   │   │   ├── helpers.test.ts
+│   │   │   │   ├── index.test.ts
+│   │   │   │   ├── mappings.test.ts
+│   │   │   │   └── types.test.ts
+│   │   │   ├── encoding.test.ts
+│   │   │   ├── errorHandler.int.test.ts
+│   │   │   ├── errorHandler.unit.test.ts
+│   │   │   ├── health.test.ts
+│   │   │   ├── logger.int.test.ts
+│   │   │   ├── logger.test.ts
+│   │   │   ├── performance.init.test.ts
+│   │   │   ├── performance.test.ts
+│   │   │   ├── requestContext.test.ts
+│   │   │   ├── runtime.test.ts
+│   │   │   └── startupBanner.test.ts
+│   │   ├── metrics/
+│   │   │   └── tokenCounter.test.ts
+│   │   ├── network/
+│   │   │   └── fetchWithTimeout.test.ts
+│   │   ├── pagination/
+│   │   │   └── index.test.ts
+│   │   ├── parsing/
+│   │   │   ├── csvParser.test.ts
+│   │   │   ├── dateParser.test.ts
+│   │   │   ├── frontmatterParser.test.ts
+│   │   │   ├── jsonParser.test.ts
+│   │   │   ├── pdfParser.test.ts
+│   │   │   ├── xmlParser.test.ts
+│   │   │   └── yamlParser.test.ts
+│   │   ├── scheduling/
+│   │   │   └── scheduler.test.ts
+│   │   ├── security/
+│   │   │   ├── idGenerator.test.ts
+│   │   │   ├── rateLimiter.test.ts
+│   │   │   ├── sanitization.property.test.ts
+│   │   │   └── sanitization.test.ts
+│   │   ├── telemetry/
+│   │   │   ├── index.test.ts
+│   │   │   ├── instrumentation.test.ts
+│   │   │   ├── metrics.test.ts
+│   │   │   ├── semconv.test.ts
+│   │   │   └── trace.test.ts
+│   │   └── types/
+│   │       └── guards.test.ts
+│   ├── index.test.ts
+│   ├── setup.ts
+│   └── worker.test.ts
 ├── .dockerignore
+├── .env.example
+├── .gitattributes
 ├── .gitignore
-├── .ncurc.json
+├── AGENTS.md
+├── biome.json
+├── bun.lock
+├── bunfig.toml
 ├── CHANGELOG.md
+├── CLAUDE.md
 ├── Dockerfile
-├── eslint.config.js
 ├── LICENSE
-├── mcp.json
-├── package-lock.json
 ├── package.json
 ├── README.md
 ├── repomix.config.json
+├── server.json
 ├── smithery.yaml
 ├── tsconfig.json
-├── tsconfig.typedoc.json
+├── tsconfig.scripts.json
+├── tsconfig.test.json
 ├── tsdoc.json
-└── typedoc.json
+├── typedoc.json
+├── vitest.config.ts
+├── vitest.conformance.ts
+└── wrangler.toml
 ```
 
 _Note: This tree excludes files and directories matched by .gitignore and default patterns._

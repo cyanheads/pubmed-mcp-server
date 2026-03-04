@@ -1,0 +1,1 @@
+bun run scripts/devcheck.ts --no-audit --no-secrets --no-deps --no-todos --no-format

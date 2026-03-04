@@ -1,0 +1,653 @@
+// Vitest Snapshot v1, https://vitest.dev/guide/snapshot.html
+
+exports[`Tool Schema Snapshots > Tool: pubmed_cite > inputSchema JSON output should be stable 1`] = `
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "additionalProperties": false,
+  "properties": {
+    "pmids": {
+      "description": "PubMed IDs to cite",
+      "items": {
+        "pattern": "^\\d+$",
+        "type": "string",
+      },
+      "maxItems": 20,
+      "minItems": 1,
+      "type": "array",
+    },
+    "styles": {
+      "default": [
+        "apa",
+      ],
+      "description": "Citation styles to generate",
+      "items": {
+        "enum": [
+          "apa",
+          "mla",
+          "bibtex",
+          "ris",
+        ],
+        "type": "string",
+      },
+      "type": "array",
+    },
+  },
+  "required": [
+    "pmids",
+    "styles",
+  ],
+  "type": "object",
+}
+`;
+
+exports[`Tool Schema Snapshots > Tool: pubmed_cite > outputSchema JSON output should be stable 1`] = `
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "additionalProperties": false,
+  "properties": {
+    "citations": {
+      "description": "Citations per article",
+      "items": {
+        "additionalProperties": false,
+        "properties": {
+          "citations": {
+            "additionalProperties": {
+              "type": "string",
+            },
+            "propertyNames": {
+              "type": "string",
+            },
+            "type": "object",
+          },
+          "pmid": {
+            "type": "string",
+          },
+          "title": {
+            "type": "string",
+          },
+        },
+        "required": [
+          "pmid",
+          "citations",
+        ],
+        "type": "object",
+      },
+      "type": "array",
+    },
+  },
+  "required": [
+    "citations",
+  ],
+  "type": "object",
+}
+`;
+
+exports[`Tool Schema Snapshots > Tool: pubmed_fetch > inputSchema JSON output should be stable 1`] = `
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "additionalProperties": false,
+  "properties": {
+    "includeGrants": {
+      "default": false,
+      "description": "Include grant information",
+      "type": "boolean",
+    },
+    "includeMesh": {
+      "default": true,
+      "description": "Include MeSH terms",
+      "type": "boolean",
+    },
+    "pmids": {
+      "description": "PubMed IDs to fetch",
+      "items": {
+        "pattern": "^\\d+$",
+        "type": "string",
+      },
+      "maxItems": 200,
+      "minItems": 1,
+      "type": "array",
+    },
+  },
+  "required": [
+    "pmids",
+    "includeMesh",
+    "includeGrants",
+  ],
+  "type": "object",
+}
+`;
+
+exports[`Tool Schema Snapshots > Tool: pubmed_fetch > outputSchema JSON output should be stable 1`] = `
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "additionalProperties": false,
+  "properties": {
+    "articles": {
+      "description": "Parsed articles",
+      "items": {
+        "additionalProperties": false,
+        "properties": {
+          "abstractText": {
+            "description": "Abstract text",
+            "type": "string",
+          },
+          "authors": {
+            "description": "Author list",
+            "items": {},
+            "type": "array",
+          },
+          "doi": {
+            "description": "Digital Object Identifier",
+            "type": "string",
+          },
+          "grantList": {
+            "description": "Grant information",
+            "items": {},
+            "type": "array",
+          },
+          "journalInfo": {
+            "description": "Journal information",
+          },
+          "keywords": {
+            "description": "Keywords",
+            "items": {
+              "type": "string",
+            },
+            "type": "array",
+          },
+          "meshTerms": {
+            "description": "MeSH terms",
+            "items": {},
+            "type": "array",
+          },
+          "pmid": {
+            "description": "PubMed ID",
+            "type": "string",
+          },
+          "publicationTypes": {
+            "description": "Publication types",
+            "items": {
+              "type": "string",
+            },
+            "type": "array",
+          },
+          "title": {
+            "description": "Article title",
+            "type": "string",
+          },
+        },
+        "type": "object",
+      },
+      "type": "array",
+    },
+    "totalReturned": {
+      "description": "Number of articles returned",
+      "type": "number",
+    },
+  },
+  "required": [
+    "articles",
+    "totalReturned",
+  ],
+  "type": "object",
+}
+`;
+
+exports[`Tool Schema Snapshots > Tool: pubmed_mesh_lookup > inputSchema JSON output should be stable 1`] = `
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "additionalProperties": false,
+  "properties": {
+    "includeDetails": {
+      "default": false,
+      "description": "Fetch full MeSH records (scope notes, tree numbers, entry terms)",
+      "type": "boolean",
+    },
+    "maxResults": {
+      "default": 10,
+      "description": "Maximum results",
+      "maximum": 50,
+      "minimum": 1,
+      "type": "integer",
+    },
+    "term": {
+      "description": "MeSH term to look up",
+      "minLength": 1,
+      "type": "string",
+    },
+  },
+  "required": [
+    "term",
+    "maxResults",
+    "includeDetails",
+  ],
+  "type": "object",
+}
+`;
+
+exports[`Tool Schema Snapshots > Tool: pubmed_mesh_lookup > outputSchema JSON output should be stable 1`] = `
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "additionalProperties": false,
+  "properties": {
+    "results": {
+      "description": "Matching MeSH records",
+      "items": {
+        "additionalProperties": false,
+        "properties": {
+          "entryTerms": {
+            "description": "Synonyms / entry terms",
+            "items": {
+              "type": "string",
+            },
+            "type": "array",
+          },
+          "meshId": {
+            "description": "MeSH descriptor unique identifier",
+            "type": "string",
+          },
+          "name": {
+            "description": "Descriptor name",
+            "type": "string",
+          },
+          "scopeNote": {
+            "description": "Scope note describing the descriptor",
+            "type": "string",
+          },
+          "treeNumbers": {
+            "description": "MeSH tree number(s)",
+            "items": {
+              "type": "string",
+            },
+            "type": "array",
+          },
+        },
+        "required": [
+          "meshId",
+          "name",
+        ],
+        "type": "object",
+      },
+      "type": "array",
+    },
+    "term": {
+      "description": "Original search term",
+      "type": "string",
+    },
+  },
+  "required": [
+    "term",
+    "results",
+  ],
+  "type": "object",
+}
+`;
+
+exports[`Tool Schema Snapshots > Tool: pubmed_related > inputSchema JSON output should be stable 1`] = `
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "additionalProperties": false,
+  "properties": {
+    "maxResults": {
+      "default": 10,
+      "description": "Maximum related articles",
+      "maximum": 50,
+      "minimum": 1,
+      "type": "integer",
+    },
+    "pmid": {
+      "description": "Source PubMed ID",
+      "pattern": "^\\d+$",
+      "type": "string",
+    },
+    "relationship": {
+      "default": "similar",
+      "description": "Type of relationship",
+      "enum": [
+        "similar",
+        "cited_by",
+        "references",
+      ],
+      "type": "string",
+    },
+  },
+  "required": [
+    "pmid",
+    "relationship",
+    "maxResults",
+  ],
+  "type": "object",
+}
+`;
+
+exports[`Tool Schema Snapshots > Tool: pubmed_related > outputSchema JSON output should be stable 1`] = `
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "additionalProperties": false,
+  "properties": {
+    "articles": {
+      "description": "Related articles",
+      "items": {
+        "additionalProperties": false,
+        "properties": {
+          "authors": {
+            "type": "string",
+          },
+          "pmid": {
+            "type": "string",
+          },
+          "score": {
+            "type": "number",
+          },
+          "title": {
+            "type": "string",
+          },
+        },
+        "required": [
+          "pmid",
+        ],
+        "type": "object",
+      },
+      "type": "array",
+    },
+    "relationship": {
+      "description": "Relationship type used",
+      "type": "string",
+    },
+    "sourcePmid": {
+      "description": "Source PubMed ID",
+      "type": "string",
+    },
+    "totalFound": {
+      "description": "Total related articles found before truncation",
+      "type": "number",
+    },
+  },
+  "required": [
+    "sourcePmid",
+    "relationship",
+    "articles",
+    "totalFound",
+  ],
+  "type": "object",
+}
+`;
+
+exports[`Tool Schema Snapshots > Tool: pubmed_search > inputSchema JSON output should be stable 1`] = `
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "additionalProperties": false,
+  "properties": {
+    "dateRange": {
+      "additionalProperties": false,
+      "description": "Filter by date range (YYYY/MM/DD)",
+      "properties": {
+        "dateType": {
+          "default": "pdat",
+          "description": "Date type: pdat (publication), mdat (modification), edat (entrez)",
+          "enum": [
+            "pdat",
+            "mdat",
+            "edat",
+          ],
+          "type": "string",
+        },
+        "maxDate": {
+          "description": "End date (YYYY/MM/DD)",
+          "type": "string",
+        },
+        "minDate": {
+          "description": "Start date (YYYY/MM/DD)",
+          "type": "string",
+        },
+      },
+      "required": [
+        "minDate",
+        "maxDate",
+        "dateType",
+      ],
+      "type": "object",
+    },
+    "includeSummaries": {
+      "default": 0,
+      "description": "Fetch brief summaries for top N results",
+      "maximum": 50,
+      "minimum": 0,
+      "type": "integer",
+    },
+    "maxResults": {
+      "default": 20,
+      "description": "Maximum results to return",
+      "maximum": 1000,
+      "minimum": 1,
+      "type": "integer",
+    },
+    "publicationTypes": {
+      "description": "Filter by publication type",
+      "items": {
+        "type": "string",
+      },
+      "type": "array",
+    },
+    "query": {
+      "description": "PubMed search query (supports full NCBI syntax)",
+      "minLength": 1,
+      "type": "string",
+    },
+    "sort": {
+      "default": "relevance",
+      "description": "Sort order",
+      "enum": [
+        "relevance",
+        "pub_date",
+        "author",
+        "journal",
+      ],
+      "type": "string",
+    },
+  },
+  "required": [
+    "query",
+    "maxResults",
+    "sort",
+    "includeSummaries",
+  ],
+  "type": "object",
+}
+`;
+
+exports[`Tool Schema Snapshots > Tool: pubmed_search > outputSchema JSON output should be stable 1`] = `
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "additionalProperties": false,
+  "properties": {
+    "pmids": {
+      "description": "PubMed IDs",
+      "items": {
+        "type": "string",
+      },
+      "type": "array",
+    },
+    "query": {
+      "description": "Original query",
+      "type": "string",
+    },
+    "searchUrl": {
+      "description": "PubMed search URL",
+      "type": "string",
+    },
+    "summaries": {
+      "description": "Brief summaries",
+      "items": {
+        "additionalProperties": false,
+        "properties": {
+          "authors": {
+            "type": "string",
+          },
+          "doi": {
+            "type": "string",
+          },
+          "pmid": {
+            "type": "string",
+          },
+          "pubDate": {
+            "type": "string",
+          },
+          "source": {
+            "type": "string",
+          },
+          "title": {
+            "type": "string",
+          },
+        },
+        "required": [
+          "pmid",
+        ],
+        "type": "object",
+      },
+      "type": "array",
+    },
+    "totalFound": {
+      "description": "Total matching articles",
+      "type": "number",
+    },
+  },
+  "required": [
+    "query",
+    "totalFound",
+    "pmids",
+    "searchUrl",
+  ],
+  "type": "object",
+}
+`;
+
+exports[`Tool Schema Snapshots > Tool: pubmed_spell > inputSchema JSON output should be stable 1`] = `
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "additionalProperties": false,
+  "properties": {
+    "query": {
+      "description": "Query to spell-check",
+      "minLength": 2,
+      "type": "string",
+    },
+  },
+  "required": [
+    "query",
+  ],
+  "type": "object",
+}
+`;
+
+exports[`Tool Schema Snapshots > Tool: pubmed_spell > outputSchema JSON output should be stable 1`] = `
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "additionalProperties": false,
+  "properties": {
+    "corrected": {
+      "description": "Corrected query (same as original if no suggestion)",
+      "type": "string",
+    },
+    "hasSuggestion": {
+      "description": "Whether NCBI suggested a correction",
+      "type": "boolean",
+    },
+    "original": {
+      "description": "Original query",
+      "type": "string",
+    },
+  },
+  "required": [
+    "original",
+    "corrected",
+    "hasSuggestion",
+  ],
+  "type": "object",
+}
+`;
+
+exports[`Tool Schema Snapshots > Tool: pubmed_trending > inputSchema JSON output should be stable 1`] = `
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "additionalProperties": false,
+  "properties": {
+    "days": {
+      "default": 30,
+      "description": "Look-back period in days",
+      "maximum": 365,
+      "minimum": 1,
+      "type": "integer",
+    },
+    "maxResults": {
+      "default": 10,
+      "description": "Maximum results",
+      "maximum": 50,
+      "minimum": 1,
+      "type": "integer",
+    },
+    "query": {
+      "description": "Topic to find trending articles for",
+      "minLength": 1,
+      "type": "string",
+    },
+  },
+  "required": [
+    "query",
+    "days",
+    "maxResults",
+  ],
+  "type": "object",
+}
+`;
+
+exports[`Tool Schema Snapshots > Tool: pubmed_trending > outputSchema JSON output should be stable 1`] = `
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "additionalProperties": false,
+  "properties": {
+    "articles": {
+      "description": "Trending articles",
+      "items": {
+        "additionalProperties": false,
+        "properties": {
+          "authors": {
+            "type": "string",
+          },
+          "pmid": {
+            "type": "string",
+          },
+          "publicationDate": {
+            "type": "string",
+          },
+          "source": {
+            "type": "string",
+          },
+          "title": {
+            "type": "string",
+          },
+        },
+        "required": [
+          "pmid",
+        ],
+        "type": "object",
+      },
+      "type": "array",
+    },
+    "period": {
+      "description": "Date range description",
+      "type": "string",
+    },
+    "query": {
+      "description": "Search query used",
+      "type": "string",
+    },
+  },
+  "required": [
+    "query",
+    "period",
+    "articles",
+  ],
+  "type": "object",
+}
+`;

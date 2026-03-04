@@ -1,88 +1,374 @@
 /**
  * @fileoverview Configures and starts the HTTP MCP transport using Hono.
- * This file has been refactored to correctly integrate Hono's streaming
- * capabilities with the Model Context Protocol SDK's transport layer.
+ * This implementation uses the official @hono/mcp package for a fully
+ * web-standard, platform-agnostic transport layer.
+ *
+ * Implements MCP Specification 2025-06-18 Streamable HTTP Transport.
+ * @see {@link https://modelcontextprotocol.io/specification/2025-06-18/basic/transports#streamable-http | MCP Streamable HTTP Transport}
  * @module src/mcp-server/transports/http/httpTransport
  */
 
-import { serve, ServerType } from "@hono/node-server";
-import { Context, Hono, Next } from "hono";
-import { cors } from "hono/cors";
-import { stream } from "hono/streaming";
-import http from "http";
-import { config } from "../../../config/index.js";
-import {
-  logger,
-  rateLimiter,
-  RequestContext,
-  requestContextService,
-} from "../../../utils/index.js";
-import { ServerInstanceInfo } from "../../server.js";
-import { createAuthMiddleware, createAuthStrategy } from "../auth/index.js";
-import { StatelessTransportManager } from "../core/statelessTransportManager.js";
-import { TransportManager } from "../core/transportTypes.js";
-import { StatefulTransportManager } from "./../core/statefulTransportManager.js";
-import { httpErrorHandler } from "./httpErrorHandler.js";
-import { HonoNodeBindings } from "./httpTypes.js";
-import { mcpTransportMiddleware } from "./mcpTransportMiddleware.js";
+import http from 'node:http';
+import { StreamableHTTPTransport } from '@hono/mcp';
+import { type ServerType, serve } from '@hono/node-server';
+import { httpInstrumentationMiddleware } from '@hono/otel';
+import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
+import { SUPPORTED_PROTOCOL_VERSIONS } from '@modelcontextprotocol/sdk/types.js';
+import { Hono } from 'hono';
+import { cors } from 'hono/cors';
 
-const HTTP_PORT = config.mcpHttpPort;
-const HTTP_HOST = config.mcpHttpHost;
-const MCP_ENDPOINT_PATH = config.mcpHttpEndpointPath;
+import { config } from '@/config/index.js';
+import { createAuthStrategy } from '@/mcp-server/transports/auth/authFactory.js';
+import { createAuthMiddleware } from '@/mcp-server/transports/auth/authMiddleware.js';
+import { authContext } from '@/mcp-server/transports/auth/lib/authContext.js';
+import { httpErrorHandler } from '@/mcp-server/transports/http/httpErrorHandler.js';
+import type { HonoNodeBindings } from '@/mcp-server/transports/http/httpTypes.js';
+import { protectedResourceMetadataHandler } from '@/mcp-server/transports/http/protectedResourceMetadata.js';
+import { generateSecureSessionId } from '@/mcp-server/transports/http/sessionIdUtils.js';
+import { type SessionIdentity, SessionStore } from '@/mcp-server/transports/http/sessionStore.js';
+import { logger } from '@/utils/internal/logger.js';
+import type { RequestContext } from '@/utils/internal/requestContext.js';
+import { logStartupBanner } from '@/utils/internal/startupBanner.js';
+import { createObservableGauge } from '@/utils/telemetry/metrics.js';
 
 /**
- * Extracts the client IP address from the request, prioritizing common proxy headers.
- * @param c - The Hono context object.
- * @returns The client's IP address or a default string if not found.
+ * Extends the base StreamableHTTPTransport to include a session ID.
  */
-function getClientIp(c: Context<{ Bindings: HonoNodeBindings }>): string {
-  const forwardedFor = c.req.header("x-forwarded-for");
-  return (
-    (forwardedFor?.split(",")[0] ?? "").trim() ||
-    c.req.header("x-real-ip") ||
-    "unknown_ip"
-  );
+class McpSessionTransport extends StreamableHTTPTransport {
+  public sessionId: string;
+
+  constructor(sessionId: string) {
+    super();
+    this.sessionId = sessionId;
+  }
 }
 
 /**
- * Converts a Fetch API Headers object to Node.js IncomingHttpHeaders.
- * Hono uses Fetch API Headers, but the underlying transport managers expect
- * Node's native IncomingHttpHeaders.
- * @param headers - The Headers object to convert.
- * @returns An object compatible with IncomingHttpHeaders.
+ * Creates a Hono HTTP application for the MCP server.
+ *
+ * This function is generic and can create apps with different binding types:
+ * - Node.js environments use HonoNodeBindings (default)
+ * - Cloudflare Workers use CloudflareBindings
+ *
+ * The function itself doesn't access bindings; they're only used at runtime
+ * when the app processes requests in its specific environment.
+ *
+ * @template TBindings - The Hono binding type (must extend object, defaults to HonoNodeBindings for Node.js)
+ * @param mcpServer - The MCP server instance
+ * @param parentContext - Parent request context for logging
+ * @returns Configured Hono application with the specified binding type
  */
-
-async function isPortInUse(
-  port: number,
-  host: string,
+export function createHttpApp<TBindings extends object = HonoNodeBindings>(
+  serverFactory: () => Promise<McpServer>,
   parentContext: RequestContext,
-): Promise<boolean> {
-  const context = { ...parentContext, operation: "isPortInUse", port, host };
+): Hono<{ Bindings: TBindings }> {
+  const app = new Hono<{ Bindings: TBindings }>();
+  const transportContext = {
+    ...parentContext,
+    component: 'HttpTransportSetup',
+  };
+
+  // Initialize session store for stateful mode
+  const sessionStore =
+    config.mcpSessionMode === 'stateful'
+      ? new SessionStore(config.mcpStatefulSessionStaleTimeoutMs)
+      : null;
+
+  // Wire session count to OTel observable gauge for durable metrics
+  if (sessionStore && config.openTelemetry.enabled) {
+    createObservableGauge(
+      'mcp.sessions.active',
+      'Number of active MCP sessions',
+      () => sessionStore.getSessionCount(),
+      '{sessions}',
+    );
+  }
+
+  // OpenTelemetry request tracing — outermost middleware on the MCP endpoint
+  // so the span captures the full lifecycle (CORS, auth, handler).
+  // On Bun, Node.js HTTP auto-instrumentation is a no-op; this fills that gap.
+  if (config.openTelemetry.enabled) {
+    app.use(
+      config.mcpHttpEndpointPath,
+      httpInstrumentationMiddleware({
+        captureRequestHeaders: ['mcp-session-id'],
+      }),
+    );
+    logger.debug('OTel request tracing middleware enabled for MCP endpoint.', transportContext);
+  }
+
+  // CORS (with permissive fallback)
+  const allowedOrigin =
+    Array.isArray(config.mcpAllowedOrigins) && config.mcpAllowedOrigins.length > 0
+      ? config.mcpAllowedOrigins
+      : '*';
+
+  if (allowedOrigin === '*') {
+    logger.warning(
+      'CORS origin set to wildcard (*). Set MCP_ALLOWED_ORIGINS for production deployments.',
+      transportContext,
+    );
+  }
+
+  app.use(
+    '*',
+    cors({
+      origin: allowedOrigin,
+      allowMethods: ['GET', 'POST', 'DELETE', 'OPTIONS'],
+      allowHeaders: ['Content-Type', 'Authorization', 'Mcp-Session-Id', 'MCP-Protocol-Version'],
+      exposeHeaders: ['Mcp-Session-Id'],
+      credentials: true,
+    }),
+  );
+
+  // Centralized error handling
+  app.onError(httpErrorHandler);
+
+  // MCP Spec 2025-06-18: Origin header validation for DNS rebinding protection
+  // https://modelcontextprotocol.io/specification/2025-06-18/basic/transports#security-warning
+  app.use(config.mcpHttpEndpointPath, async (c, next) => {
+    const origin = c.req.header('origin');
+    if (origin) {
+      const isAllowed =
+        allowedOrigin === '*' || (Array.isArray(allowedOrigin) && allowedOrigin.includes(origin));
+
+      if (!isAllowed) {
+        logger.warning('Rejected request with invalid Origin header', {
+          ...transportContext,
+          origin,
+          allowedOrigins: allowedOrigin,
+        });
+        return c.json({ error: 'Invalid origin. DNS rebinding protection.' }, 403);
+      }
+    }
+    // Origin is valid or not present, continue
+    return await next();
+  });
+
+  // Health and GET /mcp status remain unprotected for convenience
+  app.get('/healthz', (c) => c.json({ status: 'ok' }));
+
+  // RFC 9728 Protected Resource Metadata — always mounted, unauthenticated
+  // https://datatracker.ietf.org/doc/html/rfc9728
+  app.get('/.well-known/oauth-protected-resource', protectedResourceMetadataHandler);
+
+  // MCP Spec 2025-06-18: GET with Accept: text/event-stream opens an SSE stream
+  // for server-initiated messages. Plain GET (browser, health check) returns info.
+  app.get(config.mcpHttpEndpointPath, (c, next) => {
+    if (c.req.header('accept')?.includes('text/event-stream')) {
+      return next(); // Fall through to transport handler for SSE
+    }
+    return c.json({
+      status: 'ok',
+      server: {
+        name: config.mcpServerName,
+        version: config.mcpServerVersion,
+        description: config.mcpServerDescription,
+        environment: config.environment,
+        transport: config.mcpTransportType,
+        sessionMode: config.mcpSessionMode,
+      },
+    });
+  });
+
+  // Create auth strategy and middleware if auth is enabled
+  // IMPORTANT: Auth middleware must be registered BEFORE route handlers
+  // so Hono applies it to all subsequent routes on this path.
+  const authStrategy = createAuthStrategy();
+  if (authStrategy) {
+    const authMiddleware = createAuthMiddleware(authStrategy);
+    app.use(config.mcpHttpEndpointPath, authMiddleware);
+    logger.info('Authentication middleware enabled for MCP endpoint.', transportContext);
+  } else {
+    logger.info('Authentication is disabled; MCP endpoint is unprotected.', transportContext);
+  }
+
+  // MCP Spec 2025-06-18: DELETE endpoint for session termination
+  // Clients SHOULD send DELETE to explicitly terminate sessions
+  // https://modelcontextprotocol.io/specification/2025-06-18/basic/transports#session-management
+  app.delete(config.mcpHttpEndpointPath, (c) => {
+    const sessionId = c.req.header('mcp-session-id');
+
+    if (!sessionId) {
+      logger.warning('DELETE request without session ID', transportContext);
+      return c.json({ error: 'Mcp-Session-Id header required' }, 400);
+    }
+
+    logger.info('Session termination requested', {
+      ...transportContext,
+      sessionId,
+    });
+
+    // For stateless mode or if session management is disabled, return 405
+    if (config.mcpSessionMode === 'stateless' || !sessionStore) {
+      return c.json({ error: 'Session termination not supported in stateless mode' }, 405);
+    }
+
+    // SECURITY: Validate session ownership before termination
+    const authInfo = authContext.getStore()?.authInfo;
+    const sessionIdentity: SessionIdentity | undefined = authInfo
+      ? Object.fromEntries(
+          Object.entries({
+            tenantId: authInfo.tenantId,
+            clientId: authInfo.clientId,
+            subject: authInfo.subject,
+          }).filter(([, v]) => v != null),
+        )
+      : undefined;
+
+    if (!sessionStore.isValidForIdentity(sessionId, sessionIdentity)) {
+      logger.warning('Session termination rejected - ownership validation failed', {
+        ...transportContext,
+        sessionId,
+        requestTenant: sessionIdentity?.tenantId,
+        requestClient: sessionIdentity?.clientId,
+      });
+      return c.json({ error: 'Session not found or access denied' }, 404);
+    }
+
+    // Terminate the session in the store
+    sessionStore.terminate(sessionId);
+
+    logger.info('Session terminated successfully', {
+      ...transportContext,
+      sessionId,
+    });
+
+    return c.json({ status: 'terminated', sessionId }, 200);
+  });
+
+  // JSON-RPC over HTTP (Streamable)
+  app.all(config.mcpHttpEndpointPath, async (c) => {
+    const protocolVersion = c.req.header('mcp-protocol-version') ?? '2025-03-26';
+    logger.debug('Handling MCP request.', {
+      ...transportContext,
+      path: c.req.path,
+      method: c.req.method,
+      protocolVersion,
+    });
+
+    // Per MCP Spec 2025-06-18: MCP-Protocol-Version header MUST be validated
+    // Server MUST respond with 400 Bad Request for unsupported versions
+    // We default to 2025-03-26 for backward compatibility if not provided
+    const supportedVersions = SUPPORTED_PROTOCOL_VERSIONS;
+    if (!supportedVersions.includes(protocolVersion)) {
+      logger.warning('Unsupported MCP protocol version requested.', {
+        ...transportContext,
+        protocolVersion,
+        supportedVersions,
+      });
+      return c.json(
+        {
+          error: 'Unsupported MCP protocol version',
+          protocolVersion,
+          supportedVersions,
+        },
+        400,
+      );
+    }
+
+    const providedSessionId = c.req.header('mcp-session-id');
+    const sessionId = providedSessionId ?? generateSecureSessionId();
+
+    // Extract identity from auth context (if auth is enabled)
+    // This MUST happen before session validation for security
+    const authInfo = authContext.getStore()?.authInfo;
+    const sessionIdentity: SessionIdentity | undefined = authInfo
+      ? Object.fromEntries(
+          Object.entries({
+            tenantId: authInfo.tenantId,
+            clientId: authInfo.clientId,
+            subject: authInfo.subject,
+          }).filter(([, v]) => v != null),
+        )
+      : undefined;
+
+    // MCP Spec 2025-06-18: Return 404 for invalid/terminated sessions
+    // https://modelcontextprotocol.io/specification/2025-06-18/basic/transports#session-management
+    // SECURITY: Validate session WITH identity binding to prevent hijacking
+    if (
+      sessionStore &&
+      providedSessionId &&
+      !sessionStore.isValidForIdentity(providedSessionId, sessionIdentity)
+    ) {
+      logger.warning('Session validation failed - invalid or hijacked session', {
+        ...transportContext,
+        sessionId: providedSessionId,
+        requestTenant: sessionIdentity?.tenantId,
+        requestClient: sessionIdentity?.clientId,
+      });
+      return c.json({ error: 'Session not found or expired' }, 404);
+    }
+
+    // Create or update session for stateful mode WITH identity binding
+    if (sessionStore) {
+      sessionStore.getOrCreate(sessionId, sessionIdentity);
+    }
+
+    const transport = new McpSessionTransport(sessionId);
+
+    const handleRpc = async (): Promise<Response> => {
+      // SDK 1.26.0: Protocol.connect() throws if already connected.
+      // Create a fresh McpServer per request to prevent cross-client data leaks.
+      // See GHSA-345p-7cg4-v4c7.
+      const server = await serverFactory();
+      await server.connect(transport);
+      const response = await transport.handleRequest(c);
+
+      // MCP Spec 2025-06-18: For stateful sessions, return Mcp-Session-Id header
+      // in InitializeResponse (and all subsequent responses)
+      if (response && config.mcpSessionMode === 'stateful') {
+        response.headers.set('Mcp-Session-Id', sessionId);
+        logger.debug('Added Mcp-Session-Id header to response', {
+          ...transportContext,
+          sessionId,
+        });
+      }
+
+      if (response) {
+        return response;
+      }
+      return c.body(null, 204);
+    };
+
+    // Auth context is already populated by the middleware's authContext.run().
+    // ALS propagates through all async continuations in this handler.
+    try {
+      return await handleRpc();
+    } catch (err) {
+      // Close transport only on error — success path must keep the SSE stream
+      // alive for Hono to consume. streamSSE returns a Response wrapping a
+      // ReadableStream; closing the transport aborts the stream before Hono
+      // can read it, producing an empty-message Error on the client.
+      await transport.close?.().catch((closeErr: unknown) => {
+        logger.debug('Failed to close transport after error', {
+          ...transportContext,
+          sessionId,
+          error: closeErr instanceof Error ? closeErr.message : String(closeErr),
+        });
+      });
+      throw err instanceof Error ? err : new Error(String(err));
+    }
+  });
+
+  logger.info('Hono application setup complete.', transportContext);
+  return app;
+}
+
+function isPortInUse(port: number, host: string, parentContext: RequestContext): Promise<boolean> {
+  const context = { ...parentContext, operation: 'isPortInUse', port, host };
   logger.debug(`Checking if port ${port} is in use...`, context);
   return new Promise((resolve) => {
     const tempServer = http.createServer();
     tempServer
-      .once("error", (err: NodeJS.ErrnoException) => {
-        const inUse = err.code === "EADDRINUSE";
-        logger.debug(
-          `Port check resulted in error: ${err.code}. Port in use: ${inUse}`,
-          context,
-        );
-        resolve(inUse);
-      })
-      .once("listening", () => {
-        logger.debug(
-          `Successfully bound to port ${port} temporarily. Port is not in use.`,
-          context,
-        );
-        tempServer.close(() => resolve(false));
-      })
+      .once('error', (err: NodeJS.ErrnoException) => resolve(err.code === 'EADDRINUSE'))
+      .once('listening', () => tempServer.close(() => resolve(false)))
       .listen(port, host);
   });
 }
 
-function startHttpServerWithRetry(
-  app: Hono<{ Bindings: HonoNodeBindings }>,
+function startHttpServerWithRetry<TBindings extends object = HonoNodeBindings>(
+  app: Hono<{ Bindings: TBindings }>,
   initialPort: number,
   host: string,
   maxRetries: number,
@@ -90,365 +376,105 @@ function startHttpServerWithRetry(
 ): Promise<ServerType> {
   const startContext = {
     ...parentContext,
-    operation: "startHttpServerWithRetry",
+    operation: 'startHttpServerWithRetry',
   };
   logger.info(
     `Attempting to start HTTP server on port ${initialPort} with ${maxRetries} retries.`,
     startContext,
   );
 
-  return new Promise((resolve, reject) => {
-    const tryBind = (port: number, attempt: number) => {
-      const attemptContext = { ...startContext, port, attempt };
-      if (attempt > maxRetries + 1) {
-        const error = new Error(
-          `Failed to bind to any port after ${maxRetries} retries.`,
-        );
-        logger.fatal(error.message, attemptContext);
-        return reject(error);
-      }
+  const { promise, resolve, reject } = Promise.withResolvers<ServerType>();
 
-      isPortInUse(port, host, attemptContext)
-        .then((inUse) => {
-          if (inUse) {
-            logger.warning(
-              `Port ${port} is in use, retrying on port ${port + 1}...`,
-              attemptContext,
-            );
-            setTimeout(
-              () => tryBind(port + 1, attempt + 1),
-              config.mcpHttpPortRetryDelayMs,
-            );
-            return;
-          }
+  const tryBind = (port: number, attempt: number) => {
+    if (attempt > maxRetries + 1) {
+      const error = new Error(`Failed to bind to any port after ${maxRetries} retries.`);
+      logger.fatal(error.message, { ...startContext, port, attempt });
+      return reject(error);
+    }
 
-          try {
-            const serverInstance = serve(
-              { fetch: app.fetch, port, hostname: host },
-              (info: { address: string; port: number }) => {
-                const serverAddress = `http://${info.address}:${info.port}${MCP_ENDPOINT_PATH}`;
-                logger.info(`HTTP transport listening at ${serverAddress}`, {
-                  ...attemptContext,
-                  address: serverAddress,
-                  sessionMode: config.mcpSessionMode,
-                });
-                if (process.stdout.isTTY) {
-                  console.log(`\n🚀 MCP Server running at: ${serverAddress}`);
-                  console.log(`   Session Mode: ${config.mcpSessionMode}\n`);
-                }
-              },
-            );
-            resolve(serverInstance);
-          } catch (err: unknown) {
-            if (
-              err &&
-              typeof err === "object" &&
-              "code" in err &&
-              (err as { code: string }).code !== "EADDRINUSE"
-            ) {
-              const errorToLog =
-                err instanceof Error ? err : new Error(String(err));
-              logger.error(
-                "An unexpected error occurred while starting the server.",
-                errorToLog,
-                attemptContext,
-              );
-              return reject(err);
-            }
-            logger.warning(
-              `Encountered EADDRINUSE race condition on port ${port}, retrying...`,
-              attemptContext,
-            );
-            setTimeout(
-              () => tryBind(port + 1, attempt + 1),
-              config.mcpHttpPortRetryDelayMs,
-            );
-          }
-        })
-        .catch((err) => {
-          const error = err instanceof Error ? err : new Error(String(err));
-          logger.fatal(
-            "Failed to check if port is in use.",
-            error,
-            attemptContext,
-          );
-          reject(err);
-        });
-    };
-
-    tryBind(initialPort, 1);
-  });
-}
-
-function createTransportManager(
-  createServerInstanceFn: () => Promise<ServerInstanceInfo>,
-  sessionMode: string,
-  context: RequestContext,
-): TransportManager {
-  const opContext = {
-    ...context,
-    operation: "createTransportManager",
-    sessionMode,
-  };
-  logger.info(
-    `Creating transport manager for session mode: ${sessionMode}`,
-    opContext,
-  );
-
-  const statefulOptions = {
-    staleSessionTimeoutMs: config.mcpStatefulSessionStaleTimeoutMs,
-    mcpHttpEndpointPath: config.mcpHttpEndpointPath,
-  };
-
-  const getMcpServer = async () => (await createServerInstanceFn()).server;
-
-  switch (sessionMode) {
-    case "stateless":
-      return new StatelessTransportManager(getMcpServer);
-    case "stateful":
-      return new StatefulTransportManager(getMcpServer, statefulOptions);
-    case "auto":
-    default:
-      logger.info(
-        "Defaulting to 'auto' mode (stateful with stateless fallback).",
-        opContext,
-      );
-      return new StatefulTransportManager(getMcpServer, statefulOptions);
-  }
-}
-
-export function createHttpApp(
-  transportManager: TransportManager,
-  createServerInstanceFn: () => Promise<ServerInstanceInfo>,
-  parentContext: RequestContext,
-): Hono<{ Bindings: HonoNodeBindings }> {
-  const app = new Hono<{ Bindings: HonoNodeBindings }>();
-  const transportContext = {
-    ...parentContext,
-    component: "HttpTransportSetup",
-  };
-  logger.info("Creating Hono HTTP application.", transportContext);
-
-  app.use(
-    "*",
-    cors({
-      origin: config.mcpAllowedOrigins || [],
-      allowMethods: ["GET", "POST", "DELETE", "OPTIONS"],
-      allowHeaders: [
-        "Content-Type",
-        "Mcp-Session-Id",
-        "Last-Event-ID",
-        "Authorization",
-      ],
-      credentials: true,
-    }),
-  );
-
-  app.use(
-    "*",
-    async (c: Context<{ Bindings: HonoNodeBindings }>, next: Next) => {
-      (c.env.outgoing as http.ServerResponse).setHeader(
-        "X-Content-Type-Options",
-        "nosniff",
-      );
-      await next();
-    },
-  );
-
-  app.use(
-    MCP_ENDPOINT_PATH,
-    async (c: Context<{ Bindings: HonoNodeBindings }>, next: Next) => {
-      const clientIp = getClientIp(c);
-      const context = requestContextService.createRequestContext({
-        operation: "httpRateLimitCheck",
-        ipAddress: clientIp,
-      });
-      try {
-        rateLimiter.check(clientIp, context);
-        logger.debug("Rate limit check passed.", context);
-      } catch (error) {
-        logger.warning("Rate limit check failed.", {
-          ...context,
-          error: error instanceof Error ? error.message : String(error),
-        });
-        throw error;
-      }
-      await next();
-    },
-  );
-
-  const authStrategy = createAuthStrategy();
-  if (authStrategy) {
-    logger.info(
-      "Authentication strategy found, enabling auth middleware.",
-      transportContext,
-    );
-    app.use(MCP_ENDPOINT_PATH, createAuthMiddleware(authStrategy));
-  } else {
-    logger.info(
-      "No authentication strategy found, auth middleware disabled.",
-      transportContext,
-    );
-  }
-
-  app.onError(httpErrorHandler);
-
-  app.get("/healthz", (c) => {
-    return c.json({
-      status: "ok",
-      timestamp: new Date().toISOString(),
-    });
-  });
-
-  app.get(
-    MCP_ENDPOINT_PATH,
-    async (c: Context<{ Bindings: HonoNodeBindings }>) => {
-      const sessionId = c.req.header("mcp-session-id");
-      if (sessionId) {
-        return c.text(
-          "GET requests to existing sessions are not supported.",
-          405,
-        );
-      }
-
-      // Since this is a stateless endpoint, we create a temporary instance
-      // to report on the server's configuration.
-      const { tools, identity, options } = await createServerInstanceFn();
-      const effectiveSessionMode =
-        transportManager instanceof StatefulTransportManager
-          ? "stateful"
-          : "stateless";
-
-      return c.json({
-        status: "ok",
-        server: {
-          name: identity.name,
-          version: identity.version,
-          description: identity.description || "No description provided.",
-          nodeVersion: process.version,
-          environment: config.environment,
-          capabilities: options.capabilities,
-        },
-        sessionMode: {
-          configured: config.mcpSessionMode,
-          effective: effectiveSessionMode,
-        },
-        tools: tools,
-        message:
-          "Server is running. POST to this endpoint to execute a tool call.",
-      });
-    },
-  );
-
-  app.post(
-    MCP_ENDPOINT_PATH,
-    mcpTransportMiddleware(transportManager, createServerInstanceFn),
-    (c) => {
-      const response = c.get("mcpResponse");
-
-      if (response.sessionId) {
-        c.header("Mcp-Session-Id", response.sessionId);
-      }
-      response.headers.forEach((value, key) => {
-        c.header(key, value);
-      });
-
-      c.status(response.statusCode);
-
-      if (response.type === "stream") {
-        return stream(c, async (s) => {
-          await s.pipe(response.stream);
-        });
-      } else {
-        const body =
-          typeof response.body === "object" && response.body !== null
-            ? response.body
-            : { body: response.body };
-        return c.json(body);
-      }
-    },
-  );
-
-  app.delete(
-    MCP_ENDPOINT_PATH,
-    async (c: Context<{ Bindings: HonoNodeBindings }>) => {
-      const sessionId = c.req.header("mcp-session-id");
-      const context = requestContextService.createRequestContext({
-        ...transportContext,
-        operation: "handleDeleteRequest",
-        sessionId,
-      });
-
-      if (sessionId) {
-        if (transportManager instanceof StatefulTransportManager) {
-          const response = await transportManager.handleDeleteRequest(
-            sessionId,
-            context,
-          );
-          if (response.type === "buffered") {
-            const body =
-              typeof response.body === "object" && response.body !== null
-                ? response.body
-                : { body: response.body };
-            return c.json(body, response.statusCode);
-          }
-          // Fallback for unexpected stream response on DELETE
-          return c.body(null, response.statusCode);
-        } else {
-          return c.json(
-            {
-              error: "Method Not Allowed",
-              message: "DELETE operations are not supported in this mode.",
-            },
-            405,
-          );
+    isPortInUse(port, host, { ...startContext, port, attempt })
+      .then((inUse) => {
+        if (inUse) {
+          logger.warning(`Port ${port} is in use, retrying...`, {
+            ...startContext,
+            port,
+            attempt,
+          });
+          setTimeout(() => tryBind(port + 1, attempt + 1), config.mcpHttpPortRetryDelayMs);
+          return;
         }
-      } else {
-        return c.json({
-          status: "stateless_mode",
-          message: "No sessions to delete in stateless mode",
-        });
-      }
-    },
-  );
 
-  logger.info("Hono application setup complete.", transportContext);
-  return app;
+        try {
+          const serverInstance = serve({ fetch: app.fetch, port, hostname: host }, (info) => {
+            const serverAddress = `http://${info.address}:${info.port}${config.mcpHttpEndpointPath}`;
+            logger.info(`HTTP transport listening at ${serverAddress}`, {
+              ...startContext,
+              port,
+              address: serverAddress,
+            });
+            logStartupBanner(`\n🚀 MCP Server running at: ${serverAddress}`, 'http');
+          });
+          resolve(serverInstance);
+        } catch (err: unknown) {
+          logger.warning(`Binding attempt failed for port ${port}, retrying...`, {
+            ...startContext,
+            port,
+            attempt,
+            error: String(err),
+          });
+          setTimeout(() => tryBind(port + 1, attempt + 1), config.mcpHttpPortRetryDelayMs);
+        }
+      })
+      .catch((err) => reject(err instanceof Error ? err : new Error(String(err))));
+  };
+
+  tryBind(initialPort, 1);
+  return promise;
 }
 
 export async function startHttpTransport(
-  createServerInstanceFn: () => Promise<ServerInstanceInfo>,
+  serverFactory: () => Promise<McpServer>,
   parentContext: RequestContext,
-): Promise<{
-  app: Hono<{ Bindings: HonoNodeBindings }>;
-  server: ServerType;
-  transportManager: TransportManager;
-}> {
+): Promise<ServerType> {
   const transportContext = {
     ...parentContext,
-    component: "HttpTransportStart",
+    component: 'HttpTransportStart',
   };
-  logger.info("Starting HTTP transport.", transportContext);
+  logger.info('Starting HTTP transport.', transportContext);
 
-  const transportManager = createTransportManager(
-    createServerInstanceFn,
-    config.mcpSessionMode,
-    transportContext,
-  );
-  const app = createHttpApp(
-    transportManager,
-    createServerInstanceFn,
-    transportContext,
-  );
+  const app = createHttpApp(serverFactory, transportContext);
 
   const server = await startHttpServerWithRetry(
     app,
-    HTTP_PORT,
-    HTTP_HOST,
+    config.mcpHttpPort,
+    config.mcpHttpHost,
     config.mcpHttpMaxPortRetries,
     transportContext,
   );
 
-  logger.info("HTTP transport started successfully.", transportContext);
-  return { app, server, transportManager };
+  logger.info('HTTP transport started successfully.', transportContext);
+  return server;
+}
+
+export function stopHttpTransport(
+  server: ServerType,
+  parentContext: RequestContext,
+): Promise<void> {
+  const operationContext = {
+    ...parentContext,
+    operation: 'stopHttpTransport',
+    transportType: 'Http',
+  };
+  logger.info('Attempting to stop http transport...', operationContext);
+
+  return new Promise((resolve, reject) => {
+    server.close((err) => {
+      if (err) {
+        logger.error('Error closing HTTP server.', err, operationContext);
+        return reject(err);
+      }
+      logger.info('HTTP server closed successfully.', operationContext);
+      resolve();
+    });
+  });
 }

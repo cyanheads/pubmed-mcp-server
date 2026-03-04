@@ -1,47 +1,48 @@
 {
-  "$schema": "https://static.modelcontextprotocol.io/schemas/2025-07-09/server.schema.json",
+  "$schema": "https://static.modelcontextprotocol.io/schemas/2025-12-11/server.schema.json",
   "name": "io.github.cyanheads/pubmed-mcp-server",
-  "description": "Comprehensive PubMed MCP Server to search, retrieve, and analyze biomedical literature from NCBI.",
-  "status": "active",
+  "description": "MCP server for PubMed/NCBI E-utilities. Search, fetch, cite, and explore biomedical literature.",
   "repository": {
     "url": "https://github.com/cyanheads/pubmed-mcp-server",
     "source": "github"
   },
-  "website_url": "https://github.com/cyanheads/pubmed-mcp-server#readme",
-  "version": "1.4.4",
+  "version": "2.0.0",
   "packages": [
     {
-      "registry_type": "npm",
-      "registry_base_url": "https://registry.npmjs.org",
+      "registryType": "npm",
+      "registryBaseUrl": "https://registry.npmjs.org",
       "identifier": "@cyanheads/pubmed-mcp-server",
-      "version": "1.4.4",
-      "runtime_hint": "node",
-      "package_arguments": [
+      "runtimeHint": "bun",
+      "version": "2.0.0",
+      "packageArguments": [
         {
           "type": "positional",
-          "value": "dist/index.js"
+          "value": "run"
+        },
+        {
+          "type": "positional",
+          "value": "start:stdio"
         }
       ],
-      "environment_variables": [
-        {
-          "name": "MCP_TRANSPORT_TYPE",
-          "description": "Specifies the transport mechanism for the server.",
-          "format": "string",
-          "is_required": true,
-          "default": "stdio"
-        },
+      "environmentVariables": [
         {
           "name": "MCP_LOG_LEVEL",
           "description": "Sets the minimum log level for output (e.g., 'debug', 'info', 'warn').",
           "format": "string",
-          "is_required": false,
+          "isRequired": false,
           "default": "info"
         },
         {
           "name": "NCBI_API_KEY",
-          "description": "Your NCBI API key for higher rate limits.",
+          "description": "NCBI API key for higher rate limits (10 req/s vs 3 req/s).",
           "format": "string",
-          "is_required": false
+          "isRequired": false
+        },
+        {
+          "name": "NCBI_ADMIN_EMAIL",
+          "description": "Contact email sent with NCBI requests (recommended by NCBI).",
+          "format": "string",
+          "isRequired": false
         }
       ],
       "transport": {
@@ -49,72 +50,74 @@
       }
     },
     {
-      "registry_type": "npm",
-      "registry_base_url": "https://registry.npmjs.org",
+      "registryType": "npm",
+      "registryBaseUrl": "https://registry.npmjs.org",
       "identifier": "@cyanheads/pubmed-mcp-server",
-      "version": "1.4.4",
-      "runtime_hint": "node",
-      "package_arguments": [
+      "runtimeHint": "bun",
+      "version": "2.0.0",
+      "packageArguments": [
         {
           "type": "positional",
-          "value": "dist/index.js"
-        }
-      ],
-      "environment_variables": [
-        {
-          "name": "MCP_TRANSPORT_TYPE",
-          "description": "Specifies the transport mechanism for the server.",
-          "format": "string",
-          "is_required": true,
-          "default": "http"
+          "value": "run"
         },
         {
+          "type": "positional",
+          "value": "start:http"
+        }
+      ],
+      "environmentVariables": [
+        {
           "name": "MCP_HTTP_HOST",
-          "description": "The host for the HTTP server.",
+          "description": "The hostname for the HTTP server.",
           "format": "string",
-          "is_required": false,
-          "default": "localhost"
+          "isRequired": false,
+          "default": "127.0.0.1"
         },
         {
           "name": "MCP_HTTP_PORT",
-          "description": "The port for the HTTP server.",
+          "description": "The port to run the HTTP server on.",
           "format": "string",
-          "is_required": false,
-          "default": "3017"
+          "isRequired": false,
+          "default": "3010"
         },
         {
           "name": "MCP_HTTP_ENDPOINT_PATH",
-          "description": "The endpoint path for MCP requests.",
+          "description": "The endpoint path for the MCP server.",
           "format": "string",
-          "is_required": false,
+          "isRequired": false,
           "default": "/mcp"
         },
         {
           "name": "MCP_AUTH_MODE",
-          "description": "Authentication mode: 'none', 'jwt', or 'oauth'.",
+          "description": "Authentication mode to use: 'none', 'jwt', or 'oauth'.",
           "format": "string",
-          "is_required": false,
+          "isRequired": false,
           "default": "none"
         },
         {
           "name": "MCP_LOG_LEVEL",
-          "description": "Sets the minimum log level (e.g., 'debug', 'info', 'warn').",
+          "description": "Sets the minimum log level for output (e.g., 'debug', 'info', 'warn').",
           "format": "string",
-          "is_required": false,
+          "isRequired": false,
           "default": "info"
         },
         {
           "name": "NCBI_API_KEY",
-          "description": "Your NCBI API key for higher rate limits.",
+          "description": "NCBI API key for higher rate limits (10 req/s vs 3 req/s).",
           "format": "string",
-          "is_required": false
+          "isRequired": false
+        },
+        {
+          "name": "NCBI_ADMIN_EMAIL",
+          "description": "Contact email sent with NCBI requests (recommended by NCBI).",
+          "format": "string",
+          "isRequired": false
         }
       ],
       "transport": {
         "type": "streamable-http",
-        "url": "http://localhost:3017/mcp"
+        "url": "http://localhost:3010/mcp"
       }
     }
-  ],
-  "mcpName": "io.github.cyanheads/pubmed-mcp-server"
+  ]
 }

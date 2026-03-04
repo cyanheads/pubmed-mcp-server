@@ -4,12 +4,11 @@
  * optional <think>...</think> blocks often found at the beginning of LLM outputs.
  * @module src/utils/parsing/jsonParser
  */
-import {
-  parse as parsePartialJson,
-  Allow as PartialJsonAllow,
-} from "partial-json";
-import { BaseErrorCode, McpError } from "../../types-global/errors.js";
-import { logger, RequestContext, requestContextService } from "../index.js";
+import { Allow as PartialJsonAllow, parse as parsePartialJson } from 'partial-json';
+
+import { JsonRpcErrorCode, McpError } from '@/types-global/errors.js';
+import { logger } from '@/utils/internal/logger.js';
+import { type RequestContext, requestContextService } from '@/utils/internal/requestContext.js';
 
 /**
  * Enum mirroring `partial-json`'s `Allow` constants. These specify
@@ -70,21 +69,21 @@ export class JsonParser {
     const match = jsonString.match(thinkBlockRegex);
 
     if (match) {
-      const thinkContent = match[1]?.trim() ?? "";
-      const restOfString = match[2] ?? "";
+      const thinkContent = match[1]?.trim() ?? '';
+      const restOfString = match[2] ?? '';
 
       const logContext =
         context ||
         requestContextService.createRequestContext({
-          operation: "JsonParser.thinkBlock",
+          operation: 'JsonParser.thinkBlock',
         });
       if (thinkContent) {
-        logger.debug("LLM <think> block detected and logged.", {
+        logger.debug('LLM <think> block detected and logged.', {
           ...logContext,
           thinkContent,
         });
       } else {
-        logger.debug("Empty LLM <think> block detected.", logContext);
+        logger.debug('Empty LLM <think> block detected.', logContext);
       }
       stringToParse = restOfString;
     }
@@ -93,8 +92,8 @@ export class JsonParser {
 
     if (!stringToParse) {
       throw new McpError(
-        BaseErrorCode.VALIDATION_ERROR,
-        "JSON string is empty after removing <think> block and trimming.",
+        JsonRpcErrorCode.ValidationError,
+        'JSON string is empty after removing <think> block and trimming.',
         context,
       );
     }
@@ -102,26 +101,25 @@ export class JsonParser {
     try {
       return parsePartialJson(stringToParse, allowPartial) as T;
     } catch (e: unknown) {
-      const error = e as Error;
+      const error = e instanceof Error ? e : new Error(String(e));
       const errorLogContext =
         context ||
         requestContextService.createRequestContext({
-          operation: "JsonParser.parseError",
+          operation: 'JsonParser.parseError',
         });
-      logger.error("Failed to parse JSON content.", {
+      logger.error('Failed to parse JSON content.', {
         ...errorLogContext,
         errorDetails: error.message,
         contentAttempted: stringToParse.substring(0, 200),
       });
 
       throw new McpError(
-        BaseErrorCode.VALIDATION_ERROR,
+        JsonRpcErrorCode.ValidationError,
         `Failed to parse JSON: ${error.message}`,
         {
           ...context,
           originalContentSample:
-            stringToParse.substring(0, 200) +
-            (stringToParse.length > 200 ? "..." : ""),
+            stringToParse.substring(0, 200) + (stringToParse.length > 200 ? '...' : ''),
           rawError: error instanceof Error ? error.stack : String(error),
         },
       );

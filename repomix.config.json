@@ -5,14 +5,25 @@
     "removeComments": false,
     "removeEmptyLines": false,
     "topFilesLength": 5,
-    "showLineNumbers": false,
+    "showLineNumbers": true,
     "copyToClipboard": false
   },
   "include": [],
   "ignore": {
     "useGitignore": true,
     "useDefaultPatterns": true,
-    "customPatterns": [".clinerules"]
+    "customPatterns": [
+      ".clinerules/",
+      ".github/",
+      ".storage/",
+      ".vscode/",
+      "CHANGELOG.md",
+      "changelog/",
+      "coverage/",
+      "docs/",
+      "repomix.config.json",
+      ".husky/_"
+    ]
   },
   "security": {
     "enableSecurityCheck": true

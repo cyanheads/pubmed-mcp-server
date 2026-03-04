@@ -2,66 +2,81 @@
  * @fileoverview Provides a comprehensive `Sanitization` class for various input cleaning and validation tasks.
  * This module includes utilities for sanitizing HTML, strings, URLs, file paths, JSON, numbers,
  * and for redacting sensitive information from data intended for logging.
+ * The path sanitization utilities are only available in a Node.js environment.
  * @module src/utils/security/sanitization
  */
-import path from "path";
-import sanitizeHtml from "sanitize-html";
-import validator from "validator";
-import { BaseErrorCode, McpError } from "../../types-global/errors.js";
-import { logger, requestContextService } from "../index.js";
+import sanitizeHtml from 'sanitize-html';
+import validator from 'validator';
+
+import { JsonRpcErrorCode, McpError } from '@/types-global/errors.js';
+import { logger } from '@/utils/internal/logger.js';
+import { requestContextService } from '@/utils/internal/requestContext.js';
+import { runtimeCaps } from '@/utils/internal/runtime.js';
+import { isRecord } from '@/utils/types/guards.js';
+
+// Dynamically import 'path' only in Node.js environments.
+// Top-level await ensures the module is loaded before any sanitizePath call.
+let pathModule: typeof import('node:path') | undefined;
+if (runtimeCaps.isNode) {
+  try {
+    pathModule = (await import('node:path')).default;
+  } catch {
+    // May fail in some bundlers; sanitizePath guards against undefined pathModule.
+  }
+}
 
 /**
  * Defines options for path sanitization to control how file paths are processed and validated.
  */
 export interface PathSanitizeOptions {
+  /** If true, absolute paths are permitted (subject to `rootDir`). Default: false. */
+  allowAbsolute?: boolean;
   /** If provided, restricts sanitized paths to be relative to this directory. */
   rootDir?: string;
   /** If true, normalizes Windows backslashes to POSIX forward slashes. */
   toPosix?: boolean;
-  /** If true, absolute paths are permitted (subject to `rootDir`). Default: false. */
-  allowAbsolute?: boolean;
 }
 
 /**
  * Contains information about a path sanitization operation.
  */
 export interface SanitizedPathInfo {
-  /** The final sanitized and normalized path string. */
-  sanitizedPath: string;
-  /** The original path string before any processing. */
-  originalInput: string;
-  /** True if the input path was absolute after initial normalization. */
-  wasAbsolute: boolean;
   /** True if an absolute path was converted to relative due to `allowAbsolute: false`. */
   convertedToRelative: boolean;
   /** The effective options used for sanitization, including defaults. */
   optionsUsed: PathSanitizeOptions;
+  /** The original path string before any processing. */
+  originalInput: string;
+  /** The final sanitized and normalized path string. */
+  sanitizedPath: string;
+  /** True if the input path was absolute after initial normalization. */
+  wasAbsolute: boolean;
 }
 
 /**
  * Defines options for context-specific string sanitization.
  */
 export interface SanitizeStringOptions {
-  /** The context in which the string will be used. 'javascript' is disallowed. */
-  context?: "text" | "html" | "attribute" | "url" | "javascript";
-  /** Custom allowed HTML tags if `context` is 'html'. */
-  allowedTags?: string[];
   /** Custom allowed HTML attributes if `context` is 'html'. */
   allowedAttributes?: Record<string, string[]>;
+  /** Custom allowed HTML tags if `context` is 'html'. */
+  allowedTags?: string[];
+  /** The context in which the string will be used. 'javascript' is disallowed. */
+  context?: 'text' | 'html' | 'attribute' | 'url' | 'javascript';
 }
 
 /**
  * Configuration options for HTML sanitization, mirroring `sanitize-html` library options.
  */
 export interface HtmlSanitizeConfig {
+  /** Specifies allowed attributes, either globally or per tag. */
+  allowedAttributes?: sanitizeHtml.IOptions['allowedAttributes'];
   /** An array of allowed HTML tag names. */
   allowedTags?: string[];
-  /** Specifies allowed attributes, either globally or per tag. */
-  allowedAttributes?: sanitizeHtml.IOptions["allowedAttributes"];
   /** If true, HTML comments are preserved. */
   preserveComments?: boolean;
   /** Custom functions to transform tags during sanitization. */
-  transformTags?: sanitizeHtml.IOptions["transformTags"];
+  transformTags?: sanitizeHtml.IOptions['transformTags'];
 }
 
 /**
@@ -72,25 +87,21 @@ export class Sanitization {
   /** @private */
   private static instance: Sanitization;
 
-  /**
-   * Default list of field names considered sensitive for log redaction.
-   * Case-insensitive matching is applied.
-   * @private
-   */
   private sensitiveFields: string[] = [
-    "password",
-    "token",
-    "secret",
-    "key",
-    "apiKey",
-    "auth",
-    "credential",
-    "jwt",
-    "ssn",
-    "credit",
-    "card",
-    "cvv",
-    "authorization",
+    'password',
+    'token',
+    'secret',
+    'apiKey',
+    'credential',
+    'jwt',
+    'ssn',
+    'cvv',
+    'authorization',
+    'cookie',
+    'clientsecret',
+    'client_secret',
+    'private_key',
+    'privatekey',
   ];
 
   /**
@@ -99,44 +110,79 @@ export class Sanitization {
    */
   private defaultHtmlSanitizeConfig: HtmlSanitizeConfig = {
     allowedTags: [
-      "h1",
-      "h2",
-      "h3",
-      "h4",
-      "h5",
-      "h6",
-      "p",
-      "a",
-      "ul",
-      "ol",
-      "li",
-      "b",
-      "i",
-      "strong",
-      "em",
-      "strike",
-      "code",
-      "hr",
-      "br",
-      "div",
-      "table",
-      "thead",
-      "tbody",
-      "tr",
-      "th",
-      "td",
-      "pre",
+      // === Structure & Sectioning ===
+      'div',
+      'span',
+      'p',
+      'br',
+      'hr',
+      'header',
+      'footer',
+      'nav',
+      'article',
+      'section',
+      'aside',
+      // === Headings & Text Content ===
+      'h1',
+      'h2',
+      'h3',
+      'h4',
+      'h5',
+      'h6',
+      'strong',
+      'em',
+      'b',
+      'i',
+      'strike',
+      'blockquote',
+      // === Code ===
+      'code',
+      'pre',
+      // === Lists ===
+      'ul',
+      'ol',
+      'li',
+      // === Tables ===
+      'table',
+      'thead',
+      'tbody',
+      'tr',
+      'th',
+      'td',
+      // === Media & Links ===
+      'a',
+      'img',
+      'figure',
+      'figcaption',
     ],
     allowedAttributes: {
-      a: ["href", "name", "target"],
-      img: ["src", "alt", "title", "width", "height"],
-      "*": ["class", "id", "style"],
+      a: ['href', 'name', 'target', 'rel', 'title'],
+      img: ['src', 'alt', 'title', 'width', 'height', 'loading'],
+      // Allow data attributes, class, and id on all tags.
+      // Note: 'style' is intentionally excluded — sanitize-html does not sanitize
+      // CSS property values, so allowing it enables CSS injection (data exfiltration
+      // via background:url(), UI redress via positioning, content injection via
+      // ::before/::after). Use 'class' with external stylesheets instead.
+      '*': ['class', 'id', 'data-*'],
+      // Table-specific attributes
+      th: ['scope'],
+      td: ['colspan', 'rowspan'],
     },
-    preserveComments: false,
+    preserveComments: true,
+    // Enforce rel="noopener noreferrer" on all links to prevent tabnabbing
+    // (window.opener access when target="_blank" is used)
+    transformTags: {
+      a: sanitizeHtml.simpleTransform('a', { rel: 'noopener noreferrer' }),
+    },
   };
 
   /** @private */
-  private constructor() {}
+  private constructor() {
+    this.rebuildSensitiveSets();
+  }
+
+  private normalizedSensitiveSet!: Set<string>;
+  private wordSensitiveSet!: Set<string>;
 
   /**
    * Retrieves the singleton instance of the `Sanitization` class.
@@ -155,19 +201,16 @@ export class Sanitization {
    */
   public setSensitiveFields(fields: string[]): void {
     this.sensitiveFields = [
-      ...new Set([
-        ...this.sensitiveFields,
-        ...fields.map((f) => f.toLowerCase()),
-      ]),
+      ...new Set([...this.sensitiveFields, ...fields.map((f) => f.toLowerCase())]),
     ];
+    this.rebuildSensitiveSets();
     const logContext = requestContextService.createRequestContext({
-      operation: "Sanitization.setSensitiveFields",
-      newSensitiveFieldCount: this.sensitiveFields.length,
+      operation: 'Sanitization.setSensitiveFields',
+      additionalContext: {
+        newSensitiveFieldCount: this.sensitiveFields.length,
+      },
     });
-    logger.debug(
-      "Updated sensitive fields list for log sanitization",
-      logContext,
-    );
+    logger.debug('Updated sensitive fields list for log sanitization', logContext);
   }
 
   /**
@@ -179,23 +222,33 @@ export class Sanitization {
   }
 
   /**
+   * Gets pino-compliant redact paths covering sensitive field names at multiple nesting depths.
+   * Uses wildcard paths so fields like `auth.token` or `context.auth.secret` are redacted,
+   * not just top-level properties.
+   * @returns An array of fast-redact compatible paths for pino's `redact.paths` option.
+   */
+  public getSensitivePinoFields(): string[] {
+    return this.sensitiveFields.flatMap((field) => [
+      field, // top-level: { password: '...' }
+      `*.${field}`, // one level deep: { auth: { token: '...' } }
+      `*.*.${field}`, // two levels deep: { context: { auth: { secret: '...' } } }
+    ]);
+  }
+
+  /**
    * Sanitizes an HTML string by removing potentially malicious tags and attributes.
    * @param input - The HTML string to sanitize.
    * @param config - Optional custom configuration for `sanitize-html`.
    * @returns The sanitized HTML string. Returns an empty string if input is falsy.
    */
   public sanitizeHtml(input: string, config?: HtmlSanitizeConfig): string {
-    if (!input) return "";
+    if (!input) return '';
     const effectiveConfig = {
-      allowedTags:
-        config?.allowedTags ?? this.defaultHtmlSanitizeConfig.allowedTags,
+      allowedTags: config?.allowedTags ?? this.defaultHtmlSanitizeConfig.allowedTags,
       allowedAttributes:
-        config?.allowedAttributes ??
-        this.defaultHtmlSanitizeConfig.allowedAttributes,
-      transformTags: config?.transformTags, // Can be undefined
-      preserveComments:
-        config?.preserveComments ??
-        this.defaultHtmlSanitizeConfig.preserveComments,
+        config?.allowedAttributes ?? this.defaultHtmlSanitizeConfig.allowedAttributes,
+      transformTags: config?.transformTags ?? this.defaultHtmlSanitizeConfig.transformTags,
+      preserveComments: config?.preserveComments ?? this.defaultHtmlSanitizeConfig.preserveComments,
     };
 
     const options: sanitizeHtml.IOptions = {
@@ -206,10 +259,8 @@ export class Sanitization {
 
     if (effectiveConfig.preserveComments) {
       // Ensure allowedTags is an array before spreading
-      const baseTags = Array.isArray(options.allowedTags)
-        ? options.allowedTags
-        : [];
-      options.allowedTags = [...baseTags, "!--"];
+      const baseTags = Array.isArray(options.allowedTags) ? options.allowedTags : [];
+      options.allowedTags = [...baseTags, '!--'];
     }
     return sanitizeHtml(input, options);
   }
@@ -223,60 +274,54 @@ export class Sanitization {
    * @returns The sanitized string. Returns an empty string if input is falsy.
    * @throws {McpError} If `options.context` is 'javascript', or URL validation fails.
    */
-  public sanitizeString(
-    input: string,
-    options: SanitizeStringOptions = {},
-  ): string {
-    if (!input) return "";
+  public sanitizeString(input: string, options: SanitizeStringOptions = {}): string {
+    if (!input) return '';
 
-    const context = options.context ?? "text";
+    const context = options.context ?? 'text';
 
     switch (context) {
-      case "html": {
+      case 'html': {
         const config: HtmlSanitizeConfig = {};
         if (options.allowedTags) {
           config.allowedTags = options.allowedTags;
         }
         if (options.allowedAttributes) {
-          config.allowedAttributes = this.convertAttributesFormat(
-            options.allowedAttributes,
-          );
+          config.allowedAttributes = this.convertAttributesFormat(options.allowedAttributes);
         }
         return this.sanitizeHtml(input, config);
       }
-      case "attribute":
+      case 'attribute':
         return sanitizeHtml(input, { allowedTags: [], allowedAttributes: {} });
-      case "url":
+      case 'url':
         if (
           !validator.isURL(input, {
-            protocols: ["http", "https"],
+            protocols: ['http', 'https'],
             require_protocol: true,
             require_host: true,
           })
         ) {
           logger.warning(
-            "Potentially invalid URL detected during string sanitization (context: url)",
+            'Potentially invalid URL detected during string sanitization (context: url)',
             requestContextService.createRequestContext({
-              operation: "Sanitization.sanitizeString.urlWarning",
-              invalidUrlAttempt: input,
+              operation: 'Sanitization.sanitizeString.urlWarning',
+              additionalContext: { invalidUrlAttempt: input },
             }),
           );
-          return "";
+          return '';
         }
         return validator.trim(input);
-      case "javascript":
+      case 'javascript':
         logger.error(
-          "Attempted JavaScript sanitization via sanitizeString, which is disallowed.",
+          'Attempted JavaScript sanitization via sanitizeString, which is disallowed.',
           requestContextService.createRequestContext({
-            operation: "Sanitization.sanitizeString.jsAttempt",
-            inputSnippet: input.substring(0, 50),
+            operation: 'Sanitization.sanitizeString.jsAttempt',
+            additionalContext: { inputSnippet: input.substring(0, 50) },
           }),
         );
         throw new McpError(
-          BaseErrorCode.VALIDATION_ERROR,
-          "JavaScript sanitization is not supported through sanitizeString due to security risks.",
+          JsonRpcErrorCode.ValidationError,
+          'JavaScript sanitization is not supported through sanitizeString due to security risks.',
         );
-      case "text":
       default:
         return sanitizeHtml(input, { allowedTags: [], allowedAttributes: {} });
     }
@@ -290,7 +335,7 @@ export class Sanitization {
    */
   private convertAttributesFormat(
     attrs: Record<string, string[]>,
-  ): sanitizeHtml.IOptions["allowedAttributes"] {
+  ): sanitizeHtml.IOptions['allowedAttributes'] {
     return attrs;
   }
 
@@ -301,10 +346,7 @@ export class Sanitization {
    * @returns The sanitized and trimmed URL string.
    * @throws {McpError} If the URL is invalid or uses a disallowed protocol.
    */
-  public sanitizeUrl(
-    input: string,
-    allowedProtocols: string[] = ["http", "https"],
-  ): string {
+  public sanitizeUrl(input: string, allowedProtocols: string[] = ['http', 'https']): string {
     try {
       const trimmedInput = input.trim();
       if (
@@ -314,25 +356,21 @@ export class Sanitization {
           require_host: true,
         })
       ) {
-        throw new Error("Invalid URL format or protocol not in allowed list.");
+        throw new Error('Invalid URL format or protocol not in allowed list.');
       }
       const lowercasedInput = trimmedInput.toLowerCase();
       if (
-        lowercasedInput.startsWith("javascript:") ||
-        lowercasedInput.startsWith("data:") ||
-        lowercasedInput.startsWith("vbscript:")
+        lowercasedInput.startsWith('javascript:') ||
+        lowercasedInput.startsWith('data:') ||
+        lowercasedInput.startsWith('vbscript:')
       ) {
-        throw new Error(
-          "Disallowed pseudo-protocol (javascript:, data:, or vbscript:) in URL.",
-        );
+        throw new Error('Disallowed pseudo-protocol (javascript:, data:, or vbscript:) in URL.');
       }
       return trimmedInput;
-    } catch (error) {
+    } catch (error: unknown) {
       throw new McpError(
-        BaseErrorCode.VALIDATION_ERROR,
-        error instanceof Error
-          ? error.message
-          : "Invalid or unsafe URL provided.",
+        JsonRpcErrorCode.ValidationError,
+        error instanceof Error ? error.message : 'Invalid or unsafe URL provided.',
         { input },
       );
     }
@@ -340,78 +378,75 @@ export class Sanitization {
 
   /**
    * Sanitizes a file path to prevent path traversal and normalize format.
+   * This method is only available in a Node.js environment.
    * @param input - The file path string to sanitize.
    * @param options - Options to control sanitization behavior.
    * @returns An object with the sanitized path and sanitization metadata.
-   * @throws {McpError} If the path is invalid or unsafe.
+   * @throws {McpError} If the path is invalid, unsafe, or method is called in a non-Node.js environment.
    */
-  public sanitizePath(
-    input: string,
-    options: PathSanitizeOptions = {},
-  ): SanitizedPathInfo {
+  public sanitizePath(input: string, options: PathSanitizeOptions = {}): SanitizedPathInfo {
+    if (!runtimeCaps.isNode || !pathModule) {
+      throw new McpError(
+        JsonRpcErrorCode.InternalError,
+        'File-based path sanitization is not supported in this environment.',
+      );
+    }
+    const path = pathModule;
+
     const originalInput = input;
+    const resolvedRootDir = options.rootDir ? path.resolve(options.rootDir) : undefined;
     const effectiveOptions: PathSanitizeOptions = {
       toPosix: options.toPosix ?? false,
       allowAbsolute: options.allowAbsolute ?? false,
-      rootDir: options.rootDir ? path.resolve(options.rootDir) : undefined,
+      ...(resolvedRootDir && { rootDir: resolvedRootDir }),
     };
 
     let wasAbsoluteInitially = false;
 
     try {
-      if (!input || typeof input !== "string")
-        throw new Error("Invalid path input: must be a non-empty string.");
-      if (input.includes("\0"))
-        throw new Error("Path contains null byte, which is disallowed.");
+      if (!input || typeof input !== 'string')
+        throw new Error('Invalid path input: must be a non-empty string.');
+      if (input.includes('\0')) throw new Error('Path contains null byte, which is disallowed.');
 
       let normalized = path.normalize(input);
       wasAbsoluteInitially = path.isAbsolute(normalized);
 
       if (effectiveOptions.toPosix) {
-        normalized = normalized.replace(/\\/g, "/");
+        normalized = normalized.replace(/\\/g, '/');
       }
 
       let finalSanitizedPath: string;
 
-      if (effectiveOptions.rootDir) {
-        const fullPath = path.resolve(effectiveOptions.rootDir, normalized);
-        if (
-          !fullPath.startsWith(effectiveOptions.rootDir + path.sep) &&
-          fullPath !== effectiveOptions.rootDir
-        ) {
+      if (resolvedRootDir) {
+        const fullPath = path.resolve(resolvedRootDir, normalized);
+        if (!fullPath.startsWith(resolvedRootDir + path.sep) && fullPath !== resolvedRootDir) {
           throw new Error(
-            "Path traversal detected: attempts to escape the defined root directory.",
+            'Path traversal detected: attempts to escape the defined root directory.',
           );
         }
-        finalSanitizedPath = path.relative(effectiveOptions.rootDir, fullPath);
-        finalSanitizedPath =
-          finalSanitizedPath === "" ? "." : finalSanitizedPath;
-        if (
-          path.isAbsolute(finalSanitizedPath) &&
-          !effectiveOptions.allowAbsolute
-        ) {
+        finalSanitizedPath = path.relative(resolvedRootDir, fullPath);
+        finalSanitizedPath = finalSanitizedPath === '' ? '.' : finalSanitizedPath;
+        if (path.isAbsolute(finalSanitizedPath) && !effectiveOptions.allowAbsolute) {
           throw new Error(
-            "Path resolved to absolute outside root when absolute paths are disallowed.",
+            'Path resolved to absolute outside root when absolute paths are disallowed.',
           );
         }
       } else {
         if (path.isAbsolute(normalized)) {
           if (!effectiveOptions.allowAbsolute) {
-            throw new Error(
-              "Absolute paths are disallowed by current options.",
-            );
+            throw new Error('Absolute paths are disallowed by current options.');
           } else {
             finalSanitizedPath = normalized;
           }
         } else {
           const resolvedAgainstCwd = path.resolve(normalized);
-          const currentWorkingDir = path.resolve(".");
+          const currentWorkingDir = path.resolve('.');
           if (
             !resolvedAgainstCwd.startsWith(currentWorkingDir + path.sep) &&
             resolvedAgainstCwd !== currentWorkingDir
           ) {
             throw new Error(
-              "Relative path traversal detected (escapes current working directory context).",
+              'Relative path traversal detected (escapes current working directory context).',
             );
           }
           finalSanitizedPath = normalized;
@@ -428,21 +463,21 @@ export class Sanitization {
           !effectiveOptions.allowAbsolute,
         optionsUsed: effectiveOptions,
       };
-    } catch (error) {
+    } catch (error: unknown) {
       logger.warning(
-        "Path sanitization error",
+        'Path sanitization error',
         requestContextService.createRequestContext({
-          operation: "Sanitization.sanitizePath.error",
-          originalPathInput: originalInput,
-          pathOptionsUsed: effectiveOptions,
-          errorMessage: error instanceof Error ? error.message : String(error),
+          operation: 'Sanitization.sanitizePath.error',
+          additionalContext: {
+            originalPathInput: originalInput,
+            pathOptionsUsed: effectiveOptions,
+            errorMessage: error instanceof Error ? error.message : String(error),
+          },
         }),
       );
       throw new McpError(
-        BaseErrorCode.VALIDATION_ERROR,
-        error instanceof Error
-          ? error.message
-          : "Invalid or unsafe path provided.",
+        JsonRpcErrorCode.ValidationError,
+        error instanceof Error ? error.message : 'Invalid or unsafe path provided.',
         { input: originalInput },
       );
     }
@@ -459,24 +494,35 @@ export class Sanitization {
    */
   public sanitizeJson<T = unknown>(input: string, maxSize?: number): T {
     try {
-      if (typeof input !== "string")
-        throw new Error("Invalid input: expected a JSON string.");
-      if (maxSize !== undefined && Buffer.byteLength(input, "utf8") > maxSize) {
+      if (typeof input !== 'string') throw new Error('Invalid input: expected a JSON string.');
+
+      // Cross-environment byte length computation
+      const computeBytes = (s: string): number => {
+        if (runtimeCaps.hasBuffer && typeof Buffer.byteLength === 'function') {
+          return Buffer.byteLength(s, 'utf8');
+        }
+        if (runtimeCaps.hasTextEncoder) {
+          return new TextEncoder().encode(s).length;
+        }
+        return s.length;
+      };
+
+      if (maxSize !== undefined && computeBytes(input) > maxSize) {
         throw new McpError(
-          BaseErrorCode.VALIDATION_ERROR,
+          JsonRpcErrorCode.ValidationError,
           `JSON string exceeds maximum allowed size of ${maxSize} bytes.`,
-          { actualSize: Buffer.byteLength(input, "utf8"), maxSize },
+          { actualSize: computeBytes(input), maxSize },
         );
       }
+
       return JSON.parse(input) as T;
-    } catch (error) {
+    } catch (error: unknown) {
       if (error instanceof McpError) throw error;
       throw new McpError(
-        BaseErrorCode.VALIDATION_ERROR,
-        error instanceof Error ? error.message : "Invalid JSON format.",
+        JsonRpcErrorCode.ValidationError,
+        error instanceof Error ? error.message : 'Invalid JSON format.',
         {
-          inputPreview:
-            input.length > 100 ? `${input.substring(0, 100)}...` : input,
+          inputPreview: input.length > 100 ? `${input.substring(0, 100)}...` : input,
         },
       );
     }
@@ -491,36 +537,32 @@ export class Sanitization {
    * @returns The sanitized (and potentially clamped) number.
    * @throws {McpError} If input is not a valid number, NaN, or Infinity.
    */
-  public sanitizeNumber(
-    input: number | string,
-    min?: number,
-    max?: number,
-  ): number {
+  public sanitizeNumber(input: number | string, min?: number, max?: number): number {
     let value: number;
-    if (typeof input === "string") {
+    if (typeof input === 'string') {
       const trimmedInput = input.trim();
-      if (trimmedInput === "" || !validator.isNumeric(trimmedInput)) {
+      if (trimmedInput === '' || !validator.isNumeric(trimmedInput)) {
         throw new McpError(
-          BaseErrorCode.VALIDATION_ERROR,
-          "Invalid number format: input is empty or not numeric.",
+          JsonRpcErrorCode.ValidationError,
+          'Invalid number format: input is empty or not numeric.',
           { input },
         );
       }
       value = parseFloat(trimmedInput);
-    } else if (typeof input === "number") {
+    } else if (typeof input === 'number') {
       value = input;
     } else {
       throw new McpError(
-        BaseErrorCode.VALIDATION_ERROR,
-        "Invalid input type: expected number or string.",
+        JsonRpcErrorCode.ValidationError,
+        'Invalid input type: expected number or string.',
         { input: String(input) },
       );
     }
 
-    if (isNaN(value) || !isFinite(value)) {
+    if (Number.isNaN(value) || !Number.isFinite(value)) {
       throw new McpError(
-        BaseErrorCode.VALIDATION_ERROR,
-        "Invalid number value (NaN or Infinity).",
+        JsonRpcErrorCode.ValidationError,
+        'Invalid number value (NaN or Infinity).',
         { input },
       );
     }
@@ -537,14 +579,16 @@ export class Sanitization {
     }
     if (clamped) {
       logger.debug(
-        "Number clamped to range.",
+        'Number clamped to range.',
         requestContextService.createRequestContext({
-          operation: "Sanitization.sanitizeNumber.clamped",
-          originalInput: String(input),
-          parsedValue: originalValueForLog,
-          minValue: min,
-          maxValue: max,
-          clampedValue: value,
+          operation: 'Sanitization.sanitizeNumber.clamped',
+          additionalContext: {
+            originalInput: String(input),
+            parsedValue: originalValueForLog,
+            minValue: min,
+            maxValue: max,
+            clampedValue: value,
+          },
         }),
       );
     }
@@ -572,23 +616,22 @@ export class Sanitization {
    */
   public sanitizeForLogging(input: unknown): unknown {
     try {
-      if (!input || typeof input !== "object") return input;
+      if (!input || typeof input !== 'object') return input;
 
-      const clonedInput =
-        typeof globalThis.structuredClone === "function"
-          ? globalThis.structuredClone(input)
-          : JSON.parse(JSON.stringify(input));
+      const clonedInput: unknown = structuredClone(input);
       this.redactSensitiveFields(clonedInput);
       return clonedInput;
-    } catch (error) {
+    } catch (error: unknown) {
       logger.error(
-        "Error during log sanitization, returning placeholder.",
+        'Error during log sanitization, returning placeholder.',
         requestContextService.createRequestContext({
-          operation: "Sanitization.sanitizeForLogging.error",
-          errorMessage: error instanceof Error ? error.message : String(error),
+          operation: 'Sanitization.sanitizeForLogging.error',
+          additionalContext: {
+            errorMessage: error instanceof Error ? error.message : String(error),
+          },
         }),
       );
-      return "[Log Sanitization Failed]";
+      return '[Log Sanitization Failed]';
     }
   }
 
@@ -598,34 +641,51 @@ export class Sanitization {
    * @private
    */
   private redactSensitiveFields(obj: unknown): void {
-    if (!obj || typeof obj !== "object") return;
+    if (!obj || typeof obj !== 'object') return;
 
     if (Array.isArray(obj)) {
-      obj.forEach((item) => this.redactSensitiveFields(item));
+      for (const item of obj) this.redactSensitiveFields(item);
       return;
     }
 
+    // Type guard ensures obj is a Record<string, unknown>
+    if (!isRecord(obj)) return;
+
     for (const key in obj) {
-      if (Object.prototype.hasOwnProperty.call(obj, key)) {
-        const value = (obj as Record<string, unknown>)[key];
-
-        // Split camelCase and snake_case/kebab-case keys into words
+      if (Object.hasOwn(obj, key)) {
+        const value = obj[key];
+        const normalizedKey = Sanitization.normalizeName(key);
+        // Split into words for token-based matching (camelCase, snake_case, kebab-case)
         const keyWords = key
-          .replace(/([A-Z])/g, " $1") // Add space before uppercase letters
+          .replace(/([A-Z])/g, ' $1')
           .toLowerCase()
-          .split(/[\s_-]+/); // Split by space, underscore, or hyphen
+          .split(/[\s_-]+/)
+          .filter(Boolean);
 
-        const isSensitive = keyWords.some((word) =>
-          this.sensitiveFields.includes(word),
-        );
+        const isExactSensitive = this.normalizedSensitiveSet.has(normalizedKey);
+        const isWordSensitive = keyWords.some((w) => this.wordSensitiveSet.has(w));
+        const isSensitive = isExactSensitive || isWordSensitive;
 
         if (isSensitive) {
-          (obj as Record<string, unknown>)[key] = "[REDACTED]";
-        } else if (value && typeof value === "object") {
+          obj[key] = '[REDACTED]';
+        } else if (value && typeof value === 'object') {
           this.redactSensitiveFields(value);
         }
       }
     }
+  }
+
+  private static normalizeName(str: string): string {
+    return str.toLowerCase().replace(/[^a-z0-9]/g, '');
+  }
+
+  private rebuildSensitiveSets(): void {
+    this.normalizedSensitiveSet = new Set(
+      this.sensitiveFields.map((f) => Sanitization.normalizeName(f)).filter(Boolean),
+    );
+    this.wordSensitiveSet = new Set(
+      this.sensitiveFields.map((f) => f.toLowerCase()).filter(Boolean),
+    );
   }
 }
 
