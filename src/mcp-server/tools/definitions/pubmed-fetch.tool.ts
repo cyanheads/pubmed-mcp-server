@@ -48,6 +48,9 @@ const ArticleSchema = z.object({
   authors: z.array(z.any()).optional().describe('Author list'),
   journalInfo: z.any().optional().describe('Journal information'),
   doi: z.string().optional().describe('Digital Object Identifier'),
+  pmcId: z.string().optional().describe('PubMed Central ID (e.g. PMC1234567)'),
+  pubmedUrl: z.string().optional().describe('PubMed article URL'),
+  pmcUrl: z.string().optional().describe('PubMed Central full text URL (when available)'),
   publicationTypes: z.array(z.string()).optional().describe('Publication types'),
   keywords: z.array(z.string()).optional().describe('Keywords'),
   meshTerms: z.array(z.any()).optional().describe('MeSH terms'),
@@ -82,24 +85,37 @@ async function logic(
     { retmode: 'xml', usePost: input.pmids.length > 200 },
   );
 
-  if (!xmlData?.PubmedArticleSet) {
+  // Structural parse failure — missing top-level key entirely
+  if (!xmlData || !('PubmedArticleSet' in xmlData)) {
     throw new McpError(
       JsonRpcErrorCode.InternalError,
-      'Invalid or empty EFetch response from NCBI: missing PubmedArticleSet',
+      'Invalid EFetch response from NCBI: missing PubmedArticleSet',
       { requestId: appContext.requestId },
     );
+  }
+
+  // Empty PubmedArticleSet (all PMIDs invalid) — return empty result
+  if (!xmlData.PubmedArticleSet || !xmlData.PubmedArticleSet.PubmedArticle) {
+    return { articles: [], totalReturned: 0 };
   }
 
   const xmlArticles = ensureArray(xmlData.PubmedArticleSet.PubmedArticle) as XmlPubmedArticle[];
 
   const articles = xmlArticles
     .filter((a) => a?.MedlineCitation)
-    .map((a) =>
-      parseFullArticle(a, {
+    .map((a) => {
+      const parsed = parseFullArticle(a, {
         includeMesh: input.includeMesh,
         includeGrants: input.includeGrants,
-      }),
-    );
+      });
+      return {
+        ...parsed,
+        pubmedUrl: `https://pubmed.ncbi.nlm.nih.gov/${parsed.pmid}/`,
+        ...(parsed.pmcId && {
+          pmcUrl: `https://www.ncbi.nlm.nih.gov/pmc/articles/${parsed.pmcId}/`,
+        }),
+      };
+    });
 
   logger.notice('pubmed_fetch completed', {
     ...appContext,
@@ -119,6 +135,8 @@ function responseFormatter(result: Output): ContentBlock[] {
     md.h3(article.title ?? article.pmid ?? 'Unknown');
     if (article.pmid) md.keyValue('PMID', article.pmid);
     if (article.doi) md.keyValue('DOI', article.doi);
+    if (article.pubmedUrl) md.keyValue('PubMed', article.pubmedUrl);
+    if (article.pmcUrl) md.keyValue('PMC', article.pmcUrl);
 
     if (article.authors?.length) {
       const authorStr = article.authors

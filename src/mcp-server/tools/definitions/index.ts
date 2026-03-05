@@ -11,8 +11,6 @@ import { pubmedMeshLookupTool } from './pubmed-mesh-lookup.tool.js';
 import { pubmedRelatedTool } from './pubmed-related.tool.js';
 import { pubmedSearchTool } from './pubmed-search.tool.js';
 import { pubmedSpellTool } from './pubmed-spell.tool.js';
-import { pubmedTrendingTool } from './pubmed-trending.tool.js';
-
 /**
  * An array containing all tool definitions for easy iteration.
  */
@@ -22,6 +20,5 @@ export const allToolDefinitions = [
   pubmedSpellTool,
   pubmedCiteTool,
   pubmedRelatedTool,
-  pubmedTrendingTool,
   pubmedMeshLookupTool,
 ] as const;

@@ -42,7 +42,7 @@ const InputSchema = z.object({
   maxResults: z.number().int().min(1).max(50).default(10).describe('Maximum results'),
   includeDetails: z
     .boolean()
-    .default(false)
+    .default(true)
     .describe('Fetch full MeSH records (scope notes, tree numbers, entry terms)'),
 });
 
@@ -63,7 +63,7 @@ type Input = z.infer<typeof InputSchema>;
 type Output = z.infer<typeof OutputSchema>;
 
 // ---------------------------------------------------------------------------
-// MeSH XML parsing (inline — structure is simple enough)
+// MeSH eSummary parsing
 // ---------------------------------------------------------------------------
 
 interface MeshRecord {
@@ -74,64 +74,60 @@ interface MeshRecord {
   treeNumbers?: string[];
 }
 
-/**
- * Parses MeSH DescriptorRecord elements from eFetch XML response.
- * The fast-xml-parser output has DescriptorRecordSet.DescriptorRecord which
- * may be a single object or an array.
- */
-function parseMeshRecords(data: unknown): MeshRecord[] {
-  if (!data || typeof data !== 'object') return [];
-  const root = data as Record<string, unknown>;
-
-  const recordSet = root.DescriptorRecordSet as Record<string, unknown> | undefined;
-  const rawRecords = recordSet
-    ? ensureArray<Record<string, unknown>>(recordSet.DescriptorRecord as Record<string, unknown>)
-    : ensureArray<Record<string, unknown>>(root.DescriptorRecord as Record<string, unknown>);
-
-  return rawRecords.map((rec) => {
-    const descriptorName = rec.DescriptorName as Record<string, unknown> | undefined;
-    const name = descriptorName ? getText(descriptorName.String) : '';
-    const meshId = getText(rec.DescriptorUI);
-
-    // Tree numbers
-    const treeList = rec.TreeNumberList as Record<string, unknown> | undefined;
-    const treeNumbers = treeList
-      ? ensureArray(treeList.TreeNumber).map((t) => getText(t))
-      : undefined;
-
-    // Scope note and entry terms from first Concept
-    const concepts = ensureArray(
-      (rec.ConceptList as Record<string, unknown> | undefined)?.Concept,
-    ) as Record<string, unknown>[];
-
-    let scopeNote: string | undefined;
-    let entryTerms: string[] | undefined;
-
-    if (concepts.length > 0) {
-      const firstConcept = concepts[0] as Record<string, unknown>;
-      const rawNote = getText(firstConcept.ScopeNote, '');
-      if (rawNote) scopeNote = rawNote;
-
-      const termList = firstConcept.TermList as Record<string, unknown> | undefined;
-      if (termList) {
-        const terms = ensureArray(termList.Term) as Record<string, unknown>[];
-        const names = terms.map((t) => getText(t.String)).filter((s) => s.length > 0);
-        if (names.length > 0) entryTerms = names;
-      }
-    }
-
-    const record: MeshRecord = { meshId, name };
-    if (treeNumbers && treeNumbers.length > 0) record.treeNumbers = treeNumbers;
-    if (scopeNote) record.scopeNote = scopeNote;
-    if (entryTerms && entryTerms.length > 0) record.entryTerms = entryTerms;
-    return record;
-  });
+/** Finds an eSummary Item by its @_Name attribute. */
+function findItem(
+  items: Record<string, unknown>[],
+  name: string,
+): Record<string, unknown> | undefined {
+  return items.find((it) => getText(it['@_Name']) === name);
 }
 
 /**
- * Parses eSummary DocSum elements for basic MeSH info.
+ * Extracts the text value from an eSummary Item, handling both simple String
+ * items (#text) and List items (nested sub-Item children).
  */
-function parseSummaryRecords(data: unknown, ids: string[]): MeshRecord[] {
+function getItemText(item: Record<string, unknown> | undefined): string {
+  if (!item) return '';
+  const direct = getText(item, '');
+  if (direct) return direct;
+  // List-type: take the first nested sub-Item
+  const subItems = ensureArray(item.Item) as Record<string, unknown>[];
+  return subItems.length > 0 ? getText(subItems[0]) : '';
+}
+
+/**
+ * Extracts all text values from a List-type eSummary Item's sub-Items.
+ */
+function getItemTexts(item: Record<string, unknown> | undefined): string[] {
+  if (!item) return [];
+  const subItems = ensureArray(item.Item) as Record<string, unknown>[];
+  return subItems.map((si) => getText(si)).filter((s) => s.length > 0);
+}
+
+/**
+ * Extracts tree numbers from DS_IdxLinks, which contains nested Structure
+ * items each with a TreeNum sub-item.
+ */
+function extractTreeNumbers(items: Record<string, unknown>[]): string[] {
+  const idxLinks = findItem(items, 'DS_IdxLinks');
+  if (!idxLinks) return [];
+  const linkStructures = ensureArray(idxLinks.Item) as Record<string, unknown>[];
+  const treeNums: string[] = [];
+  for (const struct of linkStructures) {
+    const structItems = ensureArray(struct.Item) as Record<string, unknown>[];
+    const treeItem = findItem(structItems, 'TreeNum');
+    const val = treeItem ? getText(treeItem) : '';
+    if (val) treeNums.push(val);
+  }
+  return treeNums;
+}
+
+/**
+ * Parses eSummary DocSum elements into MeshRecords.
+ * Used for both basic and detailed lookups — MeSH eFetch doesn't return XML,
+ * so eSummary is the only structured data source.
+ */
+function parseSummaryRecords(data: unknown, ids: string[], includeDetails: boolean): MeshRecord[] {
   if (!data || typeof data !== 'object') {
     return ids.map((id) => ({ meshId: id, name: id }));
   }
@@ -149,27 +145,22 @@ function parseSummaryRecords(data: unknown, ids: string[]): MeshRecord[] {
   return docSums.map((doc) => {
     const meshId = getText(doc.Id);
     const items = ensureArray(doc.Item) as Record<string, unknown>[];
+    const name = getItemText(findItem(items, 'DS_MeshTerms')) || meshId;
 
-    // MeSH eSummary stores the descriptor name in DS_MeshTerms.
-    // For simple descriptors it's a String with #text; for multi-term descriptors
-    // it's a List with nested Item children — take the first child as the name.
-    const nameItem = items.find((it) => getText(it['@_Name']) === 'DS_MeshTerms');
-    let name = '';
-    if (nameItem) {
-      const directText = getText(nameItem, '');
-      if (directText) {
-        name = directText;
-      } else {
-        // List-type Item: extract first nested sub-Item's text
-        const subItems = ensureArray((nameItem as Record<string, unknown>).Item) as Record<
-          string,
-          unknown
-        >[];
-        if (subItems.length > 0) name = getText(subItems[0]);
-      }
+    const record: MeshRecord = { meshId, name };
+
+    if (includeDetails) {
+      const scopeNote = getItemText(findItem(items, 'DS_ScopeNote'));
+      if (scopeNote) record.scopeNote = scopeNote;
+
+      const entryTerms = getItemTexts(findItem(items, 'DS_MeshTerms'));
+      if (entryTerms.length > 0) record.entryTerms = entryTerms;
+
+      const treeNumbers = extractTreeNumbers(items);
+      if (treeNumbers.length > 0) record.treeNumbers = treeNumbers;
     }
 
-    return { meshId, name: name || meshId };
+    return record;
   });
 }
 
@@ -186,29 +177,46 @@ async function meshLookupLogic(
 
   logger.debug('MeSH lookup started.', { ...context, term, maxResults, includeDetails });
 
-  // Step 1: Search MeSH database for matching IDs
-  const searchResult = await ncbi().eSearch({ db: 'mesh', term, retmax: maxResults }, context);
+  // Step 1: Search MeSH database for matching IDs.
+  // NCBI's bare-term eSearch often returns subtree terms instead of the exact heading
+  // (e.g. "Triple Negative Breast Neoplasms" instead of "Neoplasms"). When the term
+  // doesn't already contain field tags, run a parallel [MH] exact-heading search and
+  // merge those IDs first so the exact descriptor always appears in the results.
+  const hasFieldTag = /\[.+\]/.test(term);
+  const broadSearch = ncbi().eSearch({ db: 'mesh', term, retmax: maxResults }, context);
+  const exactSearch = hasFieldTag
+    ? undefined
+    : ncbi().eSearch({ db: 'mesh', term: `${term}[MH]`, retmax: 1 }, context);
+  const [broadResult, exactResult] = await Promise.all([broadSearch, exactSearch]);
 
-  const ids = searchResult.idList;
+  // Merge: exact-match IDs first, then broad IDs (deduplicated), capped at maxResults
+  const seen = new Set<string>();
+  const ids: string[] = [];
+  for (const id of [...(exactResult?.idList ?? []), ...broadResult.idList]) {
+    if (!seen.has(id)) {
+      seen.add(id);
+      ids.push(id);
+    }
+  }
+  ids.length = Math.min(ids.length, maxResults);
 
   if (ids.length === 0) {
     logger.debug('No MeSH results found.', { ...context, term });
     return { term, results: [] };
   }
 
-  // Step 2: Fetch details or summaries
-  let results: MeshRecord[];
+  // Step 2: Fetch summaries (eSummary is the only structured source — MeSH eFetch returns plain text)
+  const summaryData = await ncbi().eSummary({ db: 'mesh', id: ids.join(',') }, context);
+  const results = parseSummaryRecords(summaryData, ids, includeDetails);
 
-  if (includeDetails) {
-    const fetchData = await ncbi().eFetch(
-      { db: 'mesh', id: ids.join(','), rettype: 'full', retmode: 'xml' },
-      context,
-    );
-    results = parseMeshRecords(fetchData);
-  } else {
-    const summaryData = await ncbi().eSummary({ db: 'mesh', id: ids.join(',') }, context);
-    results = parseSummaryRecords(summaryData, ids);
-  }
+  // Step 3: Stable-sort exact name matches to the top (belt-and-suspenders with the
+  // ID-level ordering above, since eSummary may return results in a different order).
+  const termLower = term.toLowerCase();
+  results.sort((a, b) => {
+    const aExact = a.name.toLowerCase() === termLower ? 0 : 1;
+    const bExact = b.name.toLowerCase() === termLower ? 0 : 1;
+    return aExact - bExact;
+  });
 
   logger.debug('MeSH lookup completed.', { ...context, term, resultCount: results.length });
 

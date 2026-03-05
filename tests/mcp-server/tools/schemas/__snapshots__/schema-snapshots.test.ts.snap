@@ -11,7 +11,7 @@ exports[`Tool Schema Snapshots > Tool: pubmed_cite > inputSchema JSON output sho
         "pattern": "^\\d+$",
         "type": "string",
       },
-      "maxItems": 20,
+      "maxItems": 50,
       "minItems": 1,
       "type": "array",
     },
@@ -160,6 +160,14 @@ exports[`Tool Schema Snapshots > Tool: pubmed_fetch > outputSchema JSON output s
             "items": {},
             "type": "array",
           },
+          "pmcId": {
+            "description": "PubMed Central ID (e.g. PMC1234567)",
+            "type": "string",
+          },
+          "pmcUrl": {
+            "description": "PubMed Central full text URL (when available)",
+            "type": "string",
+          },
           "pmid": {
             "description": "PubMed ID",
             "type": "string",
@@ -170,6 +178,10 @@ exports[`Tool Schema Snapshots > Tool: pubmed_fetch > outputSchema JSON output s
               "type": "string",
             },
             "type": "array",
+          },
+          "pubmedUrl": {
+            "description": "PubMed article URL",
+            "type": "string",
           },
           "title": {
             "description": "Article title",
@@ -199,7 +211,7 @@ exports[`Tool Schema Snapshots > Tool: pubmed_mesh_lookup > inputSchema JSON out
   "additionalProperties": false,
   "properties": {
     "includeDetails": {
-      "default": false,
+      "default": true,
       "description": "Fetch full MeSH records (scope notes, tree numbers, entry terms)",
       "type": "boolean",
     },
@@ -378,9 +390,13 @@ exports[`Tool Schema Snapshots > Tool: pubmed_search > inputSchema JSON output s
   "$schema": "http://json-schema.org/draft-07/schema#",
   "additionalProperties": false,
   "properties": {
+    "author": {
+      "description": "Filter by author name (e.g. "Smith J")",
+      "type": "string",
+    },
     "dateRange": {
       "additionalProperties": false,
-      "description": "Filter by date range (YYYY/MM/DD)",
+      "description": "Filter by date range (YYYY-MM-DD)",
       "properties": {
         "dateType": {
           "default": "pdat",
@@ -393,11 +409,11 @@ exports[`Tool Schema Snapshots > Tool: pubmed_search > inputSchema JSON output s
           "type": "string",
         },
         "maxDate": {
-          "description": "End date (YYYY/MM/DD)",
+          "description": "End date (YYYY-MM-DD)",
           "type": "string",
         },
         "minDate": {
-          "description": "Start date (YYYY/MM/DD)",
+          "description": "Start date (YYYY-MM-DD)",
           "type": "string",
         },
       },
@@ -408,18 +424,41 @@ exports[`Tool Schema Snapshots > Tool: pubmed_search > inputSchema JSON output s
       ],
       "type": "object",
     },
-    "includeSummaries": {
-      "default": 0,
-      "description": "Fetch brief summaries for top N results",
-      "maximum": 50,
-      "minimum": 0,
-      "type": "integer",
+    "freeFullText": {
+      "description": "Only include free full text articles",
+      "type": "boolean",
+    },
+    "hasAbstract": {
+      "description": "Only include articles with abstracts",
+      "type": "boolean",
+    },
+    "journal": {
+      "description": "Filter by journal name",
+      "type": "string",
+    },
+    "language": {
+      "description": "Filter by language (e.g. "english")",
+      "type": "string",
     },
     "maxResults": {
       "default": 20,
       "description": "Maximum results to return",
       "maximum": 1000,
       "minimum": 1,
+      "type": "integer",
+    },
+    "meshTerms": {
+      "description": "Filter by MeSH terms (e.g. ["Neoplasms", "Humans"])",
+      "items": {
+        "type": "string",
+      },
+      "type": "array",
+    },
+    "offset": {
+      "default": 0,
+      "description": "Result offset for pagination (0-based). Use with maxResults to page through results",
+      "maximum": 9007199254740991,
+      "minimum": 0,
       "type": "integer",
     },
     "publicationTypes": {
@@ -445,12 +484,28 @@ exports[`Tool Schema Snapshots > Tool: pubmed_search > inputSchema JSON output s
       ],
       "type": "string",
     },
+    "species": {
+      "description": "Filter by species",
+      "enum": [
+        "humans",
+        "animals",
+      ],
+      "type": "string",
+    },
+    "summaryCount": {
+      "default": 0,
+      "description": "Fetch brief summaries for top N results (0 = PMIDs only)",
+      "maximum": 50,
+      "minimum": 0,
+      "type": "integer",
+    },
   },
   "required": [
     "query",
     "maxResults",
+    "offset",
     "sort",
-    "includeSummaries",
+    "summaryCount",
   ],
   "type": "object",
 }
@@ -461,6 +516,10 @@ exports[`Tool Schema Snapshots > Tool: pubmed_search > outputSchema JSON output 
   "$schema": "http://json-schema.org/draft-07/schema#",
   "additionalProperties": false,
   "properties": {
+    "offset": {
+      "description": "Result offset used",
+      "type": "number",
+    },
     "pmids": {
       "description": "PubMed IDs",
       "items": {
@@ -487,10 +546,19 @@ exports[`Tool Schema Snapshots > Tool: pubmed_search > outputSchema JSON output 
           "doi": {
             "type": "string",
           },
+          "pmcId": {
+            "type": "string",
+          },
+          "pmcUrl": {
+            "type": "string",
+          },
           "pmid": {
             "type": "string",
           },
           "pubDate": {
+            "type": "string",
+          },
+          "pubmedUrl": {
             "type": "string",
           },
           "source": {
@@ -515,6 +583,7 @@ exports[`Tool Schema Snapshots > Tool: pubmed_search > outputSchema JSON output 
   "required": [
     "query",
     "totalFound",
+    "offset",
     "pmids",
     "searchUrl",
   ],
@@ -562,91 +631,6 @@ exports[`Tool Schema Snapshots > Tool: pubmed_spell > outputSchema JSON output s
     "original",
     "corrected",
     "hasSuggestion",
-  ],
-  "type": "object",
-}
-`;
-
-exports[`Tool Schema Snapshots > Tool: pubmed_trending > inputSchema JSON output should be stable 1`] = `
-{
-  "$schema": "http://json-schema.org/draft-07/schema#",
-  "additionalProperties": false,
-  "properties": {
-    "days": {
-      "default": 30,
-      "description": "Look-back period in days",
-      "maximum": 365,
-      "minimum": 1,
-      "type": "integer",
-    },
-    "maxResults": {
-      "default": 10,
-      "description": "Maximum results",
-      "maximum": 50,
-      "minimum": 1,
-      "type": "integer",
-    },
-    "query": {
-      "description": "Topic to find trending articles for",
-      "minLength": 1,
-      "type": "string",
-    },
-  },
-  "required": [
-    "query",
-    "days",
-    "maxResults",
-  ],
-  "type": "object",
-}
-`;
-
-exports[`Tool Schema Snapshots > Tool: pubmed_trending > outputSchema JSON output should be stable 1`] = `
-{
-  "$schema": "http://json-schema.org/draft-07/schema#",
-  "additionalProperties": false,
-  "properties": {
-    "articles": {
-      "description": "Trending articles",
-      "items": {
-        "additionalProperties": false,
-        "properties": {
-          "authors": {
-            "type": "string",
-          },
-          "pmid": {
-            "type": "string",
-          },
-          "publicationDate": {
-            "type": "string",
-          },
-          "source": {
-            "type": "string",
-          },
-          "title": {
-            "type": "string",
-          },
-        },
-        "required": [
-          "pmid",
-        ],
-        "type": "object",
-      },
-      "type": "array",
-    },
-    "period": {
-      "description": "Date range description",
-      "type": "string",
-    },
-    "query": {
-      "description": "Search query used",
-      "type": "string",
-    },
-  },
-  "required": [
-    "query",
-    "period",
-    "articles",
   ],
   "type": "object",
 }

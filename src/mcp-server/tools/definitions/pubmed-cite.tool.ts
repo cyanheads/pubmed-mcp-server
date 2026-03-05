@@ -45,7 +45,7 @@ const TOOL_ANNOTATIONS = {
 // ---------------------------------------------------------------------------
 
 const InputSchema = z.object({
-  pmids: z.array(z.string().regex(/^\d+$/)).min(1).max(20).describe('PubMed IDs to cite'),
+  pmids: z.array(z.string().regex(/^\d+$/)).min(1).max(50).describe('PubMed IDs to cite'),
   styles: z
     .array(z.enum(['apa', 'mla', 'bibtex', 'ris']))
     .default(['apa'])

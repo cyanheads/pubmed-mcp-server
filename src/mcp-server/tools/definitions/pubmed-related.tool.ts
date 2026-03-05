@@ -85,8 +85,6 @@ interface ELinkResultItem {
   ERROR?: string;
   LinkSet?: {
     LinkSetDb?: ELinkLinkSetDb | ELinkLinkSetDb[];
-    LinkSetDbHistory?: { QueryKey?: string } | { QueryKey?: string }[];
-    WebEnv?: string;
   };
 }
 
@@ -135,11 +133,11 @@ async function logic(
       eLinkParams.cmd = 'neighbor_score';
       break;
     case 'cited_by':
-      eLinkParams.cmd = 'neighbor_history';
+      eLinkParams.cmd = 'neighbor';
       eLinkParams.linkname = 'pubmed_pubmed_citedin';
       break;
     case 'references':
-      eLinkParams.cmd = 'neighbor_history';
+      eLinkParams.cmd = 'neighbor';
       eLinkParams.linkname = 'pubmed_pubmed_refs';
       break;
   }
@@ -166,32 +164,19 @@ async function logic(
   const linkSet = firstResult?.LinkSet;
   let foundPmids: { pmid: string; score?: number }[] = [];
 
-  if (linkSet?.LinkSetDbHistory) {
-    // History-based response (cited_by, references)
-    const historyArray = ensureArray(linkSet.LinkSetDbHistory);
-    const history = historyArray[0];
-
-    if (history?.QueryKey && linkSet.WebEnv) {
-      const searchResult = await ncbi().eSearch(
-        {
-          db: 'pubmed',
-          term: `%23${history.QueryKey}`, // Use query key reference
-          query_key: history.QueryKey,
-          WebEnv: linkSet.WebEnv,
-          retmax: input.maxResults * 2,
-        },
-        appContext,
-      );
-
-      foundPmids = searchResult.idList
-        .map((id: string) => ({ pmid: String(id) }))
-        .filter((item) => item.pmid && item.pmid !== input.pmid && item.pmid !== '0');
-    }
-  } else if (linkSet?.LinkSetDb) {
-    // Score-based response (similar)
+  if (linkSet?.LinkSetDb) {
+    // All relationship types use cmd=neighbor/neighbor_score and return LinkSetDb
     const linkSetDbArray = ensureArray(linkSet.LinkSetDb);
+
+    // Match the expected LinkName for the relationship type
+    const expectedLinkName =
+      input.relationship === 'cited_by'
+        ? 'pubmed_pubmed_citedin'
+        : input.relationship === 'references'
+          ? 'pubmed_pubmed_refs'
+          : 'pubmed_pubmed';
     const targetDb =
-      linkSetDbArray.find((db) => db.LinkName === 'pubmed_pubmed') ?? linkSetDbArray[0];
+      linkSetDbArray.find((db) => db.LinkName === expectedLinkName) ?? linkSetDbArray[0];
 
     if (targetDb?.Link) {
       const links = ensureArray(targetDb.Link);
