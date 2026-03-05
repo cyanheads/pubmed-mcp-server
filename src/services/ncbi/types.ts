@@ -233,7 +233,7 @@ export interface XmlPubmedArticleSet {
 // ─── Parsed Object Types (application use, derived from XML) ────────────────
 
 export interface ParsedArticleAuthor {
-  affiliation?: string;
+  affiliationIndices?: number[];
   collectiveName?: string;
   firstName?: string;
   initials?: string;
@@ -288,6 +288,7 @@ export interface ParsedGrant {
 
 export interface ParsedArticle {
   abstractText?: string;
+  affiliations?: string[];
   articleDates?: ParsedArticleDate[]; // Dates like 'received', 'accepted', 'revised'
   authors?: ParsedArticleAuthor[];
   doi?: string;
@@ -295,6 +296,7 @@ export interface ParsedArticle {
   journalInfo?: ParsedJournalInfo;
   keywords?: string[];
   meshTerms?: ParsedMeshTerm[];
+  pmcId?: string;
   pmid: string;
   publicationTypes?: string[];
   title?: string;
@@ -414,6 +416,7 @@ export interface ParsedBriefSummary {
   authors?: string; // Formatted string
   doi?: string;
   epubDate?: string; // Standardized YYYY-MM-DD
+  pmcId?: string;
   pmid: string;
   pubDate?: string; // Standardized YYYY-MM-DD
   source?: string;

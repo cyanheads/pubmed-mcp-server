@@ -217,26 +217,33 @@ function parseSingleDocumentSummary(docSummary: ESummaryDocumentSummary): Omit<
   const pmid = docSummary['@_uid'];
   const authorsArray = parseESummaryAuthorsFromDocumentSummary(docSummary);
 
+  // Parse ArticleIds once for DOI and PMC ID extraction
+  let idsArray: ESummaryArticleId[] = [];
+  const articleIdsProp = docSummary.ArticleIds;
+  if (articleIdsProp) {
+    idsArray = Array.isArray(articleIdsProp)
+      ? articleIdsProp
+      : ensureArray(
+          (
+            articleIdsProp as {
+              ArticleId: ESummaryArticleId[] | ESummaryArticleId;
+            }
+          ).ArticleId,
+        );
+  }
+
   let doiValue: string | undefined = getText(docSummary.DOI, undefined);
   if (!doiValue) {
-    const articleIdsProp = docSummary.ArticleIds;
-    if (articleIdsProp) {
-      const idsArray = Array.isArray(articleIdsProp)
-        ? articleIdsProp
-        : ensureArray(
-            (
-              articleIdsProp as {
-                ArticleId: ESummaryArticleId[] | ESummaryArticleId;
-              }
-            ).ArticleId,
-          );
-
-      const doiEntry = idsArray.find((id) => (id as ESummaryArticleId).idtype === 'doi');
-      if (doiEntry) {
-        doiValue = getText((doiEntry as ESummaryArticleId).value, undefined);
-      }
+    const doiEntry = idsArray.find((id) => (id as ESummaryArticleId).idtype === 'doi');
+    if (doiEntry) {
+      doiValue = getText((doiEntry as ESummaryArticleId).value, undefined);
     }
   }
+
+  const pmcEntry = idsArray.find((id) => (id as ESummaryArticleId).idtype === 'pmc');
+  const pmcIdValue = pmcEntry
+    ? getText((pmcEntry as ESummaryArticleId).value, undefined)
+    : undefined;
 
   const title = getText(docSummary.Title);
   const source =
@@ -250,6 +257,7 @@ function parseSingleDocumentSummary(docSummary: ESummaryDocumentSummary): Omit<
     authors: formatESummaryAuthors(authorsArray),
     ...(source && { source }),
     ...(doiValue && { doi: doiValue }),
+    ...(pmcIdValue && { pmcId: pmcIdValue }),
     ...(rawPubDate && { rawPubDate }),
     ...(rawEPubDate && { rawEPubDate }),
   };
@@ -303,22 +311,30 @@ function parseSingleDocSumOldXml(docSum: ESummaryDocSumOldXml): Omit<
 
   const authorsArray = getAuthorList();
 
+  // Parse ArticleIds list once for DOI and PMC ID extraction
+  const articleIdsItem = items.find((i) => i['@_Name'] === 'ArticleIds' && i['@_Type'] === 'List');
+  const articleIdsList = articleIdsItem?.Item ? ensureArray(articleIdsItem.Item) : [];
+
   let doiFromItems: string | undefined = getItemValue('DOI', 'String');
   if (!doiFromItems) {
-    const articleIdsItem = items.find(
-      (i) => i['@_Name'] === 'ArticleIds' && i['@_Type'] === 'List',
+    const doiIdItem = articleIdsList.find(
+      (id) =>
+        getAttribute(id as ESummaryItem, 'idtype') === 'doi' ||
+        (id as ESummaryItem)['@_Name'] === 'doi',
     );
-    if (articleIdsItem?.Item) {
-      const ids = ensureArray(articleIdsItem.Item);
-      const doiIdItem = ids.find(
-        (id) =>
-          getAttribute(id as ESummaryItem, 'idtype') === 'doi' ||
-          (id as ESummaryItem)['@_Name'] === 'doi', // Some older formats might use Name='doi'
-      );
-      if (doiIdItem) {
-        doiFromItems = getText(doiIdItem);
-      }
+    if (doiIdItem) {
+      doiFromItems = getText(doiIdItem);
     }
+  }
+
+  let pmcIdFromItems: string | undefined;
+  const pmcIdItem = articleIdsList.find(
+    (id) =>
+      getAttribute(id as ESummaryItem, 'idtype') === 'pmc' ||
+      (id as ESummaryItem)['@_Name'] === 'pmc',
+  );
+  if (pmcIdItem) {
+    pmcIdFromItems = getText(pmcIdItem);
   }
 
   const title = getItemValue('Title', 'String');
@@ -332,6 +348,7 @@ function parseSingleDocSumOldXml(docSum: ESummaryDocSumOldXml): Omit<
     authors: formatESummaryAuthors(authorsArray),
     ...(source !== undefined && { source }),
     ...(doiFromItems !== undefined && { doi: doiFromItems }),
+    ...(pmcIdFromItems !== undefined && { pmcId: pmcIdFromItems }),
     ...(rawPubDate !== undefined && { rawPubDate }),
     ...(rawEPubDate !== undefined && { rawEPubDate }),
   };
@@ -389,6 +406,7 @@ export async function extractBriefSummaries(
         ...(rawSummary.authors !== undefined && { authors: rawSummary.authors }),
         ...(rawSummary.source !== undefined && { source: rawSummary.source }),
         ...(rawSummary.doi !== undefined && { doi: rawSummary.doi }),
+        ...(rawSummary.pmcId !== undefined && { pmcId: rawSummary.pmcId }),
         ...(pubDate !== undefined && { pubDate }),
         ...(epubDate !== undefined && { epubDate }),
       } satisfies ParsedBriefSummary;

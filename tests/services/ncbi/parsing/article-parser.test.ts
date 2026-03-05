@@ -34,13 +34,15 @@ import type {
 // ─── extractAuthors ──────────────────────────────────────────────────────────
 
 describe('extractAuthors', () => {
-  it('returns [] when authorListXml is undefined', () => {
-    expect(extractAuthors(undefined)).toEqual([]);
+  it('returns empty authors and affiliations when authorListXml is undefined', () => {
+    const result = extractAuthors(undefined);
+    expect(result).toEqual({ authors: [], affiliations: [] });
   });
 
-  it('returns [] when Author list is empty / absent', () => {
+  it('returns empty when Author list is empty / absent', () => {
     const authorList: XmlAuthorList = {};
-    expect(extractAuthors(authorList)).toEqual([]);
+    const result = extractAuthors(authorList);
+    expect(result).toEqual({ authors: [], affiliations: [] });
   });
 
   it('extracts a single author with all name fields', () => {
@@ -51,9 +53,9 @@ describe('extractAuthors', () => {
         Initials: { '#text': 'J' },
       },
     };
-    expect(extractAuthors(authorList)).toEqual([
-      { lastName: 'Smith', firstName: 'John', initials: 'J' },
-    ]);
+    const { authors, affiliations } = extractAuthors(authorList);
+    expect(authors).toEqual([{ lastName: 'Smith', firstName: 'John', initials: 'J' }]);
+    expect(affiliations).toEqual([]);
   });
 
   it('extracts a collective name author', () => {
@@ -62,10 +64,11 @@ describe('extractAuthors', () => {
         CollectiveName: { '#text': 'The ACME Consortium' },
       },
     };
-    expect(extractAuthors(authorList)).toEqual([{ collectiveName: 'The ACME Consortium' }]);
+    const { authors } = extractAuthors(authorList);
+    expect(authors).toEqual([{ collectiveName: 'The ACME Consortium' }]);
   });
 
-  it('extracts an author with affiliation', () => {
+  it('extracts an author with affiliation and deduplicates', () => {
     const authorList: XmlAuthorList = {
       Author: {
         LastName: { '#text': 'Jones' },
@@ -74,8 +77,34 @@ describe('extractAuthors', () => {
         AffiliationInfo: [{ Affiliation: { '#text': 'Harvard Medical School, Boston, MA.' } }],
       },
     };
-    const [author] = extractAuthors(authorList);
-    expect(author?.affiliation).toBe('Harvard Medical School, Boston, MA.');
+    const { authors, affiliations } = extractAuthors(authorList);
+    expect(affiliations).toEqual(['Harvard Medical School, Boston, MA.']);
+    expect(authors[0]?.affiliationIndices).toEqual([0]);
+  });
+
+  it('deduplicates shared affiliations across authors', () => {
+    const sharedAffiliation = 'Department of Medicine, MIT, Cambridge, MA.';
+    const authorList: XmlAuthorList = {
+      Author: [
+        {
+          LastName: { '#text': 'Alpha' },
+          ForeName: { '#text': 'Ann' },
+          Initials: { '#text': 'A' },
+          AffiliationInfo: [{ Affiliation: { '#text': sharedAffiliation } }],
+        },
+        {
+          LastName: { '#text': 'Beta' },
+          ForeName: { '#text': 'Bob' },
+          Initials: { '#text': 'B' },
+          AffiliationInfo: [{ Affiliation: { '#text': sharedAffiliation } }],
+        },
+      ],
+    };
+    const { authors, affiliations } = extractAuthors(authorList);
+    expect(affiliations).toHaveLength(1);
+    expect(affiliations[0]).toBe(sharedAffiliation);
+    expect(authors[0]?.affiliationIndices).toEqual([0]);
+    expect(authors[1]?.affiliationIndices).toEqual([0]);
   });
 
   it('extracts multiple authors preserving order', () => {
@@ -89,10 +118,10 @@ describe('extractAuthors', () => {
         { LastName: { '#text': 'Beta' }, ForeName: { '#text': 'Bob' }, Initials: { '#text': 'B' } },
       ],
     };
-    const result = extractAuthors(authorList);
-    expect(result).toHaveLength(2);
-    expect(result[0]?.lastName).toBe('Alpha');
-    expect(result[1]?.lastName).toBe('Beta');
+    const { authors } = extractAuthors(authorList);
+    expect(authors).toHaveLength(2);
+    expect(authors[0]?.lastName).toBe('Alpha');
+    expect(authors[1]?.lastName).toBe('Beta');
   });
 });
 

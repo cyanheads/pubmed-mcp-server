@@ -46,20 +46,28 @@ const NCBI_ARRAY_JPATHS = new Set([
 /**
  * Ordered paths to check for NCBI error messages in parsed XML.
  * More specific paths come first so they take precedence.
+ *
+ * NOTE: `eSearchResult.ErrorList.PhraseNotFound` and `FieldNotFound` are
+ * intentionally excluded — NCBI includes these as informational annotations
+ * on zero-result queries, not as hard failures. The response still contains
+ * a valid `<Count>0</Count>` and empty `<IdList/>`. Treating them as errors
+ * would prevent callers from receiving a legitimate empty result set.
  */
 const ERROR_PATHS = [
   'eLinkResult.ERROR',
   'eSummaryResult.ERROR',
-  'eSearchResult.ErrorList.PhraseNotFound',
-  'eSearchResult.ErrorList.FieldNotFound',
   'PubmedArticleSet.ErrorList.CannotRetrievePMID',
   'ERROR',
 ];
 
 /**
  * Warning paths checked when no primary errors are found.
+ * Includes eSearchResult.ErrorList entries that are informational (zero-result
+ * annotations), not true API failures.
  */
 const WARNING_PATHS = [
+  'eSearchResult.ErrorList.PhraseNotFound',
+  'eSearchResult.ErrorList.FieldNotFound',
   'eSearchResult.WarningList.QuotedPhraseNotFound',
   'eSearchResult.WarningList.OutputMessage',
 ];
@@ -113,6 +121,8 @@ export class NcbiResponseHandler {
       ignoreAttributes: false,
       attributeNamePrefix: '@_',
       parseTagValue: true,
+      processEntities: true,
+      htmlEntities: true,
       isArray: (_name, jpath) => NCBI_ARRAY_JPATHS.has(jpath),
     });
   }
@@ -192,9 +202,10 @@ export class NcbiResponseHandler {
 
       const parsedXml = this.xmlParser.parse(responseText) as Record<string, unknown>;
 
-      // Check for error indicators in the parsed structure
+      // Check for error indicators in the parsed structure.
+      // Note: eSearchResult.ErrorList is NOT checked here — NCBI populates it
+      // with PhraseNotFound/FieldNotFound on valid zero-result queries.
       const hasError =
-        resolvePath(parsedXml, 'eSearchResult.ErrorList') !== undefined ||
         resolvePath(parsedXml, 'eLinkResult.ERROR') !== undefined ||
         resolvePath(parsedXml, 'eSummaryResult.ERROR') !== undefined ||
         resolvePath(parsedXml, 'PubmedArticleSet.ErrorList') !== undefined ||

@@ -35,23 +35,48 @@ import type {
 import { ensureArray, getAttribute, getText } from './xml-helpers.js';
 
 /**
- * Extracts and formats author information from XML.
- * @param authorListXml - The XML AuthorList element.
- * @returns An array of formatted author objects.
+ * Result of extracting authors with deduplicated affiliations.
  */
-export function extractAuthors(authorListXml?: XmlAuthorList): ParsedArticleAuthor[] {
-  if (!authorListXml) return [];
-  const authors = ensureArray(authorListXml.Author);
-  return authors.map((auth: XmlAuthor): ParsedArticleAuthor => {
+export interface ExtractedAuthors {
+  affiliations: string[];
+  authors: ParsedArticleAuthor[];
+}
+
+/**
+ * Extracts and formats author information from XML, deduplicating affiliations.
+ * Affiliations are collected into a single array; each author references them by index.
+ * This avoids repeating identical institutional strings per-author (common in multi-center papers).
+ * @param authorListXml - The XML AuthorList element.
+ * @returns Authors and a deduplicated affiliations list.
+ */
+export function extractAuthors(authorListXml?: XmlAuthorList): ExtractedAuthors {
+  if (!authorListXml) return { authors: [], affiliations: [] };
+
+  const affiliationMap = new Map<string, number>();
+  const affiliationList: string[] = [];
+
+  function getAffiliationIndex(text: string): number {
+    const existing = affiliationMap.get(text);
+    if (existing !== undefined) return existing;
+    const idx = affiliationList.length;
+    affiliationList.push(text);
+    affiliationMap.set(text, idx);
+    return idx;
+  }
+
+  const xmlAuthors = ensureArray(authorListXml.Author);
+  const authors = xmlAuthors.map((auth: XmlAuthor): ParsedArticleAuthor => {
     const collectiveName = getText(auth.CollectiveName);
     if (collectiveName) {
       return { collectiveName };
     }
 
-    let affiliation = '';
-    const affiliations = ensureArray(auth.AffiliationInfo);
-    if (affiliations.length > 0) {
-      affiliation = getText(affiliations[0]?.Affiliation);
+    // Collect all affiliations for this author, deduplicated at article level
+    const authorAffiliationInfos = ensureArray(auth.AffiliationInfo);
+    const indices: number[] = [];
+    for (const info of authorAffiliationInfos) {
+      const text = getText(info?.Affiliation);
+      if (text) indices.push(getAffiliationIndex(text));
     }
 
     // Extract ORCID from Identifier elements with Source="ORCID"
@@ -71,10 +96,12 @@ export function extractAuthors(authorListXml?: XmlAuthorList): ParsedArticleAuth
       lastName: getText(auth.LastName),
       firstName: getText(auth.ForeName), // XML uses ForeName
       initials: getText(auth.Initials),
-      ...(affiliation && { affiliation }),
+      ...(indices.length > 0 && { affiliationIndices: indices }),
       ...(orcid && { orcid }),
     };
   });
+
+  return { authors, affiliations: affiliationList };
 }
 
 /**
@@ -230,6 +257,40 @@ export function extractDoi(
 }
 
 /**
+ * Extracts PMC ID from ArticleIdList locations in the XML.
+ * Searches Article.ArticleIdList and PubmedData.ArticleIdList for IdType='pmc'.
+ * @param articleXml - The XML Article element.
+ * @param pubmedDataArticleIdList - Optional ArticleIdList from PubmedData.
+ * @returns The PMC ID string (e.g. 'PMC1234567') or undefined.
+ */
+export function extractPmcId(
+  articleXml?: XmlArticle,
+  pubmedDataArticleIdList?: XmlArticleIdList,
+): string | undefined {
+  // Check Article.ArticleIdList
+  const articleIds = ensureArray(articleXml?.ArticleIdList?.ArticleId);
+  for (const aid of articleIds) {
+    if (getAttribute(aid, 'IdType') === 'pmc') {
+      const val = getText(aid);
+      if (val) return val;
+    }
+  }
+
+  // Fallback to PubmedData.ArticleIdList
+  if (pubmedDataArticleIdList) {
+    const pubmedDataIds = ensureArray(pubmedDataArticleIdList.ArticleId);
+    for (const aid of pubmedDataIds) {
+      if (getAttribute(aid, 'IdType') === 'pmc') {
+        const val = getText(aid);
+        if (val) return val;
+      }
+    }
+  }
+
+  return;
+}
+
+/**
  * Extracts publication types from XML.
  * @param publicationTypeListXml - The XML PublicationTypeList element.
  * @returns An array of publication type strings.
@@ -337,19 +398,24 @@ export function parseFullArticle(
 
   const abstractText = extractAbstractText(article?.Abstract);
   const journalInfo = extractJournalInfo(article?.Journal, article);
-  const doi = extractDoi(article, xmlArticle.PubmedData?.ArticleIdList);
+  const pubmedDataArticleIdList = xmlArticle.PubmedData?.ArticleIdList;
+  const doi = extractDoi(article, pubmedDataArticleIdList);
+  const pmcId = extractPmcId(article, pubmedDataArticleIdList);
+  const { authors, affiliations } = extractAuthors(article?.AuthorList);
 
   return {
     pmid: extractPmid(medlineCitation) ?? '',
     title: getText(article?.ArticleTitle),
     ...(abstractText !== undefined && { abstractText }),
-    authors: extractAuthors(article?.AuthorList),
+    ...(affiliations.length > 0 && { affiliations }),
+    authors,
     ...(journalInfo !== undefined && { journalInfo }),
     publicationTypes: extractPublicationTypes(article?.PublicationTypeList),
     keywords: extractKeywords(medlineCitation?.KeywordList ?? article?.KeywordList),
     ...(includeMesh && { meshTerms: extractMeshTerms(medlineCitation?.MeshHeadingList) }),
     ...(includeGrants && { grantList: extractGrants(article?.GrantList) }),
     ...(doi !== undefined && { doi }),
+    ...(pmcId !== undefined && { pmcId }),
     articleDates: extractArticleDates(article),
   };
 }
