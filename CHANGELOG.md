@@ -4,6 +4,33 @@ All notable changes to this project will be documented in this file.
 
 ---
 
+## [2.1.1] - 2026-03-04
+
+### Fixed
+
+- **Response handler**: `extractTextValues` now handles numeric and boolean primitives emitted by fast-xml-parser when `parseTagValue` is enabled
+- **Response handler**: Error detection uses shared `ERROR_PATHS` constant to stay in sync with error message extraction
+- **PMC article parser**: Empty PMCID no longer produces a bare "PMC" prefix — returns empty string instead
+- **Article parser**: Eliminated redundant `getText()` calls for month, day, and medlineDate in `extractJournalInfo`
+- **Citation formatter**: `formatAuthorApa` no longer produces "undefined." when firstName contains consecutive spaces
+- **Citation formatter**: Reordered `formatAuthorApa` logic so authors with only initials (no lastName) return formatted initials instead of empty string
+
+### Changed
+
+- **Citation formatter**: `escapeBibtex` refactored from chained `.replace()` calls to a single regex with switch — fixes ordering bug where backslash-then-brace sequences were double-escaped
+- **Citation formatter**: `splitPages` simplified with destructuring
+
+### Added
+
+- Comprehensive test coverage for NCBI service edge cases: eSearch non-numeric fields, eSpell fallbacks, eSummary retmode logic, eFetch POST behavior
+- Response handler tests: `CannotRetrievePMID` error path, numeric error values, DOCTYPE stripping, `returnRawXml` error passthrough
+- Citation formatter tests: BibTeX special character escaping, APA author formatting edge cases, author-count boundaries (1/3/20/21), page splitting with en-dash/em-dash, minimal article formatting
+- Article parser tests: PMC ID extraction from `ArticleIdList`, ORCID extraction, ISSN type classification, MedlineDate without year, empty AffiliationInfo handling
+- ESummary parser tests: nested Author objects, string authors, PMC ID from ArticleIds, FullJournalName fallback
+- PMC article parser tests: `pmc-uid` fallback, empty PMCID, affiliations, page ranges, pub-date priority (epub > ppub > pub)
+
+---
+
 ## [2.1.0] - 2026-03-04
 
 ### Added
