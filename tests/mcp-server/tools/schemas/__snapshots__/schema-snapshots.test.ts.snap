@@ -1,6 +1,6 @@
 // Vitest Snapshot v1, https://vitest.dev/guide/snapshot.html
 
-exports[`Tool Schema Snapshots > Tool: pmc_fetch > inputSchema JSON output should be stable 1`] = `
+exports[`Tool Schema Snapshots > Tool: pubmed_pmc_fetch > inputSchema JSON output should be stable 1`] = `
 {
   "$schema": "http://json-schema.org/draft-07/schema#",
   "additionalProperties": false,
@@ -50,7 +50,7 @@ exports[`Tool Schema Snapshots > Tool: pmc_fetch > inputSchema JSON output shoul
 }
 `;
 
-exports[`Tool Schema Snapshots > Tool: pmc_fetch > outputSchema JSON output should be stable 1`] = `
+exports[`Tool Schema Snapshots > Tool: pubmed_pmc_fetch > outputSchema JSON output should be stable 1`] = `
 {
   "$schema": "http://json-schema.org/draft-07/schema#",
   "additionalProperties": false,

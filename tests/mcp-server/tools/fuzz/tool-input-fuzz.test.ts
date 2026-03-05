@@ -45,7 +45,7 @@ const LOGIC_SKIP = new Set([
   'pubmed_related', // requires NcbiService (external NCBI API)
   'pubmed_trending', // requires NcbiService (external NCBI API)
   'pubmed_mesh_lookup', // requires NcbiService (external NCBI API)
-  'pmc_fetch', // requires NcbiService (external NCBI API)
+  'pubmed_pmc_fetch', // requires NcbiService (external NCBI API)
 ]);
 
 /**
@@ -56,7 +56,7 @@ const LOGIC_SKIP = new Set([
 const SCHEMA_SKIP = new Set([
   'pubmed_fetch', // .min(1) on pmids array not respected by arbitrary
   'pubmed_cite', // .min(1) on pmids array not respected by arbitrary
-  'pmc_fetch', // .refine() cross-field constraints + z.lazy() recursive schema unsupported by fuzzer
+  'pubmed_pmc_fetch', // .refine() cross-field constraints + z.lazy() recursive schema unsupported by fuzzer
 ]);
 
 // ─── Test Fixtures ───────────────────────────────────────────────────────────

@@ -24,7 +24,7 @@ const ncbi = () => container.resolve(NcbiServiceToken);
 
 // ─── Metadata ────────────────────────────────────────────────────────────────
 
-const TOOL_NAME = 'pmc_fetch';
+const TOOL_NAME = 'pubmed_pmc_fetch';
 const TOOL_TITLE = 'PMC Full-Text Fetch';
 const TOOL_DESCRIPTION =
   'Fetch full-text articles from PubMed Central (PMC). Returns complete article body text, sections, and references for open-access articles. Accepts PMC IDs directly or PubMed IDs (auto-resolved via ELink). Only articles available in PMC will return full text.';
@@ -265,7 +265,7 @@ async function logic(
   appContext: RequestContext,
   _sdkContext: SdkContext,
 ): Promise<Output> {
-  logger.info('Executing pmc_fetch tool', {
+  logger.info('Executing pubmed_pmc_fetch tool', {
     ...appContext,
     hasPmcids: !!input.pmcids,
     hasPmids: !!input.pmids,
@@ -353,7 +353,7 @@ async function logic(
     });
   }
 
-  logger.notice('pmc_fetch completed', {
+  logger.notice('pubmed_pmc_fetch completed', {
     ...appContext,
     requested: pmcIds.length,
     returned: articles.length,
@@ -452,7 +452,7 @@ export const pmcFetchTool: ToolDefinition<typeof InputSchema, typeof OutputSchem
   annotations: TOOL_ANNOTATIONS,
   description: TOOL_DESCRIPTION,
   inputSchema: InputSchema,
-  logic: withToolAuth(['tool:pmc_fetch:read'], logic),
+  logic: withToolAuth(['tool:pubmed_pmc_fetch:read'], logic),
   name: TOOL_NAME,
   outputSchema: OutputSchema,
   responseFormatter,
