@@ -127,6 +127,7 @@ Add the following to your MCP client configuration file.
       "command": "bunx",
       "args": ["@cyanheads/pubmed-mcp-server@latest"],
       "env": {
+        "MCP_TRANSPORT_TYPE": "stdio",
         "MCP_LOG_LEVEL": "info",
         "NCBI_API_KEY": "your-key-here"
       }
@@ -145,6 +146,7 @@ Or with npx (no Bun required):
       "command": "npx",
       "args": ["-y", "@cyanheads/pubmed-mcp-server@latest"],
       "env": {
+        "MCP_TRANSPORT_TYPE": "stdio",
         "MCP_LOG_LEVEL": "info",
         "NCBI_API_KEY": "your-key-here"
       }
