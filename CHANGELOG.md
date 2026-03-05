@@ -4,6 +4,16 @@ All notable changes to this project will be documented in this file.
 
 ---
 
+## [2.1.4] - 2026-03-04
+
+### Added
+
+- **pubmed_fetch**: `affiliations` (deduplicated author affiliations) and `articleDates` (electronic publication, received, accepted dates) now included in article output
+- **Public hosted instance**: Added public Streamable HTTP endpoint (`https://pubmed.caseyjhand.com/mcp`) to README — no installation required
+- **Output schema coverage tests**: New test suite validates that tool output schemas cover every field returned by parsers at runtime, preventing strict-client rejections from `additionalProperties: false`
+
+---
+
 ## [2.1.3] - 2026-03-04
 
 ### Fixed
