@@ -22,6 +22,12 @@ All notable changes to this project will be documented in this file.
 - **NCBI response handler**: demoted `eSearchResult.ErrorList` (PhraseNotFound, FieldNotFound) from errors to warnings — NCBI populates these on valid zero-result queries; enabled `processEntities` and `htmlEntities` in XML parser
 - **Config defaults**: HTTP port 3010 → 3017, transport default `http` → `stdio`, storage default `filesystem` → `in-memory`
 
+### Fixed
+
+- **Auth factory tests**: JWT strategy tests now provide `mcpAuthSecretKey` and restore it on teardown
+- **Response handler tests**: updated assertions to match ErrorList demotion (PhraseNotFound is a warning, not a thrown error)
+- **Conformance tests**: removed `pubmed_trending` from expected tools list
+
 ### Removed
 
 - **`pubmed_trending` tool**: removed — its functionality is fully covered by `pubmed_search` with date range and `pub_date` sort

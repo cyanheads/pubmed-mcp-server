@@ -47,7 +47,6 @@ describe('Tool protocol conformance', () => {
         'pubmed_spell',
         'pubmed_cite',
         'pubmed_related',
-        'pubmed_trending',
         'pubmed_mesh_lookup',
       ];
       for (const name of expected) {

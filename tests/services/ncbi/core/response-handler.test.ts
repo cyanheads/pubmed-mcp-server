@@ -50,10 +50,10 @@ describe('NcbiResponseHandler', () => {
       expect(messages).toEqual(['Invalid uid 99999999']);
     });
 
-    it('extracts error from eSearchResult.ErrorList.PhraseNotFound path', () => {
+    it('extracts warning from eSearchResult.ErrorList.PhraseNotFound path', () => {
       const parsed = { eSearchResult: { ErrorList: { PhraseNotFound: 'faketerm' } } };
       const messages = handler.extractNcbiErrorMessages(parsed);
-      expect(messages).toEqual(['faketerm']);
+      expect(messages).toEqual(['Warning: faketerm']);
     });
 
     it('extracts error from top-level ERROR path', () => {
@@ -90,14 +90,14 @@ describe('NcbiResponseHandler', () => {
       expect(messages).toEqual(['Unknown NCBI API error structure.']);
     });
 
-    it('handles error value as an array of strings', () => {
+    it('handles warning value as an array of strings', () => {
       const parsed = {
         eSearchResult: {
           ErrorList: { PhraseNotFound: ['term1', 'term2'] },
         },
       };
       const messages = handler.extractNcbiErrorMessages(parsed);
-      expect(messages).toEqual(['term1', 'term2']);
+      expect(messages).toEqual(['Warning: term1', 'Warning: term2']);
     });
 
     it('handles error value as an object with #text property', () => {
@@ -196,16 +196,14 @@ describe('NcbiResponseHandler', () => {
       }
     });
 
-    it('throws ServiceUnavailable for eSearchResult.ErrorList in XML', () => {
-      try {
-        handler.parseAndHandleResponse(ESEARCH_PHRASE_NOT_FOUND_XML, 'esearch', context, {
-          retmode: 'xml',
-        });
-        throw new Error('Expected to throw');
-      } catch (err) {
-        expect(err).toBeInstanceOf(McpError);
-        expect((err as McpError).code).toBe(JsonRpcErrorCode.ServiceUnavailable);
-      }
+    it('does not throw for eSearchResult.ErrorList.PhraseNotFound in XML (informational, not an error)', () => {
+      const result = handler.parseAndHandleResponse<Record<string, unknown>>(
+        ESEARCH_PHRASE_NOT_FOUND_XML,
+        'esearch',
+        context,
+        { retmode: 'xml' },
+      );
+      expect(result).toHaveProperty('eSearchResult');
     });
 
     it('throws ServiceUnavailable for top-level ERROR element in XML', () => {
