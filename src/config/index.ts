@@ -9,6 +9,7 @@
  */
 import dotenv from 'dotenv';
 import { z } from 'zod';
+import { isAbsolute } from 'node:path'; 
 
 import packageJson from '../../package.json' with { type: 'json' };
 import { JsonRpcErrorCode, McpError } from '../types-global/errors.js';
@@ -383,7 +384,7 @@ const parseConfig = () => {
           const p = new URL(depth, import.meta.url).pathname;
           const root = p.endsWith('/') ? p.slice(0, -1) : p;
           const logsDir = rawConfig.logsPath ?? 'logs';
-          if (logsDir.startsWith('/')) return logsDir;
+          if (isAbsolute(logsDir)) return logsDir;
           return `${root}/${logsDir}`;
         })()
       : undefined,
