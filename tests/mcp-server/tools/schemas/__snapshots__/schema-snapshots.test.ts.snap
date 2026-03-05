@@ -131,6 +131,39 @@ exports[`Tool Schema Snapshots > Tool: pubmed_fetch > outputSchema JSON output s
             "description": "Abstract text",
             "type": "string",
           },
+          "affiliations": {
+            "description": "Deduplicated author affiliations",
+            "items": {
+              "type": "string",
+            },
+            "type": "array",
+          },
+          "articleDates": {
+            "description": "Article dates (e.g. electronic publication, received, accepted)",
+            "items": {
+              "additionalProperties": false,
+              "properties": {
+                "dateType": {
+                  "description": "Date type (e.g. "Electronic", "received")",
+                  "type": "string",
+                },
+                "day": {
+                  "description": "Day",
+                  "type": "string",
+                },
+                "month": {
+                  "description": "Month",
+                  "type": "string",
+                },
+                "year": {
+                  "description": "Year",
+                  "type": "string",
+                },
+              },
+              "type": "object",
+            },
+            "type": "array",
+          },
           "authors": {
             "description": "Author list",
             "items": {},

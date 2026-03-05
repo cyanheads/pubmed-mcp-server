@@ -45,6 +45,7 @@ const ArticleSchema = z.object({
   pmid: z.string().optional().describe('PubMed ID'),
   title: z.string().optional().describe('Article title'),
   abstractText: z.string().optional().describe('Abstract text'),
+  affiliations: z.array(z.string()).optional().describe('Deduplicated author affiliations'),
   authors: z.array(z.any()).optional().describe('Author list'),
   journalInfo: z.any().optional().describe('Journal information'),
   doi: z.string().optional().describe('Digital Object Identifier'),
@@ -55,6 +56,17 @@ const ArticleSchema = z.object({
   keywords: z.array(z.string()).optional().describe('Keywords'),
   meshTerms: z.array(z.any()).optional().describe('MeSH terms'),
   grantList: z.array(z.any()).optional().describe('Grant information'),
+  articleDates: z
+    .array(
+      z.object({
+        dateType: z.string().optional().describe('Date type (e.g. "Electronic", "received")'),
+        year: z.string().optional().describe('Year'),
+        month: z.string().optional().describe('Month'),
+        day: z.string().optional().describe('Day'),
+      }),
+    )
+    .optional()
+    .describe('Article dates (e.g. electronic publication, received, accepted)'),
 });
 
 const OutputSchema = z.object({
