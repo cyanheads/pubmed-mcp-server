@@ -1,11 +1,15 @@
 <div align="center">
   <h1>pubmed-mcp-server</h1>
-  <p><b>MCP server for the NCBI E-utilities API. Search PubMed, fetch article metadata, generate citations, explore MeSH terms, and discover related research. Runs over stdio or HTTP. Deployable to Cloudflare Workers.</b></p>
+  <p><b>MCP server for the NCBI E-utilities API. Search PubMed, fetch article metadata and full text, generate citations, explore MeSH terms, and discover related research. Runs over stdio or HTTP. Deployable to Cloudflare Workers.</b>
+  <div>7 Tools • 1 Resource • 1 Prompt</div>
+  </p>
 </div>
 
 <div align="center">
 
-[![npm](https://img.shields.io/npm/v/@cyanheads/pubmed-mcp-server?style=flat-square&logo=npm&logoColor=white)](https://www.npmjs.com/package/@cyanheads/pubmed-mcp-server) [![Version](https://img.shields.io/badge/Version-2.0.1-blue.svg?style=flat-square)](./CHANGELOG.md) [![MCP Spec](https://img.shields.io/badge/MCP%20Spec-2025--11--25-8A2BE2.svg?style=flat-square)](https://modelcontextprotocol.io/specification/2025-11-25) [![MCP SDK](https://img.shields.io/badge/MCP%20SDK-^1.27.1-green.svg?style=flat-square)](https://modelcontextprotocol.io/) [![License](https://img.shields.io/badge/License-Apache%202.0-orange.svg?style=flat-square)](./LICENSE) [![Status](https://img.shields.io/badge/Status-Stable-brightgreen.svg?style=flat-square)](https://github.com/cyanheads/pubmed-mcp-server/issues) [![TypeScript](https://img.shields.io/badge/TypeScript-^5.9.3-3178C6.svg?style=flat-square)](https://www.typescriptlang.org/) [![Bun](https://img.shields.io/badge/Bun-v1.3.2-blueviolet.svg?style=flat-square)](https://bun.sh/)
+[![npm](https://img.shields.io/npm/v/@cyanheads/pubmed-mcp-server?style=flat-square&logo=npm&logoColor=white)](https://www.npmjs.com/package/@cyanheads/pubmed-mcp-server) [![Version](https://img.shields.io/badge/Version-2.1.0-blue.svg?style=flat-square)](./CHANGELOG.md) [![MCP Spec](https://img.shields.io/badge/MCP%20Spec-2025--11--25-8A2BE2.svg?style=flat-square)](https://modelcontextprotocol.io/specification/2025-11-25) 
+
+[![MCP SDK](https://img.shields.io/badge/MCP%20SDK-^1.27.1-green.svg?style=flat-square)](https://modelcontextprotocol.io/) [![License](https://img.shields.io/badge/License-Apache%202.0-orange.svg?style=flat-square)](./LICENSE) [![Status](https://img.shields.io/badge/Status-Stable-brightgreen.svg?style=flat-square)](https://github.com/cyanheads/pubmed-mcp-server/issues) [![TypeScript](https://img.shields.io/badge/TypeScript-^5.9.3-3178C6.svg?style=flat-square)](https://www.typescriptlang.org/) [![Bun](https://img.shields.io/badge/Bun-v1.3.2-blueviolet.svg?style=flat-square)](https://bun.sh/)
 
 </div>
 
@@ -13,12 +17,13 @@
 
 ## Tools
 
-Six tools for working with PubMed and NCBI data:
+Seven tools for working with PubMed and NCBI data:
 
 | Tool | Description |
 |:---|:---|
 | `pubmed_search` | Search PubMed with full query syntax, field-specific filters, date ranges, pagination, and optional brief summaries |
 | `pubmed_fetch` | Fetch full article metadata by PMIDs — abstract, authors, journal, MeSH terms, grants |
+| `pmc_fetch` | Fetch full-text articles from PubMed Central — body sections, references, and metadata for open-access articles |
 | `pubmed_cite` | Generate formatted citations in APA 7th, MLA 9th, BibTeX, or RIS |
 | `pubmed_related` | Find similar articles, citing articles, or references for a given PMID |
 | `pubmed_spell` | Spell-check biomedical queries using NCBI's ESpell service |
@@ -48,6 +53,20 @@ Fetch full article metadata by PubMed IDs.
 - Direct links to PubMed and PubMed Central (when available)
 - Optional MeSH terms, grant information, and publication types
 - Handles PubMed's inconsistent XML (structured abstracts, missing fields, varying date formats)
+
+---
+
+### `pmc_fetch`
+
+Fetch full-text articles from PubMed Central (PMC).
+
+- Accepts PMC IDs directly or PubMed IDs (auto-resolved to PMCIDs via ELink)
+- Returns complete article body text organized by sections and subsections
+- Optional reference list from back matter
+- Section filtering by title (case-insensitive match, e.g. `["methods", "results"]`)
+- Configurable max sections to limit response size
+- Up to 10 articles per request
+- Only open-access articles available in PMC will return full text
 
 ---
 
@@ -264,7 +283,7 @@ bun run deploy:dev
 
 | Directory | Purpose |
 |:---|:---|
-| `src/mcp-server/tools` | Tool definitions (`*.tool.ts`). Six PubMed tools. |
+| `src/mcp-server/tools` | Tool definitions (`*.tool.ts`). Seven PubMed tools. |
 | `src/mcp-server/resources` | Resource definitions. Database info resource. |
 | `src/mcp-server/prompts` | Prompt definitions. Research plan prompt. |
 | `src/mcp-server/transports` | HTTP and stdio transports, including auth middleware. |

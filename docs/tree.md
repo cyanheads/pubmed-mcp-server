@@ -1,6 +1,6 @@
 # pubmed-mcp-server - Directory Structure
 
-Generated on: 2026-03-05 00:41:48
+Generated on: 2026-03-05 01:15:00
 
 ```
 pubmed-mcp-server/
@@ -73,6 +73,7 @@ pubmed-mcp-server/
 │   │   ├── tools/
 │   │   │   ├── definitions/
 │   │   │   │   ├── index.ts
+│   │   │   │   ├── pmc-fetch.tool.ts
 │   │   │   │   ├── pubmed-cite.tool.ts
 │   │   │   │   ├── pubmed-fetch.tool.ts
 │   │   │   │   ├── pubmed-mesh-lookup.tool.ts
@@ -122,6 +123,7 @@ pubmed-mcp-server/
 │   │   │   ├── parsing/
 │   │   │   │   ├── article-parser.ts
 │   │   │   │   ├── esummary-parser.ts
+│   │   │   │   ├── pmc-article-parser.ts
 │   │   │   │   └── xml-helpers.ts
 │   │   │   └── types.ts
 │   │   └── README.md
@@ -301,6 +303,7 @@ pubmed-mcp-server/
 │   │       └── parsing/
 │   │           ├── article-parser.test.ts
 │   │           ├── esummary-parser.test.ts
+│   │           ├── pmc-article-parser.test.ts
 │   │           └── xml-helpers.test.ts
 │   ├── storage/
 │   │   ├── core/
