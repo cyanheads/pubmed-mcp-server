@@ -126,6 +126,10 @@ export function extractJournalInfo(
   const issn = issnType === 'Electronic' ? undefined : issnValue || undefined;
   const eIssn = issnType === 'Electronic' ? issnValue || undefined : undefined;
 
+  const month = getText(pubDate?.Month);
+  const day = getText(pubDate?.Day);
+  const medlineDate = getText(pubDate?.MedlineDate);
+
   return {
     title: getText(journalXml.Title),
     isoAbbreviation: getText(journalXml.ISOAbbreviation),
@@ -136,9 +140,9 @@ export function extractJournalInfo(
     pages: getText(articleXml?.Pagination?.MedlinePgn),
     publicationDate: {
       ...(year && { year }),
-      ...(getText(pubDate?.Month) && { month: getText(pubDate?.Month) }),
-      ...(getText(pubDate?.Day) && { day: getText(pubDate?.Day) }),
-      ...(getText(pubDate?.MedlineDate) && { medlineDate: getText(pubDate?.MedlineDate) }),
+      ...(month && { month }),
+      ...(day && { day }),
+      ...(medlineDate && { medlineDate }),
     },
   };
 }

@@ -100,14 +100,15 @@ function resolvePath(obj: unknown, path: string): unknown {
 
 /**
  * Extracts human-readable strings from a resolved path value.
- * Handles plain strings, arrays of strings, and objects with a `#text` property.
+ * Handles primitives (string/number/boolean — fast-xml-parser emits numbers
+ * when `parseTagValue` is enabled), arrays, and objects with a `#text` property.
  */
 function extractTextValues(source: unknown, prefix = ''): string[] {
   const items = Array.isArray(source) ? source : [source];
   const messages: string[] = [];
   for (const item of items) {
-    if (typeof item === 'string') {
-      messages.push(`${prefix}${item}`);
+    if (typeof item === 'string' || typeof item === 'number' || typeof item === 'boolean') {
+      messages.push(`${prefix}${String(item)}`);
     } else if (item && typeof (item as Record<string, unknown>)['#text'] === 'string') {
       messages.push(`${prefix}${(item as Record<string, unknown>)['#text'] as string}`);
     }
@@ -212,14 +213,9 @@ export class NcbiResponseHandler {
 
       const parsedXml = this.xmlParser.parse(responseText) as Record<string, unknown>;
 
-      // Check for error indicators in the parsed structure.
-      // Note: eSearchResult.ErrorList is NOT checked here — NCBI populates it
-      // with PhraseNotFound/FieldNotFound on valid zero-result queries.
-      const hasError =
-        resolvePath(parsedXml, 'eLinkResult.ERROR') !== undefined ||
-        resolvePath(parsedXml, 'eSummaryResult.ERROR') !== undefined ||
-        resolvePath(parsedXml, 'PubmedArticleSet.ErrorList') !== undefined ||
-        resolvePath(parsedXml, 'ERROR') !== undefined;
+      // Check for error indicators using the same paths that extractNcbiErrorMessages
+      // uses for extraction — keeps detection and extraction in sync.
+      const hasError = ERROR_PATHS.some((path) => resolvePath(parsedXml, path) !== undefined);
 
       if (hasError) {
         const errorMessages = this.extractNcbiErrorMessages(parsedXml);

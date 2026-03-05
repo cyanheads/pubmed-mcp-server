@@ -394,8 +394,8 @@ export function parsePmcArticle(xmlArticle: XmlJatsArticle): ParsedPmcArticle {
   const sections = extractBodySections(xmlArticle.body);
   const references = extractReferences(xmlArticle.back);
 
-  // Normalize PMCID — ensure it has the PMC prefix
-  const normalizedPmcId = pmcId.startsWith('PMC') ? pmcId : `PMC${pmcId}`;
+  // Normalize PMCID — ensure it has the PMC prefix (skip if empty)
+  const normalizedPmcId = !pmcId ? '' : pmcId.startsWith('PMC') ? pmcId : `PMC${pmcId}`;
 
   return {
     pmcId: normalizedPmcId,

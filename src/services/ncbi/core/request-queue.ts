@@ -109,10 +109,10 @@ export class NcbiRequestQueue {
 
     const item = this.queue.shift();
     if (!item) {
+      // Unreachable — the length check above guarantees at least one item.
       this.processing = false;
       return;
     }
-
     const { resolve, reject, task, context, endpoint } = item;
 
     try {

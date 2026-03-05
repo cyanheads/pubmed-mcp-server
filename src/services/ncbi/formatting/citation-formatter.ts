@@ -28,18 +28,11 @@ function getYear(article: ParsedArticle): string {
  */
 function splitPages(pages?: string): { start?: string; end?: string } {
   if (!pages) return {};
-  // Normalize dashes to a single separator
+  // Normalize hyphens, en-dashes, and em-dashes to a single separator
   const parts = pages.split(/[-\u2013\u2014]/).map((p) => p.trim());
-  if (parts.length >= 2) {
-    const start = parts[0];
-    const end = parts[1];
-    return {
-      ...(start !== undefined && { start }),
-      ...(end !== undefined && { end }),
-    };
-  }
-  const start = parts[0];
-  return start !== undefined ? { start } : {};
+  const [start, end] = parts;
+  if (start && end) return { start, end };
+  return start ? { start } : {};
 }
 
 /**
@@ -47,17 +40,18 @@ function splitPages(pages?: string): { start?: string; end?: string } {
  * Handles: & % $ # _ { } ~ ^
  */
 function escapeBibtex(text: string): string {
-  return text
-    .replace(/\\/g, '\\textbackslash{}')
-    .replace(/&/g, '\\&')
-    .replace(/%/g, '\\%')
-    .replace(/\$/g, '\\$')
-    .replace(/#/g, '\\#')
-    .replace(/_/g, '\\_')
-    .replace(/\{/g, '\\{')
-    .replace(/\}/g, '\\}')
-    .replace(/~/g, '\\textasciitilde{}')
-    .replace(/\^/g, '\\textasciicircum{}');
+  return text.replace(/[\\&%$#_{}~^]/g, (ch) => {
+    switch (ch) {
+      case '\\':
+        return '\\textbackslash{}';
+      case '~':
+        return '\\textasciitilde{}';
+      case '^':
+        return '\\textasciicircum{}';
+      default:
+        return `\\${ch}`;
+    }
+  });
 }
 
 // ---------------------------------------------------------------------------
@@ -76,9 +70,9 @@ function formatAuthorApa(author: ParsedArticleAuthor): string {
     author.initials ??
     author.firstName
       ?.split(/[\s-]+/)
+      .filter(Boolean)
       .map((part) => `${part[0]}.`)
       .join(' ');
-  if (!last) return initials ?? '';
   if (!initials) return last;
   // Extract only letter characters, format each as "X." separated by spaces
   const formatted = initials
@@ -86,6 +80,7 @@ function formatAuthorApa(author: ParsedArticleAuthor): string {
     .split('')
     .map((c) => `${c}.`)
     .join(' ');
+  if (!last) return formatted;
   return `${last}, ${formatted}`;
 }
 
