@@ -16,7 +16,7 @@
  * @param transportType - The transport type ('stdio' or 'http'). If 'stdio', uses stderr.
  * @example
  * ```typescript
- * logStartupBanner('🚀 MCP Server running at: http://localhost:3010', 'http');
+ * logStartupBanner('🚀 MCP Server running at: http://localhost:3017', 'http');
  * logStartupBanner('🚀 MCP Server running in STDIO mode', 'stdio');
  * ```
  */

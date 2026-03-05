@@ -205,8 +205,7 @@ pubmed-mcp-server/
 │   │   │   │   ├── pubmed-mesh-lookup.tool.ts
 │   │   │   │   ├── pubmed-related.tool.ts
 │   │   │   │   ├── pubmed-search.tool.ts
-│   │   │   │   ├── pubmed-spell.tool.ts
-│   │   │   │   └── pubmed-trending.tool.ts
+│   │   │   │   └── pubmed-spell.tool.ts
 │   │   │   ├── utils/
 │   │   │   │   ├── toolDefinition.ts
 │   │   │   │   └── toolHandlerFactory.ts

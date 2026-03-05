@@ -5,7 +5,7 @@
 
 <div align="center">
 
-[![npm](https://img.shields.io/npm/v/@cyanheads/pubmed-mcp-server?style=flat-square&logo=npm&logoColor=white)](https://www.npmjs.com/package/@cyanheads/pubmed-mcp-server) [![Version](https://img.shields.io/badge/Version-2.0.0-blue.svg?style=flat-square)](./CHANGELOG.md) [![MCP Spec](https://img.shields.io/badge/MCP%20Spec-2025--11--25-8A2BE2.svg?style=flat-square)](https://modelcontextprotocol.io/specification/2025-11-25) [![MCP SDK](https://img.shields.io/badge/MCP%20SDK-^1.27.1-green.svg?style=flat-square)](https://modelcontextprotocol.io/) [![License](https://img.shields.io/badge/License-Apache%202.0-orange.svg?style=flat-square)](./LICENSE) [![Status](https://img.shields.io/badge/Status-Stable-brightgreen.svg?style=flat-square)](https://github.com/cyanheads/pubmed-mcp-server/issues) [![TypeScript](https://img.shields.io/badge/TypeScript-^5.9.3-3178C6.svg?style=flat-square)](https://www.typescriptlang.org/) [![Bun](https://img.shields.io/badge/Bun-v1.3.2-blueviolet.svg?style=flat-square)](https://bun.sh/)
+[![npm](https://img.shields.io/npm/v/@cyanheads/pubmed-mcp-server?style=flat-square&logo=npm&logoColor=white)](https://www.npmjs.com/package/@cyanheads/pubmed-mcp-server) [![Version](https://img.shields.io/badge/Version-2.0.1-blue.svg?style=flat-square)](./CHANGELOG.md) [![MCP Spec](https://img.shields.io/badge/MCP%20Spec-2025--11--25-8A2BE2.svg?style=flat-square)](https://modelcontextprotocol.io/specification/2025-11-25) [![MCP SDK](https://img.shields.io/badge/MCP%20SDK-^1.27.1-green.svg?style=flat-square)](https://modelcontextprotocol.io/) [![License](https://img.shields.io/badge/License-Apache%202.0-orange.svg?style=flat-square)](./LICENSE) [![Status](https://img.shields.io/badge/Status-Stable-brightgreen.svg?style=flat-square)](https://github.com/cyanheads/pubmed-mcp-server/issues) [![TypeScript](https://img.shields.io/badge/TypeScript-^5.9.3-3178C6.svg?style=flat-square)](https://www.typescriptlang.org/) [![Bun](https://img.shields.io/badge/Bun-v1.3.2-blueviolet.svg?style=flat-square)](https://bun.sh/)
 
 </div>
 
@@ -13,16 +13,15 @@
 
 ## Tools
 
-Seven tools for working with PubMed and NCBI data:
+Six tools for working with PubMed and NCBI data:
 
 | Tool | Description |
 |:---|:---|
-| `pubmed_search` | Search PubMed with query syntax, filters, date ranges, and optional brief summaries |
+| `pubmed_search` | Search PubMed with full query syntax, field-specific filters, date ranges, pagination, and optional brief summaries |
 | `pubmed_fetch` | Fetch full article metadata by PMIDs — abstract, authors, journal, MeSH terms, grants |
 | `pubmed_cite` | Generate formatted citations in APA 7th, MLA 9th, BibTeX, or RIS |
 | `pubmed_related` | Find similar articles, citing articles, or references for a given PMID |
 | `pubmed_spell` | Spell-check biomedical queries using NCBI's ESpell service |
-| `pubmed_trending` | Find recent publications in a topic, sorted by publication date |
 | `pubmed_mesh_lookup` | Search and explore MeSH vocabulary — tree numbers, scope notes, entry terms |
 
 ### `pubmed_search`
@@ -30,9 +29,12 @@ Seven tools for working with PubMed and NCBI data:
 Search PubMed with full NCBI query syntax and filters.
 
 - Free-text queries with PubMed's full boolean and field-tag syntax
+- Field-specific filters: author, journal, MeSH terms, language, species
+- Common filters: has abstract, free full text
 - Date range filtering by publication, modification, or Entrez date
 - Publication type filtering (Review, Clinical Trial, Meta-Analysis, etc.)
 - Sort by relevance, publication date, author, or journal
+- Pagination via offset for paging through large result sets
 - Optional brief summaries for top N results via ESummary
 
 ---
@@ -55,7 +57,7 @@ Generate formatted citations for articles.
 - Four citation styles: APA 7th, MLA 9th, BibTeX, RIS
 - Request multiple styles per article in a single call
 - Hand-rolled formatters — zero external dependencies, fully Workers-compatible
-- Up to 20 articles per request
+- Up to 50 articles per request
 
 ---
 
@@ -75,16 +77,6 @@ Spell-check a biomedical query using NCBI's ESpell.
 
 - Returns the original query, corrected query, and whether a suggestion was found
 - Useful for query refinement before searching
-
----
-
-### `pubmed_trending`
-
-Find recent publications in a topic, sorted by date.
-
-- Configurable look-back period (1–365 days)
-- Results include title, authors, publication date, source, and DOI
-- Convenience wrapper over date-filtered ESearch + ESummary
 
 ---
 
@@ -147,7 +139,7 @@ Or for Streamable HTTP:
 
 ```bash
 MCP_TRANSPORT_TYPE=http
-MCP_HTTP_PORT=3010
+MCP_HTTP_PORT=3017
 ```
 
 ### Prerequisites
@@ -181,11 +173,11 @@ All configuration is centralized and validated at startup in `src/config/index.t
 
 | Variable | Description | Default |
 |:---|:---|:---|
-| `MCP_TRANSPORT_TYPE` | Transport: `stdio` or `http` | `http` |
-| `MCP_HTTP_PORT` | HTTP server port | `3010` |
+| `MCP_TRANSPORT_TYPE` | Transport: `stdio` or `http` | `stdio` |
+| `MCP_HTTP_PORT` | HTTP server port | `3017` |
 | `MCP_AUTH_MODE` | Authentication: `none`, `jwt`, or `oauth` | `none` |
 | `MCP_LOG_LEVEL` | Log level (`debug`, `info`, `warning`, `error`, etc.) | `info` |
-| `STORAGE_PROVIDER_TYPE` | Storage backend: `in-memory`, `filesystem`, `supabase`, `cloudflare-kv/r2/d1` | `filesystem` |
+| `STORAGE_PROVIDER_TYPE` | Storage backend: `in-memory`, `filesystem`, `supabase`, `cloudflare-kv/r2/d1` | `in-memory` |
 | `NCBI_API_KEY` | NCBI API key for higher rate limits (10 req/s vs 3 req/s) | none |
 | `NCBI_ADMIN_EMAIL` | Contact email sent with NCBI requests (recommended by NCBI) | none |
 | `NCBI_REQUEST_DELAY_MS` | Delay between NCBI requests in ms | 334 (100 with key) |

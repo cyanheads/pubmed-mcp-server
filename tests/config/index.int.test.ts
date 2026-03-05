@@ -28,7 +28,7 @@ describe('Configuration Service', () => {
     const config = parseConfig();
     expect(config.environment).toBe('development');
     expect(config.logLevel).toBe('debug');
-    expect(config.mcpHttpPort).toBe(3010);
+    expect(config.mcpHttpPort).toBe(3017);
     expect(config.storage.providerType).toBe('in-memory');
   });
 
