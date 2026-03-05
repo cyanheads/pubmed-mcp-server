@@ -4,6 +4,14 @@ All notable changes to this project will be documented in this file.
 
 ---
 
+## [2.1.3] - 2026-03-04
+
+### Fixed
+
+- **Telemetry**: Enable OpenTelemetry NodeSDK on Bun — the `isBun` guard was unnecessarily blocking initialization when manual spans, custom metrics, and OTLP export all work correctly
+
+---
+
 ## [2.1.2] - 2026-03-04
 
 ### Changed
