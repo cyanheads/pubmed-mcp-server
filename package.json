@@ -1,6 +1,6 @@
 {
   "name": "@cyanheads/pubmed-mcp-server",
-  "version": "2.1.1",
+  "version": "2.1.2",
   "mcpName": "io.github.cyanheads/pubmed-mcp-server",
   "description": "MCP server for PubMed/NCBI E-utilities integration. Search articles, fetch metadata, generate citations, explore MeSH terms, and discover related research.",
   "main": "dist/index.js",
@@ -78,7 +78,7 @@
     "rollup": "4.59.0"
   },
   "devDependencies": {
-    "@cloudflare/workers-types": "^4.20260301.1",
+    "@cloudflare/workers-types": "^4.20260305.1",
     "@biomejs/biome": "2.4.5",
     "@hono/mcp": "^0.2.4",
     "@traversable/registry": "^0.0.49",

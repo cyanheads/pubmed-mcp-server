@@ -4,6 +4,22 @@ All notable changes to this project will be documented in this file.
 
 ---
 
+## [2.1.2] - 2026-03-04
+
+### Changed
+
+- **Tool rename**: `pmc_fetch` renamed to `pubmed_pmc_fetch` for consistency with the `pubmed_*` naming convention across all tools
+
+### Fixed
+
+- **Config**: Path resolution for logs directory now uses `node:path` utilities (`dirname`, `join`, `isAbsolute`) instead of URL-based arithmetic for cross-platform correctness ([#9](https://github.com/cyanheads/pubmed-mcp-server/pull/9))
+
+### Updated
+
+- `@cloudflare/workers-types` to `4.20260305.1`
+
+---
+
 ## [2.1.1] - 2026-03-04
 
 ### Fixed
@@ -35,14 +51,14 @@ All notable changes to this project will be documented in this file.
 
 ### Added
 
-- **`pmc_fetch` tool**: Fetch full-text articles from PubMed Central (PMC) via NCBI EFetch with `db=pmc`. Accepts PMC IDs directly or PubMed IDs (auto-resolved to PMCIDs via ELink). Returns structured body sections, subsections, metadata, and optional references parsed from JATS XML.
+- **`pubmed_pmc_fetch` tool**: Fetch full-text articles from PubMed Central (PMC) via NCBI EFetch with `db=pmc`. Accepts PMC IDs directly or PubMed IDs (auto-resolved to PMCIDs via ELink). Returns structured body sections, subsections, metadata, and optional references parsed from JATS XML.
 - **PMC article parser**: JATS XML parser (`pmc-article-parser.ts`) extracts metadata (authors, affiliations, journal, keywords, publication date, abstract), recursive body sections, and back-matter references from PMC EFetch responses.
 - **PMC types**: JATS XML element types and parsed PMC result types (`XmlJatsArticle`, `ParsedPmcArticle`, etc.) in `src/services/ncbi/types.ts`.
 
 ### Changed
 
 - **NCBI response handler**: Added PMC JATS-specific jpaths (`pmc-articleset.article`, `contrib-group.contrib`, `body.sec`, `ref-list.ref`, etc.) to the `isArray` set for consistent XML parsing.
-- **README**: Added `pmc_fetch` tool documentation, updated server description to mention full-text fetch.
+- **README**: Added `pubmed_pmc_fetch` tool documentation, updated server description to mention full-text fetch.
 
 ---
 
