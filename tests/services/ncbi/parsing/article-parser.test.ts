@@ -14,6 +14,7 @@ import {
   extractJournalInfo,
   extractKeywords,
   extractMeshTerms,
+  extractPmcId,
   extractPmid,
   extractPublicationTypes,
   parseFullArticle,
@@ -655,5 +656,185 @@ describe('parseFullArticle', () => {
       undefined as unknown as XmlMedlineCitation['PMID'];
     const result = parseFullArticle(article);
     expect(result.pmid).toBe('');
+  });
+
+  it('extracts PMC ID from PubmedData.ArticleIdList', () => {
+    const article = makeFullArticle();
+    article.PubmedData = {
+      ArticleIdList: {
+        ArticleId: [
+          { '#text': '12345678', '@_IdType': 'pubmed' },
+          { '#text': 'PMC9999999', '@_IdType': 'pmc' },
+        ],
+      },
+    };
+    const result = parseFullArticle(article);
+    expect(result.pmcId).toBe('PMC9999999');
+  });
+});
+
+// ─── extractPmcId ─────────────────────────────────────────────────────────────
+
+describe('extractPmcId', () => {
+  it('returns undefined when articleXml is undefined', () => {
+    expect(extractPmcId(undefined)).toBeUndefined();
+  });
+
+  it('extracts PMC ID from Article.ArticleIdList', () => {
+    const article: XmlArticle = {
+      ArticleIdList: {
+        ArticleId: [
+          { '#text': '12345678', '@_IdType': 'pubmed' },
+          { '#text': 'PMC7654321', '@_IdType': 'pmc' },
+        ],
+      },
+    };
+    expect(extractPmcId(article)).toBe('PMC7654321');
+  });
+
+  it('falls back to PubmedData.ArticleIdList when article-level is absent', () => {
+    const article: XmlArticle = {};
+    const pubmedDataIdList: XmlArticleIdList = {
+      ArticleId: [
+        { '#text': 'PMC1111111', '@_IdType': 'pmc' },
+        { '#text': '22222222', '@_IdType': 'pubmed' },
+      ],
+    };
+    expect(extractPmcId(article, pubmedDataIdList)).toBe('PMC1111111');
+  });
+
+  it('returns undefined when no PMC ID exists in any location', () => {
+    const article: XmlArticle = {
+      ArticleIdList: {
+        ArticleId: { '#text': '12345678', '@_IdType': 'pubmed' },
+      },
+    };
+    expect(extractPmcId(article)).toBeUndefined();
+  });
+
+  it('prefers Article.ArticleIdList over PubmedData when both have PMC ID', () => {
+    const article: XmlArticle = {
+      ArticleIdList: {
+        ArticleId: { '#text': 'PMC_ARTICLE', '@_IdType': 'pmc' },
+      },
+    };
+    const pubmedDataIdList: XmlArticleIdList = {
+      ArticleId: { '#text': 'PMC_PUBDATA', '@_IdType': 'pmc' },
+    };
+    expect(extractPmcId(article, pubmedDataIdList)).toBe('PMC_ARTICLE');
+  });
+});
+
+// ─── extractAuthors edge cases ───────────────────────────────────────────────
+
+describe('extractAuthors edge cases', () => {
+  it('extracts ORCID from Identifier with Source=ORCID', () => {
+    const authorList: XmlAuthorList = {
+      Author: {
+        LastName: { '#text': 'Smith' },
+        ForeName: { '#text': 'Jane' },
+        Initials: { '#text': 'J' },
+        Identifier: { '#text': '0000-0001-2345-6789', '@_Source': 'ORCID' },
+      },
+    };
+    const { authors } = extractAuthors(authorList);
+    expect(authors[0]?.orcid).toBe('0000-0001-2345-6789');
+  });
+
+  it('ignores Identifier with non-ORCID Source', () => {
+    const authorList: XmlAuthorList = {
+      Author: {
+        LastName: { '#text': 'Doe' },
+        ForeName: { '#text': 'John' },
+        Initials: { '#text': 'J' },
+        Identifier: { '#text': '12345', '@_Source': 'SCOPUS' },
+      },
+    };
+    const { authors } = extractAuthors(authorList);
+    expect(authors[0]?.orcid).toBeUndefined();
+  });
+
+  it('handles author with empty AffiliationInfo', () => {
+    const authorList: XmlAuthorList = {
+      Author: {
+        LastName: { '#text': 'Solo' },
+        ForeName: { '#text': 'Han' },
+        Initials: { '#text': 'H' },
+        AffiliationInfo: [],
+      },
+    };
+    const { authors, affiliations } = extractAuthors(authorList);
+    expect(authors[0]?.lastName).toBe('Solo');
+    expect(authors[0]?.affiliationIndices).toBeUndefined();
+    expect(affiliations).toEqual([]);
+  });
+
+  it('handles mix of collective and individual authors', () => {
+    const authorList: XmlAuthorList = {
+      Author: [
+        {
+          LastName: { '#text': 'Smith' },
+          ForeName: { '#text': 'Jane' },
+          Initials: { '#text': 'J' },
+        },
+        { CollectiveName: { '#text': 'WHO Consortium' } },
+        { LastName: { '#text': 'Doe' }, ForeName: { '#text': 'John' }, Initials: { '#text': 'J' } },
+      ],
+    };
+    const { authors } = extractAuthors(authorList);
+    expect(authors).toHaveLength(3);
+    expect(authors[0]?.lastName).toBe('Smith');
+    expect(authors[1]?.collectiveName).toBe('WHO Consortium');
+    expect(authors[2]?.lastName).toBe('Doe');
+  });
+});
+
+// ─── extractJournalInfo edge cases ───────────────────────────────────────────
+
+describe('extractJournalInfo edge cases', () => {
+  it('classifies Electronic ISSN into eIssn field', () => {
+    const journal: XmlJournal = {
+      Title: { '#text': 'Nature Digital Medicine' },
+      ISSN: { '#text': '2398-6352', '@_IssnType': 'Electronic' },
+      JournalIssue: { PubDate: { Year: { '#text': '2024' } } },
+    };
+    const result = extractJournalInfo(journal);
+    expect(result?.eIssn).toBe('2398-6352');
+    expect(result?.issn).toBeUndefined();
+  });
+
+  it('classifies Print ISSN into issn field', () => {
+    const journal: XmlJournal = {
+      Title: { '#text': 'JAMA' },
+      ISSN: { '#text': '0098-7484', '@_IssnType': 'Print' },
+      JournalIssue: { PubDate: { Year: { '#text': '2024' } } },
+    };
+    const result = extractJournalInfo(journal);
+    expect(result?.issn).toBe('0098-7484');
+    expect(result?.eIssn).toBeUndefined();
+  });
+
+  it('returns empty year when MedlineDate has no 4-digit year', () => {
+    const journal: XmlJournal = {
+      Title: { '#text': 'Some Journal' },
+      JournalIssue: {
+        PubDate: {
+          MedlineDate: { '#text': 'Spring' },
+        },
+      },
+    };
+    const result = extractJournalInfo(journal);
+    // MedlineDate 'Spring' has no 4-digit year — year should be empty/undefined
+    expect(result?.publicationDate?.year).toBeFalsy();
+  });
+
+  it('handles journal with no JournalIssue at all', () => {
+    const journal: XmlJournal = {
+      Title: { '#text': 'Orphan Journal' },
+    };
+    const result = extractJournalInfo(journal);
+    expect(result?.title).toBe('Orphan Journal');
+    expect(result?.volume).toBeFalsy();
+    expect(result?.issue).toBeFalsy();
   });
 });

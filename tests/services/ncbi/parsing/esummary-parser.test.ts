@@ -455,4 +455,88 @@ describe('extractBriefSummaries', () => {
     const results = await extractBriefSummaries(eSummaryResult, testContext);
     expect(results).toEqual([]);
   });
+
+  // ── Authors parsing edge cases ─────────────────────────────────────────
+
+  describe('Authors parsing edge cases', () => {
+    it('parses Authors as { Author: ... } nested object', async () => {
+      mockParseDate.mockResolvedValue(null);
+
+      const docSummary: ESummaryDocumentSummary = {
+        '@_uid': '40000001',
+        Title: 'Nested Author format test',
+        Authors: {
+          Author: [
+            { Name: 'Garcia M', authtype: 'Author' },
+            { Name: 'Wang X', authtype: 'Author' },
+          ],
+        },
+      };
+
+      const eSummaryResult: ESummaryResult = {
+        DocumentSummarySet: { DocumentSummary: docSummary },
+      };
+
+      const results = await extractBriefSummaries(eSummaryResult, testContext);
+      expect(results[0]?.authors).toBe('Garcia M, Wang X');
+    });
+
+    it('parses Authors as comma-separated string', async () => {
+      mockParseDate.mockResolvedValue(null);
+
+      const docSummary: ESummaryDocumentSummary = {
+        '@_uid': '40000002',
+        Title: 'String authors test',
+        Authors: 'Smith JA, Doe B, Brown C',
+      };
+
+      const eSummaryResult: ESummaryResult = {
+        DocumentSummarySet: { DocumentSummary: docSummary },
+      };
+
+      const results = await extractBriefSummaries(eSummaryResult, testContext);
+      expect(results[0]?.authors).toContain('Smith JA');
+      expect(results[0]?.authors).toContain('Doe B');
+      expect(results[0]?.authors).toContain('Brown C');
+    });
+
+    it('extracts PMC ID from ArticleIds in DocumentSummary', async () => {
+      mockParseDate.mockResolvedValue(null);
+
+      const docSummary: ESummaryDocumentSummary = {
+        '@_uid': '40000003',
+        Title: 'PMC ID test',
+        ArticleIds: {
+          ArticleId: [
+            { idtype: 'pubmed', idtypen: 1, value: '40000003' },
+            { idtype: 'pmc', idtypen: 8, value: 'PMC9999999' },
+          ],
+        },
+      };
+
+      const eSummaryResult: ESummaryResult = {
+        DocumentSummarySet: { DocumentSummary: docSummary },
+      };
+
+      const results = await extractBriefSummaries(eSummaryResult, testContext);
+      expect(results[0]?.pmcId).toBe('PMC9999999');
+    });
+
+    it('falls back to FullJournalName when Source is absent', async () => {
+      mockParseDate.mockResolvedValue(null);
+
+      const docSummary: ESummaryDocumentSummary = {
+        '@_uid': '40000004',
+        Title: 'Source fallback test',
+        FullJournalName: 'Journal of Advanced Testing',
+      };
+
+      const eSummaryResult: ESummaryResult = {
+        DocumentSummarySet: { DocumentSummary: docSummary },
+      };
+
+      const results = await extractBriefSummaries(eSummaryResult, testContext);
+      expect(results[0]?.source).toBe('Journal of Advanced Testing');
+    });
+  });
 });

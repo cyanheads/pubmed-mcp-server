@@ -445,6 +445,149 @@ describe('NcbiService', () => {
     });
   });
 
+  // ── eSearch edge cases ─────────────────────────────────────────────────────
+
+  describe('eSearch edge cases', () => {
+    it('returns 0 for non-numeric Count/RetMax/RetStart', async () => {
+      mockResponseHandler.parseAndHandleResponse.mockReturnValue({
+        eSearchResult: {
+          Count: 'not-a-number',
+          RetMax: '',
+          RetStart: undefined,
+          IdList: { Id: [] },
+          QueryTranslation: '',
+        },
+      });
+
+      const result = await service.eSearch({ db: 'pubmed', term: 'test' }, context);
+
+      expect(result.count).toBe(0);
+      expect(result.retmax).toBe(0);
+      expect(result.retstart).toBe(0);
+    });
+
+    it('stringifies numeric IDs in idList', async () => {
+      mockResponseHandler.parseAndHandleResponse.mockReturnValue({
+        eSearchResult: {
+          Count: '2',
+          RetMax: '2',
+          RetStart: '0',
+          IdList: { Id: [12345, 67890] },
+          QueryTranslation: '',
+        },
+      });
+
+      const result = await service.eSearch({ db: 'pubmed', term: 'test' }, context);
+
+      expect(result.idList).toEqual(['12345', '67890']);
+    });
+  });
+
+  // ── eSpell edge cases ──────────────────────────────────────────────────────
+
+  describe('eSpell edge cases', () => {
+    it('falls back to params.term when Query is absent from response', async () => {
+      mockResponseHandler.parseAndHandleResponse.mockReturnValue({
+        eSpellResult: { CorrectedQuery: 'diabetes' },
+      });
+
+      const result = await service.eSpell({ db: 'pubmed', term: 'dibeates' }, context);
+
+      expect(result.original).toBe('dibeates');
+      expect(result.corrected).toBe('diabetes');
+      expect(result.hasSuggestion).toBe(true);
+    });
+
+    it('falls back to empty string when both Query and params.term are absent', async () => {
+      mockResponseHandler.parseAndHandleResponse.mockReturnValue({
+        eSpellResult: { CorrectedQuery: 'something' },
+      });
+
+      const result = await service.eSpell({ db: 'pubmed' }, context);
+
+      expect(result.original).toBe('');
+      expect(result.corrected).toBe('something');
+    });
+
+    it('returns original as corrected when CorrectedQuery is absent', async () => {
+      mockResponseHandler.parseAndHandleResponse.mockReturnValue({
+        eSpellResult: { Query: 'cancer' },
+      });
+
+      const result = await service.eSpell({ db: 'pubmed', term: 'cancer' }, context);
+
+      expect(result.corrected).toBe('cancer');
+      expect(result.hasSuggestion).toBe(false);
+    });
+  });
+
+  // ── eSummary edge cases ────────────────────────────────────────────────────
+
+  describe('eSummary edge cases', () => {
+    it('uses xml retmode when version is 2.0 but retmode is not json', async () => {
+      mockResponseHandler.parseAndHandleResponse.mockReturnValue({ eSummaryResult: {} });
+
+      await service.eSummary(
+        { db: 'pubmed', id: '12345', version: '2.0', retmode: 'xml' },
+        context,
+      );
+
+      expect(mockApiClient.makeRequest).toHaveBeenCalledWith(
+        'esummary',
+        expect.anything(),
+        context,
+        { retmode: 'xml' },
+      );
+    });
+
+    it('uses xml retmode when retmode is json but version is not 2.0', async () => {
+      mockResponseHandler.parseAndHandleResponse.mockReturnValue({ eSummaryResult: {} });
+
+      await service.eSummary(
+        { db: 'pubmed', id: '12345', version: '1.0', retmode: 'json' },
+        context,
+      );
+
+      expect(mockApiClient.makeRequest).toHaveBeenCalledWith(
+        'esummary',
+        expect.anything(),
+        context,
+        { retmode: 'xml' },
+      );
+    });
+  });
+
+  // ── eFetch edge cases ──────────────────────────────────────────────────────
+
+  describe('eFetch edge cases', () => {
+    it('preserves explicit usePost from caller options', async () => {
+      mockResponseHandler.parseAndHandleResponse.mockReturnValue({});
+
+      await service.eFetch({ db: 'pubmed', id: '12345' }, context, {
+        retmode: 'xml',
+        usePost: true,
+      });
+
+      expect(mockApiClient.makeRequest).toHaveBeenCalledWith(
+        'efetch',
+        expect.anything(),
+        context,
+        expect.objectContaining({ usePost: true }),
+      );
+    });
+
+    it('does not force POST when id is not a string', async () => {
+      mockResponseHandler.parseAndHandleResponse.mockReturnValue({});
+
+      await service.eFetch({ db: 'pubmed', id: 12345 }, context);
+
+      const callOptions = mockApiClient.makeRequest.mock.calls[0]?.[3] as
+        | Record<string, unknown>
+        | undefined;
+      expect(callOptions?.usePost).toBeFalsy();
+    });
+  });
+
   // ── Queue integration ──────────────────────────────────────────────────────
 
   describe('queue integration', () => {

@@ -479,4 +479,146 @@ describe('parsePmcArticle', () => {
     expect(result.keywords).toBeUndefined();
     expect(result.references).toBeUndefined();
   });
+
+  it('falls back to pmc-uid article-id type', () => {
+    const article: XmlJatsArticle = {
+      front: {
+        'article-meta': {
+          'article-id': { '#text': '9575052', '@_pub-id-type': 'pmc-uid' },
+        },
+      },
+    };
+    const result = parsePmcArticle(article);
+    expect(result.pmcId).toBe('PMC9575052');
+  });
+
+  it('returns empty pmcId when no article-id matches pmcid or pmc-uid', () => {
+    const article: XmlJatsArticle = {
+      front: {
+        'article-meta': {
+          'article-id': { '#text': '12345678', '@_pub-id-type': 'pmid' },
+        },
+      },
+    };
+    const result = parsePmcArticle(article);
+    // No PMCID found — should be empty, not 'PMC' (bare prefix)
+    expect(result.pmcId).toBe('');
+  });
+
+  it('extracts affiliations from aff elements', () => {
+    const article: XmlJatsArticle = {
+      front: {
+        'article-meta': {
+          'article-id': { '#text': 'PMC1234567', '@_pub-id-type': 'pmcid' },
+          aff: [
+            { '#text': 'Department of Biology, MIT, Cambridge, MA' },
+            { '#text': 'School of Medicine, Harvard, Boston, MA' },
+          ],
+        },
+      },
+    };
+    const result = parsePmcArticle(article);
+    expect(result.affiliations).toHaveLength(2);
+    expect(result.affiliations![0]).toContain('MIT');
+    expect(result.affiliations![1]).toContain('Harvard');
+  });
+
+  it('extracts journal with page range from fpage and lpage', () => {
+    const article: XmlJatsArticle = {
+      front: {
+        'article-meta': {
+          'article-id': { '#text': 'PMC1234567', '@_pub-id-type': 'pmcid' },
+          volume: '42',
+          issue: '3',
+          fpage: '100',
+          lpage: '115',
+        },
+        'journal-meta': {
+          'journal-title-group': { 'journal-title': 'Nature' },
+        },
+      },
+    };
+    const result = parsePmcArticle(article);
+    expect(result.journal?.pages).toBe('100-115');
+    expect(result.journal?.volume).toBe('42');
+    expect(result.journal?.issue).toBe('3');
+  });
+
+  it('uses fpage alone when lpage is absent', () => {
+    const article: XmlJatsArticle = {
+      front: {
+        'article-meta': {
+          'article-id': { '#text': 'PMC1234567', '@_pub-id-type': 'pmcid' },
+          fpage: 'e12345',
+        },
+        'journal-meta': {
+          'journal-title-group': { 'journal-title': 'PLOS ONE' },
+        },
+      },
+    };
+    const result = parsePmcArticle(article);
+    expect(result.journal?.pages).toBe('e12345');
+  });
+});
+
+// ─── extractPubDate priority ─────────────────────────────────────────────────
+
+describe('pub-date priority in parsePmcArticle', () => {
+  it('prefers epub over ppub', () => {
+    const article: XmlJatsArticle = {
+      front: {
+        'article-meta': {
+          'article-id': { '#text': 'PMC1234567', '@_pub-id-type': 'pmcid' },
+          'pub-date': [
+            { '@_pub-type': 'ppub', year: '2023', month: '6' },
+            { '@_pub-type': 'epub', year: '2023', month: '4', day: '15' },
+          ],
+        },
+      },
+    };
+    const result = parsePmcArticle(article);
+    expect(result.publicationDate?.year).toBe('2023');
+    expect(result.publicationDate?.month).toBe('4');
+    expect(result.publicationDate?.day).toBe('15');
+  });
+
+  it('falls back to ppub when epub is absent', () => {
+    const article: XmlJatsArticle = {
+      front: {
+        'article-meta': {
+          'article-id': { '#text': 'PMC1234567', '@_pub-id-type': 'pmcid' },
+          'pub-date': { '@_pub-type': 'ppub', year: '2022', month: '12' },
+        },
+      },
+    };
+    const result = parsePmcArticle(article);
+    expect(result.publicationDate?.year).toBe('2022');
+    expect(result.publicationDate?.month).toBe('12');
+  });
+
+  it('falls back to date-type="pub" when no epub/ppub', () => {
+    const article: XmlJatsArticle = {
+      front: {
+        'article-meta': {
+          'article-id': { '#text': 'PMC1234567', '@_pub-id-type': 'pmcid' },
+          'pub-date': { '@_date-type': 'pub', year: '2021' },
+        },
+      },
+    };
+    const result = parsePmcArticle(article);
+    expect(result.publicationDate?.year).toBe('2021');
+  });
+
+  it('returns undefined publicationDate when year is absent', () => {
+    const article: XmlJatsArticle = {
+      front: {
+        'article-meta': {
+          'article-id': { '#text': 'PMC1234567', '@_pub-id-type': 'pmcid' },
+          'pub-date': { '@_pub-type': 'epub', month: '3' },
+        },
+      },
+    };
+    const result = parsePmcArticle(article);
+    expect(result.publicationDate).toBeUndefined();
+  });
 });

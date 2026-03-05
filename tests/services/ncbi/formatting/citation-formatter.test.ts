@@ -406,3 +406,320 @@ describe('formatCitations', () => {
     expect(result).toEqual({});
   });
 });
+
+// ---------------------------------------------------------------------------
+// Internal helpers — exercised through public API
+// ---------------------------------------------------------------------------
+
+describe('escapeBibtex (via formatBibtex)', () => {
+  it('escapes a literal backslash without double-escaping the braces', () => {
+    const article: ParsedArticle = {
+      ...sampleArticle,
+      title: 'Path C:\\data\\results',
+    };
+    const result = formatBibtex(article);
+    // Should contain \textbackslash{} NOT \textbackslash\{\}
+    expect(result).toContain('\\textbackslash{}');
+    expect(result).not.toContain('\\textbackslash\\{\\}');
+  });
+
+  it('escapes tilde without corrupting the trailing braces', () => {
+    const article: ParsedArticle = {
+      ...sampleArticle,
+      title: 'User ~home directory',
+    };
+    const result = formatBibtex(article);
+    expect(result).toContain('\\textasciitilde{}');
+    expect(result).not.toContain('\\textasciitilde\\{\\}');
+  });
+
+  it('escapes caret without corrupting the trailing braces', () => {
+    const article: ParsedArticle = {
+      ...sampleArticle,
+      title: 'X^2 convergence',
+    };
+    const result = formatBibtex(article);
+    expect(result).toContain('\\textasciicircum{}');
+    expect(result).not.toContain('\\textasciicircum\\{\\}');
+  });
+
+  it('handles multiple special characters in one string', () => {
+    const article: ParsedArticle = {
+      ...sampleArticle,
+      title: '\\~^&%$#_{}',
+    };
+    const result = formatBibtex(article);
+    expect(result).toContain('\\textbackslash{}');
+    expect(result).toContain('\\textasciitilde{}');
+    expect(result).toContain('\\textasciicircum{}');
+    expect(result).toContain('\\&');
+    expect(result).toContain('\\%');
+    expect(result).toContain('\\$');
+    expect(result).toContain('\\#');
+    expect(result).toContain('\\_');
+    expect(result).toContain('\\{');
+    expect(result).toContain('\\}');
+  });
+
+  it('escapes special characters in author names', () => {
+    const article: ParsedArticle = {
+      ...sampleArticle,
+      authors: [{ lastName: "O'Brien & Sons", firstName: 'José' }],
+    };
+    const result = formatBibtex(article);
+    expect(result).toContain('\\&');
+  });
+});
+
+describe('formatAuthorApa edge cases', () => {
+  it('derives initials from firstName when initials field is absent', () => {
+    const article: ParsedArticle = {
+      ...sampleArticle,
+      authors: [{ lastName: 'Smith', firstName: 'John Michael' }],
+    };
+    const result = formatApa(article);
+    expect(result).toContain('Smith, J. M.');
+  });
+
+  it('handles firstName with hyphens (derives initials per part)', () => {
+    const article: ParsedArticle = {
+      ...sampleArticle,
+      authors: [{ lastName: 'Lee', firstName: 'Mei-Ling' }],
+    };
+    const result = formatApa(article);
+    expect(result).toContain('Lee, M. L.');
+  });
+
+  it('does not produce "undefined." when firstName has consecutive spaces', () => {
+    const article: ParsedArticle = {
+      ...sampleArticle,
+      authors: [{ lastName: 'Test', firstName: 'A  B' }],
+    };
+    const result = formatApa(article);
+    expect(result).not.toContain('undefined');
+  });
+
+  it('author with only lastName, no firstName or initials', () => {
+    const article: ParsedArticle = {
+      ...sampleArticle,
+      authors: [{ lastName: 'Aristotle' }],
+    };
+    const result = formatApa(article);
+    expect(result).toContain('Aristotle');
+    expect(result).not.toContain('Aristotle,');
+  });
+
+  it('author with only firstName, no lastName', () => {
+    const article: ParsedArticle = {
+      ...sampleArticle,
+      authors: [{ firstName: 'Madonna', initials: 'M' }],
+    };
+    const result = formatApa(article);
+    expect(result).toContain('M.');
+  });
+
+  it('author with neither name nor collectiveName produces empty string gracefully', () => {
+    const article: ParsedArticle = {
+      ...sampleArticle,
+      authors: [{}],
+    };
+    const result = formatApa(article);
+    // Should not crash; the empty author contributes nothing meaningful
+    expect(typeof result).toBe('string');
+  });
+});
+
+describe('formatAuthorsApa author-count boundaries', () => {
+  it('single author — no ampersand', () => {
+    const article: ParsedArticle = {
+      ...sampleArticle,
+      authors: [{ lastName: 'Solo', initials: 'S' }],
+    };
+    const result = formatApa(article);
+    expect(result).toContain('Solo, S.');
+    expect(result).not.toContain('&');
+  });
+
+  it('3 authors — comma-separated with & before last', () => {
+    const article: ParsedArticle = {
+      ...sampleArticle,
+      authors: [
+        { lastName: 'A', initials: 'X' },
+        { lastName: 'B', initials: 'Y' },
+        { lastName: 'C', initials: 'Z' },
+      ],
+    };
+    const result = formatApa(article);
+    expect(result).toContain('A, X., B, Y., & C, Z.');
+  });
+
+  it('exactly 20 authors — all listed, no ellipsis', () => {
+    const authors = Array.from({ length: 20 }, (_, i) => ({
+      lastName: `Author${i + 1}`,
+      initials: 'A',
+    }));
+    const article: ParsedArticle = { ...sampleArticle, authors };
+    const result = formatApa(article);
+    expect(result).toContain('Author1');
+    expect(result).toContain('Author20');
+    expect(result).toContain('& Author20');
+    expect(result).not.toContain('...');
+  });
+
+  it('exactly 21 authors — triggers ellipsis rule', () => {
+    const authors = Array.from({ length: 21 }, (_, i) => ({
+      lastName: `Author${i + 1}`,
+      initials: 'A',
+    }));
+    const article: ParsedArticle = { ...sampleArticle, authors };
+    const result = formatApa(article);
+    expect(result).toContain('Author19');
+    expect(result).toContain('...');
+    expect(result).toContain('Author21');
+    expect(result).not.toContain('Author20');
+  });
+});
+
+describe('splitPages (via formatRis)', () => {
+  it('splits pages with en-dash', () => {
+    const article: ParsedArticle = {
+      ...sampleArticle,
+      journalInfo: { ...sampleArticle.journalInfo!, pages: '100\u2013115' },
+    };
+    const result = formatRis(article);
+    expect(result).toContain('SP  - 100');
+    expect(result).toContain('EP  - 115');
+  });
+
+  it('splits pages with em-dash', () => {
+    const article: ParsedArticle = {
+      ...sampleArticle,
+      journalInfo: { ...sampleArticle.journalInfo!, pages: '200\u2014250' },
+    };
+    const result = formatRis(article);
+    expect(result).toContain('SP  - 200');
+    expect(result).toContain('EP  - 250');
+  });
+
+  it('single page number only emits SP, no EP', () => {
+    const article: ParsedArticle = {
+      ...sampleArticle,
+      journalInfo: { ...sampleArticle.journalInfo!, pages: 'e12345' },
+    };
+    const result = formatRis(article);
+    expect(result).toContain('SP  - e12345');
+    expect(result).not.toMatch(/EP {2}-/);
+  });
+
+  it('no pages omits both SP and EP', () => {
+    const { pages: _, ...journalWithoutPages } = sampleArticle.journalInfo!;
+    const article: ParsedArticle = {
+      ...sampleArticle,
+      journalInfo: journalWithoutPages,
+    };
+    const result = formatRis(article);
+    expect(result).not.toMatch(/SP {2}-/);
+    expect(result).not.toMatch(/EP {2}-/);
+  });
+});
+
+describe('minimal article (pmid only)', () => {
+  const minimal: ParsedArticle = { pmid: '99999999' };
+
+  it('formatApa returns year fallback only', () => {
+    const result = formatApa(minimal);
+    expect(result).toContain('(n.d.).');
+    expect(result).not.toContain('doi.org');
+  });
+
+  it('formatMla returns empty-ish string without crashing', () => {
+    const result = formatMla(minimal);
+    expect(typeof result).toBe('string');
+  });
+
+  it('formatBibtex returns valid structure with pmid field', () => {
+    const result = formatBibtex(minimal);
+    expect(result).toMatch(/^@article\{pmid99999999,/);
+    expect(result).toContain('{99999999}');
+    expect(result).toMatch(/\}$/);
+  });
+
+  it('formatRis includes TY, AN, UR, ER tags', () => {
+    const result = formatRis(minimal);
+    expect(result).toContain('TY  - JOUR');
+    expect(result).toContain('AN  - 99999999');
+    expect(result).toContain('UR  - https://pubmed.ncbi.nlm.nih.gov/99999999/');
+    expect(result).toContain('ER  - ');
+  });
+});
+
+describe('formatMla edge cases', () => {
+  it('collective name author works', () => {
+    const article: ParsedArticle = {
+      ...sampleArticle,
+      authors: [{ collectiveName: 'WHO Working Group' }],
+    };
+    const result = formatMla(article);
+    expect(result).toContain('WHO Working Group.');
+  });
+
+  it('author with only lastName', () => {
+    const article: ParsedArticle = {
+      ...sampleArticle,
+      authors: [{ lastName: 'Plato' }],
+    };
+    const result = formatMla(article);
+    expect(result).toContain('Plato.');
+  });
+
+  it('journal without volume or issue only shows title and year', () => {
+    const article: ParsedArticle = {
+      ...sampleArticle,
+      journalInfo: {
+        title: 'Nature',
+        publicationDate: { year: '2024' },
+      },
+    };
+    const result = formatMla(article);
+    expect(result).toContain('*Nature*');
+    expect(result).not.toContain('vol.');
+    expect(result).not.toContain('no.');
+  });
+});
+
+describe('formatBibtex edge cases', () => {
+  it('author with only firstName (no lastName)', () => {
+    const article: ParsedArticle = {
+      ...sampleArticle,
+      authors: [{ firstName: 'Madonna' }],
+    };
+    const result = formatBibtex(article);
+    expect(result).toContain('Madonna');
+  });
+
+  it('author with only lastName (no firstName)', () => {
+    const article: ParsedArticle = {
+      ...sampleArticle,
+      authors: [{ lastName: 'Aristotle' }],
+    };
+    const result = formatBibtex(article);
+    expect(result).toContain('{Aristotle}');
+  });
+
+  it('empty authors array omits author field', () => {
+    const article: ParsedArticle = { ...sampleArticle, authors: [] };
+    const result = formatBibtex(article);
+    expect(result).not.toMatch(/author\s*=/);
+  });
+
+  it('journal without volume omits volume field', () => {
+    const article: ParsedArticle = {
+      ...sampleArticle,
+      journalInfo: { title: 'Test Journal', publicationDate: { year: '2024' } },
+    };
+    const result = formatBibtex(article);
+    expect(result).not.toMatch(/volume\s*=/);
+    expect(result).not.toMatch(/number\s*=/);
+    expect(result).not.toMatch(/pages\s*=/);
+  });
+});

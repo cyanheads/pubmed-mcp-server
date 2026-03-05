@@ -105,6 +105,38 @@ describe('NcbiResponseHandler', () => {
       const messages = handler.extractNcbiErrorMessages(parsed);
       expect(messages).toEqual(['Extracted from text node']);
     });
+
+    it('extracts error from PubmedArticleSet.ErrorList.CannotRetrievePMID path', () => {
+      const parsed = {
+        PubmedArticleSet: { ErrorList: { CannotRetrievePMID: '99999999' } },
+      };
+      const messages = handler.extractNcbiErrorMessages(parsed);
+      expect(messages).toEqual(['99999999']);
+    });
+
+    it('extracts errors from array of CannotRetrievePMID values', () => {
+      const parsed = {
+        PubmedArticleSet: { ErrorList: { CannotRetrievePMID: ['111', '222'] } },
+      };
+      const messages = handler.extractNcbiErrorMessages(parsed);
+      expect(messages).toEqual(['111', '222']);
+    });
+
+    it('handles numeric error values from parseTagValue', () => {
+      // fast-xml-parser with parseTagValue:true parses "99999999" as a number
+      const parsed = { ERROR: 42 };
+      const messages = handler.extractNcbiErrorMessages(parsed as Record<string, unknown>);
+      expect(messages).toEqual(['42']);
+    });
+
+    it('does not fall back to warnings when errors exist', () => {
+      const parsed = {
+        ERROR: 'real error',
+        eSearchResult: { ErrorList: { PhraseNotFound: 'ignored warning' } },
+      };
+      const messages = handler.extractNcbiErrorMessages(parsed);
+      expect(messages).toEqual(['real error']);
+    });
   });
 
   // ── parseAndHandleResponse — text mode ───────────────────────────────────
@@ -217,6 +249,43 @@ describe('NcbiResponseHandler', () => {
         expect((err as McpError).code).toBe(JsonRpcErrorCode.ServiceUnavailable);
         expect((err as McpError).message).toContain('Server unavailable');
       }
+    });
+
+    it('throws ServiceUnavailable for PubmedArticleSet.ErrorList.CannotRetrievePMID in XML', () => {
+      const xml =
+        '<PubmedArticleSet><ErrorList><CannotRetrievePMID>99999999</CannotRetrievePMID></ErrorList></PubmedArticleSet>';
+      expect(() =>
+        handler.parseAndHandleResponse(xml, 'efetch', context, { retmode: 'xml' }),
+      ).toThrow(McpError);
+
+      try {
+        handler.parseAndHandleResponse(xml, 'efetch', context, { retmode: 'xml' });
+      } catch (err) {
+        expect((err as McpError).code).toBe(JsonRpcErrorCode.ServiceUnavailable);
+        expect((err as McpError).message).toContain('99999999');
+      }
+    });
+
+    it('strips DOCTYPE declarations before validation', () => {
+      const xmlWithDoctype =
+        '<?xml version="1.0"?><!DOCTYPE eSearchResult PUBLIC "-//NLM//DTD esearch//EN" "https://eutils.ncbi.nlm.nih.gov/eutils/dtd/20060131/esearch.dtd">' +
+        '<eSearchResult><Count>0</Count><RetMax>0</RetMax><RetStart>0</RetStart><IdList></IdList></eSearchResult>';
+      const result = handler.parseAndHandleResponse<Record<string, unknown>>(
+        xmlWithDoctype,
+        'esearch',
+        context,
+        { retmode: 'xml' },
+      );
+      expect(result).toHaveProperty('eSearchResult');
+    });
+
+    it('still throws on NCBI errors even when returnRawXml is true', () => {
+      expect(() =>
+        handler.parseAndHandleResponse(ESUMMARY_ERROR_XML, 'esummary', context, {
+          retmode: 'xml',
+          returnRawXml: true,
+        }),
+      ).toThrow(McpError);
     });
   });
 
