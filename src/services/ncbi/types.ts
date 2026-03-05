@@ -506,3 +506,185 @@ export interface EFetchArticleSet {
   articles: ParsedArticle[];
   // Add any other top-level fields from the parsed EFetch result if necessary
 }
+
+// ─── JATS XML Element Types (PMC EFetch) ────────────────────────────────────
+
+/** Top-level PMC EFetch response container. */
+export interface XmlPmcArticleSet {
+  article?: XmlJatsArticle | XmlJatsArticle[];
+}
+
+/** JATS `<article>` element. */
+export interface XmlJatsArticle {
+  '@_article-type'?: string;
+  '@_xml:lang'?: string;
+  back?: XmlJatsBack;
+  body?: XmlJatsBody;
+  front?: XmlJatsFront;
+}
+
+/** JATS `<front>` element containing journal and article metadata. */
+export interface XmlJatsFront {
+  'article-meta'?: XmlJatsArticleMeta;
+  'journal-meta'?: XmlJatsJournalMeta;
+}
+
+/** JATS `<journal-meta>` element. */
+export interface XmlJatsJournalMeta {
+  issn?: XmlTextElement | XmlTextElement[];
+  'journal-id'?: XmlTextElement | XmlTextElement[];
+  'journal-title'?: unknown;
+  'journal-title-group'?: { 'journal-title'?: unknown };
+  publisher?: { 'publisher-name'?: unknown };
+}
+
+/** JATS `<article-meta>` element. */
+export interface XmlJatsArticleMeta {
+  abstract?: unknown;
+  aff?: XmlJatsAff | XmlJatsAff[];
+  'article-id'?: XmlJatsArticleId | XmlJatsArticleId[];
+  'contrib-group'?: XmlJatsContribGroup | XmlJatsContribGroup[];
+  fpage?: unknown;
+  issue?: unknown;
+  'kwd-group'?: XmlJatsKwdGroup | XmlJatsKwdGroup[];
+  lpage?: unknown;
+  permissions?: { 'copyright-statement'?: unknown; license?: unknown };
+  'pub-date'?: XmlJatsPubDate | XmlJatsPubDate[];
+  'title-group'?: { 'article-title'?: unknown };
+  volume?: unknown;
+}
+
+/** JATS `<article-id>` element with pub-id-type attribute. */
+export interface XmlJatsArticleId {
+  '@_pub-id-type'?: string; // 'pmcid' | 'pmid' | 'doi' | 'manuscript' | ...
+  '#text'?: string | number;
+}
+
+/** JATS `<contrib-group>` element. */
+export interface XmlJatsContribGroup {
+  contrib?: XmlJatsContrib | XmlJatsContrib[];
+}
+
+/** JATS `<contrib>` element (author or other contributor). */
+export interface XmlJatsContrib {
+  '@_contrib-type'?: string; // 'author', 'editor', ...
+  collab?: unknown;
+  name?: { surname?: unknown; 'given-names'?: unknown };
+  xref?: unknown;
+}
+
+/** JATS `<aff>` element (affiliation). */
+export interface XmlJatsAff {
+  '@_id'?: string;
+  '#text'?: string;
+  'addr-line'?: unknown;
+  country?: unknown;
+  institution?: unknown;
+  label?: unknown;
+  [key: string]: unknown;
+}
+
+/** JATS `<pub-date>` element. */
+export interface XmlJatsPubDate {
+  '@_date-type'?: string;
+  '@_pub-type'?: string; // 'epub', 'ppub', 'collection', ...
+  day?: unknown;
+  month?: unknown;
+  year?: unknown;
+}
+
+/** JATS `<kwd-group>` element. */
+export interface XmlJatsKwdGroup {
+  '@_kwd-group-type'?: string;
+  kwd?: unknown;
+}
+
+/** JATS `<body>` element containing article full text. */
+export interface XmlJatsBody {
+  p?: unknown; // Some articles have paragraphs directly in body without sections
+  sec?: XmlJatsSection | XmlJatsSection[];
+}
+
+/** JATS `<sec>` element (article section, may nest recursively). */
+export interface XmlJatsSection {
+  '@_id'?: string;
+  '@_sec-type'?: string;
+  fig?: unknown;
+  label?: unknown;
+  p?: unknown;
+  sec?: XmlJatsSection | XmlJatsSection[];
+  'table-wrap'?: unknown;
+  title?: unknown;
+  [key: string]: unknown;
+}
+
+/** JATS `<back>` element containing references and supplementary material. */
+export interface XmlJatsBack {
+  'ref-list'?: XmlJatsRefList;
+}
+
+/** JATS `<ref-list>` element. */
+export interface XmlJatsRefList {
+  ref?: XmlJatsRef | XmlJatsRef[];
+  title?: unknown;
+}
+
+/** JATS `<ref>` element. */
+export interface XmlJatsRef {
+  '@_id'?: string;
+  'element-citation'?: unknown;
+  label?: unknown;
+  'mixed-citation'?: unknown;
+}
+
+// ─── Parsed PMC Types (application use) ─────────────────────────────────────
+
+/** Parsed full-text article from PMC. */
+export interface ParsedPmcArticle {
+  abstract?: string;
+  affiliations?: string[];
+  articleType?: string;
+  authors?: ParsedPmcAuthor[];
+  doi?: string;
+  journal?: ParsedPmcJournal;
+  keywords?: string[];
+  pmcId: string;
+  pmcUrl: string;
+  pmid?: string;
+  publicationDate?: { year?: string; month?: string; day?: string };
+  pubmedUrl?: string;
+  references?: ParsedPmcReference[];
+  sections: ParsedPmcSection[];
+  title?: string;
+}
+
+/** Parsed PMC author. */
+export interface ParsedPmcAuthor {
+  collectiveName?: string;
+  givenNames?: string;
+  lastName?: string;
+}
+
+/** Parsed PMC journal info. */
+export interface ParsedPmcJournal {
+  issn?: string;
+  issue?: string;
+  pages?: string;
+  title?: string;
+  volume?: string;
+}
+
+/** Parsed PMC article section. */
+export interface ParsedPmcSection {
+  label?: string;
+  subsections?: ParsedPmcSection[];
+  text: string;
+  title?: string;
+}
+
+/** Parsed PMC reference. */
+export interface ParsedPmcReference {
+  citation: string;
+  id?: string;
+  label?: string;
+}

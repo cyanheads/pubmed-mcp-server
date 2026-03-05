@@ -41,6 +41,16 @@ const NCBI_ARRAY_JPATHS = new Set([
   'ConceptList.Concept',
   'TermList.Term',
   'TreeNumberList.TreeNumber',
+  // PMC JATS XML structures
+  'pmc-articleset.article',
+  'article-meta.article-id',
+  'article-meta.pub-date',
+  'contrib-group.contrib',
+  'kwd-group.kwd',
+  'body.sec',
+  'sec.sec',
+  'sec.p',
+  'ref-list.ref',
 ]);
 
 /**

@@ -5,6 +5,7 @@
  * @module src/mcp-server/tools/definitions
  */
 
+import { pmcFetchTool } from './pmc-fetch.tool.js';
 import { pubmedCiteTool } from './pubmed-cite.tool.js';
 import { pubmedFetchTool } from './pubmed-fetch.tool.js';
 import { pubmedMeshLookupTool } from './pubmed-mesh-lookup.tool.js';
@@ -17,6 +18,7 @@ import { pubmedSpellTool } from './pubmed-spell.tool.js';
 export const allToolDefinitions = [
   pubmedSearchTool,
   pubmedFetchTool,
+  pmcFetchTool,
   pubmedSpellTool,
   pubmedCiteTool,
   pubmedRelatedTool,
