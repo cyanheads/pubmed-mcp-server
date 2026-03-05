@@ -176,7 +176,7 @@ All configuration is centralized and validated at startup in `src/config/index.t
 | `MCP_TRANSPORT_TYPE` | Transport: `stdio` or `http` | `stdio` |
 | `MCP_HTTP_PORT` | HTTP server port | `3017` |
 | `MCP_AUTH_MODE` | Authentication: `none`, `jwt`, or `oauth` | `none` |
-| `MCP_LOG_LEVEL` | Log level (`debug`, `info`, `warning`, `error`, etc.) | `info` |
+| `MCP_LOG_LEVEL` | Log level (`debug`, `info`, `warning`, `error`, etc.) | `debug` |
 | `STORAGE_PROVIDER_TYPE` | Storage backend: `in-memory`, `filesystem`, `supabase`, `cloudflare-kv/r2/d1` | `in-memory` |
 | `NCBI_API_KEY` | NCBI API key for higher rate limits (10 req/s vs 3 req/s) | none |
 | `NCBI_ADMIN_EMAIL` | Contact email sent with NCBI requests (recommended by NCBI) | none |
@@ -230,7 +230,7 @@ bun run deploy:dev
 
 | Directory | Purpose |
 |:---|:---|
-| `src/mcp-server/tools` | Tool definitions (`*.tool.ts`). Seven PubMed tools. |
+| `src/mcp-server/tools` | Tool definitions (`*.tool.ts`). Six PubMed tools. |
 | `src/mcp-server/resources` | Resource definitions. Database info resource. |
 | `src/mcp-server/prompts` | Prompt definitions. Research plan prompt. |
 | `src/mcp-server/transports` | HTTP and stdio transports, including auth middleware. |
