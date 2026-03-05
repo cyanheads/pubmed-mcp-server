@@ -1,5 +1,225 @@
 // Vitest Snapshot v1, https://vitest.dev/guide/snapshot.html
 
+exports[`Tool Schema Snapshots > Tool: pmc_fetch > inputSchema JSON output should be stable 1`] = `
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "additionalProperties": false,
+  "properties": {
+    "includeReferences": {
+      "default": false,
+      "description": "Include reference list from back matter",
+      "type": "boolean",
+    },
+    "maxSections": {
+      "description": "Maximum number of top-level body sections to return",
+      "maximum": 50,
+      "minimum": 1,
+      "type": "integer",
+    },
+    "pmcids": {
+      "description": "PMC IDs to fetch (e.g., ["PMC9575052"] or ["9575052"]). Provide pmcids or pmids, not both.",
+      "items": {
+        "type": "string",
+      },
+      "maxItems": 10,
+      "minItems": 1,
+      "type": "array",
+    },
+    "pmids": {
+      "description": "PubMed IDs to resolve to PMC articles via ELink. Only articles available in PMC will be returned.",
+      "items": {
+        "pattern": "^\\d+$",
+        "type": "string",
+      },
+      "maxItems": 10,
+      "minItems": 1,
+      "type": "array",
+    },
+    "sections": {
+      "description": "Filter to specific sections by title (case-insensitive match, e.g., ["methods", "results"])",
+      "items": {
+        "type": "string",
+      },
+      "type": "array",
+    },
+  },
+  "required": [
+    "includeReferences",
+  ],
+  "type": "object",
+}
+`;
+
+exports[`Tool Schema Snapshots > Tool: pmc_fetch > outputSchema JSON output should be stable 1`] = `
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "additionalProperties": false,
+  "definitions": {
+    "__schema0": {
+      "additionalProperties": false,
+      "properties": {
+        "label": {
+          "description": "Section label (e.g., "1", "2.1")",
+          "type": "string",
+        },
+        "subsections": {
+          "description": "Nested subsections",
+          "items": {
+            "$ref": "#/definitions/__schema0",
+          },
+          "type": "array",
+        },
+        "text": {
+          "description": "Section body text",
+          "type": "string",
+        },
+        "title": {
+          "description": "Section heading",
+          "type": "string",
+        },
+      },
+      "required": [
+        "text",
+      ],
+      "type": "object",
+    },
+  },
+  "properties": {
+    "articles": {
+      "description": "Parsed full-text articles",
+      "items": {
+        "additionalProperties": false,
+        "properties": {
+          "abstract": {
+            "description": "Article abstract",
+            "type": "string",
+          },
+          "affiliations": {
+            "description": "Author affiliations",
+            "items": {
+              "type": "string",
+            },
+            "type": "array",
+          },
+          "articleType": {
+            "description": "Article type (e.g., "research-article")",
+            "type": "string",
+          },
+          "authors": {
+            "description": "Author list",
+            "items": {
+              "additionalProperties": false,
+              "properties": {
+                "collectiveName": {
+                  "type": "string",
+                },
+                "givenNames": {
+                  "type": "string",
+                },
+                "lastName": {
+                  "type": "string",
+                },
+              },
+              "type": "object",
+            },
+            "type": "array",
+          },
+          "doi": {
+            "description": "Digital Object Identifier",
+            "type": "string",
+          },
+          "journal": {
+            "description": "Journal information",
+          },
+          "keywords": {
+            "description": "Article keywords",
+            "items": {
+              "type": "string",
+            },
+            "type": "array",
+          },
+          "pmcId": {
+            "description": "PubMed Central ID",
+            "type": "string",
+          },
+          "pmcUrl": {
+            "description": "PMC article URL",
+            "type": "string",
+          },
+          "pmid": {
+            "description": "PubMed ID",
+            "type": "string",
+          },
+          "publicationDate": {
+            "description": "Publication date",
+          },
+          "pubmedUrl": {
+            "description": "PubMed article URL",
+            "type": "string",
+          },
+          "references": {
+            "description": "Reference list",
+            "items": {
+              "additionalProperties": false,
+              "properties": {
+                "citation": {
+                  "type": "string",
+                },
+                "id": {
+                  "type": "string",
+                },
+                "label": {
+                  "type": "string",
+                },
+              },
+              "required": [
+                "citation",
+              ],
+              "type": "object",
+            },
+            "type": "array",
+          },
+          "sections": {
+            "description": "Article body sections with full text",
+            "items": {
+              "$ref": "#/definitions/__schema0",
+            },
+            "type": "array",
+          },
+          "title": {
+            "description": "Article title",
+            "type": "string",
+          },
+        },
+        "required": [
+          "pmcId",
+          "pmcUrl",
+          "sections",
+        ],
+        "type": "object",
+      },
+      "type": "array",
+    },
+    "totalReturned": {
+      "description": "Number of articles returned",
+      "type": "number",
+    },
+    "unavailablePmids": {
+      "description": "PMIDs that could not be resolved to PMC articles",
+      "items": {
+        "type": "string",
+      },
+      "type": "array",
+    },
+  },
+  "required": [
+    "articles",
+    "totalReturned",
+  ],
+  "type": "object",
+}
+`;
+
 exports[`Tool Schema Snapshots > Tool: pubmed_cite > inputSchema JSON output should be stable 1`] = `
 {
   "$schema": "http://json-schema.org/draft-07/schema#",
