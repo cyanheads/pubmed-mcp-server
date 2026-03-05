@@ -44,7 +44,8 @@ Search PubMed with full NCBI query syntax and filters.
 Fetch full article metadata by PubMed IDs.
 
 - Batch fetch up to 200 articles at once (auto-switches to POST for large batches)
-- Returns structured data: title, abstract, authors with affiliations, journal info, DOI
+- Returns structured data: title, abstract, authors with deduplicated affiliations, journal info, DOI
+- Direct links to PubMed and PubMed Central (when available)
 - Optional MeSH terms, grant information, and publication types
 - Handles PubMed's inconsistent XML (structured abstracts, missing fields, varying date formats)
 
@@ -84,8 +85,8 @@ Spell-check a biomedical query using NCBI's ESpell.
 
 Search and explore the MeSH (Medical Subject Headings) vocabulary.
 
-- Search MeSH terms by name
-- Optional detailed records with tree numbers, scope notes, and entry terms
+- Search MeSH terms by name with exact-heading matching
+- Detailed records with tree numbers, scope notes, and entry terms by default
 - Useful for building precise PubMed queries with controlled vocabulary
 
 ## Resource and prompt
@@ -124,9 +125,8 @@ Add the following to your MCP client configuration file.
     "pubmed": {
       "type": "stdio",
       "command": "bunx",
-      "args": ["@cyanheads/pubmed-mcp-server@latest"],
+      "args": ["@cyanheads/pubmed-mcp-server@latest", "run", "start:stdio"],
       "env": {
-        "MCP_TRANSPORT_TYPE": "stdio",
         "MCP_LOG_LEVEL": "info",
         "NCBI_API_KEY": "your-key-here"
       }
@@ -135,11 +135,43 @@ Add the following to your MCP client configuration file.
 }
 ```
 
-Or for Streamable HTTP:
+Or with npx (no Bun required):
 
-```bash
-MCP_TRANSPORT_TYPE=http
-MCP_HTTP_PORT=3017
+```json
+{
+  "mcpServers": {
+    "pubmed": {
+      "type": "stdio",
+      "command": "npx",
+      "args": ["-y", "@cyanheads/pubmed-mcp-server@latest", "run", "start:stdio"],
+      "env": {
+        "MCP_LOG_LEVEL": "info",
+        "NCBI_API_KEY": "your-key-here"
+      }
+    }
+  }
+}
+```
+
+Or with Docker:
+
+```json
+{
+  "mcpServers": {
+    "pubmed": {
+      "type": "stdio",
+      "command": "docker",
+      "args": ["run", "-i", "--rm", "-e", "MCP_TRANSPORT_TYPE=stdio", "ghcr.io/cyanheads/pubmed-mcp-server:latest"]
+    }
+  }
+}
+```
+
+For Streamable HTTP, set the transport and start the server:
+
+```sh
+MCP_TRANSPORT_TYPE=http MCP_HTTP_PORT=3017 bun run start:http
+# Server listens at http://localhost:3017/mcp
 ```
 
 ### Prerequisites
@@ -176,7 +208,7 @@ All configuration is centralized and validated at startup in `src/config/index.t
 | `MCP_TRANSPORT_TYPE` | Transport: `stdio` or `http` | `stdio` |
 | `MCP_HTTP_PORT` | HTTP server port | `3017` |
 | `MCP_AUTH_MODE` | Authentication: `none`, `jwt`, or `oauth` | `none` |
-| `MCP_LOG_LEVEL` | Log level (`debug`, `info`, `warning`, `error`, etc.) | `debug` |
+| `MCP_LOG_LEVEL` | Log level (`debug`, `info`, `warning`, `error`, etc.) | `info` |
 | `STORAGE_PROVIDER_TYPE` | Storage backend: `in-memory`, `filesystem`, `supabase`, `cloudflare-kv/r2/d1` | `in-memory` |
 | `NCBI_API_KEY` | NCBI API key for higher rate limits (10 req/s vs 3 req/s) | none |
 | `NCBI_ADMIN_EMAIL` | Contact email sent with NCBI requests (recommended by NCBI) | none |
