@@ -254,7 +254,7 @@ function filterSections(
   const lowerFilter = sectionFilter.map((s) => s.toLowerCase());
   return sections.filter((s) => {
     if (!s.title) return false;
-    return lowerFilter.some((f) => s.title!.toLowerCase().includes(f));
+    return lowerFilter.some((f) => s.title?.toLowerCase().includes(f));
   });
 }
 
@@ -300,7 +300,7 @@ async function logic(
       });
     }
   } else {
-    pmcIds = input.pmcids!.map(normalizePmcId);
+    pmcIds = (input.pmcids ?? []).map(normalizePmcId);
   }
 
   // Fetch full-text XML from PMC
@@ -330,9 +330,10 @@ async function logic(
 
   // Apply section filtering
   if (input.sections && input.sections.length > 0) {
+    const sectionFilter = input.sections;
     articles = articles.map((article) => ({
       ...article,
-      sections: filterSections(article.sections, input.sections!),
+      sections: filterSections(article.sections, sectionFilter),
     }));
   }
 
