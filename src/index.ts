@@ -114,9 +114,20 @@ const start = async (): Promise<void> => {
   // Pass transport type to logger to ensure STDIO mode uses plain JSON (no ANSI colors)
   await logger.initialize(config.logLevel as McpLogLevel, config.mcpTransportType);
 
+  const initContext = requestContextService.createRequestContext({ operation: 'Init' });
+
   logger.info(
     `Storage service initialized with provider: ${config.storage.providerType}`,
-    requestContextService.createRequestContext({ operation: 'StorageInit' }),
+    initContext,
+  );
+
+  logger.info(
+    `NCBI config: apiKey=${config.ncbiApiKey ? 'configured' : 'not set'}, ` +
+      `email=${config.ncbiAdminEmail ?? 'not set'}, ` +
+      `requestDelay=${config.ncbiRequestDelayMs}ms, ` +
+      `maxRetries=${config.ncbiMaxRetries}, ` +
+      `timeout=${config.ncbiTimeoutMs}ms`,
+    initContext,
   );
 
   transportManager = container.resolve(TransportManagerToken);
