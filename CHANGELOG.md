@@ -4,6 +4,22 @@ All notable changes to this project will be documented in this file.
 
 ---
 
+## [2.1.5] - 2026-03-06
+
+### Added
+
+- **Startup logging**: NCBI configuration (API key status, email, request delay, max retries, timeout) now logged at initialization for easier debugging
+
+### Updated
+
+- `@biomejs/biome` to 2.4.6
+- `@cloudflare/workers-types` to 4.20260307.1
+- `@types/node` to 25.3.5
+- `@types/sanitize-html` to 2.16.1
+- `jose` to 6.2.0
+
+---
+
 ## [2.1.4] - 2026-03-04
 
 ### Added
