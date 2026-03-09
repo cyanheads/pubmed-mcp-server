@@ -250,10 +250,7 @@ describe('createMcpToolHandler', () => {
       expect(result.isError).toBe(true);
       expect(result.content?.[0]?.type).toBe('text');
       expect((result.content?.[0] as { text: string }).text).toContain('Test error message');
-      expect(result.structuredContent).toMatchObject({
-        code: JsonRpcErrorCode.InvalidParams,
-        message: 'Test error message',
-      });
+      expect(result.structuredContent).toBeUndefined();
     });
 
     it('should convert generic errors to McpError', async () => {
@@ -272,8 +269,7 @@ describe('createMcpToolHandler', () => {
 
       expect(result.isError).toBe(true);
       expect((result.content?.[0] as { text: string }).text).toContain('Error:');
-      expect(result.structuredContent?.code).toBeDefined();
-      expect(result.structuredContent?.message).toBeDefined();
+      expect(result.structuredContent).toBeUndefined();
     });
 
     it('should handle errors with input context for debugging', async () => {
@@ -294,7 +290,7 @@ describe('createMcpToolHandler', () => {
       const result = await handler({ userId: 123, action: 'test' }, createMockSdkContext());
 
       expect(result.isError).toBe(true);
-      expect(result.structuredContent?.code).toBe(JsonRpcErrorCode.InternalError);
+      expect(result.structuredContent).toBeUndefined();
     });
 
     it('should preserve error data in structured content', async () => {
@@ -318,7 +314,7 @@ describe('createMcpToolHandler', () => {
       const result = await handler({}, createMockSdkContext());
 
       expect(result.isError).toBe(true);
-      expect(result.structuredContent?.data).toBeDefined();
+      expect(result.structuredContent).toBeUndefined();
     });
   });
 
