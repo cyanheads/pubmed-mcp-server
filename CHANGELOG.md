@@ -4,6 +4,19 @@ All notable changes to this project will be documented in this file.
 
 ---
 
+## [2.1.6] - 2026-03-09
+
+### Fixed
+
+- **Error responses**: Removed `structuredContent` from error responses in tool handler factory — `structuredContent` is only valid for successful results, not error payloads
+
+### Updated
+
+- `fast-check` to 4.6.0
+- `jose` to 6.2.1
+
+---
+
 ## [2.1.5] - 2026-03-06
 
 ### Added
