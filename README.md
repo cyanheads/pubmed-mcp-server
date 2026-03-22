@@ -13,6 +13,12 @@
 
 </div>
 
+<div align="center">
+
+**Public Hosted Server:** [https://pubmed.caseyjhand.com/mcp](https://pubmed.caseyjhand.com/mcp)
+
+</div>
+
 ---
 
 ## Tools
