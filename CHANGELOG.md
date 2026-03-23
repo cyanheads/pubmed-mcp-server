@@ -20,6 +20,8 @@ All notable changes to this project will be documented in this file.
 - **CLAUDE.md**: Replaced generic placeholder patterns with actual server examples (spell-check tool, database-info resource, NCBI config), updated structure tree, removed unused context properties
 - **README.md**: Updated all tool names to match renames (e.g., `pubmed_search` → `pubmed_search_articles`), updated config section description
 - **Dockerfile**: Fixed image title/description labels, added `source` label, corrected log directory name and default port
+- **Default HTTP port**: Reverted to `3010` across `.env.example`, `Dockerfile`, `README.md`, and `server.json` (was changed to `3017` in 2.0.1)
+- **server-config.ts**: Replaced `z.string().email()` with `z.email()` shorthand
 - **.env.example**: Added `NCBI_TIMEOUT_MS` entry
 
 ### Added

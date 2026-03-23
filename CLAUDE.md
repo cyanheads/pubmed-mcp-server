@@ -107,7 +107,7 @@ export const databaseInfoResource = resource('pubmed://database/info', {
 const ServerConfigSchema = z.object({
   apiKey: z.string().optional().describe('NCBI API key'),
   toolIdentifier: z.string().describe('NCBI tool identifier'),
-  adminEmail: z.string().email().optional().describe('Admin contact email'),
+  adminEmail: z.email().optional().describe('Admin contact email'),
   requestDelayMs: z.coerce.number().min(50).max(5000).default(334).describe('Request delay in ms'),
   maxRetries: z.coerce.number().min(0).max(10).default(3).describe('Max retry attempts'),
   timeoutMs: z.coerce.number().min(1000).max(120000).default(30000).describe('Request timeout in ms'),
