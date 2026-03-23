@@ -3,8 +3,8 @@
  * @module tests/mcp-server/tools/definitions/fetch-fulltext.tool.test
  */
 
-import { describe, expect, it, vi } from 'vitest';
 import { createMockContext } from '@cyanheads/mcp-ts-core/testing';
+import { describe, expect, it, vi } from 'vitest';
 
 const mockEFetch = vi.fn();
 const mockELink = vi.fn();
@@ -12,9 +12,7 @@ vi.mock('@/services/ncbi/ncbi-service.js', () => ({
   getNcbiService: () => ({ eFetch: mockEFetch, eLink: mockELink }),
 }));
 
-const { fetchFulltextTool } = await import(
-  '@/mcp-server/tools/definitions/fetch-fulltext.tool.js'
-);
+const { fetchFulltextTool } = await import('@/mcp-server/tools/definitions/fetch-fulltext.tool.js');
 
 describe('fetchFulltextTool', () => {
   it('validates input with pmcids', () => {
@@ -25,9 +23,7 @@ describe('fetchFulltextTool', () => {
   it('throws when neither pmcids nor pmids provided', async () => {
     const ctx = createMockContext();
     const input = fetchFulltextTool.input.parse({});
-    await expect(fetchFulltextTool.handler(input, ctx)).rejects.toThrow(
-      /Either pmcids or pmids/,
-    );
+    await expect(fetchFulltextTool.handler(input, ctx)).rejects.toThrow(/Either pmcids or pmids/);
   });
 
   it('throws when both pmcids and pmids provided', async () => {
@@ -36,9 +32,7 @@ describe('fetchFulltextTool', () => {
       pmcids: ['PMC1'],
       pmids: ['12345'],
     });
-    await expect(fetchFulltextTool.handler(input, ctx)).rejects.toThrow(
-      /not both/,
-    );
+    await expect(fetchFulltextTool.handler(input, ctx)).rejects.toThrow(/not both/);
   });
 
   it('fetches by PMC IDs', async () => {
@@ -48,9 +42,7 @@ describe('fetchFulltextTool', () => {
           {
             front: {
               'article-meta': {
-                'article-id': [
-                  { '@_pub-id-type': 'pmcid', '#text': 'PMC1234567' },
-                ],
+                'article-id': [{ '@_pub-id-type': 'pmcid', '#text': 'PMC1234567' }],
                 'title-group': { 'article-title': 'Full Text Article' },
               },
             },

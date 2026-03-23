@@ -3,17 +3,15 @@
  * @module tests/mcp-server/tools/definitions/spell-check.tool.test
  */
 
-import { describe, expect, it, vi } from 'vitest';
 import { createMockContext } from '@cyanheads/mcp-ts-core/testing';
+import { describe, expect, it, vi } from 'vitest';
 
 const mockESpell = vi.fn();
 vi.mock('@/services/ncbi/ncbi-service.js', () => ({
   getNcbiService: () => ({ eSpell: mockESpell }),
 }));
 
-const { spellCheckTool } = await import(
-  '@/mcp-server/tools/definitions/spell-check.tool.js'
-);
+const { spellCheckTool } = await import('@/mcp-server/tools/definitions/spell-check.tool.js');
 
 describe('spellCheckTool', () => {
   it('validates input schema', () => {

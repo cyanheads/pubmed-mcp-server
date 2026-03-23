@@ -10,23 +10,23 @@ import {
   extractAuthors,
   extractDoi,
   extractGrants,
+  extractJournalInfo,
   extractKeywords,
   extractMeshTerms,
   extractPmcId,
   extractPmid,
   extractPublicationTypes,
   parseFullArticle,
-  extractJournalInfo,
 } from '@/services/ncbi/parsing/article-parser.js';
 import type {
-  XmlAuthorList,
-  XmlMeshHeadingList,
-  XmlGrantList,
   XmlArticle,
   XmlArticleIdList,
-  XmlPublicationTypeList,
+  XmlAuthorList,
+  XmlGrantList,
   XmlKeywordList,
   XmlMedlineCitation,
+  XmlMeshHeadingList,
+  XmlPublicationTypeList,
   XmlPubmedArticle,
 } from '@/services/ncbi/types.js';
 
@@ -39,8 +39,16 @@ describe('extractAuthors', () => {
   it('extracts individual authors with names', () => {
     const authorList: XmlAuthorList = {
       Author: [
-        { LastName: { '#text': 'Smith' }, ForeName: { '#text': 'John' }, Initials: { '#text': 'J' } },
-        { LastName: { '#text': 'Doe' }, ForeName: { '#text': 'Jane' }, Initials: { '#text': 'JA' } },
+        {
+          LastName: { '#text': 'Smith' },
+          ForeName: { '#text': 'John' },
+          Initials: { '#text': 'J' },
+        },
+        {
+          LastName: { '#text': 'Doe' },
+          ForeName: { '#text': 'Jane' },
+          Initials: { '#text': 'JA' },
+        },
       ],
     };
     const result = extractAuthors(authorList);
@@ -98,7 +106,11 @@ describe('extractAuthors', () => {
 
   it('handles a single author (not array)', () => {
     const authorList: XmlAuthorList = {
-      Author: { LastName: { '#text': 'Solo' }, ForeName: { '#text': 'Han' }, Initials: { '#text': 'H' } },
+      Author: {
+        LastName: { '#text': 'Solo' },
+        ForeName: { '#text': 'Han' },
+        Initials: { '#text': 'H' },
+      },
     };
     const result = extractAuthors(authorList);
     expect(result.authors).toHaveLength(1);
@@ -142,9 +154,7 @@ describe('extractMeshTerms', () => {
       MeshHeading: [
         {
           DescriptorName: { '#text': 'Neoplasms', '@_UI': 'D009369', '@_MajorTopicYN': 'Y' },
-          QualifierName: [
-            { '#text': 'therapy', '@_UI': 'Q000628', '@_MajorTopicYN': 'N' },
-          ],
+          QualifierName: [{ '#text': 'therapy', '@_UI': 'Q000628', '@_MajorTopicYN': 'N' }],
         },
       ],
     };
@@ -188,9 +198,7 @@ describe('extractDoi', () => {
 
   it('finds DOI from ELocationID with ValidYN=Y', () => {
     const article: XmlArticle = {
-      ELocationID: [
-        { '#text': '10.1000/test', '@_EIdType': 'doi', '@_ValidYN': 'Y' },
-      ],
+      ELocationID: [{ '#text': '10.1000/test', '@_EIdType': 'doi', '@_ValidYN': 'Y' }],
     };
     expect(extractDoi(article)).toBe('10.1000/test');
   });
@@ -312,7 +320,11 @@ describe('parseFullArticle', () => {
           Abstract: { AbstractText: { '#text': 'Abstract here.' } },
           AuthorList: {
             Author: [
-              { LastName: { '#text': 'Smith' }, ForeName: { '#text': 'J' }, Initials: { '#text': 'J' } },
+              {
+                LastName: { '#text': 'Smith' },
+                ForeName: { '#text': 'J' },
+                Initials: { '#text': 'J' },
+              },
             ],
           },
           Journal: {
@@ -349,9 +361,7 @@ describe('parseFullArticle', () => {
         PMID: { '#text': '1' },
         Article: {},
         MeshHeadingList: {
-          MeshHeading: [
-            { DescriptorName: { '#text': 'Test', '@_MajorTopicYN': 'N' } },
-          ],
+          MeshHeading: [{ DescriptorName: { '#text': 'Test', '@_MajorTopicYN': 'N' } }],
         },
       } as unknown as XmlMedlineCitation,
     };

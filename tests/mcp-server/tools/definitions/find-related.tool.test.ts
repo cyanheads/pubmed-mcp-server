@@ -3,8 +3,8 @@
  * @module tests/mcp-server/tools/definitions/find-related.tool.test
  */
 
-import { describe, expect, it, vi } from 'vitest';
 import { createMockContext } from '@cyanheads/mcp-ts-core/testing';
+import { describe, expect, it, vi } from 'vitest';
 
 const mockELink = vi.fn();
 const mockESummary = vi.fn();
@@ -15,9 +15,7 @@ vi.mock('@/services/ncbi/parsing/esummary-parser.js', () => ({
   extractBriefSummaries: vi.fn(() => Promise.resolve([])),
 }));
 
-const { findRelatedTool } = await import(
-  '@/mcp-server/tools/definitions/find-related.tool.js'
-);
+const { findRelatedTool } = await import('@/mcp-server/tools/definitions/find-related.tool.js');
 
 describe('findRelatedTool', () => {
   it('validates input with defaults', () => {
@@ -58,9 +56,7 @@ describe('findRelatedTool', () => {
     const blocks = findRelatedTool.format!({
       sourcePmid: '12345',
       relationship: 'similar',
-      articles: [
-        { pmid: '111', title: 'Related Article', score: 95 },
-      ],
+      articles: [{ pmid: '111', title: 'Related Article', score: 95 }],
       totalFound: 1,
     });
     expect(blocks[0]?.text).toContain('Related Articles');

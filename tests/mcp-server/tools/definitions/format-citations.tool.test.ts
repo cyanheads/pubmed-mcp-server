@@ -3,8 +3,8 @@
  * @module tests/mcp-server/tools/definitions/format-citations.tool.test
  */
 
-import { describe, expect, it, vi } from 'vitest';
 import { createMockContext } from '@cyanheads/mcp-ts-core/testing';
+import { describe, expect, it, vi } from 'vitest';
 
 const mockEFetch = vi.fn();
 vi.mock('@/services/ncbi/ncbi-service.js', () => ({
@@ -44,7 +44,11 @@ describe('formatCitationsTool', () => {
                 ArticleTitle: { '#text': 'Test Article' },
                 AuthorList: {
                   Author: [
-                    { LastName: { '#text': 'Smith' }, ForeName: { '#text': 'J' }, Initials: { '#text': 'J' } },
+                    {
+                      LastName: { '#text': 'Smith' },
+                      ForeName: { '#text': 'J' },
+                      Initials: { '#text': 'J' },
+                    },
                   ],
                 },
                 Journal: {

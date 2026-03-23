@@ -3,9 +3,9 @@
  * @module tests/services/ncbi/api-client.test
  */
 
-import { describe, expect, it, vi, beforeEach } from 'vitest';
-import { NcbiApiClient, type NcbiApiClientConfig } from '@/services/ncbi/api-client.js';
 import { McpError } from '@cyanheads/mcp-ts-core/errors';
+import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { NcbiApiClient, type NcbiApiClientConfig } from '@/services/ncbi/api-client.js';
 
 vi.mock('@cyanheads/mcp-ts-core/utils', () => {
   const mockFetch = vi.fn();
@@ -94,9 +94,7 @@ describe('NcbiApiClient', () => {
 
   it('throws non-retryable McpError immediately', async () => {
     const { JsonRpcErrorCode } = await import('@cyanheads/mcp-ts-core/errors');
-    mockFetch.mockRejectedValueOnce(
-      new McpError(JsonRpcErrorCode.InvalidRequest, 'bad request'),
-    );
+    mockFetch.mockRejectedValueOnce(new McpError(JsonRpcErrorCode.InvalidRequest, 'bad request'));
 
     const client = new NcbiApiClient({ ...baseConfig, maxRetries: 3 });
     await expect(client.makeRequest('esearch', { db: 'pubmed' })).rejects.toThrow('bad request');

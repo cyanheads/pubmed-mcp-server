@@ -50,10 +50,11 @@ describe('NcbiResponseHandler', () => {
 
     it('throws on NCBI error in XML response', () => {
       const handler = createHandler();
-      const xml = '<?xml version="1.0"?><eSummaryResult><ERROR>Invalid uid</ERROR></eSummaryResult>';
-      expect(() =>
-        handler.parseAndHandleResponse(xml, 'esummary', { retmode: 'xml' }),
-      ).toThrow(/NCBI API Error/);
+      const xml =
+        '<?xml version="1.0"?><eSummaryResult><ERROR>Invalid uid</ERROR></eSummaryResult>';
+      expect(() => handler.parseAndHandleResponse(xml, 'esummary', { retmode: 'xml' })).toThrow(
+        /NCBI API Error/,
+      );
     });
 
     it('returns raw XML when returnRawXml is true', () => {
@@ -89,9 +90,9 @@ describe('NcbiResponseHandler', () => {
     it('throws on JSON response with error field', () => {
       const handler = createHandler();
       const json = '{"error":"Invalid ID"}';
-      expect(() =>
-        handler.parseAndHandleResponse(json, 'esearch', { retmode: 'json' }),
-      ).toThrow(/NCBI API Error.*Invalid ID/);
+      expect(() => handler.parseAndHandleResponse(json, 'esearch', { retmode: 'json' })).toThrow(
+        /NCBI API Error.*Invalid ID/,
+      );
     });
   });
 

@@ -26,18 +26,30 @@ describe('NcbiRequestQueue', () => {
     const queue = new NcbiRequestQueue(0);
     const order: number[] = [];
 
-    const t1 = queue.enqueue(async () => {
-      order.push(1);
-      return 1;
-    }, 'e1', {});
-    const t2 = queue.enqueue(async () => {
-      order.push(2);
-      return 2;
-    }, 'e2', {});
-    const t3 = queue.enqueue(async () => {
-      order.push(3);
-      return 3;
-    }, 'e3', {});
+    const t1 = queue.enqueue(
+      async () => {
+        order.push(1);
+        return 1;
+      },
+      'e1',
+      {},
+    );
+    const t2 = queue.enqueue(
+      async () => {
+        order.push(2);
+        return 2;
+      },
+      'e2',
+      {},
+    );
+    const t3 = queue.enqueue(
+      async () => {
+        order.push(3);
+        return 3;
+      },
+      'e3',
+      {},
+    );
 
     const results = await Promise.all([t1, t2, t3]);
     expect(results).toEqual([1, 2, 3]);
@@ -50,9 +62,9 @@ describe('NcbiRequestQueue', () => {
     const blocking = new Promise<void>((resolve) => setTimeout(resolve, 100));
     queue.enqueue(() => blocking, 'blocking', {});
 
-    await expect(
-      queue.enqueue(() => Promise.resolve(), 'overflow', {}),
-    ).rejects.toThrow(/queue is full/);
+    await expect(queue.enqueue(() => Promise.resolve(), 'overflow', {})).rejects.toThrow(
+      /queue is full/,
+    );
   });
 
   it('propagates task errors to the caller', async () => {
@@ -64,7 +76,9 @@ describe('NcbiRequestQueue', () => {
 
   it('continues processing after a failed task', async () => {
     const queue = new NcbiRequestQueue(0);
-    const p1 = queue.enqueue(() => Promise.reject(new Error('fail')), 'e1', {}).catch(() => 'caught');
+    const p1 = queue
+      .enqueue(() => Promise.reject(new Error('fail')), 'e1', {})
+      .catch(() => 'caught');
     const p2 = queue.enqueue(() => Promise.resolve('ok'), 'e2', {});
 
     const [r1, r2] = await Promise.all([p1, p2]);

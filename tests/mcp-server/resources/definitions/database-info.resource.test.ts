@@ -3,8 +3,8 @@
  * @module tests/mcp-server/resources/definitions/database-info.resource.test
  */
 
-import { describe, expect, it, vi } from 'vitest';
 import { createMockContext } from '@cyanheads/mcp-ts-core/testing';
+import { describe, expect, it, vi } from 'vitest';
 
 const mockEInfo = vi.fn();
 vi.mock('@/services/ncbi/ncbi-service.js', () => ({

@@ -4,8 +4,8 @@
  */
 
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { NcbiService } from '@/services/ncbi/ncbi-service.js';
 import type { NcbiApiClient } from '@/services/ncbi/api-client.js';
+import { NcbiService } from '@/services/ncbi/ncbi-service.js';
 import type { NcbiRequestQueue } from '@/services/ncbi/request-queue.js';
 import type { NcbiResponseHandler } from '@/services/ncbi/response-handler.js';
 

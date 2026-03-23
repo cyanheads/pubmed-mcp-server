@@ -3,8 +3,8 @@
  * @module tests/mcp-server/tools/definitions/search-articles.tool.test
  */
 
-import { describe, expect, it, vi } from 'vitest';
 import { createMockContext } from '@cyanheads/mcp-ts-core/testing';
+import { describe, expect, it, vi } from 'vitest';
 
 const mockESearch = vi.fn();
 const mockESummary = vi.fn();

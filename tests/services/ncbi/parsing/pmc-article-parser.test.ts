@@ -81,9 +81,7 @@ describe('extractJatsAuthors', () => {
 
   it('extracts collective/group authors', () => {
     const group: XmlJatsContribGroup = {
-      contrib: [
-        { '@_contrib-type': 'author', collab: 'COVID-19 Study Group' },
-      ],
+      contrib: [{ '@_contrib-type': 'author', collab: 'COVID-19 Study Group' }],
     };
     const authors = extractJatsAuthors(group);
     expect(authors).toHaveLength(1);
@@ -171,9 +169,7 @@ describe('extractReferences', () => {
   it('falls back to element-citation', () => {
     const back: XmlJatsBack = {
       'ref-list': {
-        ref: [
-          { 'element-citation': 'Citation text here.' },
-        ],
+        ref: [{ 'element-citation': 'Citation text here.' }],
       },
     };
     const refs = extractReferences(back);

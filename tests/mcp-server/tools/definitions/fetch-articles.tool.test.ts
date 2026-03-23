@@ -3,17 +3,15 @@
  * @module tests/mcp-server/tools/definitions/fetch-articles.tool.test
  */
 
-import { describe, expect, it, vi } from 'vitest';
 import { createMockContext } from '@cyanheads/mcp-ts-core/testing';
+import { describe, expect, it, vi } from 'vitest';
 
 const mockEFetch = vi.fn();
 vi.mock('@/services/ncbi/ncbi-service.js', () => ({
   getNcbiService: () => ({ eFetch: mockEFetch }),
 }));
 
-const { fetchArticlesTool } = await import(
-  '@/mcp-server/tools/definitions/fetch-articles.tool.js'
-);
+const { fetchArticlesTool } = await import('@/mcp-server/tools/definitions/fetch-articles.tool.js');
 
 describe('fetchArticlesTool', () => {
   it('validates input schema', () => {
@@ -42,9 +40,7 @@ describe('fetchArticlesTool', () => {
     const ctx = createMockContext();
     const input = fetchArticlesTool.input.parse({ pmids: ['12345'] });
 
-    await expect(fetchArticlesTool.handler(input, ctx)).rejects.toThrow(
-      /missing PubmedArticleSet/,
-    );
+    await expect(fetchArticlesTool.handler(input, ctx)).rejects.toThrow(/missing PubmedArticleSet/);
   });
 
   it('parses articles and adds URLs', async () => {

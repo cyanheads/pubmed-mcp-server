@@ -1,6 +1,6 @@
 # pubmed-mcp-server - Directory Structure
 
-Generated on: 2026-03-23 19:20:13
+Generated on: 2026-03-23 20:30:02
 
 ```text
 pubmed-mcp-server/
@@ -117,8 +117,37 @@ pubmed-mcp-server/
 │   │       └── types.ts
 │   └── index.ts
 ├── tests/
-│   ├── prompts/
-│   ├── resources/
+│   ├── config/
+│   │   └── server-config.test.ts
+│   ├── mcp-server/
+│   │   ├── prompts/
+│   │   │   └── definitions/
+│   │   │       └── research-plan.prompt.test.ts
+│   │   ├── resources/
+│   │   │   └── definitions/
+│   │   │       └── database-info.resource.test.ts
+│   │   └── tools/
+│   │       └── definitions/
+│   │           ├── fetch-articles.tool.test.ts
+│   │           ├── fetch-fulltext.tool.test.ts
+│   │           ├── find-related.tool.test.ts
+│   │           ├── format-citations.tool.test.ts
+│   │           ├── lookup-mesh.tool.test.ts
+│   │           ├── search-articles.tool.test.ts
+│   │           └── spell-check.tool.test.ts
+│   ├── services/
+│   │   └── ncbi/
+│   │       ├── formatting/
+│   │       │   └── citation-formatter.test.ts
+│   │       ├── parsing/
+│   │       │   ├── article-parser.test.ts
+│   │       │   ├── esummary-parser.test.ts
+│   │       │   ├── pmc-article-parser.test.ts
+│   │       │   └── xml-helpers.test.ts
+│   │       ├── api-client.test.ts
+│   │       ├── ncbi-service.test.ts
+│   │       ├── request-queue.test.ts
+│   │       └── response-handler.test.ts
 │   └── tools/
 ├── .dockerignore
 ├── .env.example

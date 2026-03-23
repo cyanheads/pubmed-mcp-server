@@ -3,8 +3,8 @@
  * @module tests/mcp-server/tools/definitions/lookup-mesh.tool.test
  */
 
-import { describe, expect, it, vi } from 'vitest';
 import { createMockContext } from '@cyanheads/mcp-ts-core/testing';
+import { describe, expect, it, vi } from 'vitest';
 
 const mockESearch = vi.fn();
 const mockESummary = vi.fn();
@@ -12,9 +12,7 @@ vi.mock('@/services/ncbi/ncbi-service.js', () => ({
   getNcbiService: () => ({ eSearch: mockESearch, eSummary: mockESummary }),
 }));
 
-const { lookupMeshTool } = await import(
-  '@/mcp-server/tools/definitions/lookup-mesh.tool.js'
-);
+const { lookupMeshTool } = await import('@/mcp-server/tools/definitions/lookup-mesh.tool.js');
 
 describe('lookupMeshTool', () => {
   it('validates input with defaults', () => {
@@ -43,8 +41,16 @@ describe('lookupMeshTool', () => {
           {
             Id: '68009369',
             Item: [
-              { '@_Name': 'DS_MeshTerms', '@_Type': 'List', Item: [{ '@_Name': 'string', '@_Type': 'String', '#text': 'Neoplasms' }] },
-              { '@_Name': 'DS_ScopeNote', '@_Type': 'String', '#text': 'New abnormal growth of tissue.' },
+              {
+                '@_Name': 'DS_MeshTerms',
+                '@_Type': 'List',
+                Item: [{ '@_Name': 'string', '@_Type': 'String', '#text': 'Neoplasms' }],
+              },
+              {
+                '@_Name': 'DS_ScopeNote',
+                '@_Type': 'String',
+                '#text': 'New abnormal growth of tissue.',
+              },
             ],
           },
         ],
