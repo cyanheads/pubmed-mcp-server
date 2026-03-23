@@ -1,15 +1,15 @@
 <div align="center">
-  <h1>pubmed-mcp-server</h1>
-  <p><b>MCP server for the NCBI E-utilities API. Search PubMed, fetch article metadata and full text, generate citations, explore MeSH terms, and discover related research. Runs over stdio or HTTP. Deployable to Cloudflare Workers.</b>
+  <h1>@cyanheads/pubmed-mcp-server</h1>
+  <p><b>MCP server for the NCBI E-utilities API. Search PubMed, fetch article metadata and full text, generate citations, explore MeSH terms, and discover related research. STDIO or Streamable HTTP.</b>
   <div>7 Tools • 1 Resource • 1 Prompt</div>
   </p>
 </div>
 
 <div align="center">
 
-[![npm](https://img.shields.io/npm/v/@cyanheads/pubmed-mcp-server?style=flat-square&logo=npm&logoColor=white)](https://www.npmjs.com/package/@cyanheads/pubmed-mcp-server) [![Version](https://img.shields.io/badge/Version-2.1.5-blue.svg?style=flat-square)](./CHANGELOG.md) [![MCP Spec](https://img.shields.io/badge/MCP%20Spec-2025--11--25-8A2BE2.svg?style=flat-square)](https://modelcontextprotocol.io/specification/2025-11-25) 
+[![npm](https://img.shields.io/npm/v/@cyanheads/pubmed-mcp-server?style=flat-square&logo=npm&logoColor=white)](https://www.npmjs.com/package/@cyanheads/pubmed-mcp-server) [![Version](https://img.shields.io/badge/Version-2.2.0-blue.svg?style=flat-square)](./CHANGELOG.md) [![Framework](https://img.shields.io/badge/Built%20on-@cyanheads/mcp--ts--core-259?style=flat-square)](https://www.npmjs.com/package/@cyanheads/mcp-ts-core) [![MCP SDK](https://img.shields.io/badge/MCP%20SDK-^1.27.1-green.svg?style=flat-square)](https://modelcontextprotocol.io/) 
 
-[![MCP SDK](https://img.shields.io/badge/MCP%20SDK-^1.27.1-green.svg?style=flat-square)](https://modelcontextprotocol.io/) [![License](https://img.shields.io/badge/License-Apache%202.0-orange.svg?style=flat-square)](./LICENSE) [![Status](https://img.shields.io/badge/Status-Stable-brightgreen.svg?style=flat-square)](https://github.com/cyanheads/pubmed-mcp-server/issues) [![TypeScript](https://img.shields.io/badge/TypeScript-^5.9.3-3178C6.svg?style=flat-square)](https://www.typescriptlang.org/) [![Bun](https://img.shields.io/badge/Bun-v1.3.2-blueviolet.svg?style=flat-square)](https://bun.sh/)
+[![License](https://img.shields.io/badge/License-Apache%202.0-orange.svg?style=flat-square)](./LICENSE) [![TypeScript](https://img.shields.io/badge/TypeScript-^6.0.2-3178C6.svg?style=flat-square)](https://www.typescriptlang.org/) [![Bun](https://img.shields.io/badge/Bun-v1.3.2-blueviolet.svg?style=flat-square)](https://bun.sh/)
 
 </div>
 
@@ -27,15 +27,15 @@ Seven tools for working with PubMed and NCBI data:
 
 | Tool | Description |
 |:---|:---|
-| `pubmed_search` | Search PubMed with full query syntax, field-specific filters, date ranges, pagination, and optional brief summaries |
-| `pubmed_fetch` | Fetch full article metadata by PMIDs — abstract, authors, journal, MeSH terms, grants |
-| `pubmed_pmc_fetch` | Fetch full-text articles from PubMed Central — body sections, references, and metadata for open-access articles |
-| `pubmed_cite` | Generate formatted citations in APA 7th, MLA 9th, BibTeX, or RIS |
-| `pubmed_related` | Find similar articles, citing articles, or references for a given PMID |
-| `pubmed_spell` | Spell-check biomedical queries using NCBI's ESpell service |
-| `pubmed_mesh_lookup` | Search and explore MeSH vocabulary — tree numbers, scope notes, entry terms |
+| `pubmed_search_articles` | Search PubMed with full query syntax, field-specific filters, date ranges, pagination, and optional brief summaries |
+| `pubmed_fetch_articles` | Fetch full article metadata by PMIDs — abstract, authors, journal, MeSH terms, grants |
+| `pubmed_fetch_fulltext` | Fetch full-text articles from PubMed Central — body sections, references, and metadata for open-access articles |
+| `pubmed_format_citations` | Generate formatted citations in APA 7th, MLA 9th, BibTeX, or RIS |
+| `pubmed_find_related` | Find similar articles, citing articles, or references for a given PMID |
+| `pubmed_spell_check` | Spell-check biomedical queries using NCBI's ESpell service |
+| `pubmed_lookup_mesh` | Search and explore MeSH vocabulary — tree numbers, scope notes, entry terms |
 
-### `pubmed_search`
+### `pubmed_search_articles`
 
 Search PubMed with full NCBI query syntax and filters.
 
@@ -50,7 +50,7 @@ Search PubMed with full NCBI query syntax and filters.
 
 ---
 
-### `pubmed_fetch`
+### `pubmed_fetch_articles`
 
 Fetch full article metadata by PubMed IDs.
 
@@ -62,7 +62,7 @@ Fetch full article metadata by PubMed IDs.
 
 ---
 
-### `pubmed_pmc_fetch`
+### `pubmed_fetch_fulltext`
 
 Fetch full-text articles from PubMed Central (PMC).
 
@@ -76,7 +76,7 @@ Fetch full-text articles from PubMed Central (PMC).
 
 ---
 
-### `pubmed_cite`
+### `pubmed_format_citations`
 
 Generate formatted citations for articles.
 
@@ -87,7 +87,7 @@ Generate formatted citations for articles.
 
 ---
 
-### `pubmed_related`
+### `pubmed_find_related`
 
 Find articles related to a source article via ELink.
 
@@ -97,7 +97,7 @@ Find articles related to a source article via ELink.
 
 ---
 
-### `pubmed_spell`
+### `pubmed_spell_check`
 
 Spell-check a biomedical query using NCBI's ESpell.
 
@@ -106,7 +106,7 @@ Spell-check a biomedical query using NCBI's ESpell.
 
 ---
 
-### `pubmed_mesh_lookup`
+### `pubmed_lookup_mesh`
 
 Search and explore the MeSH (Medical Subject Headings) vocabulary.
 
@@ -123,14 +123,13 @@ Search and explore the MeSH (Medical Subject Headings) vocabulary.
 
 ## Features
 
-Built on [`mcp-ts-template`](https://github.com/cyanheads/mcp-ts-template) 3.0:
+Built on [`@cyanheads/mcp-ts-core`](https://github.com/cyanheads/mcp-ts-core):
 
 - Declarative tool definitions — single file per tool, framework handles registration and validation
-- Unified `McpError` error handling across all tools
+- Unified error handling across all tools
 - Pluggable auth (`none`, `jwt`, `oauth`)
 - Swappable storage backends: `in-memory`, `filesystem`, `Supabase`, `Cloudflare KV/R2/D1`
-- Structured logging (Pino) with optional OpenTelemetry tracing
-- Typed DI container with `Token<T>` phantom branding
+- Structured logging with optional OpenTelemetry tracing
 - Runs locally (stdio/HTTP) or on Cloudflare Workers from the same codebase
 
 PubMed-specific:
@@ -214,8 +213,8 @@ Or with Docker:
 For Streamable HTTP, set the transport and start the server:
 
 ```sh
-MCP_TRANSPORT_TYPE=http MCP_HTTP_PORT=3017 bun run start:http
-# Server listens at http://localhost:3017/mcp
+MCP_TRANSPORT_TYPE=http MCP_HTTP_PORT=3010 bun run start:http
+# Server listens at http://localhost:3010/mcp
 ```
 
 ### Prerequisites
@@ -245,12 +244,12 @@ bun install
 
 ## Configuration
 
-All configuration is centralized and validated at startup in `src/config/index.ts`. Key environment variables:
+All configuration is validated at startup via Zod schemas in `src/config/server-config.ts`. Key environment variables:
 
 | Variable | Description | Default |
 |:---|:---|:---|
 | `MCP_TRANSPORT_TYPE` | Transport: `stdio` or `http` | `stdio` |
-| `MCP_HTTP_PORT` | HTTP server port | `3017` |
+| `MCP_HTTP_PORT` | HTTP server port | `3010` |
 | `MCP_AUTH_MODE` | Authentication: `none`, `jwt`, or `oauth` | `none` |
 | `MCP_LOG_LEVEL` | Log level (`debug`, `info`, `warning`, `error`, etc.) | `info` |
 | `STORAGE_PROVIDER_TYPE` | Storage backend: `in-memory`, `filesystem`, `supabase`, `cloudflare-kv/r2/d1` | `in-memory` |
@@ -258,7 +257,7 @@ All configuration is centralized and validated at startup in `src/config/index.t
 | `NCBI_ADMIN_EMAIL` | Contact email sent with NCBI requests (recommended by NCBI) | none |
 | `NCBI_REQUEST_DELAY_MS` | Delay between NCBI requests in ms | 334 (100 with key) |
 | `NCBI_MAX_RETRIES` | Retry attempts for failed NCBI requests | 3 |
-| `NCBI_TIMEOUT_MS` | NCBI request timeout in ms | 30000 |
+| `NCBI_TIMEOUT_MS` | NCBI request timeout in ms | `30000` |
 | `OTEL_ENABLED` | Enable OpenTelemetry | `false` |
 
 ## Running the server
@@ -283,25 +282,6 @@ All configuration is centralized and validated at startup in `src/config/index.t
   bun run test      # Runs the test suite
   ```
 
-### Cloudflare Workers
-
-1. **Build the Worker bundle**:
-
-```sh
-bun run build:worker
-```
-
-2. **Run locally with Wrangler**:
-
-```sh
-bun run deploy:dev
-```
-
-3. **Deploy to Cloudflare**:
-    ```sh
-    bun run deploy:prod
-    ```
-
 ## Project structure
 
 | Directory | Purpose |
@@ -309,23 +289,17 @@ bun run deploy:dev
 | `src/mcp-server/tools` | Tool definitions (`*.tool.ts`). Seven PubMed tools. |
 | `src/mcp-server/resources` | Resource definitions. Database info resource. |
 | `src/mcp-server/prompts` | Prompt definitions. Research plan prompt. |
-| `src/mcp-server/transports` | HTTP and stdio transports, including auth middleware. |
 | `src/services/ncbi` | NCBI E-utilities service layer — API client, queue, parser, formatter. |
-| `src/storage` | `StorageService` abstraction and provider implementations. |
-| `src/container` | DI container registrations and tokens. |
-| `src/utils` | Logging, error handling, security, parsing, formatting, telemetry. |
-| `src/config` | Environment variable parsing and validation with Zod. |
-| `schemas/ncbi-dtd` | NCBI E-utilities DTD files — XML schema definitions for ESearch, EFetch, ESummary, ELink, ESpell, EInfo, and PubMed article XML. |
-| `docs/ncbi` | NCBI reference material ([E-utilities help manual](docs/ncbi/eutilities-help.pdf)). |
+| `src/config` | Server-specific environment variable parsing and validation with Zod. |
 | `tests/` | Unit and integration tests, mirroring the `src/` structure. |
 
 ## Development guide
 
 See [`CLAUDE.md`](./CLAUDE.md) for development guidelines and architectural rules. The short version:
 
-- Logic throws `McpError`, handlers catch — no `try/catch` in tool logic
-- Pass `RequestContext` through the call stack for logging and tracing
-- Register new tools and resources in the `index.ts` barrel files
+- Handlers throw, framework catches — no `try/catch` in tool logic
+- Use `ctx.log` for logging, `ctx.state` for storage
+- Register new tools and resources in the `createApp()` arrays
 
 ## Contributing
 

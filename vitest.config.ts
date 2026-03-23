@@ -1,44 +1,14 @@
-import { defineConfig } from 'vitest/config';
-import tsconfigPaths from 'vite-tsconfig-paths';
+import { defineConfig, mergeConfig } from 'vitest/config';
+import coreConfig from '@cyanheads/mcp-ts-core/vitest.config';
 
-export default defineConfig({
-  plugins: [tsconfigPaths()],
-  // Inline zod to fix Vite SSR transform issues with Zod 4
-  ssr: {
-    noExternal: ['zod'],
-  },
-  test: {
-    globals: true,
-    environment: 'node',
-    setupFiles: ['./tests/setup.ts'],
-    // Conformance tests use real modules (no mocks) and have their own config
-    exclude: ['tests/conformance/**', 'node_modules/**'],
-    // Run tests in parallel with proper isolation to prevent mock pollution
-    pool: 'forks',
-    maxWorkers: 4,
-    isolate: true,
-    coverage: {
-      provider: 'istanbul',
-      reporter: ['text', 'json', 'html'],
-      include: ['src/**/*.ts'],
-      exclude: ['src/**/*.d.ts'],
-      thresholds: {
-        lines: 80,
-        functions: 75,
-        branches: 70,
-        statements: 80,
-      },
+export default mergeConfig(
+  coreConfig,
+  defineConfig({
+    resolve: {
+      alias: { '@/': new URL('./src/', import.meta.url).pathname },
     },
-    fakeTimers: {
-      toFake: [
-        'setTimeout',
-        'clearTimeout',
-        'setInterval',
-        'clearInterval',
-        'setImmediate',
-        'clearImmediate',
-        'Date',
-      ],
+    test: {
+      include: ['src/**/*.test.ts', 'tests/**/*.test.ts'],
     },
-  },
-});
+  }),
+);

@@ -1,8 +1,10 @@
-#!/usr/bin/env bun
+#!/usr/bin/env tsx
+import { type ChildProcess, spawn, spawnSync } from 'node:child_process';
+import { readFileSync } from 'node:fs';
 import * as path from 'node:path';
 import process from 'node:process';
 import { fileURLToPath } from 'node:url';
-/// <reference types="bun-types" />
+
 /**
  * @fileoverview Comprehensive development script for quality and security checks.
  * @module scripts/devcheck
@@ -36,10 +38,8 @@ import { fileURLToPath } from 'node:url';
  * // Run only a single check (case-insensitive partial match):
  * // bun run scripts/devcheck.ts --only lint
  */
-import { type Subprocess, spawn } from 'bun';
-
 /** Track active child processes for clean shutdown on SIGINT/SIGTERM. */
-const activeProcs = new Set<Subprocess>();
+const activeProcs = new Set<ChildProcess>();
 
 for (const signal of ['SIGINT', 'SIGTERM'] as const) {
   process.on(signal, () => {
@@ -110,6 +110,8 @@ interface CommandResult {
   skipped: boolean;
   stderr: string;
   stdout: string;
+  /** If set, check passed but with a warning (e.g., upstream-only vulnerabilities). */
+  warning?: string;
 }
 
 /** Represents the raw result from a shell execution. */
@@ -125,8 +127,12 @@ interface Check {
   /**
    * Optional predicate to determine success.
    * Useful for tools that signal issues via stdout or have non-standard exit codes.
+   * Return `{ success, warning }` to pass with a visible warning (e.g., upstream-only vulns).
    */
-  isSuccess?: (result: ShellResult, mode: RunMode) => boolean;
+  isSuccess?: (
+    result: ShellResult,
+    mode: RunMode,
+  ) => boolean | { success: boolean; warning?: string };
   name: string;
   /** If true, check is off by default — only runs when its flag is explicitly provided. */
   requiresFlag?: boolean;
@@ -141,39 +147,56 @@ interface Check {
 
 const Shell = {
   /**
-   * Executes a shell command using Bun.spawn and returns a structured result.
+   * Executes a shell command using child_process.spawn and returns a structured result.
    */
-  async exec(cmd: string[], options: { cwd: string }): Promise<ShellResult> {
-    try {
-      // Use 'pipe' to capture output for the summary.
-      const proc = spawn(cmd, {
-        cwd: options.cwd,
-        stdio: ['ignore', 'pipe', 'pipe'],
-      });
+  exec(cmd: string[], options: { cwd: string }): Promise<ShellResult> {
+    const [command = '', ...args] = cmd;
+    return new Promise((resolve) => {
+      let proc: ChildProcess;
+      try {
+        proc = spawn(command, args, {
+          cwd: options.cwd,
+          stdio: ['ignore', 'pipe', 'pipe'],
+        });
+      } catch (error: unknown) {
+        const errorMessage = error instanceof Error ? error.message : String(error);
+        resolve({
+          exitCode: 127,
+          stdout: '',
+          stderr: `Failed to execute command: ${command}\nError: ${errorMessage}`,
+        });
+        return;
+      }
+
       activeProcs.add(proc);
 
-      const [stdout, stderr] = await Promise.all([
-        new Response(proc.stdout).text(),
-        new Response(proc.stderr).text(),
-      ]);
+      const stdoutChunks: Buffer[] = [];
+      const stderrChunks: Buffer[] = [];
+      let spawnError: Error | undefined;
 
-      const exitCode = await proc.exited;
-      activeProcs.delete(proc);
+      proc.stdout?.on('data', (chunk: Buffer) => stdoutChunks.push(chunk));
+      proc.stderr?.on('data', (chunk: Buffer) => stderrChunks.push(chunk));
+      proc.on('error', (err) => {
+        spawnError = err;
+      });
 
-      return {
-        exitCode,
-        stdout: stdout.trim(),
-        stderr: stderr.trim(),
-      };
-    } catch (error: unknown) {
-      // Handle cases where the command itself fails to spawn (e.g., command not found)
-      const errorMessage = error instanceof Error ? error.message : String(error);
-      return {
-        exitCode: 127,
-        stdout: '',
-        stderr: `Failed to execute command: ${cmd[0]}\nError: ${errorMessage}`,
-      };
-    }
+      proc.on('close', (code) => {
+        activeProcs.delete(proc);
+        if (spawnError) {
+          resolve({
+            exitCode: 127,
+            stdout: '',
+            stderr: `Failed to execute command: ${command}\nError: ${spawnError.message}`,
+          });
+        } else {
+          resolve({
+            exitCode: code ?? 1,
+            stdout: Buffer.concat(stdoutChunks).toString('utf-8').trim(),
+            stderr: Buffer.concat(stderrChunks).toString('utf-8').trim(),
+          });
+        }
+      });
+    });
   },
 
   /**
@@ -206,9 +229,116 @@ const Shell = {
 
 const ROOT_DIR = path.join(path.dirname(fileURLToPath(import.meta.url)), '..');
 
-// Packages allowed to be outdated without failing the check.
-// zod is pinned due to the MCP SDK's hard version requirement.
-const OUTDATED_ALLOWLIST = new Set(['zod']);
+// ── Project-local config (devcheck.config.json) ─────────────────────
+
+interface DevcheckConfig {
+  depcheck?: {
+    ignores?: string[];
+    ignorePatterns?: string[];
+  };
+  outdated?: {
+    allowlist?: string[];
+  };
+}
+
+function loadDevcheckConfig(rootDir: string): DevcheckConfig {
+  try {
+    return JSON.parse(
+      readFileSync(path.join(rootDir, 'devcheck.config.json'), 'utf-8'),
+    ) as DevcheckConfig;
+  } catch {
+    return {};
+  }
+}
+
+const DEVCHECK_CONFIG = loadDevcheckConfig(ROOT_DIR);
+
+const OUTDATED_ALLOWLIST = new Set(DEVCHECK_CONFIG.outdated?.allowlist ?? []);
+
+/** Use bun for package management commands if available, otherwise npm. */
+const PM_CMD = spawnSync('bun', ['--version'], { stdio: 'ignore' }).status === 0 ? 'bun' : 'npm';
+
+/**
+ * Direct dependencies from package.json, used to classify audit vulnerabilities
+ * as direct (fixable by us) vs transitive/upstream (requires upstream fix).
+ */
+const DIRECT_DEPS: ReadonlySet<string> = (() => {
+  try {
+    const pkg = JSON.parse(readFileSync(path.join(ROOT_DIR, 'package.json'), 'utf-8'));
+    return new Set<string>([
+      ...Object.keys(pkg.dependencies ?? {}),
+      ...Object.keys(pkg.devDependencies ?? {}),
+    ]);
+  } catch {
+    return new Set<string>();
+  }
+})();
+
+/**
+ * Parses `bun audit` output and classifies high/critical vulnerabilities as
+ * direct (in our package.json) or upstream (transitive dependency we can't fix).
+ *
+ * Bun audit format per vulnerability block:
+ *   <package>  <version-range>        ← header (no indent, 2+ spaces before range)
+ *     <parent> › <child> [› ...]      ← dependency path (indented, › = transitive)
+ *     <severity>: <description>       ← advisory (indented)
+ *
+ * Returns null if parsing yields no results (caller should fall back to default behavior).
+ */
+function classifyAuditVulns(output: string): { direct: string[]; upstream: string[] } | null {
+  try {
+    const lines = output.split('\n');
+    const direct: string[] = [];
+    const upstream: string[] = [];
+    let i = 0;
+
+    while (i < lines.length) {
+      // Package header: non-indented, name followed by 2+ spaces then version constraint
+      const pkgMatch = lines[i]?.match(/^([@\w][\w./-]*)\s{2,}(.+)$/);
+      if (!pkgMatch) {
+        i++;
+        continue;
+      }
+
+      const [, pkg, versionRange] = pkgMatch;
+      i++;
+
+      let hasHighCritical = false;
+      const paths: string[] = [];
+
+      // Collect indented lines belonging to this block
+      while (i < lines.length && (lines[i]?.startsWith('  ') ?? false)) {
+        const trimmed = (lines[i] ?? '').trim();
+        if (/^(critical|high):/i.test(trimmed)) {
+          hasHighCritical = true;
+        } else if (trimmed && !/^(moderate|low):/i.test(trimmed)) {
+          paths.push(trimmed);
+        }
+        i++;
+      }
+
+      if (!hasHighCritical) continue;
+
+      // Direct if: the vulnerable package is in our package.json,
+      // or any dependency path lacks › (meaning it's not pulled in transitively)
+      const pkgName = pkg ?? '';
+      const isDirect = DIRECT_DEPS.has(pkgName) || paths.some((p) => !p.includes('\u203a'));
+      if (isDirect) {
+        direct.push(`${pkgName} ${versionRange}`);
+      } else {
+        const via = paths[0]?.split(/\s*\u203a\s*/)[0] ?? 'unknown';
+        upstream.push(`${pkgName} ${versionRange} (via ${via})`);
+      }
+    }
+
+    // If we found nothing despite high/critical text existing, parsing may have failed
+    if (direct.length === 0 && upstream.length === 0) return null;
+
+    return { direct, upstream };
+  } catch {
+    return null;
+  }
+}
 
 // Define file extensions for linting and formatting
 const LINT_EXTS = ['.ts', '.tsx', '.js', '.jsx'];
@@ -276,6 +406,14 @@ const ALL_CHECKS: Check[] = [
       `Add sensitive files to ${c.bold('.gitignore')} and run ${c.bold('git rm --cached <file>')}.`,
   },
   {
+    name: 'MCP Definitions',
+    flag: '--no-mcp-lint',
+    canFix: false,
+    getCommand: () => ['bun', 'run', 'scripts/lint-mcp.ts'],
+    tip: (c) =>
+      `Fix definition errors reported above. See ${c.bold('validateDefinitions()')} docs for rule details.`,
+  },
+  {
     name: 'Biome',
     flag: '--no-lint',
     canFix: true,
@@ -317,45 +455,67 @@ const ALL_CHECKS: Check[] = [
     flag: '--no-depcheck',
     canFix: false,
     slowCheck: true,
-    getCommand: (ctx) => [
-      path.join(ctx.rootDir, 'node_modules', '.bin', 'depcheck'),
-      '--ignores=@types/*,pino-pretty,typescript,bun-types,@vitest/coverage-istanbul,repomix,bun',
-    ],
+    getCommand: (ctx) => {
+      const cmd = [path.join(ctx.rootDir, 'node_modules', '.bin', 'depcheck')];
+      const ignores = DEVCHECK_CONFIG.depcheck?.ignores ?? ['@types/*'];
+      if (ignores.length > 0) cmd.push(`--ignores=${ignores.join(',')}`);
+      const patterns = DEVCHECK_CONFIG.depcheck?.ignorePatterns ?? [];
+      if (patterns.length > 0) cmd.push(`--ignore-patterns=${patterns.join(',')}`);
+      return cmd;
+    },
     tip: (c) =>
-      `Remove unused packages with ${c.bold('bun remove <pkg>')} or add to depcheck ignores.`,
+      `Remove unused packages with ${c.bold(`${PM_CMD} remove <pkg>`)} or add to ${c.bold('devcheck.config.json')} ignores.`,
   },
   // Slow checks last (network-bound operations)
   {
     name: 'Security Audit',
     flag: '--no-audit',
-    canFix: false, // 'bun audit --fix' exists but often requires manual review.
+    canFix: false, // audit --fix exists but often requires manual review.
     slowCheck: true,
-    getCommand: () => ['bun', 'audit'],
+    getCommand: () => [PM_CMD, 'audit'],
     isSuccess: (result, _mode) => {
       // If the command exits 0, no vulnerabilities were found.
       if (result.exitCode === 0) return true;
 
-      // 'bun audit' exits with 1 if vulnerabilities are found. We need to check the output.
       const output = result.stdout;
-
-      // If no vulnerabilities are found, it's a success (defensive check).
       if (output.includes('0 vulnerabilities found')) return true;
 
-      // Fail only if 'high' or 'critical' vulnerabilities are mentioned.
+      // Pass if only low/moderate severity
       const hasHighOrCritical = /high|critical/i.test(output);
+      if (!hasHighOrCritical) return true;
 
-      // If it doesn't have high or critical vulnerabilities, we consider it a success.
-      return !hasHighOrCritical;
+      // Classify: direct deps we can fix vs transitive deps we can't
+      const classified = classifyAuditVulns(output);
+
+      // If parsing failed, fall back to failing (conservative)
+      if (!classified) return false;
+
+      // Direct dep vulnerabilities — we can and should fix these
+      if (classified.direct.length > 0) return false;
+
+      // All high/critical are upstream/transitive — warn but don't fail
+      if (classified.upstream.length > 0) {
+        const n = classified.upstream.length;
+        return {
+          success: true,
+          warning: [
+            `${n} high/critical vulnerabilit${n === 1 ? 'y' : 'ies'} in transitive deps (upstream, no direct fix available):`,
+            ...classified.upstream.map((v) => `  - ${v}`),
+          ].join('\n'),
+        };
+      }
+
+      return true;
     },
     tip: (c) =>
-      `High- or critical-severity vulnerabilities found. Review the report and run ${c.bold('bun update')} or ${c.bold('bun audit --fix')}.`,
+      `Direct dependency vulnerabilities found. Run ${c.bold(`${PM_CMD} update`)} or ${c.bold(`${PM_CMD} audit --fix`)} to resolve.`,
   },
   {
     name: 'Dependencies (Outdated)',
     flag: '--no-deps',
     canFix: false,
     slowCheck: true,
-    getCommand: () => ['bun', 'outdated'],
+    getCommand: () => [PM_CMD, 'outdated'],
     isSuccess: (result) => {
       // Exit 0 with empty output = everything up to date
       if (result.exitCode === 0 && result.stdout.trim() === '') return true;
@@ -384,7 +544,7 @@ const ALL_CHECKS: Check[] = [
       return unexpected.length === 0;
     },
     tip: (c) =>
-      `Run ${c.bold('bun update')} to upgrade dependencies. Allowlisted packages: ${[...OUTDATED_ALLOWLIST].join(', ')}.`,
+      `Run ${c.bold(`${PM_CMD} update`)} to upgrade dependencies. Configure allowlist in ${c.bold('devcheck.config.json')}.`,
   },
 ];
 
@@ -463,6 +623,8 @@ const UI = {
       let status: string;
       if (result.skipped) {
         status = `${c.yellow('⚪ SKIPPED')}`;
+      } else if (result.exitCode === 0 && result.warning) {
+        status = `${c.yellow('⚠️  WARNING')}`;
       } else if (result.exitCode === 0) {
         status = `${c.green('✅ PASSED')}`;
       } else {
@@ -475,19 +637,24 @@ const UI = {
       const durationStr = result.skipped ? '' : c.dim(`(${result.duration}ms)`);
       UI.log(`${c.bold(result.checkName.padEnd(25))} ${status} ${durationStr}`);
 
-      // Display output only for failed checks
-      if (result.exitCode !== 0 && !result.skipped) {
-        if (result.stdout) UI.log(c.dim(result.stdout.replace(/^/gm, '   | ')));
-        if (result.stderr) UI.log(c.red(result.stderr.replace(/^/gm, '   | ')));
+      // Display warning details for passing checks with warnings
+      if (result.exitCode === 0 && result.warning) {
+        UI.log(c.yellow(result.warning.replace(/^/gm, '   | ')));
         UI.log('');
       }
-    }
 
-    // Highlight the slowest check to help identify bottlenecks
-    const ranChecks = results.filter((r) => !r.skipped);
-    if (ranChecks.length > 1) {
-      const slowest = ranChecks.reduce((a, b) => (a.duration > b.duration ? a : b));
-      UI.log(c.dim(`\n  Slowest: ${slowest.checkName} (${slowest.duration}ms)`));
+      // Display check output (dimmed for passing, red stderr for failures)
+      if (!result.skipped && (result.stdout || result.stderr)) {
+        if (result.stdout) UI.log(c.dim(result.stdout.replace(/^/gm, '   | ')));
+        if (result.stderr) {
+          UI.log(
+            result.exitCode !== 0
+              ? c.red(result.stderr.replace(/^/gm, '   | '))
+              : c.dim(result.stderr.replace(/^/gm, '   | ')),
+          );
+        }
+        UI.log('');
+      }
     }
 
     UI.log('\n------------------------------------------------');
@@ -690,7 +857,10 @@ async function runCheck(check: Check, ctx: AppContext): Promise<CommandResult> {
 
   // 7. Determine success (using custom logic if provided)
   if (isSuccess) {
-    const success = isSuccess(result, runMode);
+    const raw = isSuccess(result, runMode);
+    const { success, warning } =
+      typeof raw === 'boolean' ? { success: raw, warning: undefined } : raw;
+
     if (!success && finalResult.exitCode === 0) {
       finalResult.exitCode = 1;
     }
@@ -700,6 +870,9 @@ async function runCheck(check: Check, ctx: AppContext): Promise<CommandResult> {
         finalResult.stdout = finalResult.stderr;
       }
       finalResult.exitCode = 0;
+    }
+    if (warning) {
+      finalResult.warning = warning;
     }
   }
 

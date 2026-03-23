@@ -1,412 +1,171 @@
 # pubmed-mcp-server - Directory Structure
 
-Generated on: 2026-03-05 01:15:00
+Generated on: 2026-03-23 20:30:02
 
-```
+```text
 pubmed-mcp-server/
 ├── .github/
 │   └── FUNDING.yml
-├── .husky/
-│   └── pre-commit
 ├── .storage/
 ├── .vscode/
+│   ├── extensions.json
 │   └── settings.json
+├── claude-plans/
 ├── docs/
-│   ├── ncbi/
-│   │   └── eutilities-help.pdf
-│   └── v2-handoff.md
+│   └── design.md
 ├── schemas/
-│   ├── ncbi-dtd/
-│   │   ├── eInfo_020511.dtd
-│   │   ├── eLink_020511.dtd
-│   │   ├── ePost_020511.dtd
-│   │   ├── eSearch_020511.dtd
-│   │   ├── eSpell.dtd
-│   │   ├── eSummary_041029.dtd
-│   │   └── pubmed_250101.dtd
-│   └── cloudflare-d1-schema.sql
+│   └── ncbi-dtd/
+│       ├── eInfo_020511.dtd
+│       ├── eLink_020511.dtd
+│       ├── ePost_020511.dtd
+│       ├── eSearch_020511.dtd
+│       ├── eSpell.dtd
+│       ├── eSummary_041029.dtd
+│       └── pubmed_250101.dtd
 ├── scripts/
+│   ├── build.ts
 │   ├── clean.ts
 │   ├── devcheck.ts
-│   ├── devdocs.ts
-│   ├── fetch-openapi-spec.ts
-│   ├── make-executable.ts
-│   ├── tree.ts
-│   └── update-coverage.ts
+│   ├── lint-mcp.ts
+│   └── tree.ts
+├── skills/
+│   ├── add-prompt/
+│   │   └── SKILL.md
+│   ├── add-resource/
+│   │   └── SKILL.md
+│   ├── add-service/
+│   │   └── SKILL.md
+│   ├── add-test/
+│   │   └── SKILL.md
+│   ├── add-tool/
+│   │   └── SKILL.md
+│   ├── api-auth/
+│   │   └── SKILL.md
+│   ├── api-config/
+│   │   └── SKILL.md
+│   ├── api-context/
+│   │   └── SKILL.md
+│   ├── api-errors/
+│   │   └── SKILL.md
+│   ├── api-services/
+│   │   ├── references/
+│   │   │   ├── graph.md
+│   │   │   ├── llm.md
+│   │   │   └── speech.md
+│   │   └── SKILL.md
+│   ├── api-testing/
+│   │   └── SKILL.md
+│   ├── api-utils/
+│   │   ├── references/
+│   │   │   ├── formatting.md
+│   │   │   ├── parsing.md
+│   │   │   └── security.md
+│   │   └── SKILL.md
+│   ├── api-workers/
+│   │   └── SKILL.md
+│   ├── design-mcp-server/
+│   │   └── SKILL.md
+│   ├── devcheck/
+│   │   └── SKILL.md
+│   ├── field-test/
+│   │   └── SKILL.md
+│   ├── maintenance/
+│   │   └── SKILL.md
+│   ├── migrate-mcp-ts-template/
+│   │   └── SKILL.md
+│   ├── polish-docs-meta/
+│   │   ├── references/
+│   │   │   ├── agent-protocol.md
+│   │   │   ├── package-meta.md
+│   │   │   ├── readme.md
+│   │   │   └── server-json.md
+│   │   └── SKILL.md
+│   └── setup/
+│       └── SKILL.md
 ├── src/
 │   ├── config/
-│   │   └── index.ts
-│   ├── container/
-│   │   ├── core/
-│   │   │   ├── container.ts
-│   │   │   └── tokens.ts
-│   │   ├── registrations/
-│   │   │   ├── core.ts
-│   │   │   └── mcp.ts
-│   │   ├── index.ts
-│   │   └── README.md
+│   │   └── server-config.ts
 │   ├── mcp-server/
 │   │   ├── prompts/
-│   │   │   ├── definitions/
-│   │   │   │   ├── index.ts
-│   │   │   │   └── research-plan.prompt.ts
-│   │   │   ├── utils/
-│   │   │   │   └── promptDefinition.ts
-│   │   │   └── prompt-registration.ts
+│   │   │   └── definitions/
+│   │   │       └── research-plan.prompt.ts
 │   │   ├── resources/
-│   │   │   ├── definitions/
-│   │   │   │   ├── database-info.resource.ts
-│   │   │   │   └── index.ts
-│   │   │   ├── utils/
-│   │   │   │   ├── resourceDefinition.ts
-│   │   │   │   └── resourceHandlerFactory.ts
-│   │   │   └── resource-registration.ts
-│   │   ├── roots/
-│   │   │   └── roots-registration.ts
-│   │   ├── tasks/
-│   │   │   ├── core/
-│   │   │   │   ├── storageBackedTaskStore.ts
-│   │   │   │   ├── taskManager.ts
-│   │   │   │   └── taskTypes.ts
-│   │   │   └── utils/
-│   │   │       └── taskToolDefinition.ts
-│   │   ├── tools/
-│   │   │   ├── definitions/
-│   │   │   │   ├── index.ts
-│   │   │   │   ├── pmc-fetch.tool.ts
-│   │   │   │   ├── pubmed-cite.tool.ts
-│   │   │   │   ├── pubmed-fetch.tool.ts
-│   │   │   │   ├── pubmed-mesh-lookup.tool.ts
-│   │   │   │   ├── pubmed-related.tool.ts
-│   │   │   │   ├── pubmed-search.tool.ts
-│   │   │   │   └── pubmed-spell.tool.ts
-│   │   │   ├── utils/
-│   │   │   │   ├── toolDefinition.ts
-│   │   │   │   └── toolHandlerFactory.ts
-│   │   │   └── tool-registration.ts
-│   │   ├── transports/
-│   │   │   ├── auth/
-│   │   │   │   ├── lib/
-│   │   │   │   │   ├── authContext.ts
-│   │   │   │   │   ├── authTypes.ts
-│   │   │   │   │   ├── authUtils.ts
-│   │   │   │   │   ├── claimParser.ts
-│   │   │   │   │   └── withAuth.ts
-│   │   │   │   ├── strategies/
-│   │   │   │   │   ├── authStrategy.ts
-│   │   │   │   │   ├── jwtStrategy.ts
-│   │   │   │   │   └── oauthStrategy.ts
-│   │   │   │   ├── authFactory.ts
-│   │   │   │   └── authMiddleware.ts
-│   │   │   ├── http/
-│   │   │   │   ├── httpErrorHandler.ts
-│   │   │   │   ├── httpTransport.ts
-│   │   │   │   ├── httpTypes.ts
-│   │   │   │   ├── protectedResourceMetadata.ts
-│   │   │   │   ├── sessionIdUtils.ts
-│   │   │   │   └── sessionStore.ts
-│   │   │   ├── stdio/
-│   │   │   │   └── stdioTransport.ts
-│   │   │   ├── ITransport.ts
-│   │   │   └── manager.ts
-│   │   ├── README.md
-│   │   └── server.ts
-│   ├── services/
-│   │   ├── ncbi/
-│   │   │   ├── core/
-│   │   │   │   ├── api-client.ts
-│   │   │   │   ├── ncbi-service.ts
-│   │   │   │   ├── request-queue.ts
-│   │   │   │   └── response-handler.ts
-│   │   │   ├── formatting/
-│   │   │   │   └── citation-formatter.ts
-│   │   │   ├── parsing/
-│   │   │   │   ├── article-parser.ts
-│   │   │   │   ├── esummary-parser.ts
-│   │   │   │   ├── pmc-article-parser.ts
-│   │   │   │   └── xml-helpers.ts
-│   │   │   └── types.ts
-│   │   └── README.md
-│   ├── storage/
-│   │   ├── core/
-│   │   │   ├── IStorageProvider.ts
-│   │   │   ├── storageFactory.ts
-│   │   │   ├── StorageService.ts
-│   │   │   └── storageValidation.ts
-│   │   ├── providers/
-│   │   │   ├── cloudflare/
-│   │   │   │   ├── d1Provider.ts
-│   │   │   │   ├── kvProvider.ts
-│   │   │   │   └── r2Provider.ts
-│   │   │   ├── fileSystem/
-│   │   │   │   └── fileSystemProvider.ts
-│   │   │   ├── inMemory/
-│   │   │   │   └── inMemoryProvider.ts
-│   │   │   └── supabase/
-│   │   │       ├── supabase.types.ts
-│   │   │       └── supabaseProvider.ts
-│   │   └── README.md
-│   ├── types-global/
-│   │   └── errors.ts
-│   ├── utils/
-│   │   ├── formatting/
-│   │   │   ├── diffFormatter.ts
-│   │   │   ├── markdownBuilder.ts
-│   │   │   ├── tableFormatter.ts
-│   │   │   └── treeFormatter.ts
-│   │   ├── internal/
-│   │   │   ├── error-handler/
-│   │   │   │   ├── errorHandler.ts
-│   │   │   │   ├── helpers.ts
-│   │   │   │   ├── mappings.ts
-│   │   │   │   └── types.ts
-│   │   │   ├── encoding.ts
-│   │   │   ├── health.ts
-│   │   │   ├── logger.ts
-│   │   │   ├── performance.ts
-│   │   │   ├── requestContext.ts
-│   │   │   ├── runtime.ts
-│   │   │   └── startupBanner.ts
-│   │   ├── metrics/
-│   │   │   └── tokenCounter.ts
-│   │   ├── network/
-│   │   │   └── fetchWithTimeout.ts
-│   │   ├── pagination/
-│   │   │   └── pagination.ts
-│   │   ├── parsing/
-│   │   │   ├── csvParser.ts
-│   │   │   ├── dateParser.ts
-│   │   │   ├── frontmatterParser.ts
-│   │   │   ├── jsonParser.ts
-│   │   │   ├── pdfParser.ts
-│   │   │   ├── xmlParser.ts
-│   │   │   └── yamlParser.ts
-│   │   ├── scheduling/
-│   │   │   └── scheduler.ts
-│   │   ├── security/
-│   │   │   ├── idGenerator.ts
-│   │   │   ├── rateLimiter.ts
-│   │   │   └── sanitization.ts
-│   │   ├── telemetry/
-│   │   │   ├── index.ts
-│   │   │   ├── instrumentation.ts
-│   │   │   ├── metrics.ts
-│   │   │   ├── semconv.ts
-│   │   │   └── trace.ts
-│   │   └── types/
-│   │       └── guards.ts
-│   ├── index.ts
-│   └── worker.ts
-├── tests/
-│   ├── config/
-│   │   ├── index.int.test.ts
-│   │   └── index.test.ts
-│   ├── conformance/
-│   │   ├── helpers/
-│   │   │   ├── assertions.ts
-│   │   │   └── server-harness.ts
-│   │   ├── lifecycle.test.ts
-│   │   ├── prompts.test.ts
-│   │   ├── protocol-init.test.ts
-│   │   ├── resources.test.ts
-│   │   └── tools.test.ts
-│   ├── container/
-│   │   ├── registrations/
-│   │   │   ├── core.test.ts
-│   │   │   └── mcp.test.ts
-│   │   ├── container.test.ts
-│   │   ├── index.test.ts
-│   │   └── tokens.test.ts
-│   ├── fixtures/
-│   │   └── index.ts
-│   ├── mcp-server/
-│   │   ├── prompts/
-│   │   │   ├── definitions/
-│   │   │   ├── utils/
-│   │   │   │   └── promptDefinition.test.ts
-│   │   │   └── prompt-registration.test.ts
-│   │   ├── resources/
-│   │   │   ├── definitions/
-│   │   │   │   └── index.test.ts
-│   │   │   ├── schemas/
-│   │   │   │   ├── __snapshots__/
-│   │   │   │   │   └── schema-snapshots.test.ts.snap
-│   │   │   │   ├── json-schema-compatibility.test.ts
-│   │   │   │   └── schema-snapshots.test.ts
-│   │   │   ├── utils/
-│   │   │   │   ├── resourceDefinition.test.ts
-│   │   │   │   └── resourceHandlerFactory.test.ts
-│   │   │   └── resource-registration.test.ts
-│   │   ├── roots/
-│   │   │   └── roots-registration.test.ts
-│   │   ├── tasks/
-│   │   │   ├── core/
-│   │   │   │   ├── storageBackedTaskStore.test.ts
-│   │   │   │   └── taskManager.test.ts
-│   │   │   └── utils/
-│   │   │       └── taskToolDefinition.test.ts
-│   │   ├── tools/
-│   │   │   ├── definitions/
-│   │   │   │   └── index.test.ts
-│   │   │   ├── fuzz/
-│   │   │   │   └── tool-input-fuzz.test.ts
-│   │   │   ├── schemas/
-│   │   │   │   ├── __snapshots__/
-│   │   │   │   │   └── schema-snapshots.test.ts.snap
-│   │   │   │   ├── json-schema-compatibility.test.ts
-│   │   │   │   ├── schema-snapshots.test.ts
-│   │   │   │   └── zod4-compatibility.test.ts
-│   │   │   ├── utils/
-│   │   │   │   ├── toolDefinition.test.ts
-│   │   │   │   └── toolHandlerFactory.test.ts
-│   │   │   └── tool-registration.test.ts
-│   │   ├── transports/
-│   │   │   ├── auth/
-│   │   │   │   ├── lib/
-│   │   │   │   │   ├── authContext.test.ts
-│   │   │   │   │   ├── authTypes.test.ts
-│   │   │   │   │   ├── authUtils.test.ts
-│   │   │   │   │   ├── claimParser.test.ts
-│   │   │   │   │   └── withAuth.test.ts
-│   │   │   │   ├── strategies/
-│   │   │   │   │   ├── authStrategy.test.ts
-│   │   │   │   │   ├── jwtStrategy.test.ts
-│   │   │   │   │   └── oauthStrategy.test.ts
-│   │   │   │   ├── authFactory.test.ts
-│   │   │   │   └── authMiddleware.test.ts
-│   │   │   ├── http/
-│   │   │   │   ├── httpErrorHandler.test.ts
-│   │   │   │   ├── httpTransport.integration.test.ts
-│   │   │   │   ├── httpTransport.test.ts
-│   │   │   │   ├── httpTypes.test.ts
-│   │   │   │   ├── sessionIdUtils.test.ts
-│   │   │   │   └── sessionStore.test.ts
-│   │   │   ├── stdio/
-│   │   │   │   └── stdioTransport.test.ts
-│   │   │   ├── ITransport.test.ts
-│   │   │   └── manager.test.ts
-│   │   └── server.test.ts
-│   ├── mocks/
-│   │   ├── handlers.ts
-│   │   └── server.ts
-│   ├── scripts/
-│   │   └── devdocs.test.ts
+│   │   │   └── definitions/
+│   │   │       └── database-info.resource.ts
+│   │   └── tools/
+│   │       └── definitions/
+│   │           ├── fetch-articles.tool.ts
+│   │           ├── fetch-fulltext.tool.ts
+│   │           ├── find-related.tool.ts
+│   │           ├── format-citations.tool.ts
+│   │           ├── lookup-mesh.tool.ts
+│   │           ├── search-articles.tool.ts
+│   │           └── spell-check.tool.ts
 │   ├── services/
 │   │   └── ncbi/
-│   │       ├── core/
-│   │       │   ├── api-client.test.ts
-│   │       │   ├── ncbi-service.test.ts
-│   │       │   ├── request-queue.test.ts
-│   │       │   └── response-handler.test.ts
+│   │       ├── formatting/
+│   │       │   └── citation-formatter.ts
+│   │       ├── parsing/
+│   │       │   ├── article-parser.ts
+│   │       │   ├── esummary-parser.ts
+│   │       │   ├── pmc-article-parser.ts
+│   │       │   └── xml-helpers.ts
+│   │       ├── api-client.ts
+│   │       ├── ncbi-service.ts
+│   │       ├── request-queue.ts
+│   │       ├── response-handler.ts
+│   │       └── types.ts
+│   └── index.ts
+├── tests/
+│   ├── config/
+│   │   └── server-config.test.ts
+│   ├── mcp-server/
+│   │   ├── prompts/
+│   │   │   └── definitions/
+│   │   │       └── research-plan.prompt.test.ts
+│   │   ├── resources/
+│   │   │   └── definitions/
+│   │   │       └── database-info.resource.test.ts
+│   │   └── tools/
+│   │       └── definitions/
+│   │           ├── fetch-articles.tool.test.ts
+│   │           ├── fetch-fulltext.tool.test.ts
+│   │           ├── find-related.tool.test.ts
+│   │           ├── format-citations.tool.test.ts
+│   │           ├── lookup-mesh.tool.test.ts
+│   │           ├── search-articles.tool.test.ts
+│   │           └── spell-check.tool.test.ts
+│   ├── services/
+│   │   └── ncbi/
 │   │       ├── formatting/
 │   │       │   └── citation-formatter.test.ts
-│   │       └── parsing/
-│   │           ├── article-parser.test.ts
-│   │           ├── esummary-parser.test.ts
-│   │           ├── pmc-article-parser.test.ts
-│   │           └── xml-helpers.test.ts
-│   ├── storage/
-│   │   ├── core/
-│   │   │   ├── IStorageProvider.test.ts
-│   │   │   ├── storageFactory.test.ts
-│   │   │   └── storageValidation.test.ts
-│   │   ├── providers/
-│   │   │   ├── cloudflare/
-│   │   │   │   ├── d1Provider.test.ts
-│   │   │   │   ├── kvProvider.test.ts
-│   │   │   │   └── r2Provider.test.ts
-│   │   │   ├── fileSystem/
-│   │   │   │   └── fileSystemProvider.test.ts
-│   │   │   ├── inMemory/
-│   │   │   │   └── inMemoryProvider.test.ts
-│   │   │   └── supabase/
-│   │   │       ├── supabase.types.test.ts
-│   │   │       └── supabaseProvider.test.ts
-│   │   ├── storageProviderCompliance.test.ts
-│   │   └── StorageService.test.ts
-│   ├── types-global/
-│   │   └── errors.test.ts
-│   ├── utils/
-│   │   ├── formatting/
-│   │   │   ├── diffFormatter.test.ts
-│   │   │   ├── markdownBuilder.test.ts
-│   │   │   ├── tableFormatter.test.ts
-│   │   │   └── treeFormatter.test.ts
-│   │   ├── internal/
-│   │   │   ├── error-handler/
-│   │   │   │   ├── errorHandler.test.ts
-│   │   │   │   ├── helpers.test.ts
-│   │   │   │   ├── index.test.ts
-│   │   │   │   ├── mappings.test.ts
-│   │   │   │   └── types.test.ts
-│   │   │   ├── encoding.test.ts
-│   │   │   ├── errorHandler.int.test.ts
-│   │   │   ├── errorHandler.unit.test.ts
-│   │   │   ├── health.test.ts
-│   │   │   ├── logger.int.test.ts
-│   │   │   ├── logger.test.ts
-│   │   │   ├── performance.init.test.ts
-│   │   │   ├── performance.test.ts
-│   │   │   ├── requestContext.test.ts
-│   │   │   ├── runtime.test.ts
-│   │   │   └── startupBanner.test.ts
-│   │   ├── metrics/
-│   │   │   └── tokenCounter.test.ts
-│   │   ├── network/
-│   │   │   └── fetchWithTimeout.test.ts
-│   │   ├── pagination/
-│   │   │   └── index.test.ts
-│   │   ├── parsing/
-│   │   │   ├── csvParser.test.ts
-│   │   │   ├── dateParser.test.ts
-│   │   │   ├── frontmatterParser.test.ts
-│   │   │   ├── jsonParser.test.ts
-│   │   │   ├── pdfParser.test.ts
-│   │   │   ├── xmlParser.test.ts
-│   │   │   └── yamlParser.test.ts
-│   │   ├── scheduling/
-│   │   │   └── scheduler.test.ts
-│   │   ├── security/
-│   │   │   ├── idGenerator.test.ts
-│   │   │   ├── rateLimiter.test.ts
-│   │   │   ├── sanitization.property.test.ts
-│   │   │   └── sanitization.test.ts
-│   │   ├── telemetry/
-│   │   │   ├── index.test.ts
-│   │   │   ├── instrumentation.test.ts
-│   │   │   ├── metrics.test.ts
-│   │   │   ├── semconv.test.ts
-│   │   │   └── trace.test.ts
-│   │   └── types/
-│   │       └── guards.test.ts
-│   ├── index.test.ts
-│   ├── setup.ts
-│   └── worker.test.ts
+│   │       ├── parsing/
+│   │       │   ├── article-parser.test.ts
+│   │       │   ├── esummary-parser.test.ts
+│   │       │   ├── pmc-article-parser.test.ts
+│   │       │   └── xml-helpers.test.ts
+│   │       ├── api-client.test.ts
+│   │       ├── ncbi-service.test.ts
+│   │       ├── request-queue.test.ts
+│   │       └── response-handler.test.ts
+│   └── tools/
 ├── .dockerignore
 ├── .env.example
-├── .gitattributes
 ├── .gitignore
-├── AGENTS.md
 ├── biome.json
 ├── bun.lock
 ├── bunfig.toml
 ├── CHANGELOG.md
 ├── CLAUDE.md
+├── devcheck.config.json
 ├── Dockerfile
 ├── LICENSE
 ├── package.json
 ├── README.md
-├── repomix.config.json
 ├── server.json
-├── smithery.yaml
+├── tsconfig.build.json
 ├── tsconfig.json
-├── tsconfig.scripts.json
-├── tsconfig.test.json
-├── tsdoc.json
-├── typedoc.json
-├── vitest.config.ts
-├── vitest.conformance.ts
-└── wrangler.toml
+└── vitest.config.ts
 ```
 
 _Note: This tree excludes files and directories matched by .gitignore and default patterns._

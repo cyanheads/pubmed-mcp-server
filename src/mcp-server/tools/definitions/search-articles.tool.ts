@@ -1,0 +1,208 @@
+/**
+ * @fileoverview PubMed search tool. Searches PubMed with full query syntax,
+ * field-specific filters, date ranges, pagination, and optional brief summaries.
+ * @module src/mcp-server/tools/definitions/search-articles.tool
+ */
+
+import { tool, z } from '@cyanheads/mcp-ts-core';
+import { sanitization } from '@cyanheads/mcp-ts-core/utils';
+import { getNcbiService } from '@/services/ncbi/ncbi-service.js';
+import { extractBriefSummaries } from '@/services/ncbi/parsing/esummary-parser.js';
+
+export const searchArticlesTool = tool('pubmed_search_articles', {
+  description:
+    'Search PubMed with full query syntax, filters, and date ranges. Returns PMIDs and optional brief summaries. ' +
+    'Supports field-specific filters (author, journal, MeSH terms), common filters (language, species, free full text), ' +
+    'and pagination via offset for paging through large result sets.',
+  annotations: { readOnlyHint: true, openWorldHint: true },
+
+  input: z.object({
+    query: z.string().min(1).describe('PubMed search query (supports full NCBI syntax)'),
+    maxResults: z.number().int().min(1).max(1000).default(20).describe('Maximum results to return'),
+    offset: z.number().int().min(0).default(0).describe('Result offset for pagination (0-based)'),
+    sort: z
+      .enum(['relevance', 'pub_date', 'author', 'journal'])
+      .default('relevance')
+      .describe('Sort order: relevance (default), pub_date (newest first), author, or journal'),
+    dateRange: z
+      .object({
+        minDate: z.string().describe('Start date (YYYY-MM-DD)'),
+        maxDate: z.string().describe('End date (YYYY-MM-DD)'),
+        dateType: z
+          .enum(['pdat', 'mdat', 'edat'])
+          .default('pdat')
+          .describe('Date type: pdat (publication), mdat (modification), edat (entrez)'),
+      })
+      .optional()
+      .describe('Filter by date range'),
+    publicationTypes: z
+      .array(z.string())
+      .optional()
+      .describe('Filter by publication type (e.g. "Review", "Clinical Trial", "Meta-Analysis")'),
+    author: z.string().optional().describe('Filter by author name (e.g. "Smith J")'),
+    journal: z.string().optional().describe('Filter by journal name'),
+    meshTerms: z.array(z.string()).optional().describe('Filter by MeSH terms'),
+    language: z.string().optional().describe('Filter by language (e.g. "english")'),
+    hasAbstract: z.boolean().optional().describe('Only include articles with abstracts'),
+    freeFullText: z.boolean().optional().describe('Only include free full text articles'),
+    species: z.enum(['humans', 'animals']).optional().describe('Filter by species'),
+    summaryCount: z
+      .number()
+      .int()
+      .min(0)
+      .max(50)
+      .default(0)
+      .describe('Fetch brief summaries for top N results (0 = PMIDs only)'),
+  }),
+
+  output: z.object({
+    query: z.string().describe('Original query'),
+    totalFound: z.number().describe('Total matching articles'),
+    offset: z.number().describe('Result offset used'),
+    pmids: z.array(z.string()).describe('PubMed IDs'),
+    summaries: z
+      .array(
+        z.object({
+          pmid: z.string().describe('PubMed ID'),
+          title: z.string().optional().describe('Article title'),
+          authors: z.string().optional().describe('Formatted author string'),
+          source: z.string().optional().describe('Journal source'),
+          pubDate: z.string().optional().describe('Publication date'),
+          doi: z.string().optional().describe('DOI'),
+          pmcId: z.string().optional().describe('PMC ID'),
+          pmcUrl: z.string().optional().describe('PMC URL'),
+          pubmedUrl: z.string().optional().describe('PubMed URL'),
+        }),
+      )
+      .describe('Brief summaries (empty array when summaryCount is 0)'),
+    searchUrl: z.string().describe('PubMed search URL'),
+  }),
+
+  async handler(input, ctx) {
+    ctx.log.info('Executing pubmed_search', { query: input.query });
+    const ncbi = getNcbiService();
+
+    let effectiveQuery = await sanitization.sanitizeString(input.query, { context: 'text' });
+
+    if (input.dateRange) {
+      const minDate = input.dateRange.minDate.replace(/-/g, '/');
+      const maxDate = input.dateRange.maxDate.replace(/-/g, '/');
+      effectiveQuery += ` AND (${minDate}[${input.dateRange.dateType}] : ${maxDate}[${input.dateRange.dateType}])`;
+    }
+    if (input.publicationTypes?.length) {
+      const sanitizedPts = await Promise.all(
+        input.publicationTypes.map((pt) => sanitization.sanitizeString(pt, { context: 'text' })),
+      );
+      const ptQuery = sanitizedPts.map((pt) => `"${pt}"[Publication Type]`).join(' OR ');
+      effectiveQuery += ` AND (${ptQuery})`;
+    }
+    if (input.author)
+      effectiveQuery += ` AND ${await sanitization.sanitizeString(input.author, { context: 'text' })}[Author]`;
+    if (input.journal)
+      effectiveQuery += ` AND "${await sanitization.sanitizeString(input.journal, { context: 'text' })}"[Journal]`;
+    if (input.meshTerms?.length) {
+      const sanitizedTerms = await Promise.all(
+        input.meshTerms.map((term) => sanitization.sanitizeString(term, { context: 'text' })),
+      );
+      const meshQuery = sanitizedTerms.map((term) => `"${term}"[MeSH Terms]`).join(' AND ');
+      effectiveQuery += ` AND (${meshQuery})`;
+    }
+    if (input.language)
+      effectiveQuery += ` AND ${await sanitization.sanitizeString(input.language, { context: 'text' })}[Language]`;
+    if (input.hasAbstract) effectiveQuery += ' AND hasabstract[text word]';
+    if (input.freeFullText) effectiveQuery += ' AND free full text[filter]';
+    if (input.species) effectiveQuery += ` AND ${input.species}[MeSH Terms]`;
+
+    const esResult = await ncbi.eSearch({
+      db: 'pubmed',
+      term: effectiveQuery,
+      retmax: input.maxResults,
+      retstart: input.offset,
+      sort: input.sort,
+      usehistory: input.summaryCount > 0 ? 'y' : undefined,
+    });
+
+    const pmids = esResult.idList;
+    let summaries: {
+      pmid: string;
+      title?: string | undefined;
+      authors?: string | undefined;
+      source?: string | undefined;
+      pubDate?: string | undefined;
+      doi?: string | undefined;
+      pmcId?: string | undefined;
+      pmcUrl?: string | undefined;
+      pubmedUrl?: string | undefined;
+    }[] = [];
+
+    if (input.summaryCount > 0 && pmids.length > 0) {
+      const eSummaryParams: Record<string, string | number | undefined> = {
+        db: 'pubmed',
+        version: '2.0',
+        retmode: 'xml',
+      };
+      if (esResult.webEnv && esResult.queryKey) {
+        eSummaryParams.WebEnv = esResult.webEnv;
+        eSummaryParams.query_key = esResult.queryKey;
+        eSummaryParams.retmax = input.summaryCount;
+        eSummaryParams.retstart = input.offset;
+      } else {
+        eSummaryParams.id = pmids.slice(0, input.summaryCount).join(',');
+      }
+
+      const eSummaryResult = await ncbi.eSummary(eSummaryParams);
+      if (eSummaryResult) {
+        const briefSummaries = await extractBriefSummaries(eSummaryResult);
+        summaries = briefSummaries.map((s) => ({
+          pmid: s.pmid,
+          title: s.title,
+          authors: s.authors,
+          source: s.source,
+          pubDate: s.pubDate,
+          doi: s.doi,
+          pmcId: s.pmcId,
+          ...(s.pmcId && { pmcUrl: `https://www.ncbi.nlm.nih.gov/pmc/articles/${s.pmcId}/` }),
+          pubmedUrl: `https://pubmed.ncbi.nlm.nih.gov/${s.pmid}/`,
+        }));
+      }
+    }
+
+    const searchUrl = `https://pubmed.ncbi.nlm.nih.gov/?term=${encodeURIComponent(input.query)}`;
+    ctx.log.info('pubmed_search completed', {
+      totalFound: esResult.count,
+      pmidCount: pmids.length,
+    });
+    return {
+      query: input.query,
+      totalFound: esResult.count,
+      offset: input.offset,
+      pmids,
+      summaries,
+      searchUrl,
+    };
+  },
+
+  format: (result) => {
+    const lines = [
+      `## PubMed Search Results`,
+      `**Query:** ${result.query}`,
+      `**Total Found:** ${result.totalFound} | **Returned:** ${result.pmids.length} | **Offset:** ${result.offset}`,
+      `**Search URL:** ${result.searchUrl}`,
+    ];
+    if (result.pmids.length > 0) lines.push(`\n**PMIDs:** ${result.pmids.join(', ')}`);
+    if (result.summaries?.length) {
+      lines.push('\n### Summaries');
+      for (const s of result.summaries) {
+        lines.push(`\n#### ${s.title ?? s.pmid}`);
+        lines.push(`**PMID:** ${s.pmid}`);
+        if (s.authors) lines.push(`**Authors:** ${s.authors}`);
+        if (s.source) lines.push(`**Source:** ${s.source}`);
+        if (s.pubDate) lines.push(`**Published:** ${s.pubDate}`);
+        if (s.doi) lines.push(`**DOI:** ${s.doi}`);
+        if (s.pubmedUrl) lines.push(`**PubMed:** ${s.pubmedUrl}`);
+        if (s.pmcUrl) lines.push(`**PMC:** ${s.pmcUrl}`);
+      }
+    }
+    return [{ type: 'text', text: lines.join('\n') }];
+  },
+});

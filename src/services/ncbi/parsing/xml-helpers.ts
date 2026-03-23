@@ -12,7 +12,7 @@
  * @template T - The type of the items in the array.
  */
 export function ensureArray<T>(item: T | T[] | undefined | null): T[] {
-  if (item === undefined || item === null) {
+  if (item == null) {
     return [];
   }
   return Array.isArray(item) ? item : [item];
@@ -31,7 +31,7 @@ export function getText(
   element: unknown,
   defaultValue: string | undefined = '',
 ): string | undefined {
-  if (element === undefined || element === null) {
+  if (element == null) {
     return defaultValue;
   }
   if (typeof element === 'string') {

@@ -37,21 +37,34 @@ WORKDIR /usr/src/app
 ENV NODE_ENV=production
 
 # OCI image metadata (https://github.com/opencontainers/image-spec/blob/main/annotations.md)
-LABEL org.opencontainers.image.title="pubmed-mcp-server"
+LABEL org.opencontainers.image.title="@cyanheads/pubmed-mcp-server"
 LABEL org.opencontainers.image.description="MCP server for PubMed/NCBI E-utilities. Search articles, fetch metadata, generate citations, explore MeSH terms, and discover related research."
-LABEL org.opencontainers.image.source="https://github.com/cyanheads/pubmed-mcp-server"
 LABEL org.opencontainers.image.licenses="Apache-2.0"
-LABEL io.modelcontextprotocol.server.name="io.github.cyanheads/pubmed-mcp-server"
+LABEL org.opencontainers.image.source="https://github.com/cyanheads/pubmed-mcp-server"
 
 # Copy dependency manifests
 COPY package.json bun.lock ./
 
 # Install only production dependencies, ignoring any lifecycle scripts (like 'prepare')
 # that are not needed in the final production image.
-# Remove platform-specific bun/rollup binaries pulled as optionalDependencies
-# by @modelcontextprotocol/ext-apps — only needed for its build toolchain, not runtime.
-RUN bun install --production --frozen-lockfile --ignore-scripts \
-    && rm -rf node_modules/@oven node_modules/@rollup
+RUN bun install --production --frozen-lockfile --ignore-scripts
+
+# Conditionally install OpenTelemetry optional peer dependencies (Tier 3).
+# These are not bundled by default to keep the base image lean. Enable at build time
+# with: docker build --build-arg OTEL_ENABLED=true
+ARG OTEL_ENABLED=true
+RUN if [ "$OTEL_ENABLED" = "true" ]; then \
+      bun add @hono/otel \
+        @opentelemetry/instrumentation-http \
+        @opentelemetry/exporter-metrics-otlp-http \
+        @opentelemetry/exporter-trace-otlp-http \
+        @opentelemetry/instrumentation-pino \
+        @opentelemetry/resources \
+        @opentelemetry/sdk-metrics \
+        @opentelemetry/sdk-node \
+        @opentelemetry/sdk-trace-node \
+        @opentelemetry/semantic-conventions; \
+    fi
 
 # Copy the compiled application code from the build stage
 COPY --from=build /usr/src/app/dist ./dist
@@ -71,7 +84,7 @@ ARG PORT
 
 # Set runtime environment variables
 # Note: PORT is an automatic variable in many cloud environments (e.g., Cloud Run)
-ENV MCP_HTTP_PORT=${PORT:-3017}
+ENV MCP_HTTP_PORT=${PORT:-3010}
 ENV MCP_HTTP_HOST="0.0.0.0"
 ENV MCP_TRANSPORT_TYPE="http"
 ENV MCP_SESSION_MODE="stateless"
