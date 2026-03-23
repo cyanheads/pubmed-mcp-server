@@ -6,6 +6,24 @@ All notable changes to this project will be documented in this file.
 
 ## [2.2.0] - 2026-03-23
 
+### Framework Migration
+
+The server was migrated to use the `@cyanheads/mcp-ts-core` framework for MCP plumbing. This will simplify and streamline future development.
+
+### Tool Renames
+
+All tools were renamed for clarity. Schemas and capabilities are unchanged.
+
+| Previous (v2.1.x) | New (v2.2.0) |
+|:-------------------|:-------------|
+| `pubmed_search` | `pubmed_search_articles` |
+| `pubmed_fetch` | `pubmed_fetch_articles` |
+| `pubmed_pmc_fetch` | `pubmed_fetch_fulltext` |
+| `pubmed_related` | `pubmed_find_related` |
+| `pubmed_cite` | `pubmed_format_citations` |
+| `pubmed_mesh_lookup` | `pubmed_lookup_mesh` |
+| `pubmed_spell` | `pubmed_spell_check` |
+
 ### Changed
 
 - **Framework migration**: Replaced inline framework code (~58k lines) with `@cyanheads/mcp-ts-core` package dependency. All tools, resources, and prompts now use the framework's declarative builders (`tool()`, `resource()`, `prompt()`)
@@ -16,9 +34,9 @@ All notable changes to this project will be documented in this file.
 - **NCBI service**: Flattened from `services/ncbi/core/` subdirectory to `services/ncbi/` top-level; uses framework's `logger` instead of custom logger
 - **Config**: Replaced monolithic `src/config/index.ts` with focused `src/config/server-config.ts` (NCBI-specific env vars only; framework handles transport, auth, storage)
 - **Build**: Switched from custom build scripts to framework-provided `tsconfig.base.json`, `biome.json`, and `vitest.config.ts` extensions
-- **Tool renames**: File names changed to match tool names (e.g., `pubmed-search.tool.ts` → `search-articles.tool.ts`, `pubmed-spell.tool.ts` → `spell-check.tool.ts`)
+- **Tool file renames**: Files renamed to match tool names (e.g., `pubmed-search.tool.ts` → `search-articles.tool.ts`, `pubmed-spell.tool.ts` → `spell-check.tool.ts`)
 - **CLAUDE.md**: Replaced generic placeholder patterns with actual server examples (spell-check tool, database-info resource, NCBI config), updated structure tree, removed unused context properties
-- **README.md**: Updated all tool names to match renames (e.g., `pubmed_search` → `pubmed_search_articles`), updated config section description
+- **README.md**: Updated all tool names and descriptions to match renames, updated config section
 - **Dockerfile**: Fixed image title/description labels, added `source` label, corrected log directory name and default port
 - **Default HTTP port**: Reverted to `3010` across `.env.example`, `Dockerfile`, `README.md`, and `server.json` (was changed to `3017` in 2.0.1)
 - **server-config.ts**: Replaced `z.string().email()` with `z.email()` shorthand
