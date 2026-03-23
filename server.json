@@ -1,12 +1,18 @@
 {
   "$schema": "https://static.modelcontextprotocol.io/schemas/2025-12-11/server.schema.json",
   "name": "io.github.cyanheads/pubmed-mcp-server",
-  "description": "MCP server for PubMed/NCBI E-utilities. Search, fetch, cite, and explore biomedical literature.",
+  "description": "Search PubMed, fetch articles and full text, generate citations, and explore MeSH terms via NCBI.",
   "repository": {
     "url": "https://github.com/cyanheads/pubmed-mcp-server",
     "source": "github"
   },
   "version": "2.2.0",
+  "remotes": [
+    {
+      "type": "streamable-http",
+      "url": "https://pubmed.caseyjhand.com/mcp"
+    }
+  ],
   "packages": [
     {
       "registryType": "npm",
