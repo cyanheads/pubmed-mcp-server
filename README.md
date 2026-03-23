@@ -7,7 +7,7 @@
 
 <div align="center">
 
-[![npm](https://img.shields.io/npm/v/@cyanheads/pubmed-mcp-server?style=flat-square&logo=npm&logoColor=white)](https://www.npmjs.com/package/@cyanheads/pubmed-mcp-server) [![Version](https://img.shields.io/badge/Version-2.2.0-blue.svg?style=flat-square)](./CHANGELOG.md) [![Framework](https://img.shields.io/badge/Built%20on-@cyanheads/mcp--ts--core-259?style=flat-square)](https://www.npmjs.com/package/@cyanheads/mcp-ts-core) [![MCP SDK](https://img.shields.io/badge/MCP%20SDK-^1.27.1-green.svg?style=flat-square)](https://modelcontextprotocol.io/) [![License](https://img.shields.io/badge/License-Apache%202.0-orange.svg?style=flat-square)](./LICENSE) [![TypeScript](https://img.shields.io/badge/TypeScript-^6.0.2-3178C6.svg?style=flat-square)](https://www.typescriptlang.org/) [![Bun](https://img.shields.io/badge/Bun-v1.3.2-blueviolet.svg?style=flat-square)](https://bun.sh/)
+[![npm](https://img.shields.io/npm/v/@cyanheads/pubmed-mcp-server?style=flat-square&logo=npm&logoColor=white)](https://www.npmjs.com/package/@cyanheads/pubmed-mcp-server) [![Version](https://img.shields.io/badge/Version-2.2.1-blue.svg?style=flat-square)](./CHANGELOG.md) [![Framework](https://img.shields.io/badge/Built%20on-@cyanheads/mcp--ts--core-259?style=flat-square)](https://www.npmjs.com/package/@cyanheads/mcp-ts-core) [![MCP SDK](https://img.shields.io/badge/MCP%20SDK-^1.27.1-green.svg?style=flat-square)](https://modelcontextprotocol.io/) [![License](https://img.shields.io/badge/License-Apache%202.0-orange.svg?style=flat-square)](./LICENSE) [![TypeScript](https://img.shields.io/badge/TypeScript-^6.0.2-3178C6.svg?style=flat-square)](https://www.typescriptlang.org/) [![Bun](https://img.shields.io/badge/Bun-v1.3.2-blueviolet.svg?style=flat-square)](https://bun.sh/)
 
 </div>
 
@@ -25,15 +25,15 @@ Seven tools for working with PubMed and NCBI data:
 
 | Tool | Description |
 |:---|:---|
-| `pubmed_search` | Search PubMed with full query syntax, field-specific filters, date ranges, pagination, and optional brief summaries |
-| `pubmed_fetch` | Fetch full article metadata by PMIDs — abstract, authors, journal, MeSH terms, grants |
-| `pubmed_pmc_fetch` | Fetch full-text articles from PubMed Central — body sections, references, and metadata for open-access articles |
-| `pubmed_cite` | Generate formatted citations in APA 7th, MLA 9th, BibTeX, or RIS |
-| `pubmed_related` | Find similar articles, citing articles, or references for a given PMID |
-| `pubmed_spell` | Spell-check biomedical queries using NCBI's ESpell service |
-| `pubmed_mesh_lookup` | Search and explore MeSH vocabulary — tree numbers, scope notes, entry terms |
+| `pubmed_search_articles` | Search PubMed with full query syntax, field-specific filters, date ranges, pagination, and optional brief summaries |
+| `pubmed_fetch_articles` | Fetch full article metadata by PMIDs — abstract, authors, journal, MeSH terms, grants |
+| `pubmed_fetch_fulltext` | Fetch full-text articles from PubMed Central — body sections, references, and metadata for open-access articles |
+| `pubmed_format_citations` | Generate formatted citations in APA 7th, MLA 9th, BibTeX, or RIS |
+| `pubmed_find_related` | Find similar articles, citing articles, or references for a given PMID |
+| `pubmed_spell_check` | Spell-check biomedical queries using NCBI's ESpell service |
+| `pubmed_lookup_mesh` | Search and explore MeSH vocabulary — tree numbers, scope notes, entry terms |
 
-### `pubmed_search`
+### `pubmed_search_articles`
 
 Search PubMed with full NCBI query syntax and filters.
 
@@ -48,7 +48,7 @@ Search PubMed with full NCBI query syntax and filters.
 
 ---
 
-### `pubmed_fetch`
+### `pubmed_fetch_articles`
 
 Fetch full article metadata by PubMed IDs.
 
@@ -60,7 +60,7 @@ Fetch full article metadata by PubMed IDs.
 
 ---
 
-### `pubmed_pmc_fetch`
+### `pubmed_fetch_fulltext`
 
 Fetch full-text articles from PubMed Central (PMC).
 
@@ -74,7 +74,7 @@ Fetch full-text articles from PubMed Central (PMC).
 
 ---
 
-### `pubmed_cite`
+### `pubmed_format_citations`
 
 Generate formatted citations for articles.
 
@@ -85,7 +85,7 @@ Generate formatted citations for articles.
 
 ---
 
-### `pubmed_related`
+### `pubmed_find_related`
 
 Find articles related to a source article via ELink.
 
@@ -95,7 +95,7 @@ Find articles related to a source article via ELink.
 
 ---
 
-### `pubmed_spell`
+### `pubmed_spell_check`
 
 Spell-check a biomedical query using NCBI's ESpell.
 
@@ -104,7 +104,7 @@ Spell-check a biomedical query using NCBI's ESpell.
 
 ---
 
-### `pubmed_mesh_lookup`
+### `pubmed_lookup_mesh`
 
 Search and explore the MeSH (Medical Subject Headings) vocabulary.
 
@@ -242,7 +242,7 @@ bun install
 
 ## Configuration
 
-All configuration is centralized and validated at startup in `src/config/index.ts`. Key environment variables:
+All configuration is validated at startup via Zod schemas in `src/config/server-config.ts`. Key environment variables:
 
 | Variable | Description | Default |
 |:---|:---|:---|
@@ -255,7 +255,7 @@ All configuration is centralized and validated at startup in `src/config/index.t
 | `NCBI_ADMIN_EMAIL` | Contact email sent with NCBI requests (recommended by NCBI) | none |
 | `NCBI_REQUEST_DELAY_MS` | Delay between NCBI requests in ms | 334 (100 with key) |
 | `NCBI_MAX_RETRIES` | Retry attempts for failed NCBI requests | 3 |
-| `NCBI_TIMEOUT_MS` | NCBI request timeout in ms | 30000 |
+| `NCBI_TIMEOUT_MS` | NCBI request timeout in ms | `30000` |
 | `OTEL_ENABLED` | Enable OpenTelemetry | `false` |
 
 ## Running the server
