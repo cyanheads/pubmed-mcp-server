@@ -4,6 +4,14 @@ All notable changes to this project will be documented in this file.
 
 ---
 
+## [2.2.1] - 2026-03-23
+
+### Fixed
+
+- **package.json**: Added `mcpName` field required by the MCP registry for publishing
+
+---
+
 ## [2.2.0] - 2026-03-23
 
 ### Framework Migration
