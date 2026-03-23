@@ -37,9 +37,10 @@ WORKDIR /usr/src/app
 ENV NODE_ENV=production
 
 # OCI image metadata (https://github.com/opencontainers/image-spec/blob/main/annotations.md)
-LABEL org.opencontainers.image.title="pubmed-mcp-server-2"
-LABEL org.opencontainers.image.description=""
+LABEL org.opencontainers.image.title="@cyanheads/pubmed-mcp-server"
+LABEL org.opencontainers.image.description="MCP server for PubMed/NCBI E-utilities. Search articles, fetch metadata, generate citations, explore MeSH terms, and discover related research."
 LABEL org.opencontainers.image.licenses="Apache-2.0"
+LABEL org.opencontainers.image.source="https://github.com/cyanheads/pubmed-mcp-server"
 
 # Copy dependency manifests
 COPY package.json bun.lock ./
@@ -72,7 +73,7 @@ COPY --from=build /usr/src/app/dist ./dist
 # We will use this existing user for enhanced security.
 
 # Create and set permissions for the log directory, assigning ownership to the 'bun' user.
-RUN mkdir -p /var/log/pubmed-mcp-server-2 && chown -R bun:bun /var/log/pubmed-mcp-server-2
+RUN mkdir -p /var/log/pubmed-mcp-server && chown -R bun:bun /var/log/pubmed-mcp-server
 
 # Switch to the non-root user
 USER bun
@@ -83,12 +84,12 @@ ARG PORT
 
 # Set runtime environment variables
 # Note: PORT is an automatic variable in many cloud environments (e.g., Cloud Run)
-ENV MCP_HTTP_PORT=${PORT:-3010}
+ENV MCP_HTTP_PORT=${PORT:-3017}
 ENV MCP_HTTP_HOST="0.0.0.0"
 ENV MCP_TRANSPORT_TYPE="http"
 ENV MCP_SESSION_MODE="stateless"
 ENV MCP_LOG_LEVEL="info"
-ENV LOGS_DIR="/var/log/pubmed-mcp-server-2"
+ENV LOGS_DIR="/var/log/pubmed-mcp-server"
 ENV MCP_FORCE_CONSOLE_LOGGING="true"
 
 # Expose the port the server listens on
