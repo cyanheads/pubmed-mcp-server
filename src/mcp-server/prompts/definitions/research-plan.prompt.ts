@@ -1,29 +1,13 @@
 /**
  * @fileoverview Generates a structured biomedical research plan outline.
  * Produces a multi-message prompt covering four research phases: conception,
- * data collection, analysis, and dissemination. Simplified from the legacy
- * planOrchestrator tool — delivers the plan as a reusable prompt template
- * rather than an executable tool.
+ * data collection, analysis, and dissemination.
  * @module src/mcp-server/prompts/definitions/research-plan.prompt
  */
 
-import { z } from 'zod';
+import { prompt, z } from '@cyanheads/mcp-ts-core';
 
-import type { PromptDefinition } from '@/mcp-server/prompts/utils/promptDefinition.js';
-
-// ---------------------------------------------------------------------------
-// Metadata
-// ---------------------------------------------------------------------------
-
-const PROMPT_NAME = 'research_plan';
-const PROMPT_DESCRIPTION =
-  'Generate a structured research plan outline for a biomedical research project.';
-
-// ---------------------------------------------------------------------------
-// Arguments Schema
-// ---------------------------------------------------------------------------
-
-const ArgumentsSchema = z.object({
+const ArgsSchema = z.object({
   title: z.string().describe('Project title'),
   goal: z.string().describe('Primary research goal'),
   keywords: z.string().describe('Research keywords (comma-separated)'),
@@ -34,17 +18,11 @@ const ArgumentsSchema = z.object({
     .describe('Include detailed prompts for consuming LLM'),
 });
 
-type Args = z.infer<typeof ArgumentsSchema>;
-
-// ---------------------------------------------------------------------------
-// Plan builder helpers
-// ---------------------------------------------------------------------------
-
 function agentBlock(text: string, include: boolean): string {
   return include ? `\n> **Agent guidance:** ${text}\n` : '';
 }
 
-function buildPlan(args: Args): string {
+function buildPlan(args: z.infer<typeof ArgsSchema>): string {
   const kw = args.keywords
     .split(',')
     .map((k) => k.trim())
@@ -55,7 +33,6 @@ function buildPlan(args: Args): string {
 
   const lines: string[] = [];
 
-  // Header
   lines.push(`# Research Plan: ${args.title}`);
   lines.push('');
   lines.push(`**Goal:** ${args.goal}`);
@@ -170,22 +147,18 @@ function buildPlan(args: Args): string {
   return lines.filter((l) => l !== '').join('\n');
 }
 
-// ---------------------------------------------------------------------------
-// Definition
-// ---------------------------------------------------------------------------
+export const researchPlanPrompt = prompt('research_plan', {
+  description: 'Generate a structured research plan outline for a biomedical research project.',
+  args: ArgsSchema,
 
-export const researchPlanPrompt: PromptDefinition<typeof ArgumentsSchema> = {
-  name: PROMPT_NAME,
-  description: PROMPT_DESCRIPTION,
-  argumentsSchema: ArgumentsSchema,
   generate: (args) => {
     const plan = buildPlan(args);
 
     return [
       {
-        role: 'assistant',
+        role: 'assistant' as const,
         content: {
-          type: 'text',
+          type: 'text' as const,
           text: [
             'You are a biomedical research planning assistant.',
             'Your role is to help researchers develop rigorous, reproducible study plans.',
@@ -195,12 +168,12 @@ export const researchPlanPrompt: PromptDefinition<typeof ArgumentsSchema> = {
         },
       },
       {
-        role: 'user',
+        role: 'user' as const,
         content: {
-          type: 'text',
+          type: 'text' as const,
           text: plan,
         },
       },
     ];
   },
-};
+});
