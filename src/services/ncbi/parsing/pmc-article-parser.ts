@@ -10,6 +10,7 @@ import type {
   ParsedPmcJournal,
   ParsedPmcReference,
   ParsedPmcSection,
+  XmlJatsAff,
   XmlJatsArticle,
   XmlJatsArticleId,
   XmlJatsArticleMeta,
@@ -18,6 +19,7 @@ import type {
   XmlJatsContrib,
   XmlJatsContribGroup,
   XmlJatsJournalMeta,
+  XmlJatsKwdGroup,
   XmlJatsPubDate,
   XmlJatsRef,
   XmlJatsSection,
@@ -34,7 +36,7 @@ import { ensureArray, getAttribute, getText } from './xml-helpers.js';
  * text content is preserved.
  */
 export function extractTextContent(node: unknown): string {
-  if (node === undefined || node === null) return '';
+  if (node == null) return '';
   if (typeof node === 'string') return node;
   if (typeof node === 'number' || typeof node === 'boolean') return String(node);
 
@@ -125,12 +127,7 @@ export function extractJatsAuthors(
 /**
  * Extracts affiliation strings from JATS aff elements.
  */
-function extractAffiliations(
-  affs:
-    | { '#text'?: string; [key: string]: unknown }
-    | { '#text'?: string; [key: string]: unknown }[]
-    | undefined,
-): string[] {
+function extractAffiliations(affs: XmlJatsAff | XmlJatsAff[] | undefined): string[] {
   if (!affs) return [];
   const result: string[] = [];
   for (const aff of ensureArray(affs)) {
@@ -260,12 +257,7 @@ function extractAbstract(abstractNode: unknown): string | undefined {
 /**
  * Extracts keywords from JATS kwd-group elements.
  */
-function extractKeywords(
-  kwdGroups:
-    | { kwd?: unknown; '@_kwd-group-type'?: string }
-    | { kwd?: unknown; '@_kwd-group-type'?: string }[]
-    | undefined,
-): string[] {
+function extractKeywords(kwdGroups: XmlJatsKwdGroup | XmlJatsKwdGroup[] | undefined): string[] {
   if (!kwdGroups) return [];
 
   const keywords: string[] = [];
