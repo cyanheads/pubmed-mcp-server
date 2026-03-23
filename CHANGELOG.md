@@ -44,6 +44,7 @@ All tools were renamed for clarity. Schemas and capabilities are unchanged.
 
 ### Added
 
+- **Test suite**: 178 tests across 17 files in `tests/` mirroring `src/` structure — covers config, NCBI service layer, XML/JSON parsers, citation formatters, all 7 tools, 1 resource, and 1 prompt using `createMockContext()` from `@cyanheads/mcp-ts-core/testing`
 - **Skills directory**: Framework skill files for development workflows (add-tool, add-resource, devcheck, field-test, etc.)
 - **MCP definition linter**: `bun run lint:mcp` validates tool/resource/prompt definitions against the MCP spec at build time
 - **devcheck.config.json**: Centralized devcheck configuration
@@ -61,7 +62,7 @@ All tools were renamed for clarity. Schemas and capabilities are unchanged.
 ### Removed
 
 - **Inline framework code**: DI container, transport layer (stdio/HTTP/Workers), storage providers, auth strategies, error handler, logger, telemetry, utilities — all now provided by `@cyanheads/mcp-ts-core`
-- **All tests**: Legacy test suite removed (covered framework internals, not server logic); to be rebuilt with `createMockContext()` pattern
+- **Legacy tests**: Old test suite removed (covered framework internals, not server logic); replaced by new `tests/` suite
 - **Worker entry point**: `src/worker.ts` removed (framework handles Workers deployment via `createWorkerHandler()`)
 - **Cloudflare config**: `wrangler.toml`, `schemas/cloudflare-d1-schema.sql` removed
 - **Misc**: `.husky/pre-commit`, `smithery.yaml`, `repomix.config.json`, `typedoc.json`, `tsdoc.json`, various README docs in `src/`
