@@ -78,7 +78,7 @@
           "description": "The port to run the HTTP server on.",
           "format": "string",
           "isRequired": false,
-          "default": "3017"
+          "default": "3010"
         },
         {
           "name": "MCP_HTTP_ENDPOINT_PATH",
@@ -116,7 +116,7 @@
       ],
       "transport": {
         "type": "streamable-http",
-        "url": "http://localhost:3017/mcp"
+        "url": "http://localhost:3010/mcp"
       }
     }
   ]
