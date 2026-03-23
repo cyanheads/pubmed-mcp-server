@@ -4,6 +4,36 @@ All notable changes to this project will be documented in this file.
 
 ---
 
+## [2.2.0] - 2026-03-23
+
+### Changed
+
+- **Framework migration**: Replaced inline framework code (~58k lines) with `@cyanheads/mcp-ts-core` package dependency. All tools, resources, and prompts now use the framework's declarative builders (`tool()`, `resource()`, `prompt()`)
+- **Tool definitions**: Rewritten from handler-factory pattern to single-file `tool()` builder definitions with Zod input/output schemas, `format` functions, and `annotations`
+- **Resource definition**: `database-info.resource.ts` migrated from custom `ResourceDefinition` type to framework's `resource()` builder with `handler(params, ctx)` pattern
+- **Prompt definition**: `research-plan.prompt.ts` migrated from custom `PromptDefinition` type to framework's `prompt()` builder
+- **Entry point**: `src/index.ts` simplified from DI container + server bootstrap to single `createApp()` call with tool/resource/prompt arrays
+- **NCBI service**: Flattened from `services/ncbi/core/` subdirectory to `services/ncbi/` top-level; uses framework's `logger` instead of custom logger
+- **Config**: Replaced monolithic `src/config/index.ts` with focused `src/config/server-config.ts` (NCBI-specific env vars only; framework handles transport, auth, storage)
+- **Build**: Switched from custom build scripts to framework-provided `tsconfig.base.json`, `biome.json`, and `vitest.config.ts` extensions
+- **Tool renames**: File names changed to match tool names (e.g., `pubmed-search.tool.ts` → `search-articles.tool.ts`, `pubmed-spell.tool.ts` → `spell-check.tool.ts`)
+
+### Added
+
+- **Skills directory**: Framework skill files for development workflows (add-tool, add-resource, devcheck, field-test, etc.)
+- **MCP definition linter**: `bun run lint:mcp` validates tool/resource/prompt definitions against the MCP spec at build time
+- **devcheck.config.json**: Centralized devcheck configuration
+
+### Removed
+
+- **Inline framework code**: DI container, transport layer (stdio/HTTP/Workers), storage providers, auth strategies, error handler, logger, telemetry, utilities — all now provided by `@cyanheads/mcp-ts-core`
+- **All tests**: Legacy test suite removed (covered framework internals, not server logic); to be rebuilt with `createMockContext()` pattern
+- **Worker entry point**: `src/worker.ts` removed (framework handles Workers deployment via `createWorkerHandler()`)
+- **Cloudflare config**: `wrangler.toml`, `schemas/cloudflare-d1-schema.sql` removed
+- **Misc**: `.husky/pre-commit`, `smithery.yaml`, `repomix.config.json`, `typedoc.json`, `tsdoc.json`, various README docs in `src/`
+
+---
+
 ## [2.1.6] - 2026-03-09
 
 ### Fixed

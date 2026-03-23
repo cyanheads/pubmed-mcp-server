@@ -1,5 +1,5 @@
 <div align="center">
-  <h1>pubmed-mcp-server</h1>
+  <h1>@cyanheads/pubmed-mcp-server</h1>
   <p><b>MCP server for the NCBI E-utilities API. Search PubMed, fetch article metadata and full text, generate citations, explore MeSH terms, and discover related research. Runs over stdio or HTTP. Deployable to Cloudflare Workers.</b>
   <div>7 Tools • 1 Resource • 1 Prompt</div>
   </p>
@@ -7,9 +7,7 @@
 
 <div align="center">
 
-[![npm](https://img.shields.io/npm/v/@cyanheads/pubmed-mcp-server?style=flat-square&logo=npm&logoColor=white)](https://www.npmjs.com/package/@cyanheads/pubmed-mcp-server) [![Version](https://img.shields.io/badge/Version-2.1.5-blue.svg?style=flat-square)](./CHANGELOG.md) [![MCP Spec](https://img.shields.io/badge/MCP%20Spec-2025--11--25-8A2BE2.svg?style=flat-square)](https://modelcontextprotocol.io/specification/2025-11-25) 
-
-[![MCP SDK](https://img.shields.io/badge/MCP%20SDK-^1.27.1-green.svg?style=flat-square)](https://modelcontextprotocol.io/) [![License](https://img.shields.io/badge/License-Apache%202.0-orange.svg?style=flat-square)](./LICENSE) [![Status](https://img.shields.io/badge/Status-Stable-brightgreen.svg?style=flat-square)](https://github.com/cyanheads/pubmed-mcp-server/issues) [![TypeScript](https://img.shields.io/badge/TypeScript-^5.9.3-3178C6.svg?style=flat-square)](https://www.typescriptlang.org/) [![Bun](https://img.shields.io/badge/Bun-v1.3.2-blueviolet.svg?style=flat-square)](https://bun.sh/)
+[![npm](https://img.shields.io/npm/v/@cyanheads/pubmed-mcp-server?style=flat-square&logo=npm&logoColor=white)](https://www.npmjs.com/package/@cyanheads/pubmed-mcp-server) [![Version](https://img.shields.io/badge/Version-2.2.0-blue.svg?style=flat-square)](./CHANGELOG.md) [![Framework](https://img.shields.io/badge/Built%20on-@cyanheads/mcp--ts--core-259?style=flat-square)](https://www.npmjs.com/package/@cyanheads/mcp-ts-core) [![MCP SDK](https://img.shields.io/badge/MCP%20SDK-^1.27.1-green.svg?style=flat-square)](https://modelcontextprotocol.io/) [![License](https://img.shields.io/badge/License-Apache%202.0-orange.svg?style=flat-square)](./LICENSE) [![TypeScript](https://img.shields.io/badge/TypeScript-^6.0.2-3178C6.svg?style=flat-square)](https://www.typescriptlang.org/) [![Bun](https://img.shields.io/badge/Bun-v1.3.2-blueviolet.svg?style=flat-square)](https://bun.sh/)
 
 </div>
 
@@ -123,14 +121,13 @@ Search and explore the MeSH (Medical Subject Headings) vocabulary.
 
 ## Features
 
-Built on [`mcp-ts-template`](https://github.com/cyanheads/mcp-ts-template) 3.0:
+Built on [`@cyanheads/mcp-ts-core`](https://github.com/cyanheads/mcp-ts-core):
 
 - Declarative tool definitions — single file per tool, framework handles registration and validation
-- Unified `McpError` error handling across all tools
+- Unified error handling across all tools
 - Pluggable auth (`none`, `jwt`, `oauth`)
 - Swappable storage backends: `in-memory`, `filesystem`, `Supabase`, `Cloudflare KV/R2/D1`
-- Structured logging (Pino) with optional OpenTelemetry tracing
-- Typed DI container with `Token<T>` phantom branding
+- Structured logging with optional OpenTelemetry tracing
 - Runs locally (stdio/HTTP) or on Cloudflare Workers from the same codebase
 
 PubMed-specific:
@@ -283,25 +280,6 @@ All configuration is centralized and validated at startup in `src/config/index.t
   bun run test      # Runs the test suite
   ```
 
-### Cloudflare Workers
-
-1. **Build the Worker bundle**:
-
-```sh
-bun run build:worker
-```
-
-2. **Run locally with Wrangler**:
-
-```sh
-bun run deploy:dev
-```
-
-3. **Deploy to Cloudflare**:
-    ```sh
-    bun run deploy:prod
-    ```
-
 ## Project structure
 
 | Directory | Purpose |
@@ -309,23 +287,17 @@ bun run deploy:dev
 | `src/mcp-server/tools` | Tool definitions (`*.tool.ts`). Seven PubMed tools. |
 | `src/mcp-server/resources` | Resource definitions. Database info resource. |
 | `src/mcp-server/prompts` | Prompt definitions. Research plan prompt. |
-| `src/mcp-server/transports` | HTTP and stdio transports, including auth middleware. |
 | `src/services/ncbi` | NCBI E-utilities service layer — API client, queue, parser, formatter. |
-| `src/storage` | `StorageService` abstraction and provider implementations. |
-| `src/container` | DI container registrations and tokens. |
-| `src/utils` | Logging, error handling, security, parsing, formatting, telemetry. |
-| `src/config` | Environment variable parsing and validation with Zod. |
-| `schemas/ncbi-dtd` | NCBI E-utilities DTD files — XML schema definitions for ESearch, EFetch, ESummary, ELink, ESpell, EInfo, and PubMed article XML. |
-| `docs/ncbi` | NCBI reference material ([E-utilities help manual](docs/ncbi/eutilities-help.pdf)). |
+| `src/config` | Server-specific environment variable parsing and validation with Zod. |
 | `tests/` | Unit and integration tests, mirroring the `src/` structure. |
 
 ## Development guide
 
 See [`CLAUDE.md`](./CLAUDE.md) for development guidelines and architectural rules. The short version:
 
-- Logic throws `McpError`, handlers catch — no `try/catch` in tool logic
-- Pass `RequestContext` through the call stack for logging and tracing
-- Register new tools and resources in the `index.ts` barrel files
+- Handlers throw, framework catches — no `try/catch` in tool logic
+- Use `ctx.log` for logging, `ctx.state` for storage
+- Register new tools and resources in the `createApp()` arrays
 
 ## Contributing
 
