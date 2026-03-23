@@ -1,6 +1,6 @@
 <div align="center">
   <h1>@cyanheads/pubmed-mcp-server</h1>
-  <p><b>MCP server for the NCBI E-utilities API. Search PubMed, fetch article metadata and full text, generate citations, explore MeSH terms, and discover related research. Runs over stdio or HTTP. Deployable to Cloudflare Workers.</b>
+  <p><b>MCP server for the NCBI E-utilities API. Search PubMed, fetch article metadata and full text, generate citations, explore MeSH terms, and discover related research. STDIO or Streamable HTTP.</b>
   <div>7 Tools • 1 Resource • 1 Prompt</div>
   </p>
 </div>
