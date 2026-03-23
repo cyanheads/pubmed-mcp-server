@@ -15,7 +15,7 @@ const ArgsSchema = z.object({
   includeAgentPrompts: z
     .enum(['true', 'false'])
     .default('false')
-    .describe('Include detailed prompts for consuming LLM'),
+    .describe('Include detailed prompts for consuming LLM ("true" or "false")'),
 });
 
 function agentBlock(text: string, include: boolean): string {
