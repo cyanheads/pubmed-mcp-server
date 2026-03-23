@@ -193,6 +193,7 @@ export const fetchFulltextTool = tool('pubmed_fetch_fulltext', {
       .describe('Full-text articles'),
     totalReturned: z.number().describe('Number of articles returned'),
     unavailablePmids: z.array(z.string()).optional().describe('PMIDs not available in PMC'),
+    unavailablePmcIds: z.array(z.string()).optional().describe('PMC IDs that returned no data'),
   }),
 
   async handler(input, ctx) {
@@ -226,8 +227,13 @@ export const fetchFulltextTool = tool('pubmed_fetch_fulltext', {
         { retmode: 'xml', usePost: pmcIds.length > 5 },
       );
     } catch {
-      const ids = pmcIds.map((id) => `PMC${id}`).join(', ');
-      throw new Error(`Failed to fetch full text for ${ids}: article(s) not found in PMC`);
+      const ids = pmcIds.map((id) => `PMC${id}`);
+      return {
+        articles: [],
+        totalReturned: 0,
+        ...(unavailablePmids && { unavailablePmids }),
+        ...(!input.pmids && { unavailablePmcIds: ids }),
+      };
     }
 
     if (!xmlData || !('pmc-articleset' in xmlData)) {
@@ -255,6 +261,11 @@ export const fetchFulltextTool = tool('pubmed_fetch_fulltext', {
     if (!input.includeReferences)
       articles = articles.map(({ references: _, ...rest }) => rest as ParsedPmcArticle);
 
+    const returnedPmcIds = new Set(articles.map((a) => a.pmcId));
+    const missingPmcIds = pmcIds
+      .map((id) => (id.startsWith('PMC') ? id : `PMC${id}`))
+      .filter((id) => !returnedPmcIds.has(id));
+
     ctx.log.info('pubmed_pmc_fetch completed', {
       requested: pmcIds.length,
       returned: articles.length,
@@ -263,6 +274,7 @@ export const fetchFulltextTool = tool('pubmed_fetch_fulltext', {
       articles,
       totalReturned: articles.length,
       ...(unavailablePmids && { unavailablePmids }),
+      ...(missingPmcIds.length > 0 && { unavailablePmcIds: missingPmcIds }),
     };
   },
 

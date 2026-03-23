@@ -61,7 +61,7 @@ function buildPlan(args: z.infer<typeof ArgsSchema>): string {
   lines.push('- Use MeSH terms for PubMed; document search strategy for reproducibility');
   lines.push(
     agentBlock(
-      'Use pubmed_search_articles and pubmed_mesh_lookup tools to build and execute the literature search.',
+      'Use pubmed_search_articles and pubmed_lookup_mesh tools to build and execute the literature search.',
       ap,
     ),
   );

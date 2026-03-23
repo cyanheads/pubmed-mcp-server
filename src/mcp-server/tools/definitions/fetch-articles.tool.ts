@@ -121,6 +121,10 @@ export const fetchArticlesTool = tool('pubmed_fetch_articles', {
       )
       .describe('Parsed articles'),
     totalReturned: z.number().describe('Number of articles returned'),
+    unavailablePmids: z
+      .array(z.string())
+      .optional()
+      .describe('PMIDs that returned no article data'),
   }),
 
   async handler(input, ctx) {
@@ -156,11 +160,18 @@ export const fetchArticlesTool = tool('pubmed_fetch_articles', {
         };
       });
 
+    const returnedPmids = new Set(articles.map((a) => a.pmid).filter(Boolean));
+    const unavailable = input.pmids.filter((id) => !returnedPmids.has(id));
+
     ctx.log.info('pubmed_fetch completed', {
       requested: input.pmids.length,
       returned: articles.length,
     });
-    return { articles, totalReturned: articles.length };
+    return {
+      articles,
+      totalReturned: articles.length,
+      ...(unavailable.length > 0 && { unavailablePmids: unavailable }),
+    };
   },
 
   format: (result) => {
