@@ -4,6 +4,23 @@ All notable changes to this project will be documented in this file.
 
 ---
 
+## [2.2.1] - 2026-03-23
+
+### Fixed
+
+- **fetch-articles**: Added `unavailablePmids` to output — surfaces which requested PMIDs returned no article data
+- **fetch-fulltext**: Added `unavailablePmcIds` to output — tracks which PMC IDs returned no data; fetch failures now return a graceful empty result instead of throwing
+- **research-plan prompt**: Corrected tool reference from `pubmed_mesh_lookup` to `pubmed_lookup_mesh`
+
+### Changed
+
+- **CLAUDE.md**: Replaced generic placeholder patterns with actual server examples (spell-check tool, database-info resource, NCBI config), updated structure tree, removed unused context properties (`ctx.elicit`, `ctx.sample`, `ctx.progress`)
+- **README.md**: Updated all tool names to match 2.2.0 renames (e.g., `pubmed_search` → `pubmed_search_articles`), updated config section description
+- **Dockerfile**: Fixed image title/description labels, added `source` label, corrected log directory name and default port
+- **.env.example**: Added `NCBI_TIMEOUT_MS` entry
+
+---
+
 ## [2.2.0] - 2026-03-23
 
 ### Changed
