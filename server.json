@@ -6,14 +6,14 @@
     "url": "https://github.com/cyanheads/pubmed-mcp-server",
     "source": "github"
   },
-  "version": "2.2.1",
+  "version": "2.2.0",
   "packages": [
     {
       "registryType": "npm",
       "registryBaseUrl": "https://registry.npmjs.org",
       "identifier": "@cyanheads/pubmed-mcp-server",
       "runtimeHint": "bun",
-      "version": "2.2.1",
+      "version": "2.2.0",
       "packageArguments": [
         {
           "type": "positional",
@@ -54,7 +54,7 @@
       "registryBaseUrl": "https://registry.npmjs.org",
       "identifier": "@cyanheads/pubmed-mcp-server",
       "runtimeHint": "bun",
-      "version": "2.2.1",
+      "version": "2.2.0",
       "packageArguments": [
         {
           "type": "positional",
