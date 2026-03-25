@@ -4,6 +4,24 @@ All notable changes to this project will be documented in this file.
 
 ---
 
+## [2.2.2] - 2026-03-24
+
+### Changed
+
+- **fetch-articles format**: Now displays authors (first 3 + "et al."), journal info (abbreviation, year, volume, issue, pages), publication types, and unavailable PMIDs
+- **fetch-fulltext format**: Renders subsections within body sections
+- **find-related**: Added `source` and `pubDate` fields to output schema and format display
+
+### Fixed
+
+- **NCBI error messages**: Raw C++ exception traces from NCBI are now replaced with concise, user-friendly messages
+
+### Updated
+
+- `@cyanheads/mcp-ts-core` to 0.1.29
+
+---
+
 ## [2.2.1] - 2026-03-23
 
 ### Fixed
