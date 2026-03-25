@@ -1,5 +1,5 @@
 /**
- * @fileoverview Tests for the NCBI API client (URL construction, retry logic, GET/POST selection).
+ * @fileoverview Tests for the NCBI API client (URL construction, GET/POST selection, error handling).
  * @module tests/services/ncbi/api-client.test
  */
 
@@ -23,7 +23,6 @@ const mockFetch = fetchWithTimeout as ReturnType<typeof vi.fn>;
 
 const baseConfig: NcbiApiClientConfig = {
   toolIdentifier: 'test-tool',
-  maxRetries: 0,
   timeoutMs: 5000,
 };
 
@@ -33,7 +32,11 @@ describe('NcbiApiClient', () => {
   });
 
   it('makes a GET request with params', async () => {
-    mockFetch.mockResolvedValueOnce({ text: () => Promise.resolve('<xml/>') });
+    mockFetch.mockResolvedValueOnce({
+      ok: true,
+      status: 200,
+      text: () => Promise.resolve('<xml/>'),
+    });
     const client = new NcbiApiClient(baseConfig);
     const result = await client.makeRequest('esearch', { db: 'pubmed', term: 'cancer' });
 
@@ -47,7 +50,7 @@ describe('NcbiApiClient', () => {
   });
 
   it('injects api_key and email when configured', async () => {
-    mockFetch.mockResolvedValueOnce({ text: () => Promise.resolve('ok') });
+    mockFetch.mockResolvedValueOnce({ ok: true, status: 200, text: () => Promise.resolve('ok') });
     const client = new NcbiApiClient({
       ...baseConfig,
       apiKey: 'my-key',
@@ -61,7 +64,7 @@ describe('NcbiApiClient', () => {
   });
 
   it('uses POST for large payloads', async () => {
-    mockFetch.mockResolvedValueOnce({ text: () => Promise.resolve('ok') });
+    mockFetch.mockResolvedValueOnce({ ok: true, status: 200, text: () => Promise.resolve('ok') });
     const client = new NcbiApiClient(baseConfig);
     // Create a long id list to exceed POST_THRESHOLD
     const longId = Array.from({ length: 500 }, (_, i) => String(i)).join(',');
@@ -72,42 +75,38 @@ describe('NcbiApiClient', () => {
   });
 
   it('uses POST when usePost option is set', async () => {
-    mockFetch.mockResolvedValueOnce({ text: () => Promise.resolve('ok') });
+    mockFetch.mockResolvedValueOnce({ ok: true, status: 200, text: () => Promise.resolve('ok') });
     const client = new NcbiApiClient(baseConfig);
     await client.makeRequest('efetch', { db: 'pubmed' }, { usePost: true });
 
     expect(mockFetch.mock.calls[0]?.[3]).toMatchObject({ method: 'POST' });
   });
 
-  it('retries on transient errors', async () => {
-    const { JsonRpcErrorCode } = await import('@cyanheads/mcp-ts-core/errors');
-    mockFetch
-      .mockRejectedValueOnce(new McpError(JsonRpcErrorCode.ServiceUnavailable, 'down'))
-      .mockResolvedValueOnce({ text: () => Promise.resolve('recovered') });
-
-    const client = new NcbiApiClient({ ...baseConfig, maxRetries: 1 });
-    const result = await client.makeRequest('esearch', { db: 'pubmed' });
-
-    expect(result).toBe('recovered');
-    expect(mockFetch).toHaveBeenCalledTimes(2);
-  });
-
-  it('throws non-retryable McpError immediately', async () => {
+  it('re-throws McpError as-is', async () => {
     const { JsonRpcErrorCode } = await import('@cyanheads/mcp-ts-core/errors');
     mockFetch.mockRejectedValueOnce(new McpError(JsonRpcErrorCode.InvalidRequest, 'bad request'));
 
-    const client = new NcbiApiClient({ ...baseConfig, maxRetries: 3 });
+    const client = new NcbiApiClient(baseConfig);
     await expect(client.makeRequest('esearch', { db: 'pubmed' })).rejects.toThrow('bad request');
     expect(mockFetch).toHaveBeenCalledOnce();
   });
 
-  it('throws after exhausting retries', async () => {
-    mockFetch.mockRejectedValue(new Error('network error'));
-    const client = new NcbiApiClient({ ...baseConfig, maxRetries: 1 });
+  it('throws ServiceUnavailable for non-OK HTTP status', async () => {
+    mockFetch.mockResolvedValueOnce({ ok: false, status: 429, text: () => Promise.resolve('') });
+    const client = new NcbiApiClient(baseConfig);
 
     await expect(client.makeRequest('esearch', { db: 'pubmed' })).rejects.toThrow(
-      /failed after retries/,
+      /NCBI API returned HTTP 429/,
     );
-    expect(mockFetch).toHaveBeenCalledTimes(2);
+  });
+
+  it('wraps non-McpError as ServiceUnavailable', async () => {
+    mockFetch.mockRejectedValueOnce(new Error('network error'));
+    const client = new NcbiApiClient(baseConfig);
+
+    await expect(client.makeRequest('esearch', { db: 'pubmed' })).rejects.toThrow(
+      /NCBI request failed: network error/,
+    );
+    expect(mockFetch).toHaveBeenCalledOnce();
   });
 });

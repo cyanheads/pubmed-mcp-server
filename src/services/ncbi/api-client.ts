@@ -1,6 +1,7 @@
 /**
  * @fileoverview Core HTTP client for NCBI E-utility requests. Handles URL construction,
- * API key injection, GET/POST selection based on payload size, and exponential backoff retries.
+ * API key injection, and GET/POST selection based on payload size. Single-attempt only;
+ * retry logic lives in NcbiService.performRequest to cover both HTTP and XML-level errors.
  * @module src/services/ncbi/api-client
  */
 
@@ -15,14 +16,14 @@ const POST_THRESHOLD = 2000;
 export interface NcbiApiClientConfig {
   adminEmail?: string;
   apiKey?: string;
-  maxRetries: number;
   timeoutMs: number;
   toolIdentifier: string;
 }
 
 /**
  * Low-level HTTP client for NCBI E-utilities. Constructs URLs, injects credentials,
- * chooses GET/POST, and retries with exponential backoff.
+ * and chooses GET/POST based on payload size. Single-attempt — retry logic lives
+ * in {@link NcbiService.performRequest} so it covers both HTTP and XML-level errors.
  */
 export class NcbiApiClient {
   constructor(private readonly config: NcbiApiClientConfig) {}
@@ -36,56 +37,32 @@ export class NcbiApiClient {
     const usePost = this.shouldPost(finalParams, options);
     const url = `${NCBI_EUTILS_BASE_URL}/${endpoint}.fcgi`;
 
-    for (let attempt = 0; attempt <= this.config.maxRetries; attempt++) {
-      try {
-        logger.debug(`NCBI HTTP request: ${usePost ? 'POST' : 'GET'} ${url}`, {
-          endpoint,
-          attempt: attempt + 1,
-        } as never);
+    try {
+      logger.debug(`NCBI HTTP request: ${usePost ? 'POST' : 'GET'} ${url}`, {
+        endpoint,
+      } as never);
 
-        const response = usePost
-          ? await this.postRequest(url, finalParams)
-          : await this.getRequest(url, finalParams);
+      const response = usePost
+        ? await this.postRequest(url, finalParams)
+        : await this.getRequest(url, finalParams);
 
-        return await response.text();
-      } catch (error: unknown) {
-        if (error instanceof McpError) {
-          if (
-            error.code !== JsonRpcErrorCode.ServiceUnavailable &&
-            error.code !== JsonRpcErrorCode.Timeout
-          ) {
-            throw error;
-          }
-        }
-
-        if (attempt < this.config.maxRetries) {
-          const retryDelay = 2 ** attempt * 200;
-          logger.warning(
-            `NCBI request to ${endpoint} failed. Retrying (${attempt + 1}/${this.config.maxRetries}) in ${retryDelay}ms.`,
-            { endpoint, attempt: attempt + 1, retryDelay } as never,
-          );
-          await new Promise<void>((r) => setTimeout(r, retryDelay));
-          continue;
-        }
-
-        if (error instanceof McpError) throw error;
-
-        const msg = error instanceof Error ? error.message : String(error);
-        logger.error(
-          `NCBI request to ${endpoint} failed after ${this.config.maxRetries} retries.`,
-          { endpoint, errorMessage: msg } as never,
-        );
+      if (!response.ok) {
         throw new McpError(
           JsonRpcErrorCode.ServiceUnavailable,
-          `NCBI request failed after retries: ${msg}`,
-          { endpoint },
+          `NCBI API returned HTTP ${response.status}.`,
+          { endpoint, status: response.status },
         );
       }
-    }
 
-    throw new McpError(JsonRpcErrorCode.InternalError, 'Request failed after all retries.', {
-      endpoint,
-    });
+      return await response.text();
+    } catch (error: unknown) {
+      if (error instanceof McpError) throw error;
+
+      const msg = error instanceof Error ? error.message : String(error);
+      throw new McpError(JsonRpcErrorCode.ServiceUnavailable, `NCBI request failed: ${msg}`, {
+        endpoint,
+      });
+    }
   }
 
   private buildParams(params: NcbiRequestParams): Record<string, string> {

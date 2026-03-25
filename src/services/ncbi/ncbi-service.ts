@@ -5,6 +5,7 @@
  * @module src/services/ncbi/ncbi-service
  */
 
+import { JsonRpcErrorCode, McpError } from '@cyanheads/mcp-ts-core/errors';
 import { logger } from '@cyanheads/mcp-ts-core/utils';
 
 import { getServerConfig } from '@/config/server-config.js';
@@ -32,6 +33,7 @@ export class NcbiService {
     private readonly apiClient: NcbiApiClient,
     private readonly queue: NcbiRequestQueue,
     private readonly responseHandler: NcbiResponseHandler,
+    private readonly maxRetries: number,
   ) {}
 
   async eSearch(params: NcbiRequestParams): Promise<ESearchResult> {
@@ -100,6 +102,12 @@ export class NcbiService {
     return this.performRequest('einfo', params, { retmode: 'xml' });
   }
 
+  /**
+   * Enqueues a request with retry logic that covers both HTTP-level failures
+   * (network errors, timeouts) and XML-level errors (NCBI returning 200 OK
+   * with an error structure in the response body, e.g. connection resets
+   * surfaced as C++ exception traces).
+   */
   private performRequest<T>(
     endpoint: string,
     params: NcbiRequestParams,
@@ -107,8 +115,47 @@ export class NcbiService {
   ): Promise<T> {
     return this.queue.enqueue(
       async () => {
-        const text = await this.apiClient.makeRequest(endpoint, params, options);
-        return this.responseHandler.parseAndHandleResponse<T>(text, endpoint, options);
+        for (let attempt = 0; attempt <= this.maxRetries; attempt++) {
+          try {
+            const text = await this.apiClient.makeRequest(endpoint, params, options);
+            return this.responseHandler.parseAndHandleResponse<T>(text, endpoint, options);
+          } catch (error: unknown) {
+            // Only retry transient errors (ServiceUnavailable, Timeout).
+            // Validation, serialization, and other errors fail immediately.
+            if (error instanceof McpError) {
+              if (
+                error.code !== JsonRpcErrorCode.ServiceUnavailable &&
+                error.code !== JsonRpcErrorCode.Timeout
+              ) {
+                throw error;
+              }
+            }
+
+            if (attempt < this.maxRetries) {
+              const retryDelay = 1000 * 2 ** attempt; // 1s, 2s, 4s
+              logger.warning(
+                `NCBI request to ${endpoint} failed. Retrying (${attempt + 1}/${this.maxRetries}) in ${retryDelay}ms.`,
+                { endpoint, attempt: attempt + 1, retryDelay } as never,
+              );
+              await new Promise<void>((r) => setTimeout(r, retryDelay));
+              continue;
+            }
+
+            // Final attempt exhausted — surface retry context so the caller
+            // knows this wasn't a single failed request.
+            const attempts = this.maxRetries + 1;
+            const msg = error instanceof Error ? error.message : String(error);
+            throw new McpError(
+              error instanceof McpError ? error.code : JsonRpcErrorCode.ServiceUnavailable,
+              `${msg} (failed after ${attempts} attempts)`,
+              { endpoint, attempts },
+            );
+          }
+        }
+
+        throw new McpError(JsonRpcErrorCode.InternalError, 'Request failed after all retries.', {
+          endpoint,
+        });
       },
       endpoint,
       params,
@@ -125,14 +172,13 @@ export function initNcbiService(): void {
   const config = getServerConfig();
   const apiClient = new NcbiApiClient({
     toolIdentifier: config.toolIdentifier,
-    maxRetries: config.maxRetries,
     timeoutMs: config.timeoutMs,
     ...(config.apiKey && { apiKey: config.apiKey }),
     ...(config.adminEmail && { adminEmail: config.adminEmail }),
   });
   const queue = new NcbiRequestQueue(config.requestDelayMs);
   const responseHandler = new NcbiResponseHandler();
-  _service = new NcbiService(apiClient, queue, responseHandler);
+  _service = new NcbiService(apiClient, queue, responseHandler, config.maxRetries);
   logger.info('NCBI service initialized.', {
     toolIdentifier: config.toolIdentifier,
     hasApiKey: !!config.apiKey,

@@ -127,7 +127,7 @@ describe('NcbiResponseHandler', () => {
     it('returns unknown error message for empty structure', () => {
       const handler = createHandler();
       const messages = handler.extractNcbiErrorMessages({});
-      expect(messages).toEqual(['Unknown NCBI API error structure.']);
+      expect(messages).toEqual(['Unknown NCBI API error.']);
     });
   });
 });

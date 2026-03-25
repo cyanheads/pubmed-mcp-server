@@ -26,7 +26,7 @@ function createMockService() {
     parseAndHandleResponse: vi.fn(),
   } as unknown as NcbiResponseHandler;
 
-  const service = new NcbiService(mockApiClient, mockQueue, mockResponseHandler);
+  const service = new NcbiService(mockApiClient, mockQueue, mockResponseHandler, 0);
   return { service, mockApiClient, mockQueue, mockResponseHandler };
 }
 

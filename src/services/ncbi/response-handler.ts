@@ -164,6 +164,18 @@ export class NcbiResponseHandler {
       const xmlForValidation = responseText.replace(/<!DOCTYPE[^>]*>/gi, '');
       const validationResult = XMLValidator.validate(xmlForValidation);
       if (validationResult !== true) {
+        const isHtml = /^\s*<(!DOCTYPE\s+html|html[\s>])/i.test(responseText);
+        if (isHtml) {
+          logger.warning('NCBI returned HTML instead of XML (likely rate-limited).', {
+            endpoint,
+          } as never);
+          throw new McpError(
+            JsonRpcErrorCode.ServiceUnavailable,
+            'NCBI API returned an HTML response instead of XML — likely rate-limited.',
+            { endpoint },
+          );
+        }
+
         logger.error('Invalid XML response from NCBI.', {
           endpoint,
           responseSnippet: responseText.substring(0, 500),
