@@ -93,6 +93,20 @@ function extractTextValues(source: unknown, prefix = ''): string[] {
 }
 
 /**
+ * Replaces raw NCBI C++ exception traces with a concise, actionable message.
+ * The internal details are logged but not surfaced to the caller.
+ */
+function sanitizeNcbiError(message: string): string {
+  if (/NCBI C\+\+ Exception|CException|CTxRawClient/i.test(message)) {
+    if (/closed connection|EOF|Read failed/i.test(message)) {
+      return 'NCBI API temporarily unavailable (connection reset) — try again in a few seconds.';
+    }
+    return 'NCBI API returned an internal error — try again in a few seconds.';
+  }
+  return message;
+}
+
+/**
  * Parses NCBI E-utility responses (XML, JSON, text) and checks for NCBI-specific
  * error structures embedded in response bodies.
  */
@@ -129,7 +143,7 @@ export class NcbiResponseHandler {
       }
     }
 
-    return messages.length > 0 ? messages : ['Unknown NCBI API error structure.'];
+    return messages.length > 0 ? messages.map(sanitizeNcbiError) : ['Unknown NCBI API error.'];
   }
 
   parseAndHandleResponse<T>(
