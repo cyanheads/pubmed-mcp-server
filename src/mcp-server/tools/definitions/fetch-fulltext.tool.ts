@@ -292,6 +292,12 @@ export const fetchFulltextTool = tool('pubmed_fetch_fulltext', {
       for (const sec of a.sections) {
         if (sec.title) lines.push(`\n#### ${sec.title}`);
         if (sec.text) lines.push(sec.text);
+        if (sec.subsections?.length) {
+          for (const sub of sec.subsections) {
+            if (sub.title) lines.push(`\n##### ${sub.title}`);
+            if (sub.text) lines.push(sub.text);
+          }
+        }
       }
     }
     return [{ type: 'text', text: lines.join('\n') }];

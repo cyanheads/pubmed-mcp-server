@@ -63,6 +63,8 @@ export const findRelatedTool = tool('pubmed_find_related', {
           pmid: z.string().describe('PubMed ID'),
           title: z.string().optional().describe('Article title'),
           authors: z.string().optional().describe('Author string'),
+          source: z.string().optional().describe('Journal source'),
+          pubDate: z.string().optional().describe('Publication date'),
           score: z
             .number()
             .optional()
@@ -160,7 +162,14 @@ export const findRelatedTool = tool('pubmed_find_related', {
 
     const articles = pmidsToEnrich.map((p) => {
       const details = summaryMap.get(p.pmid);
-      return { pmid: p.pmid, title: details?.title, authors: details?.authors, score: p.score };
+      return {
+        pmid: p.pmid,
+        title: details?.title,
+        authors: details?.authors,
+        source: details?.source,
+        pubDate: details?.pubDate,
+        score: p.score,
+      };
     });
 
     return { sourcePmid: input.pmid, relationship: input.relationship, articles, totalFound };
@@ -181,6 +190,8 @@ export const findRelatedTool = tool('pubmed_find_related', {
         );
         if (a.title) lines.push(`  ${a.title}`);
         if (a.authors) lines.push(`  *${a.authors}*`);
+        const meta = [a.source, a.pubDate].filter(Boolean).join(', ');
+        if (meta) lines.push(`  ${meta}`);
       }
     }
     return [{ type: 'text', text: lines.join('\n') }];

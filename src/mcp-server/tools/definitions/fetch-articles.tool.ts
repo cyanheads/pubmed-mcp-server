@@ -176,8 +176,27 @@ export const fetchArticlesTool = tool('pubmed_fetch_articles', {
 
   format: (result) => {
     const lines = [`## PubMed Articles`, `**Articles Returned:** ${result.totalReturned}`];
+    if (result.unavailablePmids?.length)
+      lines.push(`**Unavailable PMIDs:** ${result.unavailablePmids.join(', ')}`);
     for (const a of result.articles) {
       lines.push(`\n### ${a.title ?? a.pmid ?? 'Unknown'}`);
+      if (a.authors?.length) {
+        const fmtAuthor = (au: (typeof a.authors)[number]) =>
+          au.collectiveName ?? `${au.lastName ?? ''} ${au.initials ?? ''}`.trim();
+        const first3 = a.authors.slice(0, 3).map(fmtAuthor).join(', ');
+        const authorStr = a.authors.length > 3 ? `${first3}, et al.` : first3;
+        lines.push(`**Authors:** ${authorStr}`);
+      }
+      const ji = a.journalInfo;
+      if (ji) {
+        const parts = [ji.isoAbbreviation ?? ji.title];
+        const year = ji.publicationDate?.year;
+        if (year) parts.push(year);
+        if (ji.volume) parts.push(`**${ji.volume}**${ji.issue ? `(${ji.issue})` : ''}`);
+        if (ji.pages) parts.push(ji.pages);
+        lines.push(`**Journal:** ${parts.filter(Boolean).join(', ')}`);
+      }
+      if (a.publicationTypes?.length) lines.push(`**Type:** ${a.publicationTypes.join(', ')}`);
       if (a.pmid) lines.push(`**PMID:** ${a.pmid}`);
       if (a.doi) lines.push(`**DOI:** ${a.doi}`);
       if (a.pubmedUrl) lines.push(`**PubMed:** ${a.pubmedUrl}`);
