@@ -333,7 +333,7 @@ export function extractKeywords(keywordListsXml?: XmlKeywordList[] | XmlKeywordL
  * @returns The abstract text string, or undefined if not found or empty.
  */
 export function extractAbstractText(abstractXml?: XmlArticle['Abstract']): string | undefined {
-  if (!abstractXml || !abstractXml.AbstractText) return;
+  if (!abstractXml?.AbstractText) return;
 
   const abstractTexts = ensureArray(abstractXml.AbstractText);
   if (abstractTexts.length === 0) return;
@@ -365,7 +365,7 @@ export function extractAbstractText(abstractXml?: XmlArticle['Abstract']): strin
  * @returns The PMID string or undefined.
  */
 export function extractPmid(medlineCitationXml?: XmlMedlineCitation): string | undefined {
-  if (!medlineCitationXml || !medlineCitationXml.PMID) return;
+  if (!medlineCitationXml?.PMID) return;
   return getText(medlineCitationXml.PMID);
 }
 
@@ -375,7 +375,7 @@ export function extractPmid(medlineCitationXml?: XmlMedlineCitation): string | u
  * @returns An array of parsed article dates.
  */
 export function extractArticleDates(articleXml?: XmlArticle): ParsedArticleDate[] {
-  if (!articleXml || !articleXml.ArticleDate) return [];
+  if (!articleXml?.ArticleDate) return [];
   const articleDatesXml = ensureArray(articleXml.ArticleDate);
   return articleDatesXml.map((ad: XmlArticleDate) => ({
     dateType: getAttribute(ad, 'DateType'),
