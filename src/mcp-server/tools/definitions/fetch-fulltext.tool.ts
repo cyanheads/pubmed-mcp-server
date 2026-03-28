@@ -282,12 +282,38 @@ export const fetchFulltextTool = tool('pubmed_fetch_fulltext', {
     const lines = [`## PMC Full-Text Articles`, `**Articles Returned:** ${result.totalReturned}`];
     if (result.unavailablePmids?.length)
       lines.push(`**Unavailable PMIDs:** ${result.unavailablePmids.join(', ')}`);
+    if (result.unavailablePmcIds?.length)
+      lines.push(`**Unavailable PMC IDs:** ${result.unavailablePmcIds.join(', ')}`);
     for (const a of result.articles) {
       lines.push(`\n### ${a.title ?? a.pmcId}`);
+      if (a.authors?.length) {
+        const fmtAuthor = (au: (typeof a.authors)[number]) =>
+          au.collectiveName ??
+          `${au.lastName ?? ''}${au.givenNames ? ` ${au.givenNames}` : ''}`.trim();
+        const first3 = a.authors.slice(0, 3).map(fmtAuthor).join(', ');
+        const authorStr = a.authors.length > 3 ? `${first3}, et al.` : first3;
+        lines.push(`**Authors:** ${authorStr}`);
+      }
+      if (a.affiliations?.length) lines.push(`**Affiliations:** ${a.affiliations.join('; ')}`);
+      if (a.journal) {
+        const parts = [a.journal.title];
+        if (a.journal.volume)
+          parts.push(`**${a.journal.volume}**${a.journal.issue ? `(${a.journal.issue})` : ''}`);
+        if (a.journal.pages) parts.push(a.journal.pages);
+        lines.push(`**Journal:** ${parts.filter(Boolean).join(', ')}`);
+      }
+      if (a.articleType) lines.push(`**Type:** ${a.articleType}`);
+      if (a.publicationDate) {
+        const d = a.publicationDate;
+        const dateParts = [d.year, d.month, d.day].filter(Boolean);
+        if (dateParts.length) lines.push(`**Published:** ${dateParts.join('-')}`);
+      }
       lines.push(`**PMCID:** ${a.pmcId}`);
       if (a.pmid) lines.push(`**PMID:** ${a.pmid}`);
       if (a.doi) lines.push(`**DOI:** ${a.doi}`);
       lines.push(`**PMC:** ${a.pmcUrl}`);
+      if (a.pubmedUrl) lines.push(`**PubMed:** ${a.pubmedUrl}`);
+      if (a.keywords?.length) lines.push(`**Keywords:** ${a.keywords.join(', ')}`);
       if (a.abstract) lines.push(`\n#### Abstract\n${a.abstract}`);
       for (const sec of a.sections) {
         if (sec.title) lines.push(`\n#### ${sec.title}`);
@@ -297,6 +323,13 @@ export const fetchFulltextTool = tool('pubmed_fetch_fulltext', {
             if (sub.title) lines.push(`\n##### ${sub.title}`);
             if (sub.text) lines.push(sub.text);
           }
+        }
+      }
+      if (a.references?.length) {
+        lines.push(`\n#### References (${a.references.length})`);
+        for (const ref of a.references) {
+          const label = ref.label ?? ref.id ?? '';
+          lines.push(`- ${label ? `[${label}] ` : ''}${ref.citation}`);
         }
       }
     }

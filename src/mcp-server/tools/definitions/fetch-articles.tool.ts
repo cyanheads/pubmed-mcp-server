@@ -139,7 +139,7 @@ export const fetchArticlesTool = tool('pubmed_fetch_articles', {
       throw new Error('Invalid EFetch response from NCBI: missing PubmedArticleSet');
     }
 
-    if (!xmlData.PubmedArticleSet || !xmlData.PubmedArticleSet.PubmedArticle) {
+    if (!xmlData.PubmedArticleSet?.PubmedArticle) {
       return { articles: [], totalReturned: 0 };
     }
 
@@ -187,6 +187,7 @@ export const fetchArticlesTool = tool('pubmed_fetch_articles', {
         const authorStr = a.authors.length > 3 ? `${first3}, et al.` : first3;
         lines.push(`**Authors:** ${authorStr}`);
       }
+      if (a.affiliations?.length) lines.push(`**Affiliations:** ${a.affiliations.join('; ')}`);
       const ji = a.journalInfo;
       if (ji) {
         const parts = [ji.isoAbbreviation ?? ji.title];
@@ -202,6 +203,24 @@ export const fetchArticlesTool = tool('pubmed_fetch_articles', {
       if (a.pubmedUrl) lines.push(`**PubMed:** ${a.pubmedUrl}`);
       if (a.pmcUrl) lines.push(`**PMC:** ${a.pmcUrl}`);
       if (a.abstractText) lines.push(`\n#### Abstract\n${a.abstractText}`);
+      if (a.keywords?.length) lines.push(`\n**Keywords:** ${a.keywords.join(', ')}`);
+      if (a.meshTerms?.length) {
+        lines.push(`\n#### MeSH Terms`);
+        for (const m of a.meshTerms) {
+          const major = m.isMajorTopic ? ' *' : '';
+          const qualifiers = m.qualifiers?.length
+            ? ` (${m.qualifiers.map((q) => `${q.qualifierName}${q.isMajorTopic ? '*' : ''}`).join(', ')})`
+            : '';
+          lines.push(`- ${m.descriptorName}${major}${qualifiers}`);
+        }
+      }
+      if (a.grantList?.length) {
+        lines.push(`\n#### Grants`);
+        for (const g of a.grantList) {
+          const parts = [g.grantId, g.agency, g.country].filter(Boolean);
+          lines.push(`- ${parts.join(' — ')}`);
+        }
+      }
     }
     return [{ type: 'text', text: lines.join('\n') }];
   },
