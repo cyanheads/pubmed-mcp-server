@@ -1,7 +1,7 @@
 # Agent Protocol
 
 **Server:** @cyanheads/pubmed-mcp-server
-**Version:** 2.2.3
+**Version:** 2.2.4
 **Framework:** [@cyanheads/mcp-ts-core](https://www.npmjs.com/package/@cyanheads/mcp-ts-core)
 
 > **Read the framework docs first:** `node_modules/@cyanheads/mcp-ts-core/CLAUDE.md` contains the full API reference — builders, Context, error codes, exports, patterns. This file covers server-specific conventions only.
@@ -232,6 +232,8 @@ Available skills:
 | `api-testing` | createMockContext, test patterns |
 | `api-utils` | Formatting, parsing, security, pagination, scheduling |
 | `api-workers` | Cloudflare Workers runtime |
+| `report-issue-framework` | File bug/feature request against @cyanheads/mcp-ts-core |
+| `report-issue-local` | File bug/feature request against this server's repo |
 
 When you complete a skill's checklist, check the boxes and add a completion timestamp at the end (e.g., `Completed: 2026-03-11`).
 
