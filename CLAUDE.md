@@ -1,7 +1,7 @@
 # Agent Protocol
 
 **Server:** @cyanheads/pubmed-mcp-server
-**Version:** 2.2.6
+**Version:** 2.3.0
 **Framework:** [@cyanheads/mcp-ts-core](https://www.npmjs.com/package/@cyanheads/mcp-ts-core)
 
 > **Read the framework docs first:** `node_modules/@cyanheads/mcp-ts-core/CLAUDE.md` contains the full API reference — builders, Context, error codes, exports, patterns. This file covers server-specific conventions only.
@@ -185,7 +185,7 @@ src/
       parsing/                          # XML parsers (article, esummary, PMC)
       formatting/                       # Citation formatter (APA, MLA, BibTeX, RIS)
   mcp-server/
-    tools/definitions/                  # 7 tool definitions (*.tool.ts)
+    tools/definitions/                  # 9 tool definitions (*.tool.ts)
     resources/definitions/              # database-info.resource.ts
     prompts/definitions/                # research-plan.prompt.ts
 ```

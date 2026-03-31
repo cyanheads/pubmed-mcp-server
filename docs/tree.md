@@ -1,6 +1,6 @@
 # pubmed-mcp-server - Directory Structure
 
-Generated on: 2026-03-23 20:30:02
+Generated on: 2026-03-31 15:46:05
 
 ```text
 pubmed-mcp-server/
@@ -80,6 +80,10 @@ pubmed-mcp-server/
 │   │   │   ├── readme.md
 │   │   │   └── server-json.md
 │   │   └── SKILL.md
+│   ├── report-issue-framework/
+│   │   └── SKILL.md
+│   ├── report-issue-local/
+│   │   └── SKILL.md
 │   └── setup/
 │       └── SKILL.md
 ├── src/
@@ -94,10 +98,12 @@ pubmed-mcp-server/
 │   │   │       └── database-info.resource.ts
 │   │   └── tools/
 │   │       └── definitions/
+│   │           ├── convert-ids.tool.ts
 │   │           ├── fetch-articles.tool.ts
 │   │           ├── fetch-fulltext.tool.ts
 │   │           ├── find-related.tool.ts
 │   │           ├── format-citations.tool.ts
+│   │           ├── lookup-citation.tool.ts
 │   │           ├── lookup-mesh.tool.ts
 │   │           ├── search-articles.tool.ts
 │   │           └── spell-check.tool.ts
@@ -111,6 +117,7 @@ pubmed-mcp-server/
 │   │       │   ├── pmc-article-parser.ts
 │   │       │   └── xml-helpers.ts
 │   │       ├── api-client.ts
+│   │       ├── ncbi-service.test.ts
 │   │       ├── ncbi-service.ts
 │   │       ├── request-queue.ts
 │   │       ├── response-handler.ts
@@ -128,10 +135,12 @@ pubmed-mcp-server/
 │   │   │       └── database-info.resource.test.ts
 │   │   └── tools/
 │   │       └── definitions/
+│   │           ├── convert-ids.tool.test.ts
 │   │           ├── fetch-articles.tool.test.ts
 │   │           ├── fetch-fulltext.tool.test.ts
 │   │           ├── find-related.tool.test.ts
 │   │           ├── format-citations.tool.test.ts
+│   │           ├── lookup-citation.tool.test.ts
 │   │           ├── lookup-mesh.tool.test.ts
 │   │           ├── search-articles.tool.test.ts
 │   │           └── spell-check.tool.test.ts

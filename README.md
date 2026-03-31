@@ -1,13 +1,13 @@
 <div align="center">
   <h1>@cyanheads/pubmed-mcp-server</h1>
   <p><b>MCP server for the NCBI E-utilities API. Search PubMed, fetch article metadata and full text, generate citations, explore MeSH terms, and discover related research. STDIO or Streamable HTTP.</b>
-  <div>7 Tools • 1 Resource • 1 Prompt</div>
+  <div>9 Tools • 1 Resource • 1 Prompt</div>
   </p>
 </div>
 
 <div align="center">
 
-[![npm](https://img.shields.io/npm/v/@cyanheads/pubmed-mcp-server?style=flat-square&logo=npm&logoColor=white)](https://www.npmjs.com/package/@cyanheads/pubmed-mcp-server) [![Version](https://img.shields.io/badge/Version-2.2.6-blue.svg?style=flat-square)](./CHANGELOG.md) [![Framework](https://img.shields.io/badge/Built%20on-@cyanheads/mcp--ts--core-259?style=flat-square)](https://www.npmjs.com/package/@cyanheads/mcp-ts-core) [![MCP SDK](https://img.shields.io/badge/MCP%20SDK-^1.27.1-green.svg?style=flat-square)](https://modelcontextprotocol.io/) 
+[![npm](https://img.shields.io/npm/v/@cyanheads/pubmed-mcp-server?style=flat-square&logo=npm&logoColor=white)](https://www.npmjs.com/package/@cyanheads/pubmed-mcp-server) [![Version](https://img.shields.io/badge/Version-2.3.0-blue.svg?style=flat-square)](./CHANGELOG.md) [![Framework](https://img.shields.io/badge/Built%20on-@cyanheads/mcp--ts--core-259?style=flat-square)](https://www.npmjs.com/package/@cyanheads/mcp-ts-core) [![MCP SDK](https://img.shields.io/badge/MCP%20SDK-^1.27.1-green.svg?style=flat-square)](https://modelcontextprotocol.io/) 
 
 [![License](https://img.shields.io/badge/License-Apache%202.0-orange.svg?style=flat-square)](./LICENSE) [![TypeScript](https://img.shields.io/badge/TypeScript-^6.0.2-3178C6.svg?style=flat-square)](https://www.typescriptlang.org/) [![Bun](https://img.shields.io/badge/Bun-v1.3.2-blueviolet.svg?style=flat-square)](https://bun.sh/)
 
@@ -23,7 +23,7 @@
 
 ## Tools
 
-Seven tools for working with PubMed and NCBI data:
+Nine tools for working with PubMed and NCBI data:
 
 | Tool | Description |
 |:---|:---|
@@ -34,6 +34,8 @@ Seven tools for working with PubMed and NCBI data:
 | `pubmed_find_related` | Find similar articles, citing articles, or references for a given PMID |
 | `pubmed_spell_check` | Spell-check biomedical queries using NCBI's ESpell service |
 | `pubmed_lookup_mesh` | Search and explore MeSH vocabulary — tree numbers, scope notes, entry terms |
+| `pubmed_lookup_citation` | Resolve partial bibliographic references to PubMed IDs via ECitMatch |
+| `pubmed_convert_ids` | Convert between DOI, PMID, and PMCID using the PMC ID Converter API |
 
 ### `pubmed_search_articles`
 
@@ -114,6 +116,28 @@ Search and explore the MeSH (Medical Subject Headings) vocabulary.
 - Detailed records with tree numbers, scope notes, and entry terms by default
 - Useful for building precise PubMed queries with controlled vocabulary
 
+---
+
+### `pubmed_lookup_citation`
+
+Resolve partial bibliographic references to PubMed IDs via NCBI ECitMatch.
+
+- Match citations by journal, year, volume, first page, and/or author name
+- More fields = better match accuracy; at least one field required
+- Batch up to 25 citations per request
+- Deterministic matching — more reliable than free-text search for known references
+
+---
+
+### `pubmed_convert_ids`
+
+Convert between article identifiers (DOI, PMID, PMCID) using the PMC ID Converter API.
+
+- Batch up to 50 IDs per request
+- Accepts DOIs, PMIDs, or PMCIDs (all IDs must be the same type)
+- Only resolves articles indexed in PubMed Central
+- Returns all available identifier mappings for each input ID
+
 ## Resource and prompt
 
 | Type | Name | Description |
@@ -134,7 +158,7 @@ Built on [`@cyanheads/mcp-ts-core`](https://github.com/cyanheads/mcp-ts-core):
 
 PubMed-specific:
 
-- Complete NCBI E-utilities integration (ESearch, EFetch, ESummary, ELink, ESpell, EInfo)
+- Complete NCBI E-utilities integration (ESearch, EFetch, ESummary, ELink, ESpell, EInfo, ECitMatch) plus PMC ID Converter
 - Sequential request queue with configurable delay for NCBI rate limit compliance
 - NCBI-specific XML parser with `isArray` hints for PubMed's inconsistent XML structure
 - Hand-rolled citation formatters (APA, MLA, BibTeX, RIS) — zero deps, Workers-compatible
@@ -287,7 +311,7 @@ All configuration is validated at startup via Zod schemas in `src/config/server-
 
 | Directory | Purpose |
 |:---|:---|
-| `src/mcp-server/tools` | Tool definitions (`*.tool.ts`). Seven PubMed tools. |
+| `src/mcp-server/tools` | Tool definitions (`*.tool.ts`). Nine PubMed tools. |
 | `src/mcp-server/resources` | Resource definitions. Database info resource. |
 | `src/mcp-server/prompts` | Prompt definitions. Research plan prompt. |
 | `src/services/ncbi` | NCBI E-utilities service layer — API client, queue, parser, formatter. |
