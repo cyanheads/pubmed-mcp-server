@@ -3,6 +3,7 @@
  * @module tests/services/ncbi/ncbi-service.test
  */
 
+import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import type { NcbiApiClient } from '@/services/ncbi/api-client.js';
 import { NcbiService } from '@/services/ncbi/ncbi-service.js';
@@ -157,6 +158,177 @@ describe('NcbiService', () => {
       const result = await service.eInfo({ db: 'pubmed' });
       expect(result).toEqual(mockInfo);
     });
+  });
+});
+
+describe('NcbiService.eCitMatch', () => {
+  it('formats bdata and parses matched response', async () => {
+    const { service, mockApiClient, mockResponseHandler } = createMockService();
+    (mockApiClient.makeRequest as ReturnType<typeof vi.fn>).mockResolvedValue('<xml/>');
+    (mockResponseHandler.parseAndHandleResponse as ReturnType<typeof vi.fn>).mockReturnValue(
+      'proc natl acad sci u s a|1991|88|3248|mann bj|ref1|8400044\r\n',
+    );
+
+    const results = await service.eCitMatch([
+      {
+        journal: 'proc natl acad sci u s a',
+        year: '1991',
+        volume: '88',
+        firstPage: '3248',
+        authorName: 'mann bj',
+        key: 'ref1',
+      },
+    ]);
+
+    expect(results).toEqual([{ key: 'ref1', matched: true, pmid: '8400044' }]);
+  });
+
+  it('handles NOT_FOUND responses', async () => {
+    const { service, mockApiClient, mockResponseHandler } = createMockService();
+    (mockApiClient.makeRequest as ReturnType<typeof vi.fn>).mockResolvedValue('<xml/>');
+    (mockResponseHandler.parseAndHandleResponse as ReturnType<typeof vi.fn>).mockReturnValue(
+      'unknown|||||ref1|NOT_FOUND\r\n',
+    );
+
+    const results = await service.eCitMatch([{ key: 'ref1', journal: 'unknown' }]);
+    expect(results).toEqual([{ key: 'ref1', matched: false, pmid: null }]);
+  });
+
+  it('handles AMBIGUOUS responses', async () => {
+    const { service, mockApiClient, mockResponseHandler } = createMockService();
+    (mockApiClient.makeRequest as ReturnType<typeof vi.fn>).mockResolvedValue('<xml/>');
+    (mockResponseHandler.parseAndHandleResponse as ReturnType<typeof vi.fn>).mockReturnValue(
+      '|2020||||ref1|AMBIGUOUS\r\n',
+    );
+
+    const results = await service.eCitMatch([{ key: 'ref1', year: '2020' }]);
+    expect(results).toEqual([{ key: 'ref1', matched: false, pmid: null }]);
+  });
+
+  it('parses multiple citations in one response', async () => {
+    const { service, mockApiClient, mockResponseHandler } = createMockService();
+    (mockApiClient.makeRequest as ReturnType<typeof vi.fn>).mockResolvedValue('<xml/>');
+    (mockResponseHandler.parseAndHandleResponse as ReturnType<typeof vi.fn>).mockReturnValue(
+      'nature|2020|||smith|ref1|12345\r\nscience|2021|||jones|ref2|NOT_FOUND\r\n',
+    );
+
+    const results = await service.eCitMatch([
+      { journal: 'nature', year: '2020', authorName: 'smith', key: 'ref1' },
+      { journal: 'science', year: '2021', authorName: 'jones', key: 'ref2' },
+    ]);
+
+    expect(results).toHaveLength(2);
+    expect(results[0]).toEqual({ key: 'ref1', matched: true, pmid: '12345' });
+    expect(results[1]).toEqual({ key: 'ref2', matched: false, pmid: null });
+  });
+
+  it('fills empty fields with empty strings in bdata', async () => {
+    const { service, mockApiClient, mockResponseHandler } = createMockService();
+    (mockApiClient.makeRequest as ReturnType<typeof vi.fn>).mockResolvedValue('<xml/>');
+    (mockResponseHandler.parseAndHandleResponse as ReturnType<typeof vi.fn>).mockReturnValue(
+      '||||smith|ref1|12345\r\n',
+    );
+
+    await service.eCitMatch([{ authorName: 'smith', key: 'ref1' }]);
+
+    const bdata = (mockApiClient.makeRequest as ReturnType<typeof vi.fn>).mock.calls[0]?.[1]?.bdata;
+    expect(bdata).toBe('||||smith|ref1|');
+  });
+});
+
+describe('NcbiService.idConvert', () => {
+  function createIdConvertService() {
+    const mockApiClient = {
+      makeExternalRequest: vi.fn(),
+    } as unknown as NcbiApiClient;
+
+    const mockQueue = {
+      enqueue: vi.fn(async (task: () => Promise<unknown>) => task()),
+    } as unknown as NcbiRequestQueue;
+
+    const service = new NcbiService(
+      mockApiClient,
+      mockQueue,
+      {} as unknown as NcbiResponseHandler,
+      0,
+    );
+    return { service, mockApiClient };
+  }
+
+  it('parses valid JSON response and returns records', async () => {
+    const { service, mockApiClient } = createIdConvertService();
+    (mockApiClient.makeExternalRequest as ReturnType<typeof vi.fn>).mockResolvedValue(
+      JSON.stringify({
+        status: 'ok',
+        'response-date': '2026-03-31',
+        request: {},
+        records: [
+          {
+            'requested-id': '23193287',
+            pmid: '23193287',
+            pmcid: 'PMC3531190',
+            doi: '10.1093/nar/gks1195',
+          },
+        ],
+      }),
+    );
+
+    const records = await service.idConvert(['23193287'], 'pmid');
+    expect(records).toEqual([
+      {
+        'requested-id': '23193287',
+        pmid: '23193287',
+        pmcid: 'PMC3531190',
+        doi: '10.1093/nar/gks1195',
+      },
+    ]);
+  });
+
+  it('joins multiple IDs with commas', async () => {
+    const { service, mockApiClient } = createIdConvertService();
+    (mockApiClient.makeExternalRequest as ReturnType<typeof vi.fn>).mockResolvedValue(
+      JSON.stringify({ records: [] }),
+    );
+
+    await service.idConvert(['111', '222', '333'], 'pmid');
+
+    const params = (mockApiClient.makeExternalRequest as ReturnType<typeof vi.fn>).mock
+      .calls[0]?.[1];
+    expect(params?.ids).toBe('111,222,333');
+    expect(params?.idtype).toBe('pmid');
+  });
+
+  it('omits idtype param when not provided', async () => {
+    const { service, mockApiClient } = createIdConvertService();
+    (mockApiClient.makeExternalRequest as ReturnType<typeof vi.fn>).mockResolvedValue(
+      JSON.stringify({ records: [] }),
+    );
+
+    await service.idConvert(['PMC123']);
+
+    const params = (mockApiClient.makeExternalRequest as ReturnType<typeof vi.fn>).mock
+      .calls[0]?.[1];
+    expect(params).not.toHaveProperty('idtype');
+  });
+
+  it('throws SerializationError on invalid JSON', async () => {
+    const { service, mockApiClient } = createIdConvertService();
+    (mockApiClient.makeExternalRequest as ReturnType<typeof vi.fn>).mockResolvedValue('not json');
+
+    await expect(service.idConvert(['123'])).rejects.toMatchObject({
+      code: JsonRpcErrorCode.SerializationError,
+      message: expect.stringContaining('Failed to parse'),
+    });
+  });
+
+  it('returns empty array when response has no records', async () => {
+    const { service, mockApiClient } = createIdConvertService();
+    (mockApiClient.makeExternalRequest as ReturnType<typeof vi.fn>).mockResolvedValue(
+      JSON.stringify({ status: 'ok' }),
+    );
+
+    const records = await service.idConvert(['123']);
+    expect(records).toEqual([]);
   });
 });
 
