@@ -35,7 +35,8 @@ export class NcbiApiClient {
   ): Promise<string> {
     const finalParams = this.buildParams(params);
     const usePost = this.shouldPost(finalParams, options);
-    const url = `${NCBI_EUTILS_BASE_URL}/${endpoint}.fcgi`;
+    const suffix = endpoint.includes('.') ? '' : '.fcgi';
+    const url = `${NCBI_EUTILS_BASE_URL}/${endpoint}${suffix}`;
 
     try {
       logger.debug(`NCBI HTTP request: ${usePost ? 'POST' : 'GET'} ${url}`, {
@@ -47,11 +48,14 @@ export class NcbiApiClient {
         : await this.getRequest(url, finalParams);
 
       if (!response.ok) {
-        throw new McpError(
-          JsonRpcErrorCode.ServiceUnavailable,
-          `NCBI API returned HTTP ${response.status}.`,
-          { endpoint, status: response.status },
-        );
+        const code =
+          response.status >= 400 && response.status < 500
+            ? JsonRpcErrorCode.InvalidRequest
+            : JsonRpcErrorCode.ServiceUnavailable;
+        throw new McpError(code, `NCBI API returned HTTP ${response.status}.`, {
+          endpoint,
+          status: response.status,
+        });
       }
 
       return await response.text();
@@ -61,6 +65,54 @@ export class NcbiApiClient {
       const msg = error instanceof Error ? error.message : String(error);
       throw new McpError(JsonRpcErrorCode.ServiceUnavailable, `NCBI request failed: ${msg}`, {
         endpoint,
+      });
+    }
+  }
+
+  /**
+   * Make a GET request to a non-eutils NCBI endpoint (e.g., PMC ID Converter).
+   * Uses plain fetch (not fetchWithTimeout) so we can capture response bodies on
+   * error status codes — fetchWithTimeout throws before the body can be read.
+   * Injects tool and email params but not api_key (eutils-specific).
+   */
+  async makeExternalRequest(url: string, params: NcbiRequestParams): Promise<string> {
+    const finalParams: Record<string, string> = {
+      tool: this.config.toolIdentifier,
+      ...(this.config.adminEmail && { email: this.config.adminEmail }),
+    };
+    for (const [key, value] of Object.entries(params)) {
+      if (value != null) finalParams[key] = String(value);
+    }
+
+    const qs = new URLSearchParams(finalParams).toString();
+    const fullUrl = qs ? `${url}?${qs}` : url;
+
+    try {
+      logger.debug(`NCBI external request: GET ${fullUrl}`, { url } as never);
+      const response = await fetch(fullUrl, {
+        signal: AbortSignal.timeout(this.config.timeoutMs),
+      });
+
+      const body = await response.text();
+
+      if (!response.ok) {
+        const code =
+          response.status >= 400 && response.status < 500
+            ? JsonRpcErrorCode.InvalidRequest
+            : JsonRpcErrorCode.ServiceUnavailable;
+        throw new McpError(
+          code,
+          `NCBI API returned HTTP ${response.status}: ${body.substring(0, 300)}`,
+          { url, status: response.status, body: body.substring(0, 500) },
+        );
+      }
+
+      return body;
+    } catch (error: unknown) {
+      if (error instanceof McpError) throw error;
+      const msg = error instanceof Error ? error.message : String(error);
+      throw new McpError(JsonRpcErrorCode.ServiceUnavailable, `NCBI request failed: ${msg}`, {
+        url,
       });
     }
   }

@@ -12,16 +12,21 @@ import { getServerConfig } from '@/config/server-config.js';
 import { NcbiApiClient } from './api-client.js';
 import { NcbiRequestQueue } from './request-queue.js';
 import { NcbiResponseHandler } from './response-handler.js';
-import type {
-  ESearchResponseContainer,
-  ESearchResult,
-  ESpellResponseContainer,
-  ESpellResult,
-  ESummaryResponseContainer,
-  ESummaryResult,
-  NcbiRequestOptions,
-  NcbiRequestParams,
-  XmlPubmedArticleSet,
+import {
+  type ECitMatchCitation,
+  type ECitMatchResult,
+  type ESearchResponseContainer,
+  type ESearchResult,
+  type ESpellResponseContainer,
+  type ESpellResult,
+  type ESummaryResponseContainer,
+  type ESummaryResult,
+  type IdConvertRecord,
+  type IdConvertResponse,
+  NCBI_PMC_IDCONV_URL,
+  type NcbiRequestOptions,
+  type NcbiRequestParams,
+  type XmlPubmedArticleSet,
 } from './types.js';
 
 /**
@@ -103,6 +108,117 @@ export class NcbiService {
   }
 
   /**
+   * Look up PMIDs from partial citation strings via NCBI ECitMatch.
+   * Each citation can include journal, year, volume, first page, and author name.
+   */
+  async eCitMatch(citations: ECitMatchCitation[]): Promise<ECitMatchResult[]> {
+    const bdata = citations
+      .map(
+        (c) =>
+          `${c.journal ?? ''}|${c.year ?? ''}|${c.volume ?? ''}|${c.firstPage ?? ''}|${c.authorName ?? ''}|${c.key}|`,
+      )
+      .join('\r');
+
+    const text = await this.performRequest<string>(
+      'ecitmatch.cgi',
+      { db: 'pubmed', retmode: 'xml', bdata },
+      { retmode: 'text' },
+    );
+
+    return text
+      .split(/[\r\n]+/)
+      .filter((line) => line.trim().length > 0)
+      .map((line) => {
+        const parts = line.split('|');
+        const key = parts[5]?.trim() ?? '';
+        const pmidField = parts[6]?.trim() ?? '';
+        const pmid =
+          pmidField && !pmidField.startsWith('NOT_FOUND') && !pmidField.startsWith('AMBIGUOUS')
+            ? pmidField
+            : null;
+        return { key, matched: pmid !== null, pmid };
+      });
+  }
+
+  /**
+   * Convert between article identifiers (DOI, PMID, PMCID) using the PMC ID Converter API.
+   * Accepts up to 200 IDs in a single request. Only works for articles in PMC.
+   */
+  async idConvert(ids: string[], idtype?: string): Promise<IdConvertRecord[]> {
+    const params: NcbiRequestParams = {
+      ids: ids.join(','),
+      format: 'json',
+      ...(idtype && { idtype }),
+    };
+
+    const text = await this.queue.enqueue(
+      () =>
+        this.withRetry(
+          () => this.apiClient.makeExternalRequest(NCBI_PMC_IDCONV_URL, params),
+          'idconv',
+        ),
+      'idconv',
+      params,
+    );
+
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(text);
+    } catch {
+      throw new McpError(
+        JsonRpcErrorCode.SerializationError,
+        'Failed to parse ID Converter JSON response.',
+        { responseSnippet: text.substring(0, 200) },
+      );
+    }
+
+    return (parsed as IdConvertResponse).records ?? [];
+  }
+
+  /**
+   * Retry wrapper for transient NCBI errors (ServiceUnavailable, Timeout).
+   * Non-transient errors (validation, serialization) fail immediately.
+   */
+  private async withRetry<T>(execute: () => Promise<T>, label: string): Promise<T> {
+    for (let attempt = 0; attempt <= this.maxRetries; attempt++) {
+      try {
+        return await execute();
+      } catch (error: unknown) {
+        if (error instanceof McpError) {
+          if (
+            error.code !== JsonRpcErrorCode.ServiceUnavailable &&
+            error.code !== JsonRpcErrorCode.Timeout
+          ) {
+            throw error;
+          }
+        }
+
+        if (attempt < this.maxRetries) {
+          const retryDelay = 1000 * 2 ** attempt; // 1s, 2s, 4s
+          logger.warning(
+            `NCBI request to ${label} failed. Retrying (${attempt + 1}/${this.maxRetries}) in ${retryDelay}ms.`,
+            { endpoint: label, attempt: attempt + 1, retryDelay } as never,
+          );
+          await new Promise<void>((r) => setTimeout(r, retryDelay));
+          continue;
+        }
+
+        const attempts = this.maxRetries + 1;
+        const msg = error instanceof Error ? error.message : String(error);
+        throw new McpError(
+          error instanceof McpError ? error.code : JsonRpcErrorCode.ServiceUnavailable,
+          `${msg} (failed after ${attempts} attempts)`,
+          { endpoint: label, attempts },
+        );
+      }
+    }
+
+    throw new McpError(JsonRpcErrorCode.InternalError, 'Request failed after all retries.', {
+      endpoint: label,
+    });
+  }
+
+  /**
    * Enqueues a request with retry logic that covers both HTTP-level failures
    * (network errors, timeouts) and XML-level errors (NCBI returning 200 OK
    * with an error structure in the response body, e.g. connection resets
@@ -114,49 +230,11 @@ export class NcbiService {
     options?: NcbiRequestOptions,
   ): Promise<T> {
     return this.queue.enqueue(
-      async () => {
-        for (let attempt = 0; attempt <= this.maxRetries; attempt++) {
-          try {
-            const text = await this.apiClient.makeRequest(endpoint, params, options);
-            return this.responseHandler.parseAndHandleResponse<T>(text, endpoint, options);
-          } catch (error: unknown) {
-            // Only retry transient errors (ServiceUnavailable, Timeout).
-            // Validation, serialization, and other errors fail immediately.
-            if (error instanceof McpError) {
-              if (
-                error.code !== JsonRpcErrorCode.ServiceUnavailable &&
-                error.code !== JsonRpcErrorCode.Timeout
-              ) {
-                throw error;
-              }
-            }
-
-            if (attempt < this.maxRetries) {
-              const retryDelay = 1000 * 2 ** attempt; // 1s, 2s, 4s
-              logger.warning(
-                `NCBI request to ${endpoint} failed. Retrying (${attempt + 1}/${this.maxRetries}) in ${retryDelay}ms.`,
-                { endpoint, attempt: attempt + 1, retryDelay } as never,
-              );
-              await new Promise<void>((r) => setTimeout(r, retryDelay));
-              continue;
-            }
-
-            // Final attempt exhausted — surface retry context so the caller
-            // knows this wasn't a single failed request.
-            const attempts = this.maxRetries + 1;
-            const msg = error instanceof Error ? error.message : String(error);
-            throw new McpError(
-              error instanceof McpError ? error.code : JsonRpcErrorCode.ServiceUnavailable,
-              `${msg} (failed after ${attempts} attempts)`,
-              { endpoint, attempts },
-            );
-          }
-        }
-
-        throw new McpError(JsonRpcErrorCode.InternalError, 'Request failed after all retries.', {
-          endpoint,
-        });
-      },
+      () =>
+        this.withRetry(async () => {
+          const text = await this.apiClient.makeRequest(endpoint, params, options);
+          return this.responseHandler.parseAndHandleResponse<T>(text, endpoint, options);
+        }, endpoint),
       endpoint,
       params,
     );

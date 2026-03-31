@@ -9,6 +9,9 @@
 /** Base URL for all NCBI E-utility endpoints. */
 export const NCBI_EUTILS_BASE_URL = 'https://eutils.ncbi.nlm.nih.gov/entrez/eutils';
 
+/** Base URL for the PMC ID Converter API (separate from E-utilities). */
+export const NCBI_PMC_IDCONV_URL = 'https://pmc.ncbi.nlm.nih.gov/tools/idconv/api/v1/articles/';
+
 /**
  * Common NCBI E-utility request parameters.
  * Specific endpoints extend this with their own fields via the index signature.
@@ -687,4 +690,58 @@ export interface ParsedPmcReference {
   citation: string;
   id?: string;
   label?: string;
+}
+
+// ─── ECitMatch Types ──────────────────────────────────────────────────────────
+
+/** Single citation for ECitMatch lookup. */
+export interface ECitMatchCitation {
+  /** Author name (e.g., "mann bj") */
+  authorName?: string | undefined;
+  /** First page number */
+  firstPage?: string | undefined;
+  /** Journal title or ISO abbreviation */
+  journal?: string | undefined;
+  /** Arbitrary key for tracking this citation in results */
+  key: string;
+  /** Volume number */
+  volume?: string | undefined;
+  /** Publication year */
+  year?: string | undefined;
+}
+
+/** Single result from ECitMatch lookup. */
+export interface ECitMatchResult {
+  /** The tracking key from the input citation */
+  key: string;
+  /** Whether a PMID was found */
+  matched: boolean;
+  /** Matched PubMed ID, or null if no match */
+  pmid: string | null;
+}
+
+// ─── PMC ID Converter Types ──────────────────────────────────────────────────
+
+/** Single record from the PMC ID Converter API response. */
+export interface IdConvertRecord {
+  /** Digital Object Identifier */
+  doi?: string;
+  /** Error message if conversion failed for this ID */
+  errmsg?: string;
+  /** PubMed Central ID (e.g., "PMC1234567") */
+  pmcid?: string;
+  /** PubMed ID (numeric string) */
+  pmid?: string;
+  /** The ID that was originally requested */
+  'requested-id': string;
+  /** Record-level status: present only on error records */
+  status?: string;
+}
+
+/** JSON response from the PMC ID Converter API. */
+export interface IdConvertResponse {
+  records: IdConvertRecord[];
+  request: Record<string, unknown>;
+  'response-date': string;
+  status: string;
 }
