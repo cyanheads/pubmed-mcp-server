@@ -26,8 +26,8 @@ export const searchArticlesTool = tool('pubmed_search_articles', {
       .describe('Sort order: relevance (default), pub_date (newest first), author, or journal'),
     dateRange: z
       .object({
-        minDate: z.string().describe('Start date (YYYY-MM-DD)'),
-        maxDate: z.string().describe('End date (YYYY-MM-DD)'),
+        minDate: z.string().describe('Start date (YYYY/MM/DD, YYYY/MM, or YYYY)'),
+        maxDate: z.string().describe('End date (YYYY/MM/DD, YYYY/MM, or YYYY)'),
         dateType: z
           .enum(['pdat', 'mdat', 'edat'])
           .default('pdat')
@@ -84,7 +84,7 @@ export const searchArticlesTool = tool('pubmed_search_articles', {
 
     let effectiveQuery = await sanitization.sanitizeString(input.query, { context: 'text' });
 
-    if (input.dateRange) {
+    if (input.dateRange?.minDate && input.dateRange?.maxDate) {
       const minDate = input.dateRange.minDate.replace(/-/g, '/');
       const maxDate = input.dateRange.maxDate.replace(/-/g, '/');
       effectiveQuery += ` AND (${minDate}[${input.dateRange.dateType}] : ${maxDate}[${input.dateRange.dateType}])`;
