@@ -4,6 +4,19 @@ All notable changes to this project will be documented in this file.
 
 ---
 
+## [2.3.1] - 2026-04-01
+
+### Fixed
+
+- **`pubmed_search_articles`**: Empty `dateRange` strings (e.g., `{ minDate: "", maxDate: "" }`) no longer produce a malformed NCBI query returning 0 results — the handler now skips the date clause when either date is empty ([#14](https://github.com/cyanheads/pubmed-mcp-server/issues/14))
+- **`pubmed_search_articles`**: Date field descriptions updated to reflect accepted NCBI formats (`YYYY/MM/DD`, `YYYY/MM`, or `YYYY`)
+
+### Added
+
+- **Test coverage**: 7 new tests for `dateRange` handling — empty strings, omitted dateRange, partial dates, valid dates, and dash-to-slash conversion
+
+---
+
 ## [2.3.0] - 2026-03-31
 
 ### Added
