@@ -220,21 +220,10 @@ export const fetchFulltextTool = tool('pubmed_fetch_fulltext', {
       pmcIds = (input.pmcids ?? []).map(normalizePmcId);
     }
 
-    let xmlData: { 'pmc-articleset'?: XmlPmcArticleSet };
-    try {
-      xmlData = await getNcbiService().eFetch<{ 'pmc-articleset'?: XmlPmcArticleSet }>(
-        { db: 'pmc', id: pmcIds.join(','), retmode: 'xml' },
-        { retmode: 'xml', usePost: pmcIds.length > 5 },
-      );
-    } catch {
-      const ids = pmcIds.map((id) => `PMC${id}`);
-      return {
-        articles: [],
-        totalReturned: 0,
-        ...(unavailablePmids && { unavailablePmids }),
-        ...(!input.pmids && { unavailablePmcIds: ids }),
-      };
-    }
+    const xmlData = await getNcbiService().eFetch<{ 'pmc-articleset'?: XmlPmcArticleSet }>(
+      { db: 'pmc', id: pmcIds.join(','), retmode: 'xml' },
+      { retmode: 'xml', usePost: pmcIds.length > 5 },
+    );
 
     if (!xmlData || !('pmc-articleset' in xmlData)) {
       throw new Error('Invalid PMC EFetch response: missing pmc-articleset');

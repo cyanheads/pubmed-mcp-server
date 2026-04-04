@@ -43,7 +43,10 @@ export const formatCitationsTool = tool('pubmed_format_citations', {
       pmids: input.pmids,
       styles: input.styles,
     });
-    const raw = await getNcbiService().eFetch({ db: 'pubmed', id: input.pmids.join(',') });
+    const raw = await getNcbiService().eFetch(
+      { db: 'pubmed', id: input.pmids.join(','), retmode: 'xml' },
+      { retmode: 'xml', usePost: input.pmids.length >= 25 },
+    );
     const xmlArticles: XmlPubmedArticle[] = ensureArray(raw?.PubmedArticleSet?.PubmedArticle);
 
     if (xmlArticles.length === 0) {

@@ -167,7 +167,7 @@ export const searchArticlesTool = tool('pubmed_search_articles', {
       }
     }
 
-    const searchUrl = `https://pubmed.ncbi.nlm.nih.gov/?term=${encodeURIComponent(input.query)}`;
+    const searchUrl = `https://pubmed.ncbi.nlm.nih.gov/?term=${encodeURIComponent(effectiveQuery)}`;
     ctx.log.info('pubmed_search completed', {
       totalFound: esResult.count,
       pmidCount: pmids.length,
