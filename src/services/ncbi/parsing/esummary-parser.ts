@@ -33,8 +33,61 @@ export function formatESummaryAuthors(authors?: XmlESummaryAuthor[]): string {
   );
 }
 
+/** 3-letter month abbreviations used by NCBI ESummary PubDate/EPubDate fields. */
+const MONTH_ABBREV: Record<string, string> = {
+  Jan: '01',
+  Feb: '02',
+  Mar: '03',
+  Apr: '04',
+  May: '05',
+  Jun: '06',
+  Jul: '07',
+  Aug: '08',
+  Sep: '09',
+  Oct: '10',
+  Nov: '11',
+  Dec: '12',
+};
+
+/**
+ * Matches NCBI ESummary date formats:
+ * - "2024"               → year only
+ * - "2024 Jan"           → year + month
+ * - "2024 Jan 15"        → year + month + day
+ * - "2018 Jul-Aug"       → year + month range (dash)
+ * - "2018 Jan/Feb"       → year + month range (slash)
+ *
+ * Groups: 1=year, 2=firstMonth?, 3=day? (second month in range is non-capturing)
+ */
+const NCBI_DATE_RE = /^(\d{4})(?:\s+([A-Za-z]{3})(?:[/-][A-Za-z]{3})?(?:\s+(\d{1,2}))?)?$/;
+
+/**
+ * Parses NCBI ESummary date strings into YYYY-MM-DD (or YYYY-MM-01 / YYYY-01-01
+ * for partial dates). Returns undefined for unrecognized formats.
+ *
+ * NCBI's ESummary API returns a small set of predictable date formats. chrono-node
+ * (used by the framework's dateParser) mishandles most of them — its `forwardDate`
+ * option causes "2023 Dec" to resolve to a future December, ignoring the year.
+ */
+export function parseNcbiDate(dateStr: string): string | undefined {
+  const m = NCBI_DATE_RE.exec(dateStr.trim());
+  if (!m) return;
+
+  const [, year, monthAbbrev, day] = m;
+  if (!year) return;
+
+  const month = monthAbbrev ? MONTH_ABBREV[monthAbbrev] : undefined;
+  if (monthAbbrev && !month) return; // unrecognized month abbreviation
+
+  if (month && day) return `${year}-${month}-${day.padStart(2, '0')}`;
+  if (month) return `${year}-${month}-01`;
+  return `${year}-01-01`;
+}
+
 /**
  * Standardizes date strings from ESummary to 'YYYY-MM-DD' format.
+ * Uses a dedicated NCBI date parser for known formats, falling back to
+ * chrono-node via the framework's dateParser for anything unexpected.
  */
 export async function standardizeESummaryDate(
   dateStr?: string,
@@ -42,7 +95,12 @@ export async function standardizeESummaryDate(
 ): Promise<string | undefined> {
   if (dateStr == null) return;
 
-  const dateInputString = String(dateStr);
+  const dateInputString = String(dateStr).trim();
+  if (!dateInputString) return;
+
+  const ncbiResult = parseNcbiDate(dateInputString);
+  if (ncbiResult) return ncbiResult;
+
   const currentContext =
     parentContext ||
     requestContextService.createRequestContext({
@@ -55,12 +113,12 @@ export async function standardizeESummaryDate(
       return parsedDate.toISOString().split('T')[0];
     }
     logger.debug(
-      `standardizeESummaryDate: dateParser could not parse "${dateInputString}", returning undefined.`,
+      `standardizeESummaryDate: could not parse "${dateInputString}", returning undefined.`,
       currentContext,
     );
   } catch (e) {
     logger.warning(
-      `standardizeESummaryDate: Error during dateParser.parseDate for "${dateInputString}", returning undefined.`,
+      `standardizeESummaryDate: dateParser.parseDate error for "${dateInputString}", returning undefined.`,
       {
         ...currentContext,
         error: e instanceof Error ? e.message : String(e),
