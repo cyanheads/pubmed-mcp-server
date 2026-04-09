@@ -131,12 +131,29 @@ export class NcbiService {
       .map((line) => {
         const parts = line.split('|');
         const key = parts[5]?.trim() ?? '';
-        const pmidField = parts[6]?.trim() ?? '';
-        const pmid =
-          pmidField && !pmidField.startsWith('NOT_FOUND') && !pmidField.startsWith('AMBIGUOUS')
-            ? pmidField
-            : null;
-        return { key, matched: pmid !== null, pmid };
+        const rawOutcome = parts[6]?.trim() ?? '';
+
+        if (/^\d+$/.test(rawOutcome)) {
+          return { key, matched: true, pmid: rawOutcome, status: 'matched' as const };
+        }
+
+        if (rawOutcome.startsWith('AMBIGUOUS')) {
+          return {
+            key,
+            matched: false,
+            pmid: null,
+            status: 'ambiguous' as const,
+            detail: rawOutcome,
+          };
+        }
+
+        return {
+          key,
+          matched: false,
+          pmid: null,
+          status: 'not_found' as const,
+          ...(rawOutcome && { detail: rawOutcome }),
+        };
       });
   }
 

@@ -180,7 +180,7 @@ describe('NcbiService.eCitMatch', () => {
       },
     ]);
 
-    expect(results).toEqual([{ key: 'ref1', matched: true, pmid: '8400044' }]);
+    expect(results).toEqual([{ key: 'ref1', matched: true, pmid: '8400044', status: 'matched' }]);
   });
 
   it('handles NOT_FOUND responses', async () => {
@@ -191,7 +191,9 @@ describe('NcbiService.eCitMatch', () => {
     );
 
     const results = await service.eCitMatch([{ key: 'ref1', journal: 'unknown' }]);
-    expect(results).toEqual([{ key: 'ref1', matched: false, pmid: null }]);
+    expect(results).toEqual([
+      { key: 'ref1', matched: false, pmid: null, status: 'not_found', detail: 'NOT_FOUND' },
+    ]);
   });
 
   it('handles AMBIGUOUS responses', async () => {
@@ -202,7 +204,9 @@ describe('NcbiService.eCitMatch', () => {
     );
 
     const results = await service.eCitMatch([{ key: 'ref1', year: '2020' }]);
-    expect(results).toEqual([{ key: 'ref1', matched: false, pmid: null }]);
+    expect(results).toEqual([
+      { key: 'ref1', matched: false, pmid: null, status: 'ambiguous', detail: 'AMBIGUOUS' },
+    ]);
   });
 
   it('parses multiple citations in one response', async () => {
@@ -218,8 +222,14 @@ describe('NcbiService.eCitMatch', () => {
     ]);
 
     expect(results).toHaveLength(2);
-    expect(results[0]).toEqual({ key: 'ref1', matched: true, pmid: '12345' });
-    expect(results[1]).toEqual({ key: 'ref2', matched: false, pmid: null });
+    expect(results[0]).toEqual({ key: 'ref1', matched: true, pmid: '12345', status: 'matched' });
+    expect(results[1]).toEqual({
+      key: 'ref2',
+      matched: false,
+      pmid: null,
+      status: 'not_found',
+      detail: 'NOT_FOUND',
+    });
   });
 
   it('fills empty fields with empty strings in bdata', async () => {

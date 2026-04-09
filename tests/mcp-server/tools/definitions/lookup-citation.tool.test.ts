@@ -43,7 +43,9 @@ describe('lookupCitationTool', () => {
   });
 
   it('maps matched results with pmid', async () => {
-    mockECitMatch.mockResolvedValue([{ key: '1', matched: true, pmid: '8400044' }]);
+    mockECitMatch.mockResolvedValue([
+      { key: '1', matched: true, pmid: '8400044', status: 'matched' },
+    ]);
 
     const ctx = createMockContext();
     const input = lookupCitationTool.input.parse({
@@ -51,13 +53,17 @@ describe('lookupCitationTool', () => {
     });
     const result = await lookupCitationTool.handler(input, ctx);
 
-    expect(result.results).toEqual([{ key: '1', matched: true, pmid: '8400044' }]);
+    expect(result.results).toEqual([
+      { key: '1', matched: true, pmid: '8400044', status: 'matched' },
+    ]);
     expect(result.totalMatched).toBe(1);
     expect(result.totalSubmitted).toBe(1);
   });
 
-  it('omits pmid field for unmatched results', async () => {
-    mockECitMatch.mockResolvedValue([{ key: '1', matched: false, pmid: null }]);
+  it('preserves not_found status for unmatched results', async () => {
+    mockECitMatch.mockResolvedValue([
+      { key: '1', matched: false, pmid: null, status: 'not_found', detail: 'NOT_FOUND' },
+    ]);
 
     const ctx = createMockContext();
     const input = lookupCitationTool.input.parse({
@@ -65,14 +71,44 @@ describe('lookupCitationTool', () => {
     });
     const result = await lookupCitationTool.handler(input, ctx);
 
-    expect(result.results[0]).toEqual({ key: '1', matched: false });
+    expect(result.results[0]).toEqual({
+      key: '1',
+      matched: false,
+      status: 'not_found',
+      detail: 'NOT_FOUND',
+    });
     expect(result.results[0]).not.toHaveProperty('pmid');
+  });
+
+  it('preserves ambiguous status and detail for recovery guidance', async () => {
+    mockECitMatch.mockResolvedValue([
+      {
+        key: '1',
+        matched: false,
+        pmid: null,
+        status: 'ambiguous',
+        detail: 'AMBIGUOUS citation',
+      },
+    ]);
+
+    const ctx = createMockContext();
+    const input = lookupCitationTool.input.parse({
+      citations: [{ journal: 'Nature', year: '2020' }],
+    });
+    const result = await lookupCitationTool.handler(input, ctx);
+
+    expect(result.results[0]).toEqual({
+      key: '1',
+      matched: false,
+      status: 'ambiguous',
+      detail: 'AMBIGUOUS citation',
+    });
   });
 
   it('auto-assigns sequential keys when not provided', async () => {
     mockECitMatch.mockResolvedValue([
-      { key: '1', matched: true, pmid: '111' },
-      { key: '2', matched: true, pmid: '222' },
+      { key: '1', matched: true, pmid: '111', status: 'matched' },
+      { key: '2', matched: true, pmid: '222', status: 'matched' },
     ]);
 
     const ctx = createMockContext();
@@ -90,7 +126,9 @@ describe('lookupCitationTool', () => {
   });
 
   it('preserves user-provided keys', async () => {
-    mockECitMatch.mockResolvedValue([{ key: 'ref-A', matched: true, pmid: '111' }]);
+    mockECitMatch.mockResolvedValue([
+      { key: 'ref-A', matched: true, pmid: '111', status: 'matched' },
+    ]);
 
     const ctx = createMockContext();
     const input = lookupCitationTool.input.parse({
@@ -113,9 +151,9 @@ describe('lookupCitationTool', () => {
 
   it('counts matches correctly in mixed results', async () => {
     mockECitMatch.mockResolvedValue([
-      { key: '1', matched: true, pmid: '111' },
-      { key: '2', matched: false, pmid: null },
-      { key: '3', matched: true, pmid: '333' },
+      { key: '1', matched: true, pmid: '111', status: 'matched' },
+      { key: '2', matched: false, pmid: null, status: 'not_found', detail: 'NOT_FOUND' },
+      { key: '3', matched: true, pmid: '333', status: 'matched' },
     ]);
 
     const ctx = createMockContext();
@@ -133,7 +171,7 @@ describe('lookupCitationTool', () => {
   });
 
   it('passes provided fields through to service', async () => {
-    mockECitMatch.mockResolvedValue([{ key: '1', matched: true, pmid: '111' }]);
+    mockECitMatch.mockResolvedValue([{ key: '1', matched: true, pmid: '111', status: 'matched' }]);
 
     const ctx = createMockContext();
     const input = lookupCitationTool.input.parse({
@@ -152,25 +190,49 @@ describe('lookupCitationTool', () => {
 
   it('formats matched citations with PMID', () => {
     const blocks = lookupCitationTool.format!({
-      results: [{ key: 'ref-1', matched: true, pmid: '8400044' }],
+      results: [{ key: 'ref-1', matched: true, pmid: '8400044', status: 'matched' }],
       totalMatched: 1,
       totalSubmitted: 1,
     });
 
     expect(blocks[0]?.text).toContain('**Matched:** 1/1');
-    expect(blocks[0]?.text).toContain('ref-1');
-    expect(blocks[0]?.text).toContain('8400044');
+    expect(blocks[0]?.text).toContain('### ref-1');
+    expect(blocks[0]?.text).toContain('**PMID:** 8400044');
+    expect(blocks[0]?.text).toContain(
+      'PMID is ready for downstream PubMed fetch or citation tools.',
+    );
   });
 
-  it('formats unmatched citations with dash and No match', () => {
+  it('formats unmatched citations with recovery guidance', () => {
     const blocks = lookupCitationTool.format!({
-      results: [{ key: 'ref-1', matched: false }],
+      results: [{ key: 'ref-1', matched: false, status: 'not_found', detail: 'NOT_FOUND' }],
       totalMatched: 0,
       totalSubmitted: 1,
     });
 
     expect(blocks[0]?.text).toContain('**Matched:** 0/1');
-    expect(blocks[0]?.text).toContain('No match');
-    expect(blocks[0]?.text).toContain('- |');
+    expect(blocks[0]?.text).toContain('**Status:** No match');
+    expect(blocks[0]?.text).toContain('Verify the citation details or try pubmed_search_articles.');
+  });
+
+  it('formats ambiguous citations with disambiguation guidance', () => {
+    const blocks = lookupCitationTool.format!({
+      results: [
+        {
+          key: 'ref-1',
+          matched: false,
+          status: 'ambiguous',
+          detail: 'AMBIGUOUS multiple matches',
+        },
+      ],
+      totalMatched: 0,
+      totalSubmitted: 1,
+    });
+
+    expect(blocks[0]?.text).toContain('**Status:** Ambiguous');
+    expect(blocks[0]?.text).toContain('AMBIGUOUS multiple matches');
+    expect(blocks[0]?.text).toContain(
+      'Add more citation fields such as journal, year, volume, firstPage, or authorName, then retry.',
+    );
   });
 });

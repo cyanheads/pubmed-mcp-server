@@ -47,6 +47,13 @@ export const lookupCitationTool = tool('pubmed_lookup_citation', {
           key: z.string().describe('Citation tracking key'),
           pmid: z.string().optional().describe('Matched PubMed ID'),
           matched: z.boolean().describe('Whether a PMID was found'),
+          status: z
+            .enum(['matched', 'not_found', 'ambiguous'])
+            .describe('Lookup outcome classification for this citation'),
+          detail: z
+            .string()
+            .optional()
+            .describe('Additional detail returned by ECitMatch for non-exact matches'),
         }),
       )
       .describe('Match results, one per input citation'),
@@ -79,7 +86,9 @@ export const lookupCitationTool = tool('pubmed_lookup_citation', {
     const mapped = results.map((r) => ({
       key: r.key,
       matched: r.matched,
+      status: r.status,
       ...(r.pmid && { pmid: r.pmid }),
+      ...(r.detail && { detail: r.detail }),
     }));
 
     const totalMatched = mapped.filter((r) => r.matched).length;
@@ -95,14 +104,28 @@ export const lookupCitationTool = tool('pubmed_lookup_citation', {
     const lines = [
       `## Citation Lookup Results`,
       `**Matched:** ${result.totalMatched}/${result.totalSubmitted}`,
-      '',
-      '| Key | PMID | Status |',
-      '|:---|:---|:---|',
     ];
     for (const r of result.results) {
-      const pmid = r.pmid ?? '-';
-      const status = r.matched ? 'Matched' : 'No match';
-      lines.push(`| ${r.key} | ${pmid} | ${status} |`);
+      lines.push(`\n### ${r.key}`);
+      if (r.pmid) lines.push(`**PMID:** ${r.pmid}`);
+      if (r.status === 'matched') {
+        lines.push(`**Status:** Matched`);
+        lines.push(`**Next Step:** PMID is ready for downstream PubMed fetch or citation tools.`);
+        continue;
+      }
+
+      if (r.status === 'ambiguous') {
+        lines.push(`**Status:** Ambiguous`);
+        if (r.detail) lines.push(`**Detail:** ${r.detail}`);
+        lines.push(
+          `**Next Step:** Add more citation fields such as journal, year, volume, firstPage, or authorName, then retry.`,
+        );
+        continue;
+      }
+
+      lines.push(`**Status:** No match`);
+      if (r.detail) lines.push(`**Detail:** ${r.detail}`);
+      lines.push(`**Next Step:** Verify the citation details or try pubmed_search_articles.`);
     }
     return [{ type: 'text', text: lines.join('\n') }];
   },

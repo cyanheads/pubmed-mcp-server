@@ -4,6 +4,38 @@ All notable changes to this project will be documented in this file.
 
 ---
 
+## [2.3.3] - 2026-04-09
+
+### Added
+
+- **`pubmed_search_articles`**: Returned `effectiveQuery` and normalized `appliedFilters` metadata so clients can inspect the exact filters sent to PubMed
+- **`pubmed_lookup_citation`**: Returned per-citation `status` (`matched`, `not_found`, `ambiguous`) and ECitMatch detail for non-exact outcomes
+- **`pubmed_format_citations`**: Returned `totalSubmitted`, `totalFormatted`, and `unavailablePmids` for partial-result handling
+- **Skill**: Added the `code-simplifier` agent skill for cleanup/refinement passes after edits
+- **Test coverage**: Added `tests/index.test.ts` for `createApp()` registration/setup and expanded tool/service tests for search, citation lookup, citation formatting, related articles, and fulltext flows
+
+### Changed
+
+- **`pubmed_search_articles`**: Format output now shows the effective query and a normalized Applied Filters section
+- **`pubmed_lookup_citation`**: Format output now gives next-step guidance for ambiguous and unmatched citations instead of a flat status table
+
+### Updated
+
+- `@cyanheads/mcp-ts-core` to ^0.3.4
+- `fast-xml-parser` to ^5.5.11
+- `vitest` to ^4.1.4
+- Added `@vitest/coverage-istanbul` for coverage support
+
+### Security
+
+- Added/raised overrides for `@hono/node-server` (>=1.19.13), `hono` (>=4.12.12), and `vite` (>=8.0.8)
+
+### Docs
+
+- Marked `docs/design.md` as historical and regenerated `docs/tree.md` for the current project layout
+
+---
+
 ## [2.3.2] - 2026-04-04
 
 ### Fixed

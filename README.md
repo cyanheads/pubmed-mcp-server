@@ -7,7 +7,7 @@
 
 <div align="center">
 
-[![npm](https://img.shields.io/npm/v/@cyanheads/pubmed-mcp-server?style=flat-square&logo=npm&logoColor=white)](https://www.npmjs.com/package/@cyanheads/pubmed-mcp-server) [![Version](https://img.shields.io/badge/Version-2.3.2-blue.svg?style=flat-square)](./CHANGELOG.md) [![Framework](https://img.shields.io/badge/Built%20on-@cyanheads/mcp--ts--core-259?style=flat-square)](https://www.npmjs.com/package/@cyanheads/mcp-ts-core) [![MCP SDK](https://img.shields.io/badge/MCP%20SDK-^1.27.1-green.svg?style=flat-square)](https://modelcontextprotocol.io/) 
+[![npm](https://img.shields.io/npm/v/@cyanheads/pubmed-mcp-server?style=flat-square&logo=npm&logoColor=white)](https://www.npmjs.com/package/@cyanheads/pubmed-mcp-server) [![Version](https://img.shields.io/badge/Version-2.3.3-blue.svg?style=flat-square)](./CHANGELOG.md) [![Framework](https://img.shields.io/badge/Built%20on-@cyanheads/mcp--ts--core-259?style=flat-square)](https://www.npmjs.com/package/@cyanheads/mcp-ts-core) [![MCP SDK](https://img.shields.io/badge/MCP%20SDK-^1.27.1-green.svg?style=flat-square)](https://modelcontextprotocol.io/) 
 
 [![License](https://img.shields.io/badge/License-Apache%202.0-orange.svg?style=flat-square)](./LICENSE) [![TypeScript](https://img.shields.io/badge/TypeScript-^6.0.2-3178C6.svg?style=flat-square)](https://www.typescriptlang.org/) [![Bun](https://img.shields.io/badge/Bun-v1.3.2-blueviolet.svg?style=flat-square)](https://bun.sh/)
 
@@ -49,6 +49,7 @@ Search PubMed with full NCBI query syntax and filters.
 - Sort by relevance, publication date, author, or journal
 - Pagination via offset for paging through large result sets
 - Optional brief summaries for top N results via ESummary
+- Returns the original query plus the fully applied PubMed query and normalized filter metadata
 
 ---
 
@@ -86,6 +87,7 @@ Generate formatted citations for articles.
 - Request multiple styles per article in a single call
 - Hand-rolled formatters — zero external dependencies, fully Workers-compatible
 - Up to 50 articles per request
+- Reports formatted counts and unavailable PMIDs for partial-result handling
 
 ---
 
@@ -126,6 +128,7 @@ Resolve partial bibliographic references to PubMed IDs via NCBI ECitMatch.
 - More fields = better match accuracy; at least one field required
 - Batch up to 25 citations per request
 - Deterministic matching — more reliable than free-text search for known references
+- Returns explicit `matched`, `not_found`, and `ambiguous` statuses with recovery detail
 
 ---
 

@@ -1,9 +1,97 @@
 # pubmed-mcp-server - Directory Structure
 
-Generated on: 2026-03-31 15:46:05
+Generated on: 2026-04-09 10:36:39
 
 ```text
 pubmed-mcp-server/
+├── .agents/
+│   └── skills/
+│       ├── add-app-tool/
+│       │   └── SKILL.md
+│       ├── add-prompt/
+│       │   └── SKILL.md
+│       ├── add-resource/
+│       │   └── SKILL.md
+│       ├── add-service/
+│       │   └── SKILL.md
+│       ├── add-test/
+│       │   └── SKILL.md
+│       ├── add-tool/
+│       │   └── SKILL.md
+│       ├── api-auth/
+│       │   └── SKILL.md
+│       ├── api-config/
+│       │   └── SKILL.md
+│       ├── api-context/
+│       │   └── SKILL.md
+│       ├── api-errors/
+│       │   └── SKILL.md
+│       ├── api-services/
+│       │   ├── references/
+│       │   │   ├── graph.md
+│       │   │   ├── llm.md
+│       │   │   └── speech.md
+│       │   └── SKILL.md
+│       ├── api-testing/
+│       │   └── SKILL.md
+│       ├── api-utils/
+│       │   ├── references/
+│       │   │   ├── formatting.md
+│       │   │   ├── parsing.md
+│       │   │   └── security.md
+│       │   └── SKILL.md
+│       ├── api-workers/
+│       │   └── SKILL.md
+│       ├── changelog/
+│       │   └── SKILL.md
+│       ├── cloudflare/
+│       │   ├── building-mcp-server-on-cloudflare/
+│       │   │   ├── references/
+│       │   │   │   ├── examples.md
+│       │   │   │   ├── oauth-setup.md
+│       │   │   │   └── troubleshooting.md
+│       │   │   └── SKILL.md
+│       │   ├── workers-best-practices/
+│       │   │   ├── references/
+│       │   │   │   ├── review.md
+│       │   │   │   └── rules.md
+│       │   │   └── SKILL.md
+│       │   ├── wrangler/
+│       │   │   ├── references/
+│       │   │   │   └── service-commands.md
+│       │   │   └── SKILL.md
+│       │   └── SKILL.md
+│       ├── code-simplifier/
+│       │   └── SKILL.md
+│       ├── design-mcp-server/
+│       │   └── SKILL.md
+│       ├── devcheck/
+│       │   └── SKILL.md
+│       ├── field-test/
+│       │   └── SKILL.md
+│       ├── github-cli/
+│       │   └── SKILL.md
+│       ├── maintenance/
+│       │   └── SKILL.md
+│       ├── migrate-mcp-ts-template/
+│       │   └── SKILL.md
+│       ├── modelcontextprotocol/
+│       │   └── SKILL.md
+│       ├── polish-docs-meta/
+│       │   ├── references/
+│       │   │   ├── agent-protocol.md
+│       │   │   ├── package-meta.md
+│       │   │   ├── readme.md
+│       │   │   └── server-json.md
+│       │   └── SKILL.md
+│       ├── report-issue-framework/
+│       │   └── SKILL.md
+│       ├── report-issue-local/
+│       │   └── SKILL.md
+│       ├── setup/
+│       │   └── SKILL.md
+│       └── writing-humanizer/
+│           └── SKILL.md
 ├── .github/
 │   └── FUNDING.yml
 ├── .storage/
@@ -29,6 +117,8 @@ pubmed-mcp-server/
 │   ├── lint-mcp.ts
 │   └── tree.ts
 ├── skills/
+│   ├── add-app-tool/
+│   │   └── SKILL.md
 │   ├── add-prompt/
 │   │   └── SKILL.md
 │   ├── add-resource/
@@ -157,10 +247,12 @@ pubmed-mcp-server/
 │   │       ├── ncbi-service.test.ts
 │   │       ├── request-queue.test.ts
 │   │       └── response-handler.test.ts
-│   └── tools/
+│   ├── tools/
+│   └── index.test.ts
 ├── .dockerignore
 ├── .env.example
 ├── .gitignore
+├── AGENTS.md
 ├── biome.json
 ├── bun.lock
 ├── bunfig.toml

@@ -712,12 +712,16 @@ export interface ECitMatchCitation {
 
 /** Single result from ECitMatch lookup. */
 export interface ECitMatchResult {
+  /** Raw non-match detail returned by ECitMatch when present */
+  detail?: string;
   /** The tracking key from the input citation */
   key: string;
   /** Whether a PMID was found */
   matched: boolean;
   /** Matched PubMed ID, or null if no match */
   pmid: string | null;
+  /** Lookup outcome classification for recovery guidance */
+  status: 'matched' | 'not_found' | 'ambiguous';
 }
 
 // ─── PMC ID Converter Types ──────────────────────────────────────────────────

@@ -1,5 +1,7 @@
 # PubMed MCP Server — Design
 
+> Original Implementation. This design document is likely outdated. Please refer to the codebase for the current implementation details.
+
 ## MCP Surface
 
 ### Tools

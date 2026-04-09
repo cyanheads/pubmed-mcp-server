@@ -36,6 +36,12 @@ export const formatCitationsTool = tool('pubmed_format_citations', {
         }),
       )
       .describe('Citations per article'),
+    totalSubmitted: z.number().describe('Number of PMIDs submitted for citation formatting'),
+    totalFormatted: z.number().describe('Number of PMIDs successfully formatted'),
+    unavailablePmids: z
+      .array(z.string())
+      .optional()
+      .describe('Requested PMIDs that did not return article metadata'),
   }),
 
   async handler(input, ctx) {
@@ -62,11 +68,25 @@ export const formatCitationsTool = tool('pubmed_format_citations', {
       };
     });
 
-    return { citations };
+    const returnedPmids = new Set(citations.map((entry) => entry.pmid));
+    const unavailablePmids = input.pmids.filter((pmid) => !returnedPmids.has(pmid));
+
+    return {
+      citations,
+      totalSubmitted: input.pmids.length,
+      totalFormatted: citations.length,
+      ...(unavailablePmids.length > 0 && { unavailablePmids }),
+    };
   },
 
   format: (result) => {
-    const lines = ['# PubMed Citations'];
+    const lines = [
+      '# PubMed Citations',
+      `**Formatted:** ${result.totalFormatted}/${result.totalSubmitted}`,
+    ];
+    if (result.unavailablePmids?.length) {
+      lines.push(`**Unavailable PMIDs:** ${result.unavailablePmids.join(', ')}`);
+    }
     for (const entry of result.citations) {
       lines.push(`\n## PMID ${entry.pmid}`);
       if (entry.title) lines.push(`**${entry.title}**`);

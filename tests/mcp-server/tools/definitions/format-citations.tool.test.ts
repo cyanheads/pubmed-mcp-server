@@ -4,7 +4,7 @@
  */
 
 import { createMockContext } from '@cyanheads/mcp-ts-core/testing';
-import { describe, expect, it, vi } from 'vitest';
+import { beforeEach, describe, expect, it, vi } from 'vitest';
 
 const mockEFetch = vi.fn();
 vi.mock('@/services/ncbi/ncbi-service.js', () => ({
@@ -16,6 +16,10 @@ const { formatCitationsTool } = await import(
 );
 
 describe('formatCitationsTool', () => {
+  beforeEach(() => {
+    mockEFetch.mockReset();
+  });
+
   it('validates input with defaults', () => {
     const input = formatCitationsTool.input.parse({ pmids: ['12345'] });
     expect(input.styles).toEqual(['apa']);
@@ -78,10 +82,51 @@ describe('formatCitationsTool', () => {
     expect(result.citations[0]?.citations).toHaveProperty('apa');
     expect(result.citations[0]?.citations).toHaveProperty('bibtex');
     expect(result.citations[0]?.citations.apa).toContain('Smith');
+    expect(result.totalSubmitted).toBe(1);
+    expect(result.totalFormatted).toBe(1);
+  });
+
+  it('reports unavailable PMIDs for partial batches', async () => {
+    mockEFetch.mockResolvedValue({
+      PubmedArticleSet: {
+        PubmedArticle: [
+          {
+            MedlineCitation: {
+              PMID: { '#text': '12345' },
+              Article: {
+                ArticleTitle: { '#text': 'Test Article' },
+                Journal: {
+                  Title: { '#text': 'Nature' },
+                  JournalIssue: {
+                    Volume: { '#text': '600' },
+                    PubDate: { Year: { '#text': '2024' } },
+                  },
+                },
+                PublicationTypeList: { PublicationType: { '#text': 'Journal Article' } },
+              },
+            },
+          },
+        ],
+      },
+    });
+
+    const ctx = createMockContext();
+    const input = formatCitationsTool.input.parse({
+      pmids: ['12345', '99999'],
+      styles: ['apa'],
+    });
+    const result = await formatCitationsTool.handler(input, ctx);
+
+    expect(result.totalSubmitted).toBe(2);
+    expect(result.totalFormatted).toBe(1);
+    expect(result.unavailablePmids).toEqual(['99999']);
   });
 
   it('formats output', () => {
     const blocks = formatCitationsTool.format!({
+      totalSubmitted: 2,
+      totalFormatted: 1,
+      unavailablePmids: ['99999'],
       citations: [
         {
           pmid: '12345',
@@ -91,6 +136,8 @@ describe('formatCitationsTool', () => {
       ],
     });
     expect(blocks[0]?.text).toContain('PubMed Citations');
+    expect(blocks[0]?.text).toContain('**Formatted:** 1/2');
+    expect(blocks[0]?.text).toContain('**Unavailable PMIDs:** 99999');
     expect(blocks[0]?.text).toContain('APA');
   });
 });

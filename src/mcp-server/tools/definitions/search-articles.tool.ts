@@ -9,6 +9,39 @@ import { sanitization } from '@cyanheads/mcp-ts-core/utils';
 import { getNcbiService } from '@/services/ncbi/ncbi-service.js';
 import { extractBriefSummaries } from '@/services/ncbi/parsing/esummary-parser.js';
 
+const AppliedFiltersSchema = z.object({
+  dateRange: z
+    .object({
+      minDate: z.string().describe('Applied minimum date'),
+      maxDate: z.string().describe('Applied maximum date'),
+      dateType: z
+        .enum(['pdat', 'mdat', 'edat'])
+        .describe('Applied date field used for the range filter'),
+    })
+    .optional()
+    .describe('Date range filter applied to the search'),
+  publicationTypes: z
+    .array(z.string())
+    .optional()
+    .describe('Publication type filters applied to the search'),
+  author: z.string().optional().describe('Author filter applied to the search'),
+  journal: z.string().optional().describe('Journal filter applied to the search'),
+  meshTerms: z.array(z.string()).optional().describe('MeSH term filters applied to the search'),
+  language: z.string().optional().describe('Language filter applied to the search'),
+  hasAbstract: z
+    .boolean()
+    .optional()
+    .describe('Whether results were restricted to articles with abstracts'),
+  freeFullText: z
+    .boolean()
+    .optional()
+    .describe('Whether results were restricted to free full-text articles'),
+  species: z
+    .enum(['humans', 'animals'])
+    .optional()
+    .describe('Species filter applied to the search'),
+});
+
 export const searchArticlesTool = tool('pubmed_search_articles', {
   description:
     'Search PubMed with full query syntax, filters, and date ranges. Returns PMIDs and optional brief summaries. ' +
@@ -57,6 +90,12 @@ export const searchArticlesTool = tool('pubmed_search_articles', {
 
   output: z.object({
     query: z.string().describe('Original query'),
+    effectiveQuery: z
+      .string()
+      .describe('Sanitized query sent to PubMed after applying all active filters'),
+    appliedFilters: AppliedFiltersSchema.describe(
+      'Normalized filter values that were applied to the PubMed query',
+    ),
     totalFound: z.number().describe('Total matching articles'),
     offset: z.number().describe('Result offset used'),
     pmids: z.array(z.string()).describe('PubMed IDs'),
@@ -168,12 +207,32 @@ export const searchArticlesTool = tool('pubmed_search_articles', {
     }
 
     const searchUrl = `https://pubmed.ncbi.nlm.nih.gov/?term=${encodeURIComponent(effectiveQuery)}`;
+    const appliedFilters = {
+      ...(input.dateRange?.minDate &&
+        input.dateRange?.maxDate && {
+          dateRange: {
+            minDate: input.dateRange.minDate,
+            maxDate: input.dateRange.maxDate,
+            dateType: input.dateRange.dateType,
+          },
+        }),
+      ...(input.publicationTypes?.length && { publicationTypes: input.publicationTypes }),
+      ...(input.author && { author: input.author }),
+      ...(input.journal && { journal: input.journal }),
+      ...(input.meshTerms?.length && { meshTerms: input.meshTerms }),
+      ...(input.language && { language: input.language }),
+      ...(input.hasAbstract && { hasAbstract: true }),
+      ...(input.freeFullText && { freeFullText: true }),
+      ...(input.species && { species: input.species }),
+    };
     ctx.log.info('pubmed_search completed', {
       totalFound: esResult.count,
       pmidCount: pmids.length,
     });
     return {
       query: input.query,
+      effectiveQuery,
+      appliedFilters,
       totalFound: esResult.count,
       offset: input.offset,
       pmids,
@@ -186,9 +245,42 @@ export const searchArticlesTool = tool('pubmed_search_articles', {
     const lines = [
       `## PubMed Search Results`,
       `**Query:** ${result.query}`,
+      `**Effective Query:** ${result.effectiveQuery}`,
       `**Total Found:** ${result.totalFound} | **Returned:** ${result.pmids.length} | **Offset:** ${result.offset}`,
       `**Search URL:** ${result.searchUrl}`,
     ];
+    if (Object.keys(result.appliedFilters).length > 0) {
+      lines.push('\n### Applied Filters');
+      if (result.appliedFilters.dateRange) {
+        lines.push(
+          `- **Date Range (${result.appliedFilters.dateRange.dateType}):** ${result.appliedFilters.dateRange.minDate} to ${result.appliedFilters.dateRange.maxDate}`,
+        );
+      }
+      if (result.appliedFilters.publicationTypes?.length) {
+        lines.push(`- **Publication Types:** ${result.appliedFilters.publicationTypes.join(', ')}`);
+      }
+      if (result.appliedFilters.author) {
+        lines.push(`- **Author:** ${result.appliedFilters.author}`);
+      }
+      if (result.appliedFilters.journal) {
+        lines.push(`- **Journal:** ${result.appliedFilters.journal}`);
+      }
+      if (result.appliedFilters.meshTerms?.length) {
+        lines.push(`- **MeSH Terms:** ${result.appliedFilters.meshTerms.join(', ')}`);
+      }
+      if (result.appliedFilters.language) {
+        lines.push(`- **Language:** ${result.appliedFilters.language}`);
+      }
+      if (result.appliedFilters.hasAbstract) {
+        lines.push(`- **Has Abstract:** Yes`);
+      }
+      if (result.appliedFilters.freeFullText) {
+        lines.push(`- **Free Full Text:** Yes`);
+      }
+      if (result.appliedFilters.species) {
+        lines.push(`- **Species:** ${result.appliedFilters.species}`);
+      }
+    }
     if (result.pmids.length > 0) lines.push(`\n**PMIDs:** ${result.pmids.join(', ')}`);
     if (result.summaries?.length) {
       lines.push('\n### Summaries');
