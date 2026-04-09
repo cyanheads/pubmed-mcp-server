@@ -123,31 +123,53 @@ export const searchArticlesTool = tool('pubmed_search_articles', {
 
     let effectiveQuery = await sanitization.sanitizeString(input.query, { context: 'text' });
 
+    // Build filters — capture normalized values for both query construction and appliedFilters
+    let normalizedDateRange:
+      | { minDate: string; maxDate: string; dateType: 'pdat' | 'mdat' | 'edat' }
+      | undefined;
     if (input.dateRange?.minDate && input.dateRange?.maxDate) {
-      const minDate = input.dateRange.minDate.replace(/-/g, '/');
-      const maxDate = input.dateRange.maxDate.replace(/-/g, '/');
-      effectiveQuery += ` AND (${minDate}[${input.dateRange.dateType}] : ${maxDate}[${input.dateRange.dateType}])`;
+      normalizedDateRange = {
+        minDate: input.dateRange.minDate.trim().replace(/[-.]/g, '/'),
+        maxDate: input.dateRange.maxDate.trim().replace(/[-.]/g, '/'),
+        dateType: input.dateRange.dateType,
+      };
+      effectiveQuery += ` AND (${normalizedDateRange.minDate}[${normalizedDateRange.dateType}] : ${normalizedDateRange.maxDate}[${normalizedDateRange.dateType}])`;
     }
+
+    let sanitizedPubTypes: string[] | undefined;
     if (input.publicationTypes?.length) {
-      const sanitizedPts = await Promise.all(
+      sanitizedPubTypes = await Promise.all(
         input.publicationTypes.map((pt) => sanitization.sanitizeString(pt, { context: 'text' })),
       );
-      const ptQuery = sanitizedPts.map((pt) => `"${pt}"[Publication Type]`).join(' OR ');
-      effectiveQuery += ` AND (${ptQuery})`;
+      effectiveQuery += ` AND (${sanitizedPubTypes.map((pt) => `"${pt}"[Publication Type]`).join(' OR ')})`;
     }
-    if (input.author)
-      effectiveQuery += ` AND ${await sanitization.sanitizeString(input.author, { context: 'text' })}[Author]`;
-    if (input.journal)
-      effectiveQuery += ` AND "${await sanitization.sanitizeString(input.journal, { context: 'text' })}"[Journal]`;
+
+    let sanitizedAuthor: string | undefined;
+    if (input.author) {
+      sanitizedAuthor = await sanitization.sanitizeString(input.author, { context: 'text' });
+      effectiveQuery += ` AND ${sanitizedAuthor}[Author]`;
+    }
+
+    let sanitizedJournal: string | undefined;
+    if (input.journal) {
+      sanitizedJournal = await sanitization.sanitizeString(input.journal, { context: 'text' });
+      effectiveQuery += ` AND "${sanitizedJournal}"[Journal]`;
+    }
+
+    let sanitizedMeshTerms: string[] | undefined;
     if (input.meshTerms?.length) {
-      const sanitizedTerms = await Promise.all(
+      sanitizedMeshTerms = await Promise.all(
         input.meshTerms.map((term) => sanitization.sanitizeString(term, { context: 'text' })),
       );
-      const meshQuery = sanitizedTerms.map((term) => `"${term}"[MeSH Terms]`).join(' AND ');
-      effectiveQuery += ` AND (${meshQuery})`;
+      effectiveQuery += ` AND (${sanitizedMeshTerms.map((term) => `"${term}"[MeSH Terms]`).join(' AND ')})`;
     }
-    if (input.language)
-      effectiveQuery += ` AND ${await sanitization.sanitizeString(input.language, { context: 'text' })}[Language]`;
+
+    let sanitizedLanguage: string | undefined;
+    if (input.language) {
+      sanitizedLanguage = await sanitization.sanitizeString(input.language, { context: 'text' });
+      effectiveQuery += ` AND ${sanitizedLanguage}[Language]`;
+    }
+
     if (input.hasAbstract) effectiveQuery += ' AND hasabstract[text word]';
     if (input.freeFullText) effectiveQuery += ' AND free full text[filter]';
     if (input.species) effectiveQuery += ` AND ${input.species}[MeSH Terms]`;
@@ -183,7 +205,7 @@ export const searchArticlesTool = tool('pubmed_search_articles', {
       if (esResult.webEnv && esResult.queryKey) {
         eSummaryParams.WebEnv = esResult.webEnv;
         eSummaryParams.query_key = esResult.queryKey;
-        eSummaryParams.retmax = input.summaryCount;
+        eSummaryParams.retmax = Math.min(input.summaryCount, pmids.length);
         eSummaryParams.retstart = input.offset;
       } else {
         eSummaryParams.id = pmids.slice(0, input.summaryCount).join(',');
@@ -208,19 +230,12 @@ export const searchArticlesTool = tool('pubmed_search_articles', {
 
     const searchUrl = `https://pubmed.ncbi.nlm.nih.gov/?term=${encodeURIComponent(effectiveQuery)}`;
     const appliedFilters = {
-      ...(input.dateRange?.minDate &&
-        input.dateRange?.maxDate && {
-          dateRange: {
-            minDate: input.dateRange.minDate,
-            maxDate: input.dateRange.maxDate,
-            dateType: input.dateRange.dateType,
-          },
-        }),
-      ...(input.publicationTypes?.length && { publicationTypes: input.publicationTypes }),
-      ...(input.author && { author: input.author }),
-      ...(input.journal && { journal: input.journal }),
-      ...(input.meshTerms?.length && { meshTerms: input.meshTerms }),
-      ...(input.language && { language: input.language }),
+      ...(normalizedDateRange && { dateRange: normalizedDateRange }),
+      ...(sanitizedPubTypes?.length && { publicationTypes: sanitizedPubTypes }),
+      ...(sanitizedAuthor && { author: sanitizedAuthor }),
+      ...(sanitizedJournal && { journal: sanitizedJournal }),
+      ...(sanitizedMeshTerms?.length && { meshTerms: sanitizedMeshTerms }),
+      ...(sanitizedLanguage && { language: sanitizedLanguage }),
       ...(input.hasAbstract && { hasAbstract: true }),
       ...(input.freeFullText && { freeFullText: true }),
       ...(input.species && { species: input.species }),

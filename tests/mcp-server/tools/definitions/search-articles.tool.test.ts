@@ -262,8 +262,8 @@ describe('searchArticlesTool', () => {
     expect(result.effectiveQuery).toContain('2020/01/01[mdat]');
     expect(result.appliedFilters).toEqual({
       dateRange: {
-        minDate: '2020-01-01',
-        maxDate: '2024-12-31',
+        minDate: '2020/01/01',
+        maxDate: '2024/12/31',
         dateType: 'mdat',
       },
       publicationTypes: ['Review', 'Clinical Trial'],
@@ -274,6 +274,37 @@ describe('searchArticlesTool', () => {
       hasAbstract: true,
       freeFullText: true,
       species: 'humans',
+    });
+  });
+
+  it('clamps history-backed summary fetches to the returned PMID page', async () => {
+    mockESearch.mockResolvedValue({
+      count: 10,
+      idList: ['111', '222'],
+      retmax: 2,
+      retstart: 0,
+      queryTranslation: 'asthma[All Fields]',
+      webEnv: 'NCBI_ENV',
+      queryKey: '7',
+    });
+    mockESummary.mockResolvedValue({ eSummaryResult: {} });
+
+    const ctx = createMockContext();
+    const input = searchArticlesTool.input.parse({
+      query: 'asthma',
+      maxResults: 2,
+      summaryCount: 5,
+    });
+    await searchArticlesTool.handler(input, ctx);
+
+    expect(mockESummary).toHaveBeenCalledWith({
+      db: 'pubmed',
+      version: '2.0',
+      retmode: 'xml',
+      WebEnv: 'NCBI_ENV',
+      query_key: '7',
+      retmax: 2,
+      retstart: 0,
     });
   });
 
@@ -324,8 +355,8 @@ describe('searchArticlesTool', () => {
       effectiveQuery: 'asthma AND (2020/01/01[mdat] : 2024/12/31[mdat]) AND "Nature"[Journal]',
       appliedFilters: {
         dateRange: {
-          minDate: '2020-01-01',
-          maxDate: '2024-12-31',
+          minDate: '2020/01/01',
+          maxDate: '2024/12/31',
           dateType: 'mdat',
         },
         journal: 'Nature',
@@ -351,7 +382,7 @@ describe('searchArticlesTool', () => {
     expect(blocks[0]?.text).toContain('### Summaries');
     expect(blocks[0]?.text).toContain('**Effective Query:**');
     expect(blocks[0]?.text).toContain('### Applied Filters');
-    expect(blocks[0]?.text).toContain('**Date Range (mdat):** 2020-01-01 to 2024-12-31');
+    expect(blocks[0]?.text).toContain('**Date Range (mdat):** 2020/01/01 to 2024/12/31');
     expect(blocks[0]?.text).toContain('**Journal:** Nature');
     expect(blocks[0]?.text).toContain('Asthma Outcomes');
     expect(blocks[0]?.text).toContain('**Authors:** Smith J');

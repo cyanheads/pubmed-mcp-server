@@ -12,7 +12,11 @@ All notable changes to this project will be documented in this file.
 - **`pubmed_lookup_citation`**: Returned per-citation `status` (`matched`, `not_found`, `ambiguous`) and ECitMatch detail for non-exact outcomes
 - **`pubmed_format_citations`**: Returned `totalSubmitted`, `totalFormatted`, and `unavailablePmids` for partial-result handling
 - **Skill**: Added the `code-simplifier` agent skill for cleanup/refinement passes after edits
-- **Test coverage**: Added `tests/index.test.ts` for `createApp()` registration/setup and expanded tool/service tests for search, citation lookup, citation formatting, related articles, and fulltext flows
+- **Test coverage**: Added `tests/index.test.ts` for `createApp()` registration/setup and expanded tool/service tests for search, citation lookup, citation formatting, related articles, and fulltext flows, including regression coverage for normalized `appliedFilters` output and summary clamping in `pubmed_search_articles`
+
+### Fixed
+
+- **`pubmed_search_articles`**: History-backed summary fetches now clamp to the returned PMID page, and `appliedFilters` now reports the normalized/sanitized values actually sent to PubMed
 
 ### Changed
 
