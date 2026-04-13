@@ -31,7 +31,7 @@ describe('getServerConfig', () => {
 
     expect(config.toolIdentifier).toBe('pubmed-mcp-server');
     expect(config.requestDelayMs).toBe(334);
-    expect(config.maxRetries).toBe(3);
+    expect(config.maxRetries).toBe(6);
     expect(config.timeoutMs).toBe(30000);
     expect(config.apiKey).toBeUndefined();
     expect(config.adminEmail).toBeUndefined();

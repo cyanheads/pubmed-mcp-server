@@ -48,10 +48,14 @@ export class NcbiApiClient {
         : await this.getRequest(url, finalParams);
 
       if (!response.ok) {
-        const code =
-          response.status >= 400 && response.status < 500
-            ? JsonRpcErrorCode.InvalidRequest
-            : JsonRpcErrorCode.ServiceUnavailable;
+        let code: number;
+        if (response.status === 429) {
+          code = JsonRpcErrorCode.RateLimited;
+        } else if (response.status >= 500) {
+          code = JsonRpcErrorCode.ServiceUnavailable;
+        } else {
+          code = JsonRpcErrorCode.InvalidRequest;
+        }
         throw new McpError(code, `NCBI API returned HTTP ${response.status}.`, {
           endpoint,
           status: response.status,
@@ -96,10 +100,14 @@ export class NcbiApiClient {
       const body = await response.text();
 
       if (!response.ok) {
-        const code =
-          response.status >= 400 && response.status < 500
-            ? JsonRpcErrorCode.InvalidRequest
-            : JsonRpcErrorCode.ServiceUnavailable;
+        let code: number;
+        if (response.status === 429) {
+          code = JsonRpcErrorCode.RateLimited;
+        } else if (response.status >= 500) {
+          code = JsonRpcErrorCode.ServiceUnavailable;
+        } else {
+          code = JsonRpcErrorCode.InvalidRequest;
+        }
         throw new McpError(
           code,
           `NCBI API returned HTTP ${response.status}: ${body.substring(0, 300)}`,

@@ -108,6 +108,18 @@ describe('NcbiService retry logic', () => {
     expect(makeRequest).toHaveBeenCalledTimes(2);
   });
 
+  it('retries on RateLimited errors', async () => {
+    makeRequest
+      .mockRejectedValueOnce(new McpError(JsonRpcErrorCode.RateLimited, 'HTTP 429'))
+      .mockResolvedValueOnce('<xml/>');
+    parseAndHandleResponse.mockReturnValue({ ok: true });
+
+    const result = await service.eLink({ db: 'pubmed', id: '123' });
+
+    expect(result).toEqual({ ok: true });
+    expect(makeRequest).toHaveBeenCalledTimes(2);
+  });
+
   it('retries plain Errors (unwrapped network failures)', async () => {
     makeRequest.mockRejectedValueOnce(new Error('socket hang up')).mockResolvedValueOnce('<xml/>');
     parseAndHandleResponse.mockReturnValue({ ok: true });
@@ -141,15 +153,22 @@ describe('NcbiService retry logic', () => {
     expect(makeRequest).toHaveBeenCalledTimes(MAX_RETRIES + 1);
   });
 
-  it('applies exponential backoff: 1s, 2s, 4s', async () => {
+  it('applies capped exponential backoff with jitter', async () => {
     makeRequest.mockRejectedValue(new McpError(JsonRpcErrorCode.ServiceUnavailable, 'unavailable'));
 
     await service.eLink({ db: 'pubmed', id: '123' }).catch(() => {});
 
     const retryDelays = (setTimeoutSpy.mock.calls as [unknown, unknown][])
       .map(([, ms]) => ms)
-      .filter((ms): ms is number => typeof ms === 'number' && ms >= 1000);
+      .filter((ms): ms is number => typeof ms === 'number' && ms >= 500);
 
-    expect(retryDelays).toEqual([1000, 2000, 4000]);
+    expect(retryDelays).toHaveLength(MAX_RETRIES);
+    // Base delays are 1s, 2s, 4s with ±25% jitter → [750-1250, 1500-2500, 3000-5000]
+    expect(retryDelays[0]).toBeGreaterThanOrEqual(750);
+    expect(retryDelays[0]).toBeLessThanOrEqual(1250);
+    expect(retryDelays[1]).toBeGreaterThanOrEqual(1500);
+    expect(retryDelays[1]).toBeLessThanOrEqual(2500);
+    expect(retryDelays[2]).toBeGreaterThanOrEqual(3000);
+    expect(retryDelays[2]).toBeLessThanOrEqual(5000);
   });
 });

@@ -192,26 +192,34 @@ export class NcbiService {
     return (parsed as IdConvertResponse).records ?? [];
   }
 
+  /** Error codes that are transient and worth retrying with backoff. */
+  private static readonly RETRYABLE_CODES = new Set([
+    JsonRpcErrorCode.ServiceUnavailable,
+    JsonRpcErrorCode.Timeout,
+    JsonRpcErrorCode.RateLimited,
+  ]);
+
+  /** Maximum backoff delay per retry (prevents exponential explosion at high retry counts). */
+  private static readonly MAX_BACKOFF_MS = 30_000;
+
   /**
-   * Retry wrapper for transient NCBI errors (ServiceUnavailable, Timeout).
+   * Retry wrapper for transient NCBI errors (ServiceUnavailable, Timeout, RateLimited).
    * Non-transient errors (validation, serialization) fail immediately.
+   * Uses capped exponential backoff with jitter.
    */
   private async withRetry<T>(execute: () => Promise<T>, label: string): Promise<T> {
     for (let attempt = 0; attempt <= this.maxRetries; attempt++) {
       try {
         return await execute();
       } catch (error: unknown) {
-        if (error instanceof McpError) {
-          if (
-            error.code !== JsonRpcErrorCode.ServiceUnavailable &&
-            error.code !== JsonRpcErrorCode.Timeout
-          ) {
-            throw error;
-          }
+        if (error instanceof McpError && !NcbiService.RETRYABLE_CODES.has(error.code)) {
+          throw error;
         }
 
         if (attempt < this.maxRetries) {
-          const retryDelay = 1000 * 2 ** attempt; // 1s, 2s, 4s
+          const baseDelay = Math.min(1000 * 2 ** attempt, NcbiService.MAX_BACKOFF_MS);
+          const jitter = baseDelay * (0.75 + 0.5 * Math.random()); // ±25%
+          const retryDelay = Math.round(jitter);
           logger.warning(
             `NCBI request to ${label} failed. Retrying (${attempt + 1}/${this.maxRetries}) in ${retryDelay}ms.`,
             { endpoint: label, attempt: attempt + 1, retryDelay } as never,

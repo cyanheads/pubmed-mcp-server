@@ -17,7 +17,7 @@ const ServerConfigSchema = z.object({
   /** Minimum delay between NCBI requests in ms. NCBI requires ~334ms without API key. */
   requestDelayMs: z.coerce.number().min(50).max(5000).default(334).describe('Request delay in ms'),
   /** Maximum retry attempts for failed NCBI requests. */
-  maxRetries: z.coerce.number().min(0).max(10).default(3).describe('Max retry attempts'),
+  maxRetries: z.coerce.number().min(0).max(10).default(6).describe('Max retry attempts'),
   /** Request timeout in ms. */
   timeoutMs: z.coerce
     .number()

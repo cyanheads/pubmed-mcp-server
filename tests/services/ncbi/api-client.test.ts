@@ -91,13 +91,37 @@ describe('NcbiApiClient', () => {
     expect(mockFetch).toHaveBeenCalledOnce();
   });
 
-  it('throws ServiceUnavailable for non-OK HTTP status', async () => {
+  it('throws RateLimited for HTTP 429', async () => {
+    const { JsonRpcErrorCode } = await import('@cyanheads/mcp-ts-core/errors');
     mockFetch.mockResolvedValueOnce({ ok: false, status: 429, text: () => Promise.resolve('') });
     const client = new NcbiApiClient(baseConfig);
 
-    await expect(client.makeRequest('esearch', { db: 'pubmed' })).rejects.toThrow(
-      /NCBI API returned HTTP 429/,
-    );
+    await expect(client.makeRequest('esearch', { db: 'pubmed' })).rejects.toMatchObject({
+      code: JsonRpcErrorCode.RateLimited,
+      message: expect.stringContaining('HTTP 429'),
+    });
+  });
+
+  it('throws ServiceUnavailable for HTTP 5xx', async () => {
+    const { JsonRpcErrorCode } = await import('@cyanheads/mcp-ts-core/errors');
+    mockFetch.mockResolvedValueOnce({ ok: false, status: 503, text: () => Promise.resolve('') });
+    const client = new NcbiApiClient(baseConfig);
+
+    await expect(client.makeRequest('esearch', { db: 'pubmed' })).rejects.toMatchObject({
+      code: JsonRpcErrorCode.ServiceUnavailable,
+      message: expect.stringContaining('HTTP 503'),
+    });
+  });
+
+  it('throws InvalidRequest for other 4xx', async () => {
+    const { JsonRpcErrorCode } = await import('@cyanheads/mcp-ts-core/errors');
+    mockFetch.mockResolvedValueOnce({ ok: false, status: 400, text: () => Promise.resolve('') });
+    const client = new NcbiApiClient(baseConfig);
+
+    await expect(client.makeRequest('esearch', { db: 'pubmed' })).rejects.toMatchObject({
+      code: JsonRpcErrorCode.InvalidRequest,
+      message: expect.stringContaining('HTTP 400'),
+    });
   });
 
   it('wraps non-McpError as ServiceUnavailable', async () => {

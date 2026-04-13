@@ -3,7 +3,7 @@
  * @module tests/services/ncbi/ncbi-service.test
  */
 
-import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
+import { JsonRpcErrorCode, McpError } from '@cyanheads/mcp-ts-core/errors';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import type { NcbiApiClient } from '@/services/ncbi/api-client.js';
 import { NcbiService } from '@/services/ncbi/ncbi-service.js';
@@ -339,6 +339,121 @@ describe('NcbiService.idConvert', () => {
 
     const records = await service.idConvert(['123']);
     expect(records).toEqual([]);
+  });
+});
+
+describe('NcbiService retry behavior', () => {
+  function createRetryService(maxRetries: number) {
+    const mockApiClient = {
+      makeRequest: vi.fn(),
+    } as unknown as NcbiApiClient;
+
+    const mockQueue = {
+      enqueue: vi.fn(async (task: () => Promise<unknown>) => task()),
+    } as unknown as NcbiRequestQueue;
+
+    const mockResponseHandler = {
+      parseAndHandleResponse: vi.fn(),
+    } as unknown as NcbiResponseHandler;
+
+    const service = new NcbiService(mockApiClient, mockQueue, mockResponseHandler, maxRetries);
+    return { service, mockApiClient, mockResponseHandler };
+  }
+
+  it('retries on ServiceUnavailable and eventually succeeds', async () => {
+    const { service, mockApiClient, mockResponseHandler } = createRetryService(2);
+    const makeRequest = mockApiClient.makeRequest as ReturnType<typeof vi.fn>;
+    const parseResponse = mockResponseHandler.parseAndHandleResponse as ReturnType<typeof vi.fn>;
+
+    makeRequest
+      .mockRejectedValueOnce(new McpError(JsonRpcErrorCode.ServiceUnavailable, 'unavailable'))
+      .mockResolvedValueOnce('<xml/>');
+    parseResponse.mockReturnValue({
+      eSearchResult: {
+        Count: '1',
+        RetMax: '1',
+        RetStart: '0',
+        IdList: { Id: ['1'] },
+        QueryTranslation: '',
+      },
+    });
+
+    const result = await service.eSearch({ db: 'pubmed', term: 'test' });
+    expect(result.count).toBe(1);
+    expect(makeRequest).toHaveBeenCalledTimes(2);
+  });
+
+  it('retries on RateLimited and eventually succeeds', async () => {
+    const { service, mockApiClient, mockResponseHandler } = createRetryService(2);
+    const makeRequest = mockApiClient.makeRequest as ReturnType<typeof vi.fn>;
+    const parseResponse = mockResponseHandler.parseAndHandleResponse as ReturnType<typeof vi.fn>;
+
+    makeRequest
+      .mockRejectedValueOnce(new McpError(JsonRpcErrorCode.RateLimited, 'rate limited'))
+      .mockResolvedValueOnce('<xml/>');
+    parseResponse.mockReturnValue({
+      eSearchResult: {
+        Count: '1',
+        RetMax: '1',
+        RetStart: '0',
+        IdList: { Id: ['1'] },
+        QueryTranslation: '',
+      },
+    });
+
+    const result = await service.eSearch({ db: 'pubmed', term: 'test' });
+    expect(result.count).toBe(1);
+    expect(makeRequest).toHaveBeenCalledTimes(2);
+  });
+
+  it('retries on Timeout and eventually succeeds', async () => {
+    const { service, mockApiClient, mockResponseHandler } = createRetryService(2);
+    const makeRequest = mockApiClient.makeRequest as ReturnType<typeof vi.fn>;
+    const parseResponse = mockResponseHandler.parseAndHandleResponse as ReturnType<typeof vi.fn>;
+
+    makeRequest
+      .mockRejectedValueOnce(new McpError(JsonRpcErrorCode.Timeout, 'timed out'))
+      .mockResolvedValueOnce('<xml/>');
+    parseResponse.mockReturnValue({
+      eSearchResult: {
+        Count: '1',
+        RetMax: '1',
+        RetStart: '0',
+        IdList: { Id: ['1'] },
+        QueryTranslation: '',
+      },
+    });
+
+    const result = await service.eSearch({ db: 'pubmed', term: 'test' });
+    expect(result.count).toBe(1);
+    expect(makeRequest).toHaveBeenCalledTimes(2);
+  });
+
+  it('does not retry on non-retryable errors', async () => {
+    const { service, mockApiClient } = createRetryService(3);
+    const makeRequest = mockApiClient.makeRequest as ReturnType<typeof vi.fn>;
+
+    makeRequest.mockRejectedValueOnce(new McpError(JsonRpcErrorCode.InvalidRequest, 'bad request'));
+
+    await expect(service.eSearch({ db: 'pubmed', term: 'test' })).rejects.toMatchObject({
+      code: JsonRpcErrorCode.InvalidRequest,
+      message: 'bad request',
+    });
+    expect(makeRequest).toHaveBeenCalledTimes(1);
+  });
+
+  it('gives up after maxRetries and includes attempt count', async () => {
+    const { service, mockApiClient } = createRetryService(2);
+    const makeRequest = mockApiClient.makeRequest as ReturnType<typeof vi.fn>;
+
+    makeRequest.mockRejectedValue(new McpError(JsonRpcErrorCode.ServiceUnavailable, 'unavailable'));
+
+    await expect(service.eSearch({ db: 'pubmed', term: 'test' })).rejects.toMatchObject({
+      code: JsonRpcErrorCode.ServiceUnavailable,
+      message: expect.stringContaining('failed after 3 attempts'),
+    });
+    // 1 initial + 2 retries = 3 total
+    expect(makeRequest).toHaveBeenCalledTimes(3);
   });
 });
 
