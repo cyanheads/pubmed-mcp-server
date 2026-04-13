@@ -284,7 +284,7 @@ All configuration is validated at startup via Zod schemas in `src/config/server-
 | `NCBI_API_KEY` | NCBI API key for higher rate limits (10 req/s vs 3 req/s) | none |
 | `NCBI_ADMIN_EMAIL` | Contact email sent with NCBI requests (recommended by NCBI) | none |
 | `NCBI_REQUEST_DELAY_MS` | Delay between NCBI requests in ms | 334 (100 with key) |
-| `NCBI_MAX_RETRIES` | Retry attempts for failed NCBI requests | 3 |
+| `NCBI_MAX_RETRIES` | Retry attempts for failed NCBI requests | 6 |
 | `NCBI_TIMEOUT_MS` | NCBI request timeout in ms | `30000` |
 | `OTEL_ENABLED` | Enable OpenTelemetry | `false` |
 
