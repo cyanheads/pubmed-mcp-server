@@ -122,6 +122,60 @@ describe('formatCitationsTool', () => {
     expect(result.unavailablePmids).toEqual(['99999']);
   });
 
+  it('preserves decoded Unicode metadata in generated citations', async () => {
+    mockEFetch.mockResolvedValue({
+      PubmedArticleSet: {
+        PubmedArticle: [
+          {
+            MedlineCitation: {
+              PMID: { '#text': '24680' },
+              Article: {
+                ArticleTitle: { '#text': '\u03b2-catenin in Garc\u00eda-L\u00f3pez cohorts' },
+                AuthorList: {
+                  Author: [
+                    {
+                      LastName: { '#text': 'Garc\u00eda-L\u00f3pez' },
+                      ForeName: { '#text': 'Maria' },
+                      Initials: { '#text': 'M' },
+                    },
+                  ],
+                },
+                Journal: {
+                  Title: { '#text': 'Revista Cl\u00ednica' },
+                  JournalIssue: {
+                    Volume: { '#text': '12' },
+                    Issue: { '#text': '4' },
+                    PubDate: { Year: { '#text': '2025' } },
+                  },
+                },
+                Pagination: { MedlinePgn: { '#text': '45\u201352' } },
+                PublicationTypeList: { PublicationType: { '#text': 'Journal Article' } },
+              },
+            },
+            PubmedData: {
+              ArticleIdList: [{ '#text': '10.1000/unicode', '@_IdType': 'doi' }],
+            },
+          },
+        ],
+      },
+    });
+
+    const ctx = createMockContext();
+    const input = formatCitationsTool.input.parse({
+      pmids: ['24680'],
+      styles: ['apa', 'ris'],
+    });
+    const result = await formatCitationsTool.handler(input, ctx);
+
+    expect(result.citations[0]?.citations.apa).toContain('Garc\u00eda-L\u00f3pez, M.');
+    expect(result.citations[0]?.citations.apa).toContain(
+      '\u03b2-catenin in Garc\u00eda-L\u00f3pez cohorts.',
+    );
+    expect(result.citations[0]?.citations.apa).toContain('45\u201352');
+    expect(result.citations[0]?.citations.ris).toContain('SP  - 45');
+    expect(result.citations[0]?.citations.ris).toContain('EP  - 52');
+  });
+
   it('formats output', () => {
     const blocks = formatCitationsTool.format!({
       totalSubmitted: 2,

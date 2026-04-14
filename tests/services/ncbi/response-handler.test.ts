@@ -3,6 +3,7 @@
  * @module tests/services/ncbi/response-handler.test
  */
 
+import { JsonRpcErrorCode, McpError } from '@cyanheads/mcp-ts-core/errors';
 import { describe, expect, it, vi } from 'vitest';
 import { NcbiResponseHandler } from '@/services/ncbi/response-handler.js';
 
@@ -41,6 +42,29 @@ describe('NcbiResponseHandler', () => {
       expect((result.eSearchResult as Record<string, unknown>).Count).toBe(42);
     });
 
+    it('parses XML with more than 1000 numeric character references', () => {
+      const handler = createHandler();
+      const xml = `<?xml version="1.0"?><root><value>${'&#x2013;'.repeat(1001)}</value></root>`;
+      const result = handler.parseAndHandleResponse<Record<string, unknown>>(xml, 'efetch', {
+        retmode: 'xml',
+      });
+
+      expect((result.root as Record<string, unknown>).value).toBe('–'.repeat(1001));
+    });
+
+    it('decodes mixed decimal and hexadecimal numeric entities', () => {
+      const handler = createHandler();
+      const xml =
+        '<?xml version="1.0"?><root><value>Caf&#233; &#x2013; &#x3b2;-catenin</value></root>';
+      const result = handler.parseAndHandleResponse<Record<string, unknown>>(xml, 'efetch', {
+        retmode: 'xml',
+      });
+
+      expect((result.root as Record<string, unknown>).value).toBe(
+        'Caf\u00e9 \u2013 \u03b2-catenin',
+      );
+    });
+
     it('throws on invalid XML', () => {
       const handler = createHandler();
       expect(() =>
@@ -65,6 +89,34 @@ describe('NcbiResponseHandler', () => {
         returnRawXml: true,
       });
       expect(result).toBe(xml);
+    });
+
+    it('wraps XML parser failures as serialization errors', () => {
+      const handler = createHandler() as NcbiResponseHandler & {
+        xmlParser: { parse: (input: string) => never };
+      };
+      handler.xmlParser = {
+        parse: () => {
+          throw new Error('synthetic parser failure');
+        },
+      };
+
+      try {
+        handler.parseAndHandleResponse(
+          '<?xml version="1.0"?><root><data>hello</data></root>',
+          'efetch',
+          {
+            retmode: 'xml',
+          },
+        );
+        throw new Error('Expected parseAndHandleResponse to throw');
+      } catch (error: unknown) {
+        expect(error).toBeInstanceOf(McpError);
+        expect(error).toMatchObject({
+          code: JsonRpcErrorCode.SerializationError,
+          message: expect.stringContaining('synthetic parser failure'),
+        });
+      }
     });
   });
 

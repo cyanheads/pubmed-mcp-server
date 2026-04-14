@@ -8,7 +8,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import type { NcbiApiClient } from '@/services/ncbi/api-client.js';
 import { NcbiService } from '@/services/ncbi/ncbi-service.js';
 import type { NcbiRequestQueue } from '@/services/ncbi/request-queue.js';
-import type { NcbiResponseHandler } from '@/services/ncbi/response-handler.js';
+import { NcbiResponseHandler } from '@/services/ncbi/response-handler.js';
 
 vi.mock('@cyanheads/mcp-ts-core/utils', () => ({
   logger: { debug: vi.fn(), info: vi.fn(), warning: vi.fn(), error: vi.fn() },
@@ -129,6 +129,56 @@ describe('NcbiService', () => {
 
       const result = await service.eFetch({ db: 'pubmed', id: '123' });
       expect(result).toEqual(mockData);
+    });
+
+    it('parses entity-heavy XML responses end to end', async () => {
+      const mockApiClient = {
+        makeRequest: vi.fn(),
+      } as unknown as NcbiApiClient;
+      const mockQueue = {
+        enqueue: vi.fn(async (task: () => Promise<unknown>) => task()),
+      } as unknown as NcbiRequestQueue;
+      const service = new NcbiService(mockApiClient, mockQueue, new NcbiResponseHandler(), 0);
+
+      const heavyTitle = `Signal${'&#x2013;'.repeat(1001)}axis`;
+      (
+        mockApiClient.makeRequest as ReturnType<typeof vi.fn>
+      ).mockResolvedValue(`<?xml version="1.0"?>
+<PubmedArticleSet>
+  <PubmedArticle>
+    <MedlineCitation>
+      <PMID>12345</PMID>
+      <Article>
+        <ArticleTitle>${heavyTitle}</ArticleTitle>
+        <Pagination>
+          <MedlinePgn>100&#x2013;108</MedlinePgn>
+        </Pagination>
+        <Journal>
+          <Title>Journal of Testing</Title>
+          <JournalIssue>
+            <PubDate>
+              <Year>2024</Year>
+            </PubDate>
+          </JournalIssue>
+        </Journal>
+        <PublicationTypeList>
+          <PublicationType>Journal Article</PublicationType>
+        </PublicationTypeList>
+      </Article>
+    </MedlineCitation>
+  </PubmedArticle>
+</PubmedArticleSet>`);
+
+      const result = await service.eFetch<Record<string, unknown>>({ db: 'pubmed', id: '12345' });
+      const articleSet = result.PubmedArticleSet as Record<string, unknown>;
+      const articles = articleSet.PubmedArticle as Record<string, unknown>[];
+      const article = articles[0] as Record<string, unknown>;
+      const medlineCitation = article.MedlineCitation as Record<string, unknown>;
+      const parsedArticle = medlineCitation.Article as Record<string, unknown>;
+
+      expect(articles).toHaveLength(1);
+      expect(parsedArticle.ArticleTitle).toBe(`Signal${'\u2013'.repeat(1001)}axis`);
+      expect((parsedArticle.Pagination as Record<string, unknown>).MedlinePgn).toBe('100\u2013108');
     });
   });
 
@@ -440,6 +490,21 @@ describe('NcbiService retry behavior', () => {
       message: 'bad request',
     });
     expect(makeRequest).toHaveBeenCalledTimes(1);
+  });
+
+  it('does not retry plain response-handling errors', async () => {
+    const { service, mockApiClient, mockResponseHandler } = createRetryService(3);
+    const makeRequest = mockApiClient.makeRequest as ReturnType<typeof vi.fn>;
+    const parseResponse = mockResponseHandler.parseAndHandleResponse as ReturnType<typeof vi.fn>;
+
+    makeRequest.mockResolvedValue('<xml/>');
+    parseResponse.mockRejectedValueOnce(new Error('Entity expansion limit exceeded: 1001 > 1000'));
+
+    await expect(service.eSearch({ db: 'pubmed', term: 'test' })).rejects.toThrow(
+      /Entity expansion limit exceeded/,
+    );
+    expect(makeRequest).toHaveBeenCalledTimes(1);
+    expect(parseResponse).toHaveBeenCalledTimes(1);
   });
 
   it('gives up after maxRetries and includes attempt count', async () => {

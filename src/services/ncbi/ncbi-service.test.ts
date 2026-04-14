@@ -120,14 +120,13 @@ describe('NcbiService retry logic', () => {
     expect(makeRequest).toHaveBeenCalledTimes(2);
   });
 
-  it('retries plain Errors (unwrapped network failures)', async () => {
+  it('does not retry plain Errors (unexpected internal failures)', async () => {
     makeRequest.mockRejectedValueOnce(new Error('socket hang up')).mockResolvedValueOnce('<xml/>');
     parseAndHandleResponse.mockReturnValue({ ok: true });
 
-    const result = await service.eLink({ db: 'pubmed', id: '123' });
-
-    expect(result).toEqual({ ok: true });
-    expect(makeRequest).toHaveBeenCalledTimes(2);
+    await expect(service.eLink({ db: 'pubmed', id: '123' })).rejects.toThrow('socket hang up');
+    expect(makeRequest).toHaveBeenCalledTimes(1);
+    expect(parseAndHandleResponse).not.toHaveBeenCalled();
   });
 
   it('does not retry non-transient McpErrors', async () => {

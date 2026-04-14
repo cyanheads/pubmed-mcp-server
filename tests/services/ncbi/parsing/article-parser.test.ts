@@ -355,6 +355,51 @@ describe('parseFullArticle', () => {
     expect(result.journalInfo?.title).toBe('Test Journal');
   });
 
+  it('preserves decoded page ranges and diacritics from parsed XML', () => {
+    const xmlArticle: XmlPubmedArticle = {
+      MedlineCitation: {
+        PMID: { '#text': '24680' },
+        Article: {
+          ArticleTitle: { '#text': '\u03b2-catenin in Garc\u00eda-L\u00f3pez cohorts' },
+          AuthorList: {
+            Author: [
+              {
+                LastName: { '#text': 'Garc\u00eda-L\u00f3pez' },
+                ForeName: { '#text': 'Maria' },
+                Initials: { '#text': 'M' },
+                AffiliationInfo: [
+                  {
+                    Affiliation: { '#text': 'Uniwersytet Jagiello\u0144ski, Krak\u00f3w' },
+                  },
+                ],
+              },
+            ],
+          },
+          Journal: {
+            Title: { '#text': 'Revista Cl\u00ednica' },
+            JournalIssue: {
+              Volume: { '#text': '12' },
+              Issue: { '#text': '4' },
+              PubDate: { Year: { '#text': '2025' } },
+            },
+          },
+          Pagination: { MedlinePgn: { '#text': '45\u201352' } },
+          PublicationTypeList: {
+            PublicationType: { '#text': 'Journal Article' },
+          },
+        },
+      } as unknown as XmlMedlineCitation,
+    };
+
+    const result = parseFullArticle(xmlArticle);
+
+    expect(result.title).toBe('\u03b2-catenin in Garc\u00eda-L\u00f3pez cohorts');
+    expect(result.authors?.[0]?.lastName).toBe('Garc\u00eda-L\u00f3pez');
+    expect(result.affiliations).toEqual(['Uniwersytet Jagiello\u0144ski, Krak\u00f3w']);
+    expect(result.journalInfo?.pages).toBe('45\u201352');
+    expect(result.journalInfo?.title).toBe('Revista Cl\u00ednica');
+  });
+
   it('respects includeMesh and includeGrants options', () => {
     const xmlArticle: XmlPubmedArticle = {
       MedlineCitation: {

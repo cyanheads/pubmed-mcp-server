@@ -4,6 +4,28 @@ All notable changes to this project will be documented in this file.
 
 ---
 
+## [2.3.5] - 2026-04-13
+
+### Fixed
+
+- **XML response handling**: Raised the numeric entity expansion ceiling for trusted NCBI XML, preserved decoded punctuation/diacritics in parsed metadata, and wrapped parser failures as `SerializationError`.
+- **Retry behavior**: Stopped retrying unexpected plain errors in `NcbiService`; only transient `McpError` responses are retried now.
+
+### Added
+
+- **Regression coverage**: Added end-to-end and unit tests for Unicode metadata, en-dash page ranges, parser failure wrapping, and entity-heavy XML payloads.
+
+### Updated
+
+- `@cyanheads/mcp-ts-core` to ^0.3.5
+- `fast-xml-parser` to ^5.5.12
+
+### Docs
+
+- Updated the `design-mcp-server` and `add-test` skills for MCP Apps planning guidance and default test layout guidance.
+
+---
+
 ## [2.3.4] - 2026-04-12
 
 ### Fixed

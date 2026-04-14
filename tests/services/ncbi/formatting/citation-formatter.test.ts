@@ -78,6 +78,24 @@ describe('formatApa', () => {
     const citation = formatApa(article);
     expect(citation).toContain('Smith, J., & Doe, J.');
   });
+
+  it('preserves decoded Unicode metadata', () => {
+    const article: ParsedArticle = {
+      ...sampleArticle,
+      title: '\u03b2-catenin in Garc\u00eda-L\u00f3pez cohorts',
+      authors: [{ lastName: 'Garc\u00eda-L\u00f3pez', firstName: 'Maria', initials: 'M' }],
+      journalInfo: {
+        ...sampleArticle.journalInfo!,
+        title: 'Revista Cl\u00ednica',
+        pages: '45\u201352',
+      },
+    };
+    const citation = formatApa(article);
+    expect(citation).toContain('Garc\u00eda-L\u00f3pez, M.');
+    expect(citation).toContain('\u03b2-catenin in Garc\u00eda-L\u00f3pez cohorts.');
+    expect(citation).toContain('*Revista Cl\u00ednica*');
+    expect(citation).toContain('45\u201352');
+  });
 });
 
 describe('formatMla', () => {
@@ -151,6 +169,19 @@ describe('formatRis', () => {
     expect(citation).toContain('KW  - CRISPR');
     expect(citation).toContain('AB  - This is the abstract.');
     expect(citation).toMatch(/ER {2}- $/);
+  });
+
+  it('splits en-dash page ranges into start and end pages', () => {
+    const article: ParsedArticle = {
+      ...sampleArticle,
+      journalInfo: {
+        ...sampleArticle.journalInfo!,
+        pages: '45\u201352',
+      },
+    };
+    const citation = formatRis(article);
+    expect(citation).toContain('SP  - 45');
+    expect(citation).toContain('EP  - 52');
   });
 });
 

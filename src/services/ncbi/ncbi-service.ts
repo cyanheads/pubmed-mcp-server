@@ -204,7 +204,7 @@ export class NcbiService {
 
   /**
    * Retry wrapper for transient NCBI errors (ServiceUnavailable, Timeout, RateLimited).
-   * Non-transient errors (validation, serialization) fail immediately.
+   * Non-transient McpErrors and unexpected plain Errors fail immediately.
    * Uses capped exponential backoff with jitter.
    */
   private async withRetry<T>(execute: () => Promise<T>, label: string): Promise<T> {
@@ -212,7 +212,11 @@ export class NcbiService {
       try {
         return await execute();
       } catch (error: unknown) {
-        if (error instanceof McpError && !NcbiService.RETRYABLE_CODES.has(error.code)) {
+        if (!(error instanceof McpError)) {
+          throw error;
+        }
+
+        if (!NcbiService.RETRYABLE_CODES.has(error.code)) {
           throw error;
         }
 
@@ -230,11 +234,10 @@ export class NcbiService {
 
         const attempts = this.maxRetries + 1;
         const msg = error instanceof Error ? error.message : String(error);
-        throw new McpError(
-          error instanceof McpError ? error.code : JsonRpcErrorCode.ServiceUnavailable,
-          `${msg} (failed after ${attempts} attempts)`,
-          { endpoint: label, attempts },
-        );
+        throw new McpError(error.code, `${msg} (failed after ${attempts} attempts)`, {
+          endpoint: label,
+          attempts,
+        });
       }
     }
 

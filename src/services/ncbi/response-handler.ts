@@ -67,6 +67,17 @@ const WARNING_PATHS = [
   'eSearchResult.WarningList.OutputMessage',
 ];
 
+/**
+ * NCBI responses routinely contain numeric character references for punctuation
+ * and diacritics, especially in page ranges and author names. Keep entity
+ * processing enabled, but raise the aggregate expansion ceiling high enough for
+ * trusted PubMed payloads.
+ */
+const NCBI_PROCESS_ENTITIES_OPTIONS = {
+  enabled: true,
+  maxTotalExpansions: 100_000,
+} as const;
+
 function resolvePath(obj: unknown, path: string): unknown {
   let current: unknown = obj;
   for (const part of path.split('.')) {
@@ -118,7 +129,7 @@ export class NcbiResponseHandler {
       ignoreAttributes: false,
       attributeNamePrefix: '@_',
       parseTagValue: true,
-      processEntities: true,
+      processEntities: NCBI_PROCESS_ENTITIES_OPTIONS,
       htmlEntities: true,
       isArray: (_name, jpath) => NCBI_ARRAY_JPATHS.has(jpath as string),
     });
@@ -186,7 +197,26 @@ export class NcbiResponseHandler {
         });
       }
 
-      const parsedXml = this.xmlParser.parse(responseText) as Record<string, unknown>;
+      let parsedXml: Record<string, unknown>;
+      try {
+        parsedXml = this.xmlParser.parse(responseText) as Record<string, unknown>;
+      } catch (error: unknown) {
+        const parserError = error instanceof Error ? error.message : String(error);
+        logger.error('Failed to parse validated XML response from NCBI.', {
+          endpoint,
+          parserError,
+          responseSnippet: responseText.substring(0, 500),
+        } as never);
+        throw new McpError(
+          JsonRpcErrorCode.SerializationError,
+          `Failed to parse XML response from NCBI: ${parserError}`,
+          {
+            endpoint,
+            parserError,
+            responseSnippet: responseText.substring(0, 200),
+          },
+        );
+      }
       const hasError = ERROR_PATHS.some((path) => resolvePath(parsedXml, path) !== undefined);
 
       if (hasError) {

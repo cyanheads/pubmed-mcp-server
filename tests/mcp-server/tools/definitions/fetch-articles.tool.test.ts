@@ -106,6 +106,64 @@ describe('fetchArticlesTool', () => {
     expect(result.unavailablePmids).toEqual(['222']);
   });
 
+  it('preserves decoded Unicode metadata from eFetch responses', async () => {
+    mockEFetch.mockResolvedValue({
+      PubmedArticleSet: {
+        PubmedArticle: [
+          {
+            MedlineCitation: {
+              PMID: { '#text': '24680' },
+              Article: {
+                ArticleTitle: { '#text': '\u03b2-catenin in Garc\u00eda-L\u00f3pez cohorts' },
+                AuthorList: {
+                  Author: [
+                    {
+                      LastName: { '#text': 'Garc\u00eda-L\u00f3pez' },
+                      ForeName: { '#text': 'Maria' },
+                      Initials: { '#text': 'M' },
+                      AffiliationInfo: [
+                        {
+                          Affiliation: { '#text': 'Uniwersytet Jagiello\u0144ski, Krak\u00f3w' },
+                        },
+                      ],
+                    },
+                  ],
+                },
+                Journal: {
+                  Title: { '#text': 'Revista Cl\u00ednica' },
+                  JournalIssue: {
+                    Volume: { '#text': '12' },
+                    Issue: { '#text': '4' },
+                    PubDate: { Year: { '#text': '2025' } },
+                  },
+                },
+                Pagination: { MedlinePgn: { '#text': '45\u201352' } },
+                PublicationTypeList: { PublicationType: { '#text': 'Journal Article' } },
+              },
+            },
+            PubmedData: {
+              ArticleIdList: {
+                ArticleId: [{ '#text': 'PMC24680', '@_IdType': 'pmc' }],
+              },
+            },
+          },
+        ],
+      },
+    });
+
+    const ctx = createMockContext();
+    const input = fetchArticlesTool.input.parse({ pmids: ['24680'] });
+    const result = await fetchArticlesTool.handler(input, ctx);
+
+    expect(result.articles[0]?.title).toBe('\u03b2-catenin in Garc\u00eda-L\u00f3pez cohorts');
+    expect(result.articles[0]?.authors?.[0]?.lastName).toBe('Garc\u00eda-L\u00f3pez');
+    expect(result.articles[0]?.affiliations).toEqual([
+      'Uniwersytet Jagiello\u0144ski, Krak\u00f3w',
+    ]);
+    expect(result.articles[0]?.journalInfo?.pages).toBe('45\u201352');
+    expect(result.articles[0]?.pmcUrl).toContain('PMC24680');
+  });
+
   it('uses POST for large PMID batches', async () => {
     const pmids = Array.from({ length: 100 }, (_, index) => String(index + 1));
     mockEFetch.mockResolvedValue({
