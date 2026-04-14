@@ -4,14 +4,14 @@
  */
 
 import { JsonRpcErrorCode, McpError } from '@cyanheads/mcp-ts-core/errors';
-import { afterEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { NcbiApiClient } from '@/services/ncbi/api-client.js';
 import { NcbiService } from '@/services/ncbi/ncbi-service.js';
 import type { NcbiRequestQueue } from '@/services/ncbi/request-queue.js';
 import { NcbiResponseHandler } from '@/services/ncbi/response-handler.js';
 
 vi.mock('@cyanheads/mcp-ts-core/utils', () => ({
-  logger: { debug: vi.fn(), info: vi.fn(), warning: vi.fn(), error: vi.fn() },
+  logger: { debug: vi.fn(), info: vi.fn(), notice: vi.fn(), warning: vi.fn(), error: vi.fn() },
 }));
 
 function createMockService() {
@@ -393,6 +393,20 @@ describe('NcbiService.idConvert', () => {
 });
 
 describe('NcbiService retry behavior', () => {
+  let setTimeoutSpy: ReturnType<typeof vi.spyOn>;
+
+  beforeEach(() => {
+    // Execute retry backoff timers immediately so retry behavior stays deterministic.
+    setTimeoutSpy = vi.spyOn(globalThis, 'setTimeout').mockImplementation(((fn: () => void) => {
+      fn();
+      return 0;
+    }) as unknown as typeof setTimeout);
+  });
+
+  afterEach(() => {
+    setTimeoutSpy.mockRestore();
+  });
+
   function createRetryService(maxRetries: number) {
     const mockApiClient = {
       makeRequest: vi.fn(),
@@ -409,6 +423,28 @@ describe('NcbiService retry behavior', () => {
     const service = new NcbiService(mockApiClient, mockQueue, mockResponseHandler, maxRetries);
     return { service, mockApiClient, mockResponseHandler };
   }
+
+  it('succeeds on first attempt without retrying', async () => {
+    const { service, mockApiClient, mockResponseHandler } = createRetryService(3);
+    const makeRequest = mockApiClient.makeRequest as ReturnType<typeof vi.fn>;
+    const parseResponse = mockResponseHandler.parseAndHandleResponse as ReturnType<typeof vi.fn>;
+
+    makeRequest.mockResolvedValue('<xml/>');
+    parseResponse.mockReturnValue({
+      eSearchResult: {
+        Count: '1',
+        RetMax: '1',
+        RetStart: '0',
+        IdList: { Id: ['1'] },
+        QueryTranslation: '',
+      },
+    });
+
+    const result = await service.eSearch({ db: 'pubmed', term: 'test' });
+    expect(result.count).toBe(1);
+    expect(makeRequest).toHaveBeenCalledTimes(1);
+    expect(parseResponse).toHaveBeenCalledTimes(1);
+  });
 
   it('retries on ServiceUnavailable and eventually succeeds', async () => {
     const { service, mockApiClient, mockResponseHandler } = createRetryService(2);
@@ -431,6 +467,35 @@ describe('NcbiService retry behavior', () => {
     const result = await service.eSearch({ db: 'pubmed', term: 'test' });
     expect(result.count).toBe(1);
     expect(makeRequest).toHaveBeenCalledTimes(2);
+  });
+
+  it('retries on XML-level ServiceUnavailable and eventually succeeds', async () => {
+    const { service, mockApiClient, mockResponseHandler } = createRetryService(2);
+    const makeRequest = mockApiClient.makeRequest as ReturnType<typeof vi.fn>;
+    const parseResponse = mockResponseHandler.parseAndHandleResponse as ReturnType<typeof vi.fn>;
+
+    makeRequest.mockResolvedValue('<xml/>');
+    parseResponse
+      .mockImplementationOnce(() => {
+        throw new McpError(
+          JsonRpcErrorCode.ServiceUnavailable,
+          'NCBI API temporarily unavailable (connection reset)',
+        );
+      })
+      .mockReturnValueOnce({
+        eSearchResult: {
+          Count: '1',
+          RetMax: '1',
+          RetStart: '0',
+          IdList: { Id: ['1'] },
+          QueryTranslation: '',
+        },
+      });
+
+    const result = await service.eSearch({ db: 'pubmed', term: 'test' });
+    expect(result.count).toBe(1);
+    expect(makeRequest).toHaveBeenCalledTimes(2);
+    expect(parseResponse).toHaveBeenCalledTimes(2);
   });
 
   it('retries on RateLimited and eventually succeeds', async () => {
@@ -492,6 +557,18 @@ describe('NcbiService retry behavior', () => {
     expect(makeRequest).toHaveBeenCalledTimes(1);
   });
 
+  it('does not retry plain request errors', async () => {
+    const { service, mockApiClient, mockResponseHandler } = createRetryService(3);
+    const makeRequest = mockApiClient.makeRequest as ReturnType<typeof vi.fn>;
+    const parseResponse = mockResponseHandler.parseAndHandleResponse as ReturnType<typeof vi.fn>;
+
+    makeRequest.mockRejectedValueOnce(new Error('socket hang up'));
+
+    await expect(service.eSearch({ db: 'pubmed', term: 'test' })).rejects.toThrow('socket hang up');
+    expect(makeRequest).toHaveBeenCalledTimes(1);
+    expect(parseResponse).not.toHaveBeenCalled();
+  });
+
   it('does not retry plain response-handling errors', async () => {
     const { service, mockApiClient, mockResponseHandler } = createRetryService(3);
     const makeRequest = mockApiClient.makeRequest as ReturnType<typeof vi.fn>;
@@ -503,6 +580,21 @@ describe('NcbiService retry behavior', () => {
     await expect(service.eSearch({ db: 'pubmed', term: 'test' })).rejects.toThrow(
       /Entity expansion limit exceeded/,
     );
+    expect(makeRequest).toHaveBeenCalledTimes(1);
+    expect(parseResponse).toHaveBeenCalledTimes(1);
+  });
+
+  it('does not retry non-transient response McpErrors', async () => {
+    const { service, mockApiClient, mockResponseHandler } = createRetryService(3);
+    const makeRequest = mockApiClient.makeRequest as ReturnType<typeof vi.fn>;
+    const parseResponse = mockResponseHandler.parseAndHandleResponse as ReturnType<typeof vi.fn>;
+
+    makeRequest.mockResolvedValue('<bad>');
+    parseResponse.mockImplementation(() => {
+      throw new McpError(JsonRpcErrorCode.SerializationError, 'Invalid XML');
+    });
+
+    await expect(service.eSearch({ db: 'pubmed', term: 'test' })).rejects.toThrow('Invalid XML');
     expect(makeRequest).toHaveBeenCalledTimes(1);
     expect(parseResponse).toHaveBeenCalledTimes(1);
   });
@@ -519,6 +611,27 @@ describe('NcbiService retry behavior', () => {
     });
     // 1 initial + 2 retries = 3 total
     expect(makeRequest).toHaveBeenCalledTimes(3);
+  });
+
+  it('applies capped exponential backoff with jitter', async () => {
+    const { service, mockApiClient } = createRetryService(3);
+    const makeRequest = mockApiClient.makeRequest as ReturnType<typeof vi.fn>;
+
+    makeRequest.mockRejectedValue(new McpError(JsonRpcErrorCode.ServiceUnavailable, 'unavailable'));
+
+    await service.eSearch({ db: 'pubmed', term: 'test' }).catch(() => {});
+
+    const retryDelays = (setTimeoutSpy.mock.calls as [unknown, unknown][])
+      .map(([, ms]) => ms)
+      .filter((ms): ms is number => typeof ms === 'number' && ms >= 500);
+
+    expect(retryDelays).toHaveLength(3);
+    expect(retryDelays[0]).toBeGreaterThanOrEqual(750);
+    expect(retryDelays[0]).toBeLessThanOrEqual(1250);
+    expect(retryDelays[1]).toBeGreaterThanOrEqual(1500);
+    expect(retryDelays[1]).toBeLessThanOrEqual(2500);
+    expect(retryDelays[2]).toBeGreaterThanOrEqual(3000);
+    expect(retryDelays[2]).toBeLessThanOrEqual(5000);
   });
 });
 

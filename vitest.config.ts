@@ -8,7 +8,7 @@ export default mergeConfig(
       alias: { '@/': new URL('./src/', import.meta.url).pathname },
     },
     test: {
-      include: ['src/**/*.test.ts', 'tests/**/*.test.ts'],
+      include: ['tests/**/*.test.ts'],
     },
   }),
 );
