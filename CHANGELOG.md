@@ -4,6 +4,30 @@ All notable changes to this project will be documented in this file.
 
 ---
 
+## [2.3.6] - 2026-04-19
+
+### Updated
+
+- `@cyanheads/mcp-ts-core` to ^0.3.7
+- `fast-xml-parser` to ^5.7.1
+- `sanitize-html` to ^2.17.3
+- `@biomejs/biome` to ^2.4.12
+- `typescript` to ^6.0.3
+
+### Removed
+
+- **Dependency overrides**: Removed the `overrides` block from `package.json`. All nine pinned transitive deps (`hono`, `@hono/node-server`, `brace-expansion`, `express-rate-limit`, `path-to-regexp`, `picomatch`, `vite`, `yaml`, `lodash`) have since shipped patched versions upstream, making the overrides dead weight. `bun audit` remains clean.
+
+### Changed
+
+- **Tool descriptions**: Collapsed multi-line `+` string concatenation in `pubmed_search_articles`, `pubmed_fetch_fulltext`, and `pubmed_convert_ids` to single strings, aligning with the project's description convention and the updated `add-tool` / `design-mcp-server` skill guidance (single cohesive paragraph, no structural noise).
+
+### Docs
+
+- Synced `add-tool` (v1.4) and `design-mcp-server` (v2.3) skills from the framework — both now emphasize single-paragraph tool descriptions over bullet lists or blank-line-separated sections.
+
+---
+
 ## [2.3.5] - 2026-04-13
 
 ### Fixed
