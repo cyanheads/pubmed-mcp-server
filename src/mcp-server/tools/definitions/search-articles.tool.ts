@@ -44,9 +44,7 @@ const AppliedFiltersSchema = z.object({
 
 export const searchArticlesTool = tool('pubmed_search_articles', {
   description:
-    'Search PubMed with full query syntax, filters, and date ranges. Returns PMIDs and optional brief summaries. ' +
-    'Supports field-specific filters (author, journal, MeSH terms), common filters (language, species, free full text), ' +
-    'and pagination via offset for paging through large result sets.',
+    'Search PubMed with full query syntax, filters, and date ranges. Returns PMIDs and optional brief summaries. Supports field-specific filters (author, journal, MeSH terms), common filters (language, species, free full text), and pagination via offset for paging through large result sets.',
   annotations: { readOnlyHint: true, openWorldHint: true },
 
   input: z.object({

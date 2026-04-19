@@ -100,8 +100,7 @@ const SectionSchema = z.object({
 
 export const fetchFulltextTool = tool('pubmed_fetch_fulltext', {
   description:
-    'Fetch full-text articles from PubMed Central (PMC). Returns complete article body text, sections, and references for open-access articles. ' +
-    'Accepts PMC IDs directly or PubMed IDs (auto-resolved via ELink).',
+    'Fetch full-text articles from PubMed Central (PMC). Returns complete article body text, sections, and references for open-access articles. Accepts PMC IDs directly or PubMed IDs (auto-resolved via ELink).',
   annotations: { readOnlyHint: true, openWorldHint: true },
 
   input: z.object({

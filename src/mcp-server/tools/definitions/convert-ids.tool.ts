@@ -17,8 +17,7 @@ export const convertIdsTool = tool('pubmed_convert_ids', {
       .min(1)
       .max(50)
       .describe(
-        'Article identifiers to convert. All IDs must be the same type. ' +
-          'DOIs: "10.1093/nar/gks1195", PMIDs: "23193287", PMCIDs: "PMC3531190".',
+        'Article identifiers to convert. All IDs must be the same type. DOIs: "10.1093/nar/gks1195", PMIDs: "23193287", PMCIDs: "PMC3531190".',
       ),
     idtype: z
       .enum(['pmcid', 'pmid', 'doi'])
