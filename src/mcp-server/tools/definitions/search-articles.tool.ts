@@ -9,6 +9,38 @@ import { sanitization } from '@cyanheads/mcp-ts-core/utils';
 import { getNcbiService } from '@/services/ncbi/ncbi-service.js';
 import { extractBriefSummaries } from '@/services/ncbi/parsing/esummary-parser.js';
 
+/**
+ * Accepts empty strings (treated as "no filter" by the handler) or dates in
+ * YYYY, YYYY/MM, or YYYY/MM/DD form with `/`, `-`, or `.` separators.
+ * Catches obvious typos at the edge so they don't degrade silently to 0 results.
+ */
+const DATE_RE = /^$|^\d{4}([/\-.]\d{1,2}([/\-.]\d{1,2})?)?$/;
+
+/**
+ * Produces an optional human- and agent-readable hint for edge cases where
+ * bare empty arrays leave the caller without enough signal to recover:
+ * - No matches at all (suggest spell-check / removing filters)
+ * - Filters applied but nothing matched (suggest relaxing filters)
+ * - Pagination overshoot (offset ≥ totalFound)
+ */
+function buildNotice(args: {
+  totalFound: number;
+  pmidCount: number;
+  offset: number;
+  hasFilters: boolean;
+}): string | undefined {
+  const { totalFound, pmidCount, offset, hasFilters } = args;
+  if (totalFound === 0) {
+    return hasFilters
+      ? 'No results matched your query with the applied filters. Try removing filters (e.g. dateRange, publicationTypes, meshTerms), broadening dates, or verifying author/journal spelling.'
+      : 'No results matched your query. Try running pubmed_spell_check for a suggested correction or broaden the query.';
+  }
+  if (pmidCount === 0 && offset > 0 && offset >= totalFound) {
+    return `Offset ${offset} exceeds totalFound (${totalFound}). Reset offset to 0 or reduce it below ${totalFound} to page through results.`;
+  }
+  return;
+}
+
 const AppliedFiltersSchema = z.object({
   dateRange: z
     .object({
@@ -57,8 +89,14 @@ export const searchArticlesTool = tool('pubmed_search_articles', {
       .describe('Sort order: relevance (default), pub_date (newest first), author, or journal'),
     dateRange: z
       .object({
-        minDate: z.string().describe('Start date (YYYY/MM/DD, YYYY/MM, or YYYY)'),
-        maxDate: z.string().describe('End date (YYYY/MM/DD, YYYY/MM, or YYYY)'),
+        minDate: z
+          .string()
+          .regex(DATE_RE, 'Date must be YYYY, YYYY/MM, or YYYY/MM/DD (/, -, or . separators)')
+          .describe('Start date (YYYY/MM/DD, YYYY/MM, or YYYY)'),
+        maxDate: z
+          .string()
+          .regex(DATE_RE, 'Date must be YYYY, YYYY/MM, or YYYY/MM/DD (/, -, or . separators)')
+          .describe('End date (YYYY/MM/DD, YYYY/MM, or YYYY)'),
         dateType: z
           .enum(['pdat', 'mdat', 'edat'])
           .default('pdat')
@@ -69,10 +107,15 @@ export const searchArticlesTool = tool('pubmed_search_articles', {
     publicationTypes: z
       .array(z.string())
       .optional()
-      .describe('Filter by publication type (e.g. "Review", "Clinical Trial", "Meta-Analysis")'),
+      .describe(
+        'Filter by publication type (e.g. "Review", "Clinical Trial", "Meta-Analysis"). Multiple values are OR\'d — any match qualifies.',
+      ),
     author: z.string().optional().describe('Filter by author name (e.g. "Smith J")'),
     journal: z.string().optional().describe('Filter by journal name'),
-    meshTerms: z.array(z.string()).optional().describe('Filter by MeSH terms'),
+    meshTerms: z
+      .array(z.string())
+      .optional()
+      .describe("Filter by MeSH terms. Multiple terms are AND'd — all must match."),
     language: z.string().optional().describe('Filter by language (e.g. "english")'),
     hasAbstract: z.boolean().optional().describe('Only include articles with abstracts'),
     freeFullText: z.boolean().optional().describe('Only include free full text articles'),
@@ -113,6 +156,12 @@ export const searchArticlesTool = tool('pubmed_search_articles', {
       )
       .describe('Brief summaries (empty array when summaryCount is 0)'),
     searchUrl: z.string().describe('PubMed search URL'),
+    notice: z
+      .string()
+      .optional()
+      .describe(
+        'Optional guidance when results are empty or paging overshot — e.g. how to broaden filters or reset offset. Absent on successful result pages.',
+      ),
   }),
 
   async handler(input, ctx) {
@@ -242,6 +291,14 @@ export const searchArticlesTool = tool('pubmed_search_articles', {
       totalFound: esResult.count,
       pmidCount: pmids.length,
     });
+
+    const notice = buildNotice({
+      totalFound: esResult.count,
+      pmidCount: pmids.length,
+      offset: input.offset,
+      hasFilters: Object.keys(appliedFilters).length > 0,
+    });
+
     return {
       query: input.query,
       effectiveQuery,
@@ -251,6 +308,7 @@ export const searchArticlesTool = tool('pubmed_search_articles', {
       pmids,
       summaries,
       searchUrl,
+      ...(notice && { notice }),
     };
   },
 
@@ -294,6 +352,7 @@ export const searchArticlesTool = tool('pubmed_search_articles', {
         lines.push(`- **Species:** ${result.appliedFilters.species}`);
       }
     }
+    if (result.notice) lines.push(`\n> ${result.notice}`);
     if (result.pmids.length > 0) lines.push(`\n**PMIDs:** ${result.pmids.join(', ')}`);
     if (result.summaries?.length) {
       lines.push('\n### Summaries');

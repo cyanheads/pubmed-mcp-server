@@ -46,6 +46,33 @@ describe('searchArticlesTool', () => {
       expect(result.success).toBe(true);
     });
 
+    it.each([
+      ['2024', '2024'],
+      ['2024/01', '2024/12'],
+      ['2024/01/15', '2024/12/31'],
+      ['2024-01-15', '2024-12-31'],
+      ['2024.01.15', '2024.12.31'],
+    ])('accepts valid date formats: %s → %s', (minDate, maxDate) => {
+      const result = searchArticlesTool.input.safeParse({
+        query: 'cancer',
+        dateRange: { minDate, maxDate },
+      });
+      expect(result.success).toBe(true);
+    });
+
+    it.each([
+      ['not-a-date', '2024/12/31'],
+      ['2024', 'also-invalid'],
+      ['24', '2024'],
+      ['2024/13/45abc', '2024/12/31'],
+    ])('rejects invalid date formats: %s / %s', (minDate, maxDate) => {
+      const result = searchArticlesTool.input.safeParse({
+        query: 'cancer',
+        dateRange: { minDate, maxDate },
+      });
+      expect(result.success).toBe(false);
+    });
+
     it('accepts omitted dateRange', () => {
       const result = searchArticlesTool.input.safeParse({ query: 'cancer' });
       expect(result.success).toBe(true);
@@ -330,6 +357,80 @@ describe('searchArticlesTool', () => {
       version: '2.0',
       retmode: 'xml',
       id: '111,222',
+    });
+  });
+
+  describe('empty-result notice', () => {
+    it('suggests spell-check when totalFound is 0 and no filters applied', async () => {
+      mockESearch.mockResolvedValue({
+        count: 0,
+        idList: [],
+        retmax: 20,
+        retstart: 0,
+        queryTranslation: 'xyznothingmatches[All Fields]',
+      });
+
+      const ctx = createMockContext();
+      const input = searchArticlesTool.input.parse({ query: 'xyznothingmatches' });
+      const result = await searchArticlesTool.handler(input, ctx);
+
+      expect(result.notice).toBeDefined();
+      expect(result.notice).toContain('pubmed_spell_check');
+    });
+
+    it('suggests removing filters when totalFound is 0 with filters applied', async () => {
+      mockESearch.mockResolvedValue({
+        count: 0,
+        idList: [],
+        retmax: 20,
+        retstart: 0,
+        queryTranslation: 'cancer[All Fields] AND ...',
+      });
+
+      const ctx = createMockContext();
+      const input = searchArticlesTool.input.parse({
+        query: 'cancer',
+        author: 'Smith J',
+        meshTerms: ['Asthma'],
+      });
+      const result = await searchArticlesTool.handler(input, ctx);
+
+      expect(result.notice).toBeDefined();
+      expect(result.notice).toContain('filters');
+    });
+
+    it('warns when offset exceeds totalFound', async () => {
+      mockESearch.mockResolvedValue({
+        count: 100,
+        idList: [],
+        retmax: 20,
+        retstart: 200,
+        queryTranslation: 'cancer[All Fields]',
+      });
+
+      const ctx = createMockContext();
+      const input = searchArticlesTool.input.parse({ query: 'cancer', offset: 200 });
+      const result = await searchArticlesTool.handler(input, ctx);
+
+      expect(result.notice).toBeDefined();
+      expect(result.notice).toContain('Offset 200');
+      expect(result.notice).toContain('totalFound (100)');
+    });
+
+    it('omits notice on a successful result page', async () => {
+      mockESearch.mockResolvedValue({
+        count: 100,
+        idList: ['111', '222'],
+        retmax: 20,
+        retstart: 0,
+        queryTranslation: 'cancer[All Fields]',
+      });
+
+      const ctx = createMockContext();
+      const input = searchArticlesTool.input.parse({ query: 'cancer' });
+      const result = await searchArticlesTool.handler(input, ctx);
+
+      expect(result.notice).toBeUndefined();
     });
   });
 
