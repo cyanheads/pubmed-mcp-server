@@ -4,6 +4,38 @@ All notable changes to this project will be documented in this file.
 
 ---
 
+## [2.4.0] - 2026-04-20
+
+Extends the `content[]`-completeness work from #26 across the rest of the tool surface. Every tool that previously dropped schema fields from rendered markdown now renders what the LLM sees, and the shared PMID validation logic is deduplicated into a single schema. Also bumps `@cyanheads/mcp-ts-core` 0.4.1 → 0.5.0 and migrates the server config to the new `parseEnvConfig` helper for actionable startup errors.
+
+### Added
+
+- **Shared `pmidStringSchema` export** (`src/mcp-server/tools/definitions/_schemas.ts`): Consolidates the `z.string().regex(/^\d+$/, <message>)` guard that four tool files (`fetch-articles`, `fetch-fulltext`, `find-related`, `format-citations`) each duplicated inline. The message is unified so it reads naturally in both array and scalar contexts; a future refinement now updates one file instead of four.
+- **`pubmed_fetch_articles` — MeSH UIs in `content[]`** (`fetch-articles.tool.ts`): Rendered `descriptorUi` and `qualifierUi` inline with their names (`Breast Neoplasms [D001943] * (pathology [Q000473])`). The UI codes are canonical keys the LLM can hand directly to `pubmed_lookup_mesh` or use in `{ui}[MeSH Terms]` search filters without name-matching fuzziness. (#30)
+- **`pubmed_search_articles` — raw PMCID in summaries** (`search-articles.tool.ts`): Summary entries now include `**PMCID:** PMC12345` alongside the existing `**PMC:** {url}` line, so the LLM can copy-paste the canonical ID into downstream `pubmed_fetch_fulltext` or `pubmed_convert_ids` calls without string-parsing the URL. Parallel to the raw-PMCID fix #26 applied to `pubmed_fetch_articles`. (#31)
+
+### Fixed
+
+- **`pubmed_fetch_fulltext` — `format()` silently dropped schema fields from `content[]`** (`fetch-fulltext.tool.ts`): Parallel to #26 for `fetch_articles`. Authors now render as a bulleted list with full `givenNames lastName` — no more `first3 + "et al."` truncation that silently hid authors 4+ from the LLM. Collective authors render as `{name} (collective)`. The journal line now includes `ISSN {issn}` when present. Section and subsection headings are prefixed with their JATS `label` when present (`#### 1 Introduction`, `##### 1.1 Background`), aiding cross-reference navigation. Field-tested against `PMC9575052` — confirmed ISSN, section labels "1"/"2", and all four authors now appear in `content[]`. (#29)
+- **`pubmed_convert_ids` — error rows overwrote the DOI column** (`convert-ids.tool.ts`): The prior format stuffed `errmsg` into the DOI cell of the markdown table (`| id | - | - | Error: msg |`), so an LLM parsing by column index would read the error as a DOI, and any partial pmid/pmcid data accompanying an error was silently discarded. Split into two distinct sections: a success table and a separate `### Errors` bulleted list (`- **{id}:** {errmsg}`). The structuredContent shape is unchanged. (#32)
+- **`pubmed_fetch_articles` — grant with only `acronym` rendered `"NIH (NIH)"`** (`fetch-articles.tool.ts`): When a grant carried `acronym` without `grantId`, `format()` produced the acronym duplicated in both slots of the `"{grantId} ({acronym})"` template. Now renders `"NIH"` alone in that case; the happy-path `"R01 EY05922 (EY)"` rendering is unchanged. Not covered by any existing test — discovered during an audit of the surrounding code.
+
+### Changed
+
+- **Framework bump — `@cyanheads/mcp-ts-core` 0.4.1 → 0.5.0** (minor) (`package.json`, `bun.lock`): Brings `parseEnvConfig` (opt-in env-var-aware config errors), framework-level ZodError conversion at startup (printed as a banner rather than a JSON dump), and a rewritten `maintenance` skill (v1.2 → v1.3).
+- **`getServerConfig()` migrated to `parseEnvConfig`** (`src/config/server-config.ts`): Validation errors now name the actual environment variable at fault rather than the internal Zod path — `NCBI_REQUEST_DELAY_MS (requestDelayMs): expected number` instead of `requestDelayMs: expected number, received NaN`. Moved the dynamic "API-key-present → 100ms delay" logic out of inline env plumbing into a post-parse override so the Zod schema stays declarative. Added an `emptyAsUndefined` preprocessor on `apiKey` and `adminEmail` to preserve the empty-string-as-unset semantics the previous implementation provided via `env.VAR || undefined` — without it, `NCBI_ADMIN_EMAIL=` would fail `z.email()` validation instead of being treated as "no admin email configured". No runtime behavior change for existing consumers: same field names, same types, same defaults.
+- **`maintenance` skill synced to v1.3** (`skills/maintenance/SKILL.md`, plus agent-directory copies in `.claude/skills/` and `.agents/skills/`): Rewritten around a two-mode flow (Mode A — full update-investigate-adopt flow, Mode B — post-update review), delegates per-package release-note investigation to the `changelog` skill, and documents the two-phase skill sync (package → project → agent dirs).
+- **In-file consistency in `fetch-articles.tool.ts`**: Replaced a lone `a.affiliations.forEach((aff, i) => ...)` with `for (const [i, aff] of a.affiliations.entries())` to match the `for...of` convention used everywhere else in the same file.
+
+### References
+
+- Closes [#29](https://github.com/cyanheads/pubmed-mcp-server/issues/29) — `fetch_fulltext` format() dropped fields from `content[]` that were present in `structuredContent`.
+- Closes [#30](https://github.com/cyanheads/pubmed-mcp-server/issues/30) — `fetch_articles` MeSH `descriptorUi` / `qualifierUi` missing from `content[]`.
+- Closes [#31](https://github.com/cyanheads/pubmed-mcp-server/issues/31) — `search_articles` summaries rendered `pmcUrl` but not the raw `pmcId`.
+- Closes [#32](https://github.com/cyanheads/pubmed-mcp-server/issues/32) — `convert_ids` error rows reused the DOI column for `errmsg`, hiding any other fields.
+
+---
+
 ## [2.3.11] - 2026-04-20
 
 ### Fixed
