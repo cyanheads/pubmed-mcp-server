@@ -37,6 +37,15 @@ describe('findRelatedTool', () => {
     expect(() => findRelatedTool.input.parse({ pmid: 'abc' })).toThrow();
   });
 
+  it('rejects non-numeric PMIDs with an actionable error message (issue #27)', () => {
+    const parsed = findRelatedTool.input.safeParse({ pmid: 'abc' });
+    expect(parsed.success).toBe(false);
+    const message = parsed.error?.issues[0]?.message ?? '';
+    expect(message).toMatch(/PMID/);
+    expect(message).toMatch(/numeric/);
+    expect(message).toContain('13054692');
+  });
+
   it('returns empty when no related articles found', async () => {
     mockELink.mockResolvedValue({
       eLinkResult: [{ LinkSet: {} }],

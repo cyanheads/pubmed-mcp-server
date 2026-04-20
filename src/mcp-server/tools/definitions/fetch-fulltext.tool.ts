@@ -65,7 +65,14 @@ export const fetchFulltextTool = tool('pubmed_fetch_fulltext', {
       .optional()
       .describe('PMC IDs to fetch (e.g. ["PMC9575052"]). Provide this OR pmids, not both.'),
     pmids: z
-      .array(z.string().regex(/^\d+$/))
+      .array(
+        z
+          .string()
+          .regex(
+            /^\d+$/,
+            'PMID must be a numeric identifier (e.g. "13054692"). Remove any whitespace, commas, or non-digit characters — pass each PMID as a separate array element.',
+          ),
+      )
       .min(1)
       .max(10)
       .optional()

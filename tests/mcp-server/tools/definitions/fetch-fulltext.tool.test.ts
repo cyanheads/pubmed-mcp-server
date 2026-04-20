@@ -30,6 +30,15 @@ describe('fetchFulltextTool', () => {
     expect(input.pmcids).toEqual(['PMC1234567']);
   });
 
+  it('rejects non-numeric PMIDs with an actionable error message (issue #27)', () => {
+    const parsed = fetchFulltextTool.input.safeParse({ pmids: ['abc'] });
+    expect(parsed.success).toBe(false);
+    const message = parsed.error?.issues[0]?.message ?? '';
+    expect(message).toMatch(/PMID/);
+    expect(message).toMatch(/numeric/);
+    expect(message).toContain('13054692');
+  });
+
   it('throws when neither pmcids nor pmids provided', async () => {
     const ctx = createMockContext();
     const input = fetchFulltextTool.input.parse({});

@@ -29,6 +29,15 @@ describe('formatCitationsTool', () => {
     expect(() => formatCitationsTool.input.parse({ pmids: ['abc'] })).toThrow();
   });
 
+  it('rejects non-numeric PMIDs with an actionable error message (issue #27)', () => {
+    const parsed = formatCitationsTool.input.safeParse({ pmids: ['abc'] });
+    expect(parsed.success).toBe(false);
+    const message = parsed.error?.issues[0]?.message ?? '';
+    expect(message).toMatch(/PMID/);
+    expect(message).toMatch(/numeric/);
+    expect(message).toContain('13054692');
+  });
+
   it('throws when no articles found', async () => {
     mockEFetch.mockResolvedValue({ PubmedArticleSet: { PubmedArticle: [] } });
     const ctx = createMockContext();

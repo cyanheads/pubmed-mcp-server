@@ -417,4 +417,70 @@ describe('parseFullArticle', () => {
     const withoutMesh = parseFullArticle(xmlArticle, { includeMesh: false });
     expect(withoutMesh.meshTerms).toBeUndefined();
   });
+
+  describe('empty-array omission (issue #28)', () => {
+    const bareArticle: XmlPubmedArticle = {
+      MedlineCitation: {
+        PMID: { '#text': '13054692' },
+        Article: {
+          ArticleTitle: { '#text': 'Bare article.' },
+        },
+      } as unknown as XmlMedlineCitation,
+    };
+
+    it('omits publicationTypes when absent from XML', () => {
+      const result = parseFullArticle(bareArticle);
+      expect(result.publicationTypes).toBeUndefined();
+    });
+
+    it('omits keywords when absent from XML', () => {
+      const result = parseFullArticle(bareArticle);
+      expect(result.keywords).toBeUndefined();
+    });
+
+    it('omits articleDates when absent from XML', () => {
+      const result = parseFullArticle(bareArticle);
+      expect(result.articleDates).toBeUndefined();
+    });
+
+    it('omits meshTerms when includeMesh=true but XML has none', () => {
+      const result = parseFullArticle(bareArticle, { includeMesh: true });
+      expect(result.meshTerms).toBeUndefined();
+    });
+
+    it('omits grantList when includeGrants=true but XML has none', () => {
+      const result = parseFullArticle(bareArticle, { includeGrants: true });
+      expect(result.grantList).toBeUndefined();
+    });
+
+    it('still returns non-empty arrays normally', () => {
+      const populated: XmlPubmedArticle = {
+        MedlineCitation: {
+          PMID: { '#text': '1' },
+          Article: {
+            PublicationTypeList: {
+              PublicationType: { '#text': 'Journal Article' },
+            },
+            KeywordList: {
+              Keyword: [{ '#text': 'asthma' }],
+            },
+            ArticleDate: [
+              {
+                '@_DateType': 'Electronic',
+                Year: { '#text': '2023' },
+                Month: { '#text': '02' },
+                Day: { '#text': '22' },
+              },
+            ],
+          },
+        } as unknown as XmlMedlineCitation,
+      };
+      const result = parseFullArticle(populated, { includeMesh: true, includeGrants: true });
+      expect(result.publicationTypes).toEqual(['Journal Article']);
+      expect(result.keywords).toEqual(['asthma']);
+      expect(result.articleDates).toHaveLength(1);
+      expect(result.meshTerms).toBeUndefined();
+      expect(result.grantList).toBeUndefined();
+    });
+  });
 });

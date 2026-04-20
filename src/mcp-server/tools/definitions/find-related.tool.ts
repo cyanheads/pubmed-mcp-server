@@ -44,7 +44,13 @@ export const findRelatedTool = tool('pubmed_find_related', {
   annotations: { readOnlyHint: true, openWorldHint: true },
 
   input: z.object({
-    pmid: z.string().regex(/^\d+$/).describe('Source PubMed ID'),
+    pmid: z
+      .string()
+      .regex(
+        /^\d+$/,
+        'PMID must be a numeric identifier (e.g. "13054692"). Remove any whitespace or non-digit characters.',
+      )
+      .describe('Source PubMed ID'),
     relationship: z
       .enum(['similar', 'cited_by', 'references'])
       .default('similar')

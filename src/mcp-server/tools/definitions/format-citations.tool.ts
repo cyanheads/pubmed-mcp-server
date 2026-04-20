@@ -19,7 +19,18 @@ export const formatCitationsTool = tool('pubmed_format_citations', {
   annotations: { readOnlyHint: true, openWorldHint: true },
 
   input: z.object({
-    pmids: z.array(z.string().regex(/^\d+$/)).min(1).max(50).describe('PubMed IDs to cite'),
+    pmids: z
+      .array(
+        z
+          .string()
+          .regex(
+            /^\d+$/,
+            'PMID must be a numeric identifier (e.g. "13054692"). Remove any whitespace, commas, or non-digit characters — pass each PMID as a separate array element.',
+          ),
+      )
+      .min(1)
+      .max(50)
+      .describe('PubMed IDs to cite'),
     styles: z
       .array(z.enum(['apa', 'mla', 'bibtex', 'ris']))
       .default(['apa'])

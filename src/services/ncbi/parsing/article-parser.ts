@@ -407,6 +407,12 @@ export function parseFullArticle(
   const pmcId = extractPmcId(article, pubmedDataArticleIdList);
   const { authors, affiliations } = extractAuthors(article?.AuthorList);
 
+  const publicationTypes = extractPublicationTypes(article?.PublicationTypeList);
+  const keywords = extractKeywords(medlineCitation?.KeywordList ?? article?.KeywordList);
+  const articleDates = extractArticleDates(article);
+  const meshTerms = includeMesh ? extractMeshTerms(medlineCitation?.MeshHeadingList) : undefined;
+  const grantList = includeGrants ? extractGrants(article?.GrantList) : undefined;
+
   return {
     pmid: extractPmid(medlineCitation) ?? '',
     title: getText(article?.ArticleTitle),
@@ -414,12 +420,12 @@ export function parseFullArticle(
     ...(affiliations.length > 0 && { affiliations }),
     authors,
     ...(journalInfo !== undefined && { journalInfo }),
-    publicationTypes: extractPublicationTypes(article?.PublicationTypeList),
-    keywords: extractKeywords(medlineCitation?.KeywordList ?? article?.KeywordList),
-    ...(includeMesh && { meshTerms: extractMeshTerms(medlineCitation?.MeshHeadingList) }),
-    ...(includeGrants && { grantList: extractGrants(article?.GrantList) }),
+    ...(publicationTypes.length > 0 && { publicationTypes }),
+    ...(keywords.length > 0 && { keywords }),
+    ...(meshTerms !== undefined && meshTerms.length > 0 && { meshTerms }),
+    ...(grantList !== undefined && grantList.length > 0 && { grantList }),
     ...(doi !== undefined && { doi }),
     ...(pmcId !== undefined && { pmcId }),
-    articleDates: extractArticleDates(article),
+    ...(articleDates.length > 0 && { articleDates }),
   };
 }

@@ -16,7 +16,18 @@ export const fetchArticlesTool = tool('pubmed_fetch_articles', {
   annotations: { readOnlyHint: true, openWorldHint: true },
 
   input: z.object({
-    pmids: z.array(z.string().regex(/^\d+$/)).min(1).max(200).describe('PubMed IDs to fetch'),
+    pmids: z
+      .array(
+        z
+          .string()
+          .regex(
+            /^\d+$/,
+            'PMID must be a numeric identifier (e.g. "13054692"). Remove any whitespace, commas, or non-digit characters — pass each PMID as a separate array element.',
+          ),
+      )
+      .min(1)
+      .max(200)
+      .describe('PubMed IDs to fetch'),
     includeMesh: z.boolean().default(true).describe('Include MeSH terms'),
     includeGrants: z.boolean().default(false).describe('Include grant information'),
   }),
@@ -173,32 +184,56 @@ export const fetchArticlesTool = tool('pubmed_fetch_articles', {
 
   format: (result) => {
     const lines = [`## PubMed Articles`, `**Articles Returned:** ${result.totalReturned}`];
-    if (result.unavailablePmids?.length)
+    if (result.unavailablePmids?.length) {
       lines.push(`**Unavailable PMIDs:** ${result.unavailablePmids.join(', ')}`);
+    }
+    if (result.totalReturned === 0) {
+      lines.push(
+        `\n> No articles were returned. These PMIDs may be invalid, unpublished, or withdrawn. Try \`pubmed_search_articles\` to discover valid PMIDs.`,
+      );
+    }
     for (const a of result.articles) {
       lines.push(`\n### ${a.title ?? a.pmid ?? 'Unknown'}`);
+
       if (a.authors?.length) {
-        const fmtAuthor = (au: (typeof a.authors)[number]) =>
-          au.collectiveName ?? `${au.lastName ?? ''} ${au.initials ?? ''}`.trim();
-        const first3 = a.authors.slice(0, 3).map(fmtAuthor).join(', ');
-        const authorStr = a.authors.length > 3 ? `${first3}, et al.` : first3;
-        lines.push(`**Authors:** ${authorStr}`);
+        lines.push(`\n**Authors (${a.authors.length}):**`);
+        for (const au of a.authors) {
+          lines.push(`- ${formatAuthor(au)}`);
+        }
       }
-      if (a.affiliations?.length) lines.push(`**Affiliations:** ${a.affiliations.join('; ')}`);
+
+      if (a.affiliations?.length) {
+        lines.push(`\n**Affiliations:**`);
+        a.affiliations.forEach((aff, i) => {
+          lines.push(`${i + 1}. ${aff}`);
+        });
+      }
+
       const ji = a.journalInfo;
       if (ji) {
-        const parts = [ji.isoAbbreviation ?? ji.title];
-        const year = ji.publicationDate?.year;
-        if (year) parts.push(year);
+        const parts: string[] = [];
+        const journalName = ji.isoAbbreviation ?? ji.title;
+        if (journalName) parts.push(journalName);
+        const pubDateStr = formatPublicationDate(ji.publicationDate);
+        if (pubDateStr) parts.push(pubDateStr);
         if (ji.volume) parts.push(`**${ji.volume}**${ji.issue ? `(${ji.issue})` : ''}`);
         if (ji.pages) parts.push(ji.pages);
-        lines.push(`**Journal:** ${parts.filter(Boolean).join(', ')}`);
+        const issnPart = ji.eIssn ? `eISSN ${ji.eIssn}` : ji.issn ? `ISSN ${ji.issn}` : undefined;
+        if (issnPart) parts.push(issnPart);
+        if (parts.length) lines.push(`\n**Journal:** ${parts.join(', ')}`);
       }
+
       if (a.publicationTypes?.length) lines.push(`**Type:** ${a.publicationTypes.join(', ')}`);
       if (a.pmid) lines.push(`**PMID:** ${a.pmid}`);
       if (a.doi) lines.push(`**DOI:** ${a.doi}`);
+      if (a.pmcId) lines.push(`**PMCID:** ${a.pmcId}`);
       if (a.pubmedUrl) lines.push(`**PubMed:** ${a.pubmedUrl}`);
       if (a.pmcUrl) lines.push(`**PMC:** ${a.pmcUrl}`);
+
+      if (a.articleDates?.length) {
+        lines.push(`**Article Dates:** ${a.articleDates.map(formatArticleDate).join('; ')}`);
+      }
+
       if (a.abstractText) lines.push(`\n#### Abstract\n${a.abstractText}`);
       if (a.keywords?.length) lines.push(`\n**Keywords:** ${a.keywords.join(', ')}`);
       if (a.meshTerms?.length) {
@@ -214,7 +249,10 @@ export const fetchArticlesTool = tool('pubmed_fetch_articles', {
       if (a.grantList?.length) {
         lines.push(`\n#### Grants`);
         for (const g of a.grantList) {
-          const parts = [g.grantId, g.agency, g.country].filter(Boolean);
+          const grantId = g.acronym
+            ? `${g.grantId ?? g.acronym} (${g.acronym})`
+            : (g.grantId ?? '');
+          const parts = [grantId, g.agency, g.country].filter(Boolean);
           lines.push(`- ${parts.join(' — ')}`);
         }
       }
@@ -222,3 +260,57 @@ export const fetchArticlesTool = tool('pubmed_fetch_articles', {
     return [{ type: 'text', text: lines.join('\n') }];
   },
 });
+
+type FormattedAuthor = {
+  collectiveName?: string | undefined;
+  lastName?: string | undefined;
+  firstName?: string | undefined;
+  initials?: string | undefined;
+  affiliationIndices?: number[] | undefined;
+  orcid?: string | undefined;
+};
+
+function formatAuthor(au: FormattedAuthor): string {
+  if (au.collectiveName) return `${au.collectiveName} (collective)`;
+
+  let name: string;
+  if (au.firstName && au.lastName) {
+    name = `${au.firstName} ${au.lastName}`;
+  } else if (au.lastName) {
+    name = au.initials ? `${au.lastName} ${au.initials}` : au.lastName;
+  } else {
+    name = au.initials ?? 'Unknown';
+  }
+
+  const affIndices = au.affiliationIndices?.length
+    ? ` [${au.affiliationIndices.map((i) => i + 1).join(', ')}]`
+    : '';
+  const orcid = au.orcid ? ` · ORCID: ${au.orcid}` : '';
+  return `${name}${affIndices}${orcid}`;
+}
+
+type FormattedPubDate = {
+  year?: string | undefined;
+  month?: string | undefined;
+  day?: string | undefined;
+  medlineDate?: string | undefined;
+};
+
+function formatPublicationDate(pd: FormattedPubDate | undefined): string | undefined {
+  if (!pd) return;
+  if (pd.medlineDate) return pd.medlineDate;
+  if (!pd.year) return;
+  return [pd.year, pd.month, pd.day].filter(Boolean).join(' ');
+}
+
+type FormattedArticleDate = {
+  dateType?: string | undefined;
+  year?: string | undefined;
+  month?: string | undefined;
+  day?: string | undefined;
+};
+
+function formatArticleDate(ad: FormattedArticleDate): string {
+  const datePart = [ad.year, ad.month, ad.day].filter(Boolean).join('-');
+  return ad.dateType ? `${ad.dateType} ${datePart}` : datePart;
+}
