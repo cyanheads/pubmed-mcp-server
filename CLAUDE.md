@@ -104,30 +104,35 @@ export const databaseInfoResource = resource('pubmed://database/info', {
 
 ```ts
 // src/config/server-config.ts — lazy-parsed, separate from framework config
+import { z } from '@cyanheads/mcp-ts-core';
+import { parseEnvConfig } from '@cyanheads/mcp-ts-core/config';
+
+const emptyAsUndefined = (v: unknown) => (v === '' ? undefined : v);
+
 const ServerConfigSchema = z.object({
-  apiKey: z.string().optional().describe('NCBI API key'),
-  toolIdentifier: z.string().describe('NCBI tool identifier'),
-  adminEmail: z.email().optional().describe('Admin contact email'),
+  apiKey: z.preprocess(emptyAsUndefined, z.string().optional()).describe('NCBI API key'),
+  toolIdentifier: z.string().default('pubmed-mcp-server').describe('NCBI tool identifier'),
+  adminEmail: z.preprocess(emptyAsUndefined, z.email().optional()).describe('Admin contact email'),
   requestDelayMs: z.coerce.number().min(50).max(5000).default(334).describe('Request delay in ms'),
-  maxRetries: z.coerce.number().min(0).max(10).default(3).describe('Max retry attempts'),
+  maxRetries: z.coerce.number().min(0).max(10).default(6).describe('Max retry attempts'),
   timeoutMs: z.coerce.number().min(1000).max(120000).default(30000).describe('Request timeout in ms'),
 });
 
 let _config: z.infer<typeof ServerConfigSchema> | undefined;
 export function getServerConfig(): z.infer<typeof ServerConfigSchema> {
-  if (!_config) {
-    _config = ServerConfigSchema.parse({
-      apiKey: process.env.NCBI_API_KEY || undefined,
-      toolIdentifier: process.env.NCBI_TOOL_IDENTIFIER ?? 'pubmed-mcp-server',
-      adminEmail: process.env.NCBI_ADMIN_EMAIL || undefined,
-      requestDelayMs: process.env.NCBI_REQUEST_DELAY_MS,
-      maxRetries: process.env.NCBI_MAX_RETRIES,
-      timeoutMs: process.env.NCBI_TIMEOUT_MS,
-    });
-  }
+  _config ??= parseEnvConfig(ServerConfigSchema, {
+    apiKey: 'NCBI_API_KEY',
+    toolIdentifier: 'NCBI_TOOL_IDENTIFIER',
+    adminEmail: 'NCBI_ADMIN_EMAIL',
+    requestDelayMs: 'NCBI_REQUEST_DELAY_MS',
+    maxRetries: 'NCBI_MAX_RETRIES',
+    timeoutMs: 'NCBI_TIMEOUT_MS',
+  });
   return _config;
 }
 ```
+
+`parseEnvConfig` maps Zod schema paths → env var names so validation errors name the actual variable (`NCBI_REQUEST_DELAY_MS` must be a number) rather than the internal path (`requestDelayMs: expected number`).
 
 ---
 
