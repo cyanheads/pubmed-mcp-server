@@ -47,4 +47,4 @@ After `bun update @cyanheads/mcp-ts-core`, the package may have newer skills tha
 - [x] `bun run devcheck` passes
 - [x] `bun run test` passes
 
-Completed: 2026-04-09
+Completed: 2026-04-20
