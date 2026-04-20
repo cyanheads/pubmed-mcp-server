@@ -118,11 +118,28 @@ function sanitizeNcbiError(message: string): string {
 }
 
 /**
+ * Matches `<ERROR>` (uppercase, optionally with attributes) for a cheap
+ * pre-parse check in ordered mode. Intentionally case-sensitive: NCBI's
+ * E-utilities use `<ERROR>` for response-level failures, while PMC EFetch
+ * uses lowercase `<error id="…">` to flag a single unavailable PMCID. The
+ * latter is data (a missing ID), not a transport error, so it falls through
+ * to the caller which reports it via `unavailablePmcIds`.
+ */
+const ERROR_TAG_REGEX = /<ERROR(?:\s[^>]*)?>/;
+
+/**
  * Parses NCBI E-utility responses (XML, JSON, text) and checks for NCBI-specific
  * error structures embedded in response bodies.
  */
 export class NcbiResponseHandler {
   private readonly xmlParser: FastXmlParser;
+  /**
+   * Parser configured for JATS mixed content (PMC full-text). `preserveOrder`
+   * keeps document order so inline markup in `<p>`, `<abstract>`, `<title>`
+   * doesn't collapse into reordered text. `trimValues: false` retains spacing
+   * between text nodes and adjacent inline children.
+   */
+  private readonly orderedXmlParser: FastXmlParser;
 
   constructor() {
     this.xmlParser = new FastXmlParser({
@@ -133,6 +150,32 @@ export class NcbiResponseHandler {
       htmlEntities: true,
       isArray: (_name, jpath) => NCBI_ARRAY_JPATHS.has(jpath as string),
     });
+    this.orderedXmlParser = new FastXmlParser({
+      preserveOrder: true,
+      ignoreAttributes: false,
+      attributeNamePrefix: '@_',
+      parseTagValue: true,
+      trimValues: false,
+      processEntities: NCBI_PROCESS_ENTITIES_OPTIONS,
+      htmlEntities: true,
+    });
+  }
+
+  /**
+   * Extract a structured error from a parsed NCBI XML body and throw it as an
+   * `McpError`. Never returns.
+   */
+  private throwNcbiError(parsedXml: Record<string, unknown>, endpoint: string): never {
+    const errorMessages = this.extractNcbiErrorMessages(parsedXml);
+    logger.error('NCBI API returned an error in XML response.', {
+      endpoint,
+      errors: errorMessages,
+    } as never);
+    throw new McpError(
+      JsonRpcErrorCode.ServiceUnavailable,
+      `NCBI API Error: ${errorMessages.join('; ')}`,
+      { endpoint, ncbiErrors: errorMessages },
+    );
   }
 
   extractNcbiErrorMessages(parsedXml: Record<string, unknown>): string[] {
@@ -197,9 +240,20 @@ export class NcbiResponseHandler {
         });
       }
 
-      let parsedXml: Record<string, unknown>;
+      const useOrdered = options?.useOrderedParser ?? false;
+
+      if (useOrdered && ERROR_TAG_REGEX.test(responseText)) {
+        // Ordered parser lacks the named-key shape error extraction relies on.
+        // Errors are rare, so fall back to the regular parser just to surface a
+        // structured message.
+        const errorParsed = this.xmlParser.parse(responseText) as Record<string, unknown>;
+        this.throwNcbiError(errorParsed, endpoint);
+      }
+
+      const parser = useOrdered ? this.orderedXmlParser : this.xmlParser;
+      let parsedXml: unknown;
       try {
-        parsedXml = this.xmlParser.parse(responseText) as Record<string, unknown>;
+        parsedXml = parser.parse(responseText);
       } catch (error: unknown) {
         const parserError = error instanceof Error ? error.message : String(error);
         logger.error('Failed to parse validated XML response from NCBI.', {
@@ -217,19 +271,13 @@ export class NcbiResponseHandler {
           },
         );
       }
-      const hasError = ERROR_PATHS.some((path) => resolvePath(parsedXml, path) !== undefined);
 
-      if (hasError) {
-        const errorMessages = this.extractNcbiErrorMessages(parsedXml);
-        logger.error('NCBI API returned an error in XML response.', {
-          endpoint,
-          errors: errorMessages,
-        } as never);
-        throw new McpError(
-          JsonRpcErrorCode.ServiceUnavailable,
-          `NCBI API Error: ${errorMessages.join('; ')}`,
-          { endpoint, ncbiErrors: errorMessages },
-        );
+      if (!useOrdered) {
+        const parsedObj = parsedXml as Record<string, unknown>;
+        const hasError = ERROR_PATHS.some((path) => resolvePath(parsedObj, path) !== undefined);
+        if (hasError) {
+          this.throwNcbiError(parsedObj, endpoint);
+        }
       }
 
       if (options?.returnRawXml) {

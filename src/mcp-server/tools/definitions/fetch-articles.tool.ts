@@ -139,11 +139,8 @@ export const fetchArticlesTool = tool('pubmed_fetch_articles', {
       throw new Error('Invalid EFetch response from NCBI: missing PubmedArticleSet');
     }
 
-    if (!xmlData.PubmedArticleSet?.PubmedArticle) {
-      return { articles: [], totalReturned: 0 };
-    }
-
-    const xmlArticles = ensureArray(xmlData.PubmedArticleSet.PubmedArticle) as XmlPubmedArticle[];
+    const rawArticles = xmlData.PubmedArticleSet?.PubmedArticle;
+    const xmlArticles = rawArticles ? (ensureArray(rawArticles) as XmlPubmedArticle[]) : [];
     const articles = xmlArticles
       .filter((a) => a?.MedlineCitation)
       .map((a) => {

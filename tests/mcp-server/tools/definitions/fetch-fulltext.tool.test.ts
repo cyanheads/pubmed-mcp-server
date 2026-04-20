@@ -52,16 +52,16 @@ describe('fetchFulltextTool', () => {
       title: 'Full Text Article',
       sections: [{ title: 'Introduction', text: 'Body text.' }],
     });
-    mockEFetch.mockResolvedValue({
-      'pmc-articleset': {
-        article: [{ mock: 'article' }],
-      },
-    });
+    mockEFetch.mockResolvedValue([{ 'pmc-articleset': [{ article: [] }] }]);
 
     const ctx = createMockContext();
     const input = fetchFulltextTool.input.parse({ pmcids: ['PMC1234567'] });
     const result = await fetchFulltextTool.handler(input, ctx);
 
+    expect(mockEFetch).toHaveBeenCalledWith(
+      { db: 'pmc', id: '1234567', retmode: 'xml' },
+      { retmode: 'xml', useOrderedParser: true, usePost: false },
+    );
     expect(result.totalReturned).toBe(1);
     expect(result.articles[0]?.pmcId).toBe('PMC1234567');
     expect(result.articles[0]?.title).toBe('Full Text Article');
@@ -83,11 +83,7 @@ describe('fetchFulltextTool', () => {
       ],
       references: [{ label: '1', citation: 'Reference one' }],
     });
-    mockEFetch.mockResolvedValue({
-      'pmc-articleset': {
-        article: [{ mock: 'article' }],
-      },
-    });
+    mockEFetch.mockResolvedValue([{ 'pmc-articleset': [{ article: [] }] }]);
 
     const ctx = createMockContext();
     const input = fetchFulltextTool.input.parse({
@@ -99,7 +95,7 @@ describe('fetchFulltextTool', () => {
 
     expect(mockEFetch).toHaveBeenCalledWith(
       { db: 'pmc', id: '777', retmode: 'xml' },
-      { retmode: 'xml', usePost: false },
+      { retmode: 'xml', useOrderedParser: true, usePost: false },
     );
     expect(result.unavailablePmids).toEqual(['99999']);
     expect(result.articles[0]?.sections).toEqual([{ title: 'Introduction', text: 'Intro text.' }]);
@@ -113,11 +109,7 @@ describe('fetchFulltextTool', () => {
       title: 'Direct PMC Article',
       sections: [],
     });
-    mockEFetch.mockResolvedValue({
-      'pmc-articleset': {
-        article: [{ mock: 'article' }],
-      },
-    });
+    mockEFetch.mockResolvedValue([{ 'pmc-articleset': [{ article: [] }] }]);
 
     const ctx = createMockContext();
     const input = fetchFulltextTool.input.parse({
@@ -127,9 +119,21 @@ describe('fetchFulltextTool', () => {
 
     expect(mockEFetch).toHaveBeenCalledWith(
       { db: 'pmc', id: '111,222,333,444,555,666', retmode: 'xml' },
-      { retmode: 'xml', usePost: true },
+      { retmode: 'xml', useOrderedParser: true, usePost: true },
     );
     expect(result.unavailablePmcIds).toEqual(['PMC222', 'PMC333', 'PMC444', 'PMC555', 'PMC666']);
+  });
+
+  it('reports all PMC IDs as unavailable when the article set is empty (issue #20)', async () => {
+    mockEFetch.mockResolvedValue([{ 'pmc-articleset': [] }]);
+
+    const ctx = createMockContext();
+    const input = fetchFulltextTool.input.parse({ pmcids: ['PMC9999999'] });
+    const result = await fetchFulltextTool.handler(input, ctx);
+
+    expect(result.totalReturned).toBe(0);
+    expect(result.articles).toEqual([]);
+    expect(result.unavailablePmcIds).toEqual(['PMC9999999']);
   });
 
   it('returns empty when no PMIDs resolve', async () => {
@@ -143,7 +147,7 @@ describe('fetchFulltextTool', () => {
   });
 
   it('throws when PMC EFetch response is missing the article set', async () => {
-    mockEFetch.mockResolvedValue({});
+    mockEFetch.mockResolvedValue([]);
 
     const ctx = createMockContext();
     const input = fetchFulltextTool.input.parse({ pmcids: ['PMC1'] });

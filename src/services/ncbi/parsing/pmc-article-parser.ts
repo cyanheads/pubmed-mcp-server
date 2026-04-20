@@ -1,6 +1,10 @@
 /**
  * @fileoverview Parser for PMC full-text articles in JATS XML format.
- * Extracts metadata, body sections, and references from PMC EFetch responses.
+ * Consumes the ordered tree shape from fast-xml-parser's `preserveOrder: true`
+ * mode (see `pmc-xml-helpers.ts`) so that mixed-content elements — `<p>`,
+ * `<abstract>`, `<title>` with inline `<italic>`, `<xref>`, `<sup>`, etc. —
+ * read back in document order. Parsing in the default object shape scrambles
+ * inline children and drops body sections for markup-heavy articles.
  * @module src/services/ncbi/parsing/pmc-article-parser
  */
 
@@ -10,159 +14,95 @@ import type {
   ParsedPmcJournal,
   ParsedPmcReference,
   ParsedPmcSection,
-  XmlJatsAff,
-  XmlJatsArticle,
-  XmlJatsArticleId,
-  XmlJatsArticleMeta,
-  XmlJatsBack,
-  XmlJatsBody,
-  XmlJatsContrib,
-  XmlJatsContribGroup,
-  XmlJatsJournalMeta,
-  XmlJatsKwdGroup,
-  XmlJatsPubDate,
-  XmlJatsRef,
-  XmlJatsSection,
 } from '../types.js';
-import { ensureArray, getAttribute, getText } from './xml-helpers.js';
+import {
+  attrOf,
+  childrenOf,
+  findAll,
+  findOne,
+  type JatsNode,
+  tagNameOf,
+  textContent,
+} from './pmc-xml-helpers.js';
 
-// ─── Text Extraction ────────────────────────────────────────────────────────
+// ─── Article IDs ────────────────────────────────────────────────────────────
 
-/**
- * Recursively extracts plain text content from a JATS XML node.
- * Handles mixed content where text and child elements are interleaved.
- * fast-xml-parser with `preserveOrder: false` stores text in `#text` and
- * child elements as named properties — document order is lost, but all
- * text content is preserved.
- */
-export function extractTextContent(node: unknown): string {
-  if (node == null) return '';
-  if (typeof node === 'string') return node;
-  if (typeof node === 'number' || typeof node === 'boolean') return String(node);
-
-  if (Array.isArray(node)) {
-    return node.map(extractTextContent).filter(Boolean).join(' ');
-  }
-
-  if (typeof node === 'object') {
-    const obj = node as Record<string, unknown>;
-    const parts: string[] = [];
-
-    // Collect #text from this node
-    if (obj['#text'] !== undefined) {
-      const text = typeof obj['#text'] === 'string' ? obj['#text'] : String(obj['#text']);
-      if (text) parts.push(text);
-    }
-
-    // Recurse into child elements (skip attributes prefixed with @_)
-    for (const key of Object.keys(obj)) {
-      if (key === '#text' || key.startsWith('@_')) continue;
-      const childText = extractTextContent(obj[key]);
-      if (childText) parts.push(childText);
-    }
-
-    return parts.join(' ').replace(/\s+/g, ' ').trim();
-  }
-
-  return '';
-}
-
-// ─── Article ID Extraction ──────────────────────────────────────────────────
-
-/**
- * Extracts a specific article ID by pub-id-type from article-meta.
- */
 function extractArticleId(
-  articleIds: XmlJatsArticleId | XmlJatsArticleId[] | undefined,
+  articleMeta: JatsNode | undefined,
   pubIdType: string,
 ): string | undefined {
-  for (const id of ensureArray(articleIds)) {
-    if (getAttribute(id, 'pub-id-type') === pubIdType) {
-      const val = id['#text'];
-      if (val !== undefined) return String(val);
+  if (!articleMeta) return;
+  for (const idNode of findAll(articleMeta, 'article-id')) {
+    if (attrOf(idNode, 'pub-id-type') === pubIdType) {
+      return textContent(idNode) || undefined;
     }
   }
   return;
 }
 
-// ─── Author Extraction ──────────────────────────────────────────────────────
+// ─── Authors & Affiliations ─────────────────────────────────────────────────
 
-/**
- * Extracts authors from JATS contrib-group elements.
- * Only includes contributors with contrib-type="author".
- */
-export function extractJatsAuthors(
-  contribGroups: XmlJatsContribGroup | XmlJatsContribGroup[] | undefined,
-): ParsedPmcAuthor[] {
-  if (!contribGroups) return [];
+/** Extract authors from a single `<contrib-group>` node. Non-author contributors are skipped. */
+export function extractJatsAuthors(contribGroup: JatsNode | undefined): ParsedPmcAuthor[] {
+  if (!contribGroup) return [];
 
   const authors: ParsedPmcAuthor[] = [];
-  for (const group of ensureArray(contribGroups)) {
-    for (const contrib of ensureArray(group.contrib) as XmlJatsContrib[]) {
-      // Only include authors (skip editors, etc.)
-      if (contrib['@_contrib-type'] && contrib['@_contrib-type'] !== 'author') continue;
+  for (const contrib of findAll(contribGroup, 'contrib')) {
+    const contribType = attrOf(contrib, 'contrib-type');
+    if (contribType && contribType !== 'author') continue;
 
-      const collectiveName = extractTextContent(contrib.collab);
-      if (collectiveName) {
-        authors.push({ collectiveName });
-        continue;
-      }
+    const collab = findOne(contrib, 'collab');
+    if (collab) {
+      const collectiveName = textContent(collab);
+      if (collectiveName) authors.push({ collectiveName });
+      continue;
+    }
 
-      if (contrib.name) {
-        const lastName = extractTextContent(contrib.name.surname) || undefined;
-        const givenNames = extractTextContent(contrib.name['given-names']) || undefined;
-        authors.push({
-          ...(lastName && { lastName }),
-          ...(givenNames && { givenNames }),
-        });
-      }
+    const nameNode = findOne(contrib, 'name');
+    if (nameNode) {
+      const lastName = textContent(findOne(nameNode, 'surname')) || undefined;
+      const givenNames = textContent(findOne(nameNode, 'given-names')) || undefined;
+      authors.push({
+        ...(lastName && { lastName }),
+        ...(givenNames && { givenNames }),
+      });
     }
   }
 
   return authors;
 }
 
-// ─── Affiliation Extraction ─────────────────────────────────────────────────
-
-/**
- * Extracts affiliation strings from JATS aff elements.
- */
-function extractAffiliations(affs: XmlJatsAff | XmlJatsAff[] | undefined): string[] {
-  if (!affs) return [];
+function extractAffiliations(articleMeta: JatsNode | undefined): string[] {
+  if (!articleMeta) return [];
   const result: string[] = [];
-  for (const aff of ensureArray(affs)) {
-    const text = extractTextContent(aff);
+  for (const aff of findAll(articleMeta, 'aff')) {
+    const text = textContent(aff);
     if (text) result.push(text);
   }
   return result;
 }
 
-// ─── Journal Extraction ─────────────────────────────────────────────────────
+// ─── Journal & Publication Date ─────────────────────────────────────────────
 
-/**
- * Extracts journal metadata from JATS journal-meta.
- */
 function extractJournal(
-  journalMeta: XmlJatsJournalMeta | undefined,
-  articleMeta: XmlJatsArticleMeta | undefined,
+  journalMeta: JatsNode | undefined,
+  articleMeta: JatsNode | undefined,
 ): ParsedPmcJournal | undefined {
   if (!journalMeta) return;
 
+  const titleGroup = findOne(journalMeta, 'journal-title-group');
   const title =
-    extractTextContent(journalMeta['journal-title-group']?.['journal-title']) ||
-    extractTextContent(journalMeta['journal-title']) ||
+    textContent(findOne(titleGroup, 'journal-title')) ||
+    textContent(findOne(journalMeta, 'journal-title')) ||
     undefined;
 
-  const issns = ensureArray(journalMeta.issn);
-  const issn = issns.length > 0 ? getText(issns[0]) || undefined : undefined;
+  const firstIssn = findAll(journalMeta, 'issn')[0];
+  const issn = firstIssn ? textContent(firstIssn) || undefined : undefined;
 
-  const volume = articleMeta?.volume
-    ? extractTextContent(articleMeta.volume) || undefined
-    : undefined;
-  const issue = articleMeta?.issue ? extractTextContent(articleMeta.issue) || undefined : undefined;
-
-  const fpage = articleMeta?.fpage ? extractTextContent(articleMeta.fpage) : undefined;
-  const lpage = articleMeta?.lpage ? extractTextContent(articleMeta.lpage) : undefined;
+  const volume = articleMeta ? textContent(findOne(articleMeta, 'volume')) || undefined : undefined;
+  const issue = articleMeta ? textContent(findOne(articleMeta, 'issue')) || undefined : undefined;
+  const fpage = articleMeta ? textContent(findOne(articleMeta, 'fpage')) : '';
+  const lpage = articleMeta ? textContent(findOne(articleMeta, 'lpage')) : '';
   const pages = fpage && lpage ? `${fpage}-${lpage}` : fpage || undefined;
 
   if (!title && !issn && !volume && !issue && !pages) return;
@@ -176,32 +116,27 @@ function extractJournal(
   };
 }
 
-// ─── Publication Date Extraction ────────────────────────────────────────────
-
-/**
- * Extracts publication date from JATS pub-date elements.
- * Prefers epub date, falls back to ppub, then any available.
- */
 function extractPubDate(
-  pubDates: XmlJatsPubDate | XmlJatsPubDate[] | undefined,
+  articleMeta: JatsNode | undefined,
 ): { day?: string; month?: string; year?: string } | undefined {
-  if (!pubDates) return;
+  if (!articleMeta) return;
 
-  const dates = ensureArray(pubDates);
-  // Prefer epub, then ppub, then first available
+  const dates = findAll(articleMeta, 'pub-date');
+  if (dates.length === 0) return;
+
   const preferred =
-    dates.find((d) => getAttribute(d, 'pub-type') === 'epub') ??
-    dates.find((d) => getAttribute(d, 'pub-type') === 'ppub') ??
-    dates.find((d) => getAttribute(d, 'date-type') === 'pub') ??
+    dates.find((d) => attrOf(d, 'pub-type') === 'epub') ??
+    dates.find((d) => attrOf(d, 'pub-type') === 'ppub') ??
+    dates.find((d) => attrOf(d, 'date-type') === 'pub') ??
     dates[0];
 
   if (!preferred) return;
 
-  const year = extractTextContent(preferred.year) || undefined;
-  const month = extractTextContent(preferred.month) || undefined;
-  const day = extractTextContent(preferred.day) || undefined;
-
+  const year = textContent(findOne(preferred, 'year')) || undefined;
   if (!year) return;
+
+  const month = textContent(findOne(preferred, 'month')) || undefined;
+  const day = textContent(findOne(preferred, 'day')) || undefined;
   return {
     year,
     ...(month && { month }),
@@ -209,144 +144,131 @@ function extractPubDate(
   };
 }
 
-// ─── Abstract Extraction ────────────────────────────────────────────────────
+// ─── Abstract & Keywords ────────────────────────────────────────────────────
 
-/**
- * Extracts abstract text from JATS abstract element.
- * Handles both simple and structured abstracts (with titled sections).
- */
-function extractAbstract(abstractNode: unknown): string | undefined {
+function extractAbstract(articleMeta: JatsNode | undefined): string | undefined {
+  if (!articleMeta) return;
+  const abstractNode = findOne(articleMeta, 'abstract');
   if (!abstractNode) return;
 
-  // Structured abstract with sections
-  if (typeof abstractNode === 'object' && !Array.isArray(abstractNode)) {
-    const obj = abstractNode as Record<string, unknown>;
-
-    // Check for sectioned abstract (<abstract><sec><title>...<p>...</sec></abstract>)
-    if (obj.sec) {
-      const sections = ensureArray(obj.sec);
-      const parts: string[] = [];
-      for (const sec of sections) {
-        const secObj = sec as Record<string, unknown>;
-        const title = extractTextContent(secObj.title);
-        const text = extractTextContent(secObj.p);
-        if (title && text) {
-          parts.push(`${title}: ${text}`);
-        } else if (text) {
-          parts.push(text);
-        }
-      }
-      const result = parts.join('\n\n').trim();
-      return result || undefined;
+  const sections = findAll(abstractNode, 'sec');
+  if (sections.length > 0) {
+    const parts: string[] = [];
+    for (const sec of sections) {
+      const title = textContent(findOne(sec, 'title'));
+      const text = findAll(sec, 'p')
+        .map((p) => textContent(p))
+        .filter(Boolean)
+        .join(' ');
+      if (title && text) parts.push(`${title}: ${text}`);
+      else if (text) parts.push(text);
     }
-
-    // Simple abstract with just <p> elements
-    if (obj.p) {
-      const text = extractTextContent(obj.p);
-      return text || undefined;
-    }
+    return parts.join('\n\n').trim() || undefined;
   }
 
-  // Fallback: extract all text
-  const text = extractTextContent(abstractNode);
-  return text || undefined;
+  const paragraphs = findAll(abstractNode, 'p');
+  if (paragraphs.length > 0) {
+    return (
+      paragraphs
+        .map((p) => textContent(p))
+        .filter(Boolean)
+        .join(' ') || undefined
+    );
+  }
+
+  return textContent(abstractNode) || undefined;
 }
 
-// ─── Keywords Extraction ────────────────────────────────────────────────────
-
-/**
- * Extracts keywords from JATS kwd-group elements.
- */
-function extractKeywords(kwdGroups: XmlJatsKwdGroup | XmlJatsKwdGroup[] | undefined): string[] {
-  if (!kwdGroups) return [];
-
+function extractKeywords(articleMeta: JatsNode | undefined): string[] {
+  if (!articleMeta) return [];
   const keywords: string[] = [];
-  for (const group of ensureArray(kwdGroups)) {
-    for (const kwd of ensureArray(group.kwd)) {
-      const text = extractTextContent(kwd);
+  for (const group of findAll(articleMeta, 'kwd-group')) {
+    for (const kwd of findAll(group, 'kwd')) {
+      const text = textContent(kwd);
       if (text) keywords.push(text);
     }
   }
   return keywords;
 }
 
-// ─── Body Section Extraction ────────────────────────────────────────────────
+// ─── Body Sections ──────────────────────────────────────────────────────────
 
 /**
- * Recursively extracts body sections from JATS sec elements.
+ * Extract body sections from a `<body>` node, walking children in document order.
+ * Consecutive bare `<p>` siblings are collected into an untitled section so
+ * articles with mixed structure (direct paragraphs + trailing `<sec>`, common
+ * in manuscript-submitted PMC deposits) preserve their main text.
  */
-export function extractBodySections(body: XmlJatsBody | undefined): ParsedPmcSection[] {
+export function extractBodySections(body: JatsNode | undefined): ParsedPmcSection[] {
   if (!body) return [];
 
-  // Some articles have paragraphs directly in body without section wrappers
-  if (!body.sec) {
-    if (body.p) {
-      const text = extractTextContent(body.p);
-      return text ? [{ text }] : [];
-    }
-    return [];
-  }
+  const sections: ParsedPmcSection[] = [];
+  let pendingParagraphs: string[] = [];
 
-  return ensureArray(body.sec)
-    .map(extractSection)
-    .filter((s): s is ParsedPmcSection => s !== null);
+  const flushPending = () => {
+    if (pendingParagraphs.length > 0) {
+      sections.push({ text: pendingParagraphs.join('\n\n') });
+      pendingParagraphs = [];
+    }
+  };
+
+  for (const child of childrenOf(body)) {
+    const tag = tagNameOf(child);
+    if (tag === 'p') {
+      const text = textContent(child);
+      if (text) pendingParagraphs.push(text);
+    } else if (tag === 'sec') {
+      flushPending();
+      const section = extractSection(child);
+      if (section) sections.push(section);
+    }
+  }
+  flushPending();
+
+  return sections;
 }
 
-/**
- * Extracts a single JATS section, recursing into subsections.
- */
-function extractSection(sec: XmlJatsSection): ParsedPmcSection | null {
-  const title = extractTextContent(sec.title) || undefined;
-  const label = extractTextContent(sec.label) || undefined;
+function extractSection(sec: JatsNode): ParsedPmcSection | null {
+  const title = textContent(findOne(sec, 'title')) || undefined;
+  const label = textContent(findOne(sec, 'label')) || undefined;
 
-  // Collect text from paragraphs
-  const paragraphs = ensureArray(sec.p);
-  const textParts: string[] = [];
-  for (const p of paragraphs) {
-    const text = extractTextContent(p);
-    if (text) textParts.push(text);
-  }
+  const paragraphs = findAll(sec, 'p');
+  const textParts = paragraphs.map((p) => textContent(p)).filter(Boolean);
 
-  // Recurse into subsections
-  const subsections = sec.sec
-    ? ensureArray(sec.sec)
-        .map(extractSection)
-        .filter((s): s is ParsedPmcSection => s !== null)
-    : undefined;
+  const subsections = findAll(sec, 'sec')
+    .map(extractSection)
+    .filter((s): s is ParsedPmcSection => s !== null);
 
   const text = textParts.join('\n\n');
-
-  // Skip empty sections with no subsections
-  if (!text && (!subsections || subsections.length === 0)) return null;
+  if (!text && subsections.length === 0) return null;
 
   return {
     ...(title && { title }),
     ...(label && { label }),
     text,
-    ...(subsections && subsections.length > 0 && { subsections }),
+    ...(subsections.length > 0 && { subsections }),
   };
 }
 
-// ─── Reference Extraction ───────────────────────────────────────────────────
+// ─── References ─────────────────────────────────────────────────────────────
 
-/**
- * Extracts references from JATS back matter ref-list.
- */
-export function extractReferences(back: XmlJatsBack | undefined): ParsedPmcReference[] {
-  if (!back?.['ref-list']?.ref) return [];
+/** Extract references from a `<back>` node. Prefers mixed-citation over element-citation. */
+export function extractReferences(back: JatsNode | undefined): ParsedPmcReference[] {
+  if (!back) return [];
+  const refList = findOne(back, 'ref-list');
+  if (!refList) return [];
 
-  const refs = ensureArray(back['ref-list'].ref) as XmlJatsRef[];
   const results: ParsedPmcReference[] = [];
-
-  for (const ref of refs) {
-    // Try mixed-citation first, then element-citation
-    const citationNode = ref['mixed-citation'] ?? ref['element-citation'];
-    const citation = extractTextContent(citationNode);
+  for (const ref of findAll(refList, 'ref')) {
+    const citationNode = findOne(ref, 'mixed-citation') ?? findOne(ref, 'element-citation');
+    if (!citationNode) continue;
+    const citation = textContent(citationNode);
     if (!citation) continue;
 
-    const label = ref.label ? extractTextContent(ref.label) || undefined : undefined;
+    const id = attrOf(ref, 'id');
+    const label = textContent(findOne(ref, 'label')) || undefined;
     results.push({
-      ...(ref['@_id'] && { id: ref['@_id'] }),
+      ...(id && { id }),
       ...(label && { label }),
       citation,
     });
@@ -358,36 +280,37 @@ export function extractReferences(back: XmlJatsBack | undefined): ParsedPmcRefer
 // ─── Main Parser ────────────────────────────────────────────────────────────
 
 /**
- * Parses a JATS XML article (from PMC EFetch) into a structured ParsedPmcArticle.
- * @param xmlArticle - The parsed JATS article object from fast-xml-parser.
- * @returns A fully parsed PMC article with metadata, body sections, and optional references.
+ * Parse a single JATS `<article>` node (from PMC EFetch via the ordered parser)
+ * into a structured `ParsedPmcArticle`. The input node is the element wrapper
+ * itself — `{ article: [...], ':@': { '@_article-type': ... } }` — not the
+ * outer `<pmc-articleset>`.
  */
-export function parsePmcArticle(xmlArticle: XmlJatsArticle): ParsedPmcArticle {
-  const front = xmlArticle.front;
-  const articleMeta = front?.['article-meta'];
-  const journalMeta = front?.['journal-meta'];
+export function parsePmcArticle(articleNode: JatsNode): ParsedPmcArticle {
+  const front = findOne(articleNode, 'front');
+  const articleMeta = findOne(front, 'article-meta');
+  const journalMeta = findOne(front, 'journal-meta');
+  const body = findOne(articleNode, 'body');
+  const back = findOne(articleNode, 'back');
 
-  const articleIds = articleMeta?.['article-id'];
   const pmcId =
-    extractArticleId(articleIds, 'pmcid') ?? extractArticleId(articleIds, 'pmc-uid') ?? '';
-  const pmid = extractArticleId(articleIds, 'pmid');
-  const doi = extractArticleId(articleIds, 'doi');
+    extractArticleId(articleMeta, 'pmcid') ?? extractArticleId(articleMeta, 'pmc-uid') ?? '';
+  const pmid = extractArticleId(articleMeta, 'pmid');
+  const doi = extractArticleId(articleMeta, 'doi');
 
-  const title = articleMeta?.['title-group']
-    ? extractTextContent(articleMeta['title-group']['article-title']) || undefined
-    : undefined;
+  const titleGroup = findOne(articleMeta, 'title-group');
+  const title = textContent(findOne(titleGroup, 'article-title')) || undefined;
 
-  const authors = extractJatsAuthors(articleMeta?.['contrib-group']);
-  const affiliations = extractAffiliations(articleMeta?.aff);
+  const authors = collectAuthors(articleMeta);
+  const affiliations = extractAffiliations(articleMeta);
   const journal = extractJournal(journalMeta, articleMeta);
-  const publicationDate = extractPubDate(articleMeta?.['pub-date']);
-  const abstract = extractAbstract(articleMeta?.abstract);
-  const keywords = extractKeywords(articleMeta?.['kwd-group']);
-  const sections = extractBodySections(xmlArticle.body);
-  const references = extractReferences(xmlArticle.back);
+  const publicationDate = extractPubDate(articleMeta);
+  const abstract = extractAbstract(articleMeta);
+  const keywords = extractKeywords(articleMeta);
+  const sections = extractBodySections(body);
+  const references = extractReferences(back);
 
-  // Normalize PMCID — ensure it has the PMC prefix (skip if empty)
   const normalizedPmcId = !pmcId ? '' : pmcId.startsWith('PMC') ? pmcId : `PMC${pmcId}`;
+  const articleType = attrOf(articleNode, 'article-type');
 
   return {
     pmcId: normalizedPmcId,
@@ -402,8 +325,18 @@ export function parsePmcArticle(xmlArticle: XmlJatsArticle): ParsedPmcArticle {
     ...(keywords.length > 0 && { keywords }),
     sections,
     ...(references.length > 0 && { references }),
-    ...(xmlArticle['@_article-type'] && { articleType: xmlArticle['@_article-type'] }),
+    ...(articleType && { articleType }),
     pmcUrl: `https://www.ncbi.nlm.nih.gov/pmc/articles/${normalizedPmcId}/`,
     ...(pmid && { pubmedUrl: `https://pubmed.ncbi.nlm.nih.gov/${pmid}/` }),
   };
+}
+
+/** Collect authors across every `<contrib-group>` under `<article-meta>`. */
+function collectAuthors(articleMeta: JatsNode | undefined): ParsedPmcAuthor[] {
+  if (!articleMeta) return [];
+  const result: ParsedPmcAuthor[] = [];
+  for (const group of findAll(articleMeta, 'contrib-group')) {
+    result.push(...extractJatsAuthors(group));
+  }
+  return result;
 }

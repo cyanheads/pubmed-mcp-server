@@ -7,8 +7,8 @@
 import { tool, z } from '@cyanheads/mcp-ts-core';
 import { getNcbiService } from '@/services/ncbi/ncbi-service.js';
 import { parsePmcArticle } from '@/services/ncbi/parsing/pmc-article-parser.js';
-import { ensureArray } from '@/services/ncbi/parsing/xml-helpers.js';
-import type { ParsedPmcArticle, XmlJatsArticle, XmlPmcArticleSet } from '@/services/ncbi/types.js';
+import { findAll, findOne, type JatsNodeList } from '@/services/ncbi/parsing/pmc-xml-helpers.js';
+import type { ParsedPmcArticle } from '@/services/ncbi/types.js';
 
 function normalizePmcId(id: string): string {
   return id.replace(/^PMC/i, '');
@@ -173,23 +173,17 @@ export const fetchFulltextTool = tool('pubmed_fetch_fulltext', {
       pmcIds = (input.pmcids ?? []).map(normalizePmcId);
     }
 
-    const xmlData = await getNcbiService().eFetch<{ 'pmc-articleset'?: XmlPmcArticleSet }>(
+    const xmlData = await getNcbiService().eFetch<JatsNodeList>(
       { db: 'pmc', id: pmcIds.join(','), retmode: 'xml' },
-      { retmode: 'xml', usePost: pmcIds.length > 5 },
+      { retmode: 'xml', useOrderedParser: true, usePost: pmcIds.length > 5 },
     );
 
-    if (!xmlData || !('pmc-articleset' in xmlData)) {
+    const articleSet = findOne(xmlData, 'pmc-articleset');
+    if (!articleSet) {
       throw new Error('Invalid PMC EFetch response: missing pmc-articleset');
     }
 
-    const articleSet = xmlData['pmc-articleset'];
-    if (!articleSet?.article) {
-      return { articles: [], totalReturned: 0, ...(unavailablePmids && { unavailablePmids }) };
-    }
-
-    let articles: ParsedPmcArticle[] = ensureArray(
-      articleSet.article as XmlJatsArticle | XmlJatsArticle[],
-    ).map(parsePmcArticle);
+    let articles: ParsedPmcArticle[] = findAll(articleSet, 'article').map(parsePmcArticle);
 
     if (input.sections?.length) {
       const sectionFilter = input.sections;

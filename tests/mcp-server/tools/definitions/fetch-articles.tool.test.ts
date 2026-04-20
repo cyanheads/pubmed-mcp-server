@@ -29,7 +29,7 @@ describe('fetchArticlesTool', () => {
     expect(() => fetchArticlesTool.input.parse({ pmids: ['abc'] })).toThrow();
   });
 
-  it('returns empty when no articles found', async () => {
+  it('reports all PMIDs as unavailable when no articles are returned (issue #20)', async () => {
     mockEFetch.mockResolvedValue({ PubmedArticleSet: null });
     const ctx = createMockContext();
     const input = fetchArticlesTool.input.parse({ pmids: ['99999'] });
@@ -37,6 +37,7 @@ describe('fetchArticlesTool', () => {
 
     expect(result.articles).toEqual([]);
     expect(result.totalReturned).toBe(0);
+    expect(result.unavailablePmids).toEqual(['99999']);
   });
 
   it('throws when response is missing PubmedArticleSet', async () => {
