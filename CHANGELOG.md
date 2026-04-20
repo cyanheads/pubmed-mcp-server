@@ -4,6 +4,35 @@ All notable changes to this project will be documented in this file.
 
 ---
 
+## [2.3.7] - 2026-04-20
+
+### Fixed
+
+- **APA — missing period before year with collective authors** (`citation-formatter.ts`): `formatApa` now coerces a trailing period on the author block. Individual author initials already end with `.`, but collective names (e.g., `ATLAS Collaboration`, `KEYNOTE-024 Investigators`, `ACTT-1 Study Group Members`) did not, producing `Name (Year).` instead of the APA 7 §9.8-compliant `Name. (Year).`. Fix mirrors the `endsWith('.')` idiom already used in `formatMla`.
+- **RIS — truncated-end page ranges emitted as absolute pages** (`splitPages`): `737-8` now expands to `SP 737 / EP 738`, `1639-41` to `SP 1639 / EP 1641`, etc. PubMed uses a truncated-end convention for page ranges; downstream RIS importers (Zotero, EndNote, Mendeley) treat `EP` as an absolute page number, so the unexpanded form rendered wrong page ranges in compiled bibliographies.
+- **BibTeX — trailing period retained inside `title = {...}`** (`formatBibtex`): titles ending with `.` are now stripped before emission. biblatex styles append their own terminal period, so the prior behavior produced `...Final Report..` (double period) in compiled bibliographies. Mirrors the existing APA/MLA title handling.
+
+### Changed
+
+- **MLA `p.` vs `pp.`** (`formatMla`): single-page citations now use `p.`, page ranges continue to use `pp.`, per MLA 9 §6.56.
+- **RIS abstract whitespace** (`formatRis`): structured-abstract newlines (`BACKGROUND:\n\nMETHODS:\n\n...`) are collapsed to single spaces before emission. Strict RIS parsers treat blank lines as record terminators, so the prior output could truncate records at the first `\n\n` boundary.
+- **`getYear` fallback** (`citation-formatter.ts`): falls back to `articleDates` (typically the electronic pub date) when `journalInfo.publicationDate.year` is absent, instead of emitting `n.d.` prematurely.
+
+### Added
+
+- **Publication type → entry/reference type mapping**: `publicationTypes` now drives BibTeX entry types (`@book`, `@inbook`, `@misc`) and RIS `TY` codes (`BOOK`, `CHAP`, `GEN`) for `Book`, `Book Chapter`, and `Preprint`. Unmapped types fall back to `@article` / `TY - JOUR`.
+- **RIS `SN` (ISSN) tag**: `journalInfo.issn` (with `eIssn` fallback) now emitted in RIS records.
+- **BibTeX `issn`, `pmcid` fields**: surfaced from parsed metadata when present.
+- **PMC URL in RIS**: second `UR` tag emitted when `pmcId` is present (`https://pmc.ncbi.nlm.nih.gov/articles/PMC.../`).
+- **Merged keywords + MeSH**: RIS `KW` tags and BibTeX `keywords` now include MeSH descriptor names alongside article keywords, deduplicated.
+- **Test coverage**: 11 new test cases covering the three bug fixes, MLA `p.`/`pp.` branching, abstract whitespace normalization, pub-type mapping, ISSN, PMC URL, MeSH merging, and `articleDates` year fallback.
+
+### References
+
+- Closes [#15](https://github.com/cyanheads/pubmed-mcp-server/issues/15) — field-testing report identifying the three APA/RIS/BibTeX correctness issues.
+
+---
+
 ## [2.3.6] - 2026-04-19
 
 ### Updated

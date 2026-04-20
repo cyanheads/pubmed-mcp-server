@@ -1,6 +1,6 @@
 # pubmed-mcp-server - Directory Structure
 
-Generated on: 2026-04-09 10:36:39
+Generated on: 2026-04-20 16:03:24
 
 ```text
 pubmed-mcp-server/
@@ -207,7 +207,6 @@ pubmed-mcp-server/
 │   │       │   ├── pmc-article-parser.ts
 │   │       │   └── xml-helpers.ts
 │   │       ├── api-client.ts
-│   │       ├── ncbi-service.test.ts
 │   │       ├── ncbi-service.ts
 │   │       ├── request-queue.ts
 │   │       ├── response-handler.ts
