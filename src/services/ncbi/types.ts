@@ -339,11 +339,23 @@ export interface ESummaryAuthor {
   name: string; // Standardized: 'LastName Initials'
 }
 
+/**
+ * NCBI returns ArticleId entries in two shapes depending on retmode:
+ * - JSON (`retmode=json&version=2.0`): lowercase keys `{ idtype, idtypen, value }`
+ * - XML  (`retmode=xml&version=2.0`):  capitalized child elements parsed as
+ *   `{ IdType, IdTypeN, Value }` by fast-xml-parser.
+ *
+ * Both shapes are supported so callers don't have to care which retmode produced
+ * the summary. Use the helpers in `esummary-parser.ts` to read them safely.
+ */
 export interface ESummaryArticleId {
-  idtype: string; // e.g., 'pubmed', 'doi', 'pmc'
-  idtypen: number;
-  value: string;
-  [key: string]: unknown; // For other attributes like _IdType (if parsed differently)
+  IdType?: string;
+  IdTypeN?: number;
+  idtype?: string; // e.g., 'pubmed', 'doi', 'pmc'
+  idtypen?: number;
+  Value?: string | number;
+  value?: string | number;
+  [key: string]: unknown;
 }
 
 export interface ESummaryHistory {

@@ -128,6 +128,23 @@ export async function standardizeESummaryDate(
   return;
 }
 
+/**
+ * Returns the id type (e.g. 'doi', 'pmc') from an ESummary ArticleId entry,
+ * normalizing across JSON (`idtype`) and XML (`IdType`) casings.
+ */
+function getArticleIdType(id: ESummaryArticleId): string | undefined {
+  return id.idtype ?? id.IdType;
+}
+
+/**
+ * Returns the raw value field from an ESummary ArticleId entry,
+ * normalizing across JSON (`value`) and XML (`Value`) casings. The value may
+ * be a string or number — `getText` handles both.
+ */
+function getArticleIdValue(id: ESummaryArticleId): unknown {
+  return id.value ?? id.Value;
+}
+
 function parseESummaryAuthorsFromDocumentSummary(
   docSummary: ESummaryDocumentSummary,
 ): XmlESummaryAuthor[] {
@@ -259,14 +276,14 @@ function parseSingleDocumentSummary(docSummary: ESummaryDocumentSummary): Omit<
 
   let doiValue: string | undefined = getText(docSummary.DOI, undefined);
   if (!doiValue) {
-    const doiEntry = idsArray.find((id) => id.idtype === 'doi');
+    const doiEntry = idsArray.find((id) => getArticleIdType(id) === 'doi');
     if (doiEntry) {
-      doiValue = getText(doiEntry.value, undefined);
+      doiValue = getText(getArticleIdValue(doiEntry), undefined);
     }
   }
 
-  const pmcEntry = idsArray.find((id) => id.idtype === 'pmc');
-  const pmcIdValue = pmcEntry ? getText(pmcEntry.value, undefined) : undefined;
+  const pmcEntry = idsArray.find((id) => getArticleIdType(id) === 'pmc');
+  const pmcIdValue = pmcEntry ? getText(getArticleIdValue(pmcEntry), undefined) : undefined;
 
   const title = getText(docSummary.Title);
   const source =

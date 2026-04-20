@@ -304,7 +304,7 @@ describe('extractBriefSummaries', () => {
     expect(summaries[0]?.title).toBe('Old Format Article');
   });
 
-  it('extracts DOI and PMC ID from DocumentSummary ArticleIds', async () => {
+  it('extracts DOI and PMC ID from DocumentSummary ArticleIds (JSON/lowercase shape)', async () => {
     const result: ESummaryResult = {
       DocumentSummarySet: {
         DocumentSummary: [
@@ -324,6 +324,75 @@ describe('extractBriefSummaries', () => {
     const summaries = await extractBriefSummaries(result);
     expect(summaries[0]?.doi).toBe('10.1000/test');
     expect(summaries[0]?.pmcId).toBe('PMC999');
+  });
+
+  /**
+   * Regression test for issue #17: when `retmode=xml&version=2.0` is used
+   * (the default path for `pubmed_search_articles` summaries), fast-xml-parser
+   * returns capitalized keys (`IdType`/`Value`) because those are the child
+   * element names in the DTD, not attributes. The previous implementation only
+   * matched lowercase keys, so DOI and PMC IDs silently dropped on every call.
+   */
+  it('extracts DOI and PMC ID from DocumentSummary ArticleIds (XML/capitalized shape)', async () => {
+    const result: ESummaryResult = {
+      DocumentSummarySet: {
+        DocumentSummary: [
+          {
+            '@_uid': '25430774',
+            Title: 'Genome editing. The new frontier of genome engineering with CRISPR-Cas9.',
+            ArticleIds: {
+              ArticleId: [
+                { IdType: 'pubmed', IdTypeN: 1, Value: 25430774 },
+                { IdType: 'doi', IdTypeN: 3, Value: '10.1126/science.1258096' },
+                { IdType: 'pmc', IdTypeN: 8, Value: 'PMC9876543' },
+                { IdType: 'pii', IdTypeN: 4, Value: '346/6213/1258096' },
+              ],
+            },
+          },
+        ],
+      },
+    };
+    const summaries = await extractBriefSummaries(result);
+    expect(summaries[0]?.doi).toBe('10.1126/science.1258096');
+    expect(summaries[0]?.pmcId).toBe('PMC9876543');
+  });
+
+  it('prefers top-level DOI field when present', async () => {
+    const result: ESummaryResult = {
+      DocumentSummarySet: {
+        DocumentSummary: [
+          {
+            '@_uid': '22222',
+            Title: 'DOI In Both Places',
+            DOI: '10.1000/top-level',
+            ArticleIds: {
+              ArticleId: [{ IdType: 'doi', IdTypeN: 3, Value: '10.1000/article-ids' }],
+            },
+          },
+        ],
+      },
+    };
+    const summaries = await extractBriefSummaries(result);
+    expect(summaries[0]?.doi).toBe('10.1000/top-level');
+  });
+
+  it('omits doi/pmcId when ArticleIds contains neither', async () => {
+    const result: ESummaryResult = {
+      DocumentSummarySet: {
+        DocumentSummary: [
+          {
+            '@_uid': '33333',
+            Title: 'No IDs',
+            ArticleIds: {
+              ArticleId: [{ IdType: 'pubmed', IdTypeN: 1, Value: 33333 }],
+            },
+          },
+        ],
+      },
+    };
+    const summaries = await extractBriefSummaries(result);
+    expect(summaries[0]?.doi).toBeUndefined();
+    expect(summaries[0]?.pmcId).toBeUndefined();
   });
 
   describe('date parsing through extractBriefSummaries', () => {
