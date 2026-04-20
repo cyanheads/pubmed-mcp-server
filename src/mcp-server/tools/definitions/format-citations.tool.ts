@@ -13,24 +13,14 @@ import { getNcbiService } from '@/services/ncbi/ncbi-service.js';
 import { parseFullArticle } from '@/services/ncbi/parsing/article-parser.js';
 import { ensureArray } from '@/services/ncbi/parsing/xml-helpers.js';
 import type { XmlPubmedArticle } from '@/services/ncbi/types.js';
+import { pmidStringSchema } from './_schemas.js';
 
 export const formatCitationsTool = tool('pubmed_format_citations', {
   description: 'Get formatted citations for PubMed articles in APA, MLA, BibTeX, or RIS format.',
   annotations: { readOnlyHint: true, openWorldHint: true },
 
   input: z.object({
-    pmids: z
-      .array(
-        z
-          .string()
-          .regex(
-            /^\d+$/,
-            'PMID must be a numeric identifier (e.g. "13054692"). Remove any whitespace, commas, or non-digit characters — pass each PMID as a separate array element.',
-          ),
-      )
-      .min(1)
-      .max(50)
-      .describe('PubMed IDs to cite'),
+    pmids: z.array(pmidStringSchema).min(1).max(50).describe('PubMed IDs to cite'),
     styles: z
       .array(z.enum(['apa', 'mla', 'bibtex', 'ris']))
       .default(['apa'])

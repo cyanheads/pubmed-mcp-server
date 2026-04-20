@@ -143,15 +143,40 @@ describe('convertIdsTool', () => {
     expect(blocks[0]?.text).toContain('10.1093/nar/gks1195');
   });
 
-  it('formats error records with error message', () => {
+  it('formats error records in a separate section (issue #32)', () => {
     const blocks = convertIdsTool.format!({
       records: [{ requestedId: '99999999', errmsg: 'Not a valid ID' }],
       totalConverted: 0,
       totalSubmitted: 1,
     });
 
-    expect(blocks[0]?.text).toContain('**Converted:** 0/1');
-    expect(blocks[0]?.text).toContain('Error: Not a valid ID');
+    const text = blocks[0]?.text ?? '';
+    expect(text).toContain('**Converted:** 0/1');
+    expect(text).toContain('### Errors');
+    expect(text).toContain('- **99999999:** Not a valid ID');
+    expect(text).not.toContain('| Requested ID');
+  });
+
+  it('renders the table for successes and a separate errors list for failures (issue #32)', () => {
+    const blocks = convertIdsTool.format!({
+      records: [
+        {
+          requestedId: '23193287',
+          pmid: '23193287',
+          pmcid: 'PMC3531190',
+          doi: '10.1093/nar/gks1195',
+        },
+        { requestedId: '99999999', errmsg: 'Not a valid ID' },
+      ],
+      totalConverted: 1,
+      totalSubmitted: 2,
+    });
+
+    const text = blocks[0]?.text ?? '';
+    expect(text).toContain('| 23193287 | 23193287 | PMC3531190 | 10.1093/nar/gks1195 |');
+    expect(text).toContain('### Errors');
+    expect(text).toContain('- **99999999:** Not a valid ID');
+    expect(text).not.toMatch(/\| 99999999 \|/);
   });
 
   it('formats dash for missing optional fields', () => {

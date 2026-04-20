@@ -9,6 +9,7 @@ import { getNcbiService } from '@/services/ncbi/ncbi-service.js';
 import { parseFullArticle } from '@/services/ncbi/parsing/article-parser.js';
 import { ensureArray } from '@/services/ncbi/parsing/xml-helpers.js';
 import type { XmlPubmedArticle } from '@/services/ncbi/types.js';
+import { pmidStringSchema } from './_schemas.js';
 
 export const fetchArticlesTool = tool('pubmed_fetch_articles', {
   description:
@@ -16,18 +17,7 @@ export const fetchArticlesTool = tool('pubmed_fetch_articles', {
   annotations: { readOnlyHint: true, openWorldHint: true },
 
   input: z.object({
-    pmids: z
-      .array(
-        z
-          .string()
-          .regex(
-            /^\d+$/,
-            'PMID must be a numeric identifier (e.g. "13054692"). Remove any whitespace, commas, or non-digit characters — pass each PMID as a separate array element.',
-          ),
-      )
-      .min(1)
-      .max(200)
-      .describe('PubMed IDs to fetch'),
+    pmids: z.array(pmidStringSchema).min(1).max(200).describe('PubMed IDs to fetch'),
     includeMesh: z.boolean().default(true).describe('Include MeSH terms'),
     includeGrants: z.boolean().default(false).describe('Include grant information'),
   }),
@@ -204,9 +194,9 @@ export const fetchArticlesTool = tool('pubmed_fetch_articles', {
 
       if (a.affiliations?.length) {
         lines.push(`\n**Affiliations:**`);
-        a.affiliations.forEach((aff, i) => {
+        for (const [i, aff] of a.affiliations.entries()) {
           lines.push(`${i + 1}. ${aff}`);
-        });
+        }
       }
 
       const ji = a.journalInfo;
@@ -239,19 +229,28 @@ export const fetchArticlesTool = tool('pubmed_fetch_articles', {
       if (a.meshTerms?.length) {
         lines.push(`\n#### MeSH Terms`);
         for (const m of a.meshTerms) {
+          const descriptor = m.descriptorUi
+            ? `${m.descriptorName} [${m.descriptorUi}]`
+            : m.descriptorName;
           const major = m.isMajorTopic ? ' *' : '';
           const qualifiers = m.qualifiers?.length
-            ? ` (${m.qualifiers.map((q) => `${q.qualifierName}${q.isMajorTopic ? '*' : ''}`).join(', ')})`
+            ? ` (${m.qualifiers
+                .map((q) => {
+                  const name = q.qualifierUi
+                    ? `${q.qualifierName} [${q.qualifierUi}]`
+                    : q.qualifierName;
+                  return `${name}${q.isMajorTopic ? '*' : ''}`;
+                })
+                .join(', ')})`
             : '';
-          lines.push(`- ${m.descriptorName}${major}${qualifiers}`);
+          lines.push(`- ${descriptor}${major}${qualifiers}`);
         }
       }
       if (a.grantList?.length) {
         lines.push(`\n#### Grants`);
         for (const g of a.grantList) {
-          const grantId = g.acronym
-            ? `${g.grantId ?? g.acronym} (${g.acronym})`
-            : (g.grantId ?? '');
+          const grantId =
+            g.grantId && g.acronym ? `${g.grantId} (${g.acronym})` : (g.grantId ?? g.acronym ?? '');
           const parts = [grantId, g.agency, g.country].filter(Boolean);
           lines.push(`- ${parts.join(' — ')}`);
         }

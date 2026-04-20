@@ -404,6 +404,38 @@ describe('fetchArticlesTool', () => {
       }
       expect(text).not.toContain('et al.');
     });
+
+    it('renders MeSH descriptorUi and qualifierUi alongside their names (issue #30)', () => {
+      const articleWithMeshUis = {
+        ...richArticle,
+        meshTerms: [
+          {
+            descriptorName: 'Breast Neoplasms',
+            descriptorUi: 'D001943',
+            isMajorTopic: true,
+            qualifiers: [
+              {
+                qualifierName: 'pathology',
+                qualifierUi: 'Q000473',
+                isMajorTopic: false,
+              },
+            ],
+          },
+          {
+            descriptorName: 'Humans',
+            descriptorUi: 'D006801',
+            isMajorTopic: false,
+          },
+        ],
+      };
+      const blocks = fetchArticlesTool.format!({
+        articles: [articleWithMeshUis],
+        totalReturned: 1,
+      });
+      const text = blocks[0]?.text ?? '';
+      expect(text).toContain('- Breast Neoplasms [D001943] * (pathology [Q000473])');
+      expect(text).toContain('- Humans [D006801]');
+    });
   });
 
   describe('format() empty-result guidance', () => {

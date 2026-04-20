@@ -473,6 +473,7 @@ describe('searchArticlesTool', () => {
           source: 'Nature',
           pubDate: '2024-01-01',
           doi: '10.1000/example',
+          pmcId: 'PMC12345',
           pubmedUrl: 'https://pubmed.ncbi.nlm.nih.gov/111/',
           pmcUrl: 'https://www.ncbi.nlm.nih.gov/pmc/articles/PMC12345/',
         },
@@ -490,6 +491,7 @@ describe('searchArticlesTool', () => {
     expect(blocks[0]?.text).toContain('**Source:** Nature');
     expect(blocks[0]?.text).toContain('**Published:** 2024-01-01');
     expect(blocks[0]?.text).toContain('**DOI:** 10.1000/example');
+    expect(blocks[0]?.text).toContain('**PMCID:** PMC12345');
     expect(blocks[0]?.text).toContain('**PubMed:** https://pubmed.ncbi.nlm.nih.gov/111/');
     expect(blocks[0]?.text).toContain(
       '**PMC:** https://www.ncbi.nlm.nih.gov/pmc/articles/PMC12345/',

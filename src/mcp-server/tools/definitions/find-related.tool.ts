@@ -8,6 +8,7 @@ import { tool, z } from '@cyanheads/mcp-ts-core';
 import { getNcbiService } from '@/services/ncbi/ncbi-service.js';
 import { extractBriefSummaries } from '@/services/ncbi/parsing/esummary-parser.js';
 import { ensureArray } from '@/services/ncbi/parsing/xml-helpers.js';
+import { pmidStringSchema } from './_schemas.js';
 
 // ─── ELink XML types ─────────────────────────────────────────────────────────
 
@@ -44,13 +45,7 @@ export const findRelatedTool = tool('pubmed_find_related', {
   annotations: { readOnlyHint: true, openWorldHint: true },
 
   input: z.object({
-    pmid: z
-      .string()
-      .regex(
-        /^\d+$/,
-        'PMID must be a numeric identifier (e.g. "13054692"). Remove any whitespace or non-digit characters.',
-      )
-      .describe('Source PubMed ID'),
+    pmid: pmidStringSchema.describe('Source PubMed ID'),
     relationship: z
       .enum(['similar', 'cited_by', 'references'])
       .default('similar')

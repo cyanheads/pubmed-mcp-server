@@ -204,7 +204,6 @@ describe('fetchFulltextTool', () => {
     expect(blocks[0]?.text).toContain('Article');
     expect(blocks[0]?.text).toContain('Unavailable PMIDs');
     expect(blocks[0]?.text).toContain('Unavailable PMC IDs');
-    expect(blocks[0]?.text).toContain('Smith Jane, Jones Alex, Brown Sam, et al.');
     expect(blocks[0]?.text).toContain('Affiliations');
     expect(blocks[0]?.text).toContain('Nature, **12**(3), 45-52');
     expect(blocks[0]?.text).toContain('Published:** 2024-01-02');
@@ -213,5 +212,57 @@ describe('fetchFulltextTool', () => {
     expect(blocks[0]?.text).toContain('##### Background');
     expect(blocks[0]?.text).toContain('References (1)');
     expect(blocks[0]?.text).toContain('[1] Reference one');
+  });
+
+  describe('format content[] completeness (issue #29)', () => {
+    const baseArticle = {
+      pmcId: 'PMC1',
+      pmcUrl: 'https://www.ncbi.nlm.nih.gov/pmc/articles/PMC1/',
+      title: 'Article',
+      authors: [
+        { lastName: 'Smith', givenNames: 'Jane' },
+        { lastName: 'Jones', givenNames: 'Alex' },
+        { lastName: 'Brown', givenNames: 'Sam' },
+        { lastName: 'White', givenNames: 'Pat' },
+        { collectiveName: 'Consortium X' },
+      ],
+      journal: { title: 'Nature', issn: '1476-4687', volume: '12', issue: '3', pages: '45-52' },
+      sections: [
+        {
+          title: 'Introduction',
+          label: '1',
+          text: 'Intro body.',
+          subsections: [{ title: 'Background', label: '1.1', text: 'Background.' }],
+        },
+        { title: 'Methods', text: 'Methods body.' },
+      ],
+    } as const;
+
+    it('renders every author with givenNames lastName — no et al. truncation', () => {
+      const blocks = fetchFulltextTool.format!({ articles: [baseArticle], totalReturned: 1 });
+      const text = blocks[0]?.text ?? '';
+
+      expect(text).toContain('**Authors (5):**');
+      expect(text).toContain('- Jane Smith');
+      expect(text).toContain('- Alex Jones');
+      expect(text).toContain('- Sam Brown');
+      expect(text).toContain('- Pat White');
+      expect(text).toContain('- Consortium X (collective)');
+      expect(text).not.toContain('et al.');
+    });
+
+    it('renders the journal ISSN alongside other journal fields', () => {
+      const blocks = fetchFulltextTool.format!({ articles: [baseArticle], totalReturned: 1 });
+      expect(blocks[0]?.text).toContain('ISSN 1476-4687');
+    });
+
+    it('prefixes section and subsection headings with the JATS label when present', () => {
+      const blocks = fetchFulltextTool.format!({ articles: [baseArticle], totalReturned: 1 });
+      const text = blocks[0]?.text ?? '';
+
+      expect(text).toContain('#### 1 Introduction');
+      expect(text).toContain('##### 1.1 Background');
+      expect(text).toContain('#### Methods');
+    });
   });
 });

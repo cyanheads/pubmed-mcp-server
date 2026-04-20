@@ -9,6 +9,7 @@ import { getNcbiService } from '@/services/ncbi/ncbi-service.js';
 import { parsePmcArticle } from '@/services/ncbi/parsing/pmc-article-parser.js';
 import { findAll, findOne, type JatsNodeList } from '@/services/ncbi/parsing/pmc-xml-helpers.js';
 import type { ParsedPmcArticle } from '@/services/ncbi/types.js';
+import { pmidStringSchema } from './_schemas.js';
 
 function normalizePmcId(id: string): string {
   return id.replace(/^PMC/i, '');
@@ -65,14 +66,7 @@ export const fetchFulltextTool = tool('pubmed_fetch_fulltext', {
       .optional()
       .describe('PMC IDs to fetch (e.g. ["PMC9575052"]). Provide this OR pmids, not both.'),
     pmids: z
-      .array(
-        z
-          .string()
-          .regex(
-            /^\d+$/,
-            'PMID must be a numeric identifier (e.g. "13054692"). Remove any whitespace, commas, or non-digit characters — pass each PMID as a separate array element.',
-          ),
-      )
+      .array(pmidStringSchema)
       .min(1)
       .max(10)
       .optional()
@@ -229,21 +223,29 @@ export const fetchFulltextTool = tool('pubmed_fetch_fulltext', {
       lines.push(`**Unavailable PMC IDs:** ${result.unavailablePmcIds.join(', ')}`);
     for (const a of result.articles) {
       lines.push(`\n### ${a.title ?? a.pmcId}`);
+
       if (a.authors?.length) {
-        const fmtAuthor = (au: (typeof a.authors)[number]) =>
-          au.collectiveName ??
-          `${au.lastName ?? ''}${au.givenNames ? ` ${au.givenNames}` : ''}`.trim();
-        const first3 = a.authors.slice(0, 3).map(fmtAuthor).join(', ');
-        const authorStr = a.authors.length > 3 ? `${first3}, et al.` : first3;
-        lines.push(`**Authors:** ${authorStr}`);
+        lines.push(`\n**Authors (${a.authors.length}):**`);
+        for (const au of a.authors) {
+          lines.push(`- ${formatPmcAuthor(au)}`);
+        }
       }
-      if (a.affiliations?.length) lines.push(`**Affiliations:** ${a.affiliations.join('; ')}`);
+
+      if (a.affiliations?.length) {
+        lines.push(`\n**Affiliations:**`);
+        for (const [i, aff] of a.affiliations.entries()) {
+          lines.push(`${i + 1}. ${aff}`);
+        }
+      }
+
       if (a.journal) {
-        const parts = [a.journal.title];
+        const parts: string[] = [];
+        if (a.journal.title) parts.push(a.journal.title);
         if (a.journal.volume)
           parts.push(`**${a.journal.volume}**${a.journal.issue ? `(${a.journal.issue})` : ''}`);
         if (a.journal.pages) parts.push(a.journal.pages);
-        lines.push(`**Journal:** ${parts.filter(Boolean).join(', ')}`);
+        if (a.journal.issn) parts.push(`ISSN ${a.journal.issn}`);
+        if (parts.length) lines.push(`\n**Journal:** ${parts.join(', ')}`);
       }
       if (a.articleType) lines.push(`**Type:** ${a.articleType}`);
       if (a.publicationDate) {
@@ -259,11 +261,11 @@ export const fetchFulltextTool = tool('pubmed_fetch_fulltext', {
       if (a.keywords?.length) lines.push(`**Keywords:** ${a.keywords.join(', ')}`);
       if (a.abstract) lines.push(`\n#### Abstract\n${a.abstract}`);
       for (const sec of a.sections) {
-        if (sec.title) lines.push(`\n#### ${sec.title}`);
+        if (sec.title) lines.push(`\n#### ${formatHeading(sec.label, sec.title)}`);
         if (sec.text) lines.push(sec.text);
         if (sec.subsections?.length) {
           for (const sub of sec.subsections) {
-            if (sub.title) lines.push(`\n##### ${sub.title}`);
+            if (sub.title) lines.push(`\n##### ${formatHeading(sub.label, sub.title)}`);
             if (sub.text) lines.push(sub.text);
           }
         }
@@ -279,3 +281,19 @@ export const fetchFulltextTool = tool('pubmed_fetch_fulltext', {
     return [{ type: 'text', text: lines.join('\n') }];
   },
 });
+
+type FormattedPmcAuthor = {
+  collectiveName?: string | undefined;
+  givenNames?: string | undefined;
+  lastName?: string | undefined;
+};
+
+function formatPmcAuthor(au: FormattedPmcAuthor): string {
+  if (au.collectiveName) return `${au.collectiveName} (collective)`;
+  const name = `${au.givenNames ? `${au.givenNames} ` : ''}${au.lastName ?? ''}`.trim();
+  return name || 'Unknown';
+}
+
+function formatHeading(label: string | undefined, title: string): string {
+  return label ? `${label} ${title}` : title;
+}

@@ -363,6 +363,7 @@ export const searchArticlesTool = tool('pubmed_search_articles', {
         if (s.source) lines.push(`**Source:** ${s.source}`);
         if (s.pubDate) lines.push(`**Published:** ${s.pubDate}`);
         if (s.doi) lines.push(`**DOI:** ${s.doi}`);
+        if (s.pmcId) lines.push(`**PMCID:** ${s.pmcId}`);
         if (s.pubmedUrl) lines.push(`**PubMed:** ${s.pubmedUrl}`);
         if (s.pmcUrl) lines.push(`**PMC:** ${s.pmcUrl}`);
       }
