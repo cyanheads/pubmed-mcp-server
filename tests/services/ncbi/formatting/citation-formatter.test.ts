@@ -96,6 +96,38 @@ describe('formatApa', () => {
     expect(citation).toContain('*Revista Cl\u00ednica*');
     expect(citation).toContain('45\u201352');
   });
+
+  it('adds trailing period when last author is collective', () => {
+    const article: ParsedArticle = {
+      ...sampleArticle,
+      authors: [
+        { lastName: 'Short', firstName: 'William', initials: 'WR' },
+        { collectiveName: 'ACTT-1 Study Group Members' },
+      ],
+    };
+    const citation = formatApa(article);
+    expect(citation).toContain('ACTT-1 Study Group Members. (2024).');
+    expect(citation).not.toContain('ACTT-1 Study Group Members (2024)');
+  });
+
+  it('adds trailing period when the only author is collective', () => {
+    const article: ParsedArticle = {
+      ...sampleArticle,
+      authors: [{ collectiveName: 'ATLAS Collaboration' }],
+    };
+    const citation = formatApa(article);
+    expect(citation).toContain('ATLAS Collaboration. (2024).');
+  });
+
+  it('falls back to articleDates year when journal pub date is missing', () => {
+    const article: ParsedArticle = {
+      pmid: '555',
+      title: 'Electronic-only paper.',
+      articleDates: [{ dateType: 'Electronic', year: '2023', month: '7' }],
+    };
+    const citation = formatApa(article);
+    expect(citation).toContain('(2023).');
+  });
 });
 
 describe('formatMla', () => {
@@ -120,6 +152,21 @@ describe('formatMla', () => {
     };
     const citation = formatMla(article);
     expect(citation).toContain('Smith, John, and Jane Doe.');
+  });
+
+  it('uses "p." for a single page and "pp." for a range', () => {
+    const single: ParsedArticle = {
+      ...sampleArticle,
+      journalInfo: { ...sampleArticle.journalInfo!, pages: '42' },
+    };
+    expect(formatMla(single)).toContain('p. 42');
+    expect(formatMla(single)).not.toContain('pp.');
+
+    const range: ParsedArticle = {
+      ...sampleArticle,
+      journalInfo: { ...sampleArticle.journalInfo!, pages: '42-48' },
+    };
+    expect(formatMla(range)).toContain('pp. 42-48');
   });
 });
 
@@ -147,6 +194,52 @@ describe('formatBibtex', () => {
     expect(citation).toContain('\\&');
     expect(citation).toContain('\\$');
     expect(citation).toContain('\\#');
+  });
+
+  it('strips trailing period from title to avoid double punctuation', () => {
+    const article: ParsedArticle = {
+      ...sampleArticle,
+      title: 'Pembrolizumab versus Chemotherapy for Lung Cancer.',
+    };
+    const citation = formatBibtex(article);
+    expect(citation).toContain('{Pembrolizumab versus Chemotherapy for Lung Cancer}');
+    expect(citation).not.toContain('Lung Cancer.}');
+  });
+
+  it('maps publication types to BibTeX entry types', () => {
+    const book: ParsedArticle = { ...sampleArticle, publicationTypes: ['Book'] };
+    expect(formatBibtex(book)).toMatch(/^@book\{/);
+
+    const chapter: ParsedArticle = { ...sampleArticle, publicationTypes: ['Book Chapter'] };
+    expect(formatBibtex(chapter)).toMatch(/^@inbook\{/);
+
+    const preprint: ParsedArticle = { ...sampleArticle, publicationTypes: ['Preprint'] };
+    expect(formatBibtex(preprint)).toMatch(/^@misc\{/);
+
+    const unknown: ParsedArticle = { ...sampleArticle, publicationTypes: ['Journal Article'] };
+    expect(formatBibtex(unknown)).toMatch(/^@article\{/);
+  });
+
+  it('emits issn, pmcid, and merged keywords+MeSH', () => {
+    const article: ParsedArticle = {
+      ...sampleArticle,
+      pmcId: 'PMC7654321',
+      journalInfo: { ...sampleArticle.journalInfo!, issn: '1078-8956' },
+      meshTerms: [
+        { descriptorName: 'Humans', isMajorTopic: false },
+        { descriptorName: 'CRISPR', isMajorTopic: true }, // duplicate of keyword; dedup
+      ],
+    };
+    const citation = formatBibtex(article);
+    expect(citation).toContain('issn');
+    expect(citation).toContain('1078-8956');
+    expect(citation).toContain('pmcid');
+    expect(citation).toContain('PMC7654321');
+    expect(citation).toContain('keywords');
+    expect(citation).toContain('gene therapy');
+    expect(citation).toContain('Humans');
+    // Deduplicated — CRISPR should appear once
+    expect(citation.match(/CRISPR/g)?.length).toBe(1);
   });
 });
 
@@ -182,6 +275,79 @@ describe('formatRis', () => {
     const citation = formatRis(article);
     expect(citation).toContain('SP  - 45');
     expect(citation).toContain('EP  - 52');
+  });
+
+  it('expands PubMed truncated-end page ranges (737-8 → 737/738, 1639-41 → 1639/1641)', () => {
+    const short: ParsedArticle = {
+      ...sampleArticle,
+      journalInfo: { ...sampleArticle.journalInfo!, pages: '737-8' },
+    };
+    expect(formatRis(short)).toContain('SP  - 737');
+    expect(formatRis(short)).toContain('EP  - 738');
+
+    const medium: ParsedArticle = {
+      ...sampleArticle,
+      journalInfo: { ...sampleArticle.journalInfo!, pages: '1639-41' },
+    };
+    expect(formatRis(medium)).toContain('SP  - 1639');
+    expect(formatRis(medium)).toContain('EP  - 1641');
+
+    // Full ranges unchanged
+    const full: ParsedArticle = {
+      ...sampleArticle,
+      journalInfo: { ...sampleArticle.journalInfo!, pages: '105-116' },
+    };
+    expect(formatRis(full)).toContain('SP  - 105');
+    expect(formatRis(full)).toContain('EP  - 116');
+  });
+
+  it('collapses embedded newlines in abstract to single spaces', () => {
+    const article: ParsedArticle = {
+      ...sampleArticle,
+      abstractText: 'BACKGROUND:\n\nFirst paragraph.\n\nRESULTS:\n\nSecond paragraph.',
+    };
+    const citation = formatRis(article);
+    expect(citation).toContain('AB  - BACKGROUND: First paragraph. RESULTS: Second paragraph.');
+    // No blank lines inside the record body
+    const lines = citation.split('\n');
+    const abIndex = lines.findIndex((l) => l.startsWith('AB  -'));
+    expect(lines[abIndex + 1]?.startsWith('ER')).toBe(true);
+  });
+
+  it('emits SN (ISSN), PMC URL, and merges MeSH into keywords', () => {
+    const article: ParsedArticle = {
+      ...sampleArticle,
+      pmcId: 'PMC7654321',
+      journalInfo: { ...sampleArticle.journalInfo!, issn: '1078-8956', eIssn: '1546-170X' },
+      meshTerms: [{ descriptorName: 'Humans', isMajorTopic: false }],
+    };
+    const citation = formatRis(article);
+    expect(citation).toContain('SN  - 1078-8956');
+    expect(citation).toContain('UR  - https://pmc.ncbi.nlm.nih.gov/articles/PMC7654321/');
+    expect(citation).toContain('KW  - Humans');
+    expect(citation).toContain('KW  - gene therapy');
+  });
+
+  it('maps publication types to RIS reference types', () => {
+    const book: ParsedArticle = { ...sampleArticle, publicationTypes: ['Book'] };
+    expect(formatRis(book)).toMatch(/^TY {2}- BOOK/);
+
+    const chapter: ParsedArticle = { ...sampleArticle, publicationTypes: ['Book Chapter'] };
+    expect(formatRis(chapter)).toMatch(/^TY {2}- CHAP/);
+
+    const preprint: ParsedArticle = { ...sampleArticle, publicationTypes: ['Preprint'] };
+    expect(formatRis(preprint)).toMatch(/^TY {2}- GEN/);
+
+    const unknown: ParsedArticle = { ...sampleArticle, publicationTypes: ['Journal Article'] };
+    expect(formatRis(unknown)).toMatch(/^TY {2}- JOUR/);
+  });
+
+  it('falls back to e-ISSN when print ISSN is missing', () => {
+    const article: ParsedArticle = {
+      ...sampleArticle,
+      journalInfo: { ...sampleArticle.journalInfo!, issn: undefined, eIssn: '1546-170X' },
+    };
+    expect(formatRis(article)).toContain('SN  - 1546-170X');
   });
 });
 

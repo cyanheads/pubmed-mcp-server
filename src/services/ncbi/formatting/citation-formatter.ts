@@ -16,23 +16,68 @@ export type CitationStyle = 'apa' | 'mla' | 'bibtex' | 'ris';
 
 /**
  * Extract the publication year from a ParsedArticle.
- * Falls back to 'n.d.' (no date) when unavailable.
+ * Prefers `journalInfo.publicationDate.year`; falls back to the earliest
+ * `articleDates` entry (typically the electronic pub date) before giving up.
+ * Returns 'n.d.' (no date) when no year is available.
  */
 function getYear(article: ParsedArticle): string {
-  return article.journalInfo?.publicationDate?.year ?? 'n.d.';
+  const journalYear = article.journalInfo?.publicationDate?.year;
+  if (journalYear) return journalYear;
+  const articleYear = article.articleDates?.find((d) => d.year)?.year;
+  return articleYear ?? 'n.d.';
 }
 
 /**
  * Split a pages string like "45-67" into start and end components.
- * Handles en-dashes, em-dashes, and hyphens.
+ * Handles en-dashes, em-dashes, and hyphens. Expands PubMed's truncated-end
+ * convention (e.g., "737-8" → { start: "737", end: "738" }, "1639-41" →
+ * "1639"/"1641") so downstream RIS/BibTeX consumers see absolute page numbers.
  */
 function splitPages(pages?: string): { start?: string; end?: string } {
   if (!pages) return {};
-  // Normalize hyphens, en-dashes, and em-dashes to a single separator
   const parts = pages.split(/[-\u2013\u2014]/).map((p) => p.trim());
-  const [start, end] = parts;
+  let [start, end] = parts;
+  if (start && end && end.length < start.length) {
+    end = start.slice(0, start.length - end.length) + end;
+  }
   if (start && end) return { start, end };
   return start ? { start } : {};
+}
+
+/**
+ * Collapse internal whitespace (including embedded newlines from structured
+ * abstracts) to single spaces. Strict RIS parsers treat blank lines as record
+ * terminators, so abstract text must be flattened before emission.
+ */
+function collapseWhitespace(text: string): string {
+  return text.replace(/\s+/g, ' ').trim();
+}
+
+/** PubMed `PublicationType` → BibTeX entry type. Defaults to `article`. */
+const BIBTEX_ENTRY_TYPE: Record<string, string> = {
+  Book: 'book',
+  'Book Chapter': 'inbook',
+  Preprint: 'misc',
+};
+
+/** PubMed `PublicationType` → RIS reference type. Defaults to `JOUR`. */
+const RIS_REFERENCE_TYPE: Record<string, string> = {
+  Book: 'BOOK',
+  'Book Chapter': 'CHAP',
+  Preprint: 'GEN',
+};
+
+function firstMappedType(
+  types: string[] | undefined,
+  map: Record<string, string>,
+  fallback: string,
+): string {
+  if (!types?.length) return fallback;
+  for (const t of types) {
+    const mapped = map[t];
+    if (mapped) return mapped;
+  }
+  return fallback;
 }
 
 /**
@@ -167,11 +212,12 @@ function formatAuthorBibtex(author: ParsedArticleAuthor): string {
 export function formatApa(article: ParsedArticle): string {
   const parts: string[] = [];
 
-  // Authors
+  // Authors — ensure trailing period (individual author initials end with '.',
+  // but collective names do not, which would otherwise produce "Name (Year).")
   const authorStr = article.authors?.length ? formatAuthorsApa(article.authors) : '';
 
   if (authorStr) {
-    parts.push(authorStr);
+    parts.push(authorStr.endsWith('.') ? authorStr : `${authorStr}.`);
   }
 
   // Year
@@ -258,7 +304,9 @@ export function formatMla(article: ParsedArticle): string {
     }
 
     if (journal.pages) {
-      detailParts.push(`pp. ${journal.pages}`);
+      // MLA 9 §6.56: "p." for a single page, "pp." for a range
+      const isRange = /[-\u2013\u2014]/.test(journal.pages);
+      detailParts.push(`${isRange ? 'pp.' : 'p.'} ${journal.pages}`);
     }
 
     parts.push(`${detailParts.join(', ')}.`);
@@ -291,6 +339,7 @@ export function formatMla(article: ParsedArticle): string {
  */
 export function formatBibtex(article: ParsedArticle): string {
   const key = `pmid${article.pmid}`;
+  const entryType = firstMappedType(article.publicationTypes, BIBTEX_ENTRY_TYPE, 'article');
   const fields: [string, string][] = [];
 
   // Authors
@@ -299,9 +348,10 @@ export function formatBibtex(article: ParsedArticle): string {
     if (authorStr) fields.push(['author', authorStr]);
   }
 
-  // Title
+  // Title — strip trailing period; biblatex styles append their own
   if (article.title) {
-    fields.push(['title', `{${escapeBibtex(article.title)}}`]);
+    const title = article.title.replace(/\.\s*$/, '');
+    fields.push(['title', `{${escapeBibtex(title)}}`]);
   }
 
   // Journal
@@ -331,6 +381,12 @@ export function formatBibtex(article: ParsedArticle): string {
     fields.push(['pages', escapeBibtex(journal.pages)]);
   }
 
+  // ISSN
+  const issn = journal?.issn ?? journal?.eIssn;
+  if (issn) {
+    fields.push(['issn', escapeBibtex(issn)]);
+  }
+
   // DOI
   if (article.doi) {
     fields.push(['doi', article.doi]);
@@ -339,11 +395,26 @@ export function formatBibtex(article: ParsedArticle): string {
   // PMID
   fields.push(['pmid', article.pmid]);
 
+  // PMCID
+  if (article.pmcId) {
+    fields.push(['pmcid', article.pmcId]);
+  }
+
+  // Keywords — merge article keywords with MeSH descriptor names
+  const keywordSet = new Set<string>();
+  for (const k of article.keywords ?? []) keywordSet.add(k);
+  for (const m of article.meshTerms ?? []) {
+    if (m.descriptorName) keywordSet.add(m.descriptorName);
+  }
+  if (keywordSet.size > 0) {
+    fields.push(['keywords', escapeBibtex([...keywordSet].join(', '))]);
+  }
+
   // Build entry
   const maxKeyLen = Math.max(...fields.map(([k]) => k.length));
   const fieldLines = fields.map(([k, v]) => `  ${k.padEnd(maxKeyLen)} = {${v}}`).join(',\n');
 
-  return `@article{${key},\n${fieldLines}\n}`;
+  return `@${entryType}{${key},\n${fieldLines}\n}`;
 }
 
 // ---------------------------------------------------------------------------
@@ -363,8 +434,9 @@ export function formatRis(article: ParsedArticle): string {
     if (value) lines.push(`${code}  - ${value}`);
   };
 
-  // Type of reference
-  lines.push('TY  - JOUR');
+  // Type of reference — map from PubMed publication types
+  const refType = firstMappedType(article.publicationTypes, RIS_REFERENCE_TYPE, 'JOUR');
+  lines.push(`TY  - ${refType}`);
 
   // Authors — one AU tag per author
   if (article.authors?.length) {
@@ -403,12 +475,15 @@ export function formatRis(article: ParsedArticle): string {
   tag('VL', journal?.volume);
   tag('IS', journal?.issue);
 
-  // Pages — split into start/end
+  // Pages — split into start/end, expanding PubMed's truncated-end convention
   if (journal?.pages) {
     const { start, end } = splitPages(journal.pages);
     tag('SP', start);
     tag('EP', end);
   }
+
+  // ISSN — prefer print ISSN, fall back to electronic
+  tag('SN', journal?.issn ?? journal?.eIssn);
 
   // DOI (without URL prefix — RIS DO tag holds the bare DOI)
   tag('DO', article.doi);
@@ -419,15 +494,26 @@ export function formatRis(article: ParsedArticle): string {
   // PubMed URL
   lines.push(`UR  - https://pubmed.ncbi.nlm.nih.gov/${article.pmid}/`);
 
-  // Keywords
-  if (article.keywords?.length) {
-    for (const kw of article.keywords) {
-      tag('KW', kw);
-    }
+  // PMC URL (when available)
+  if (article.pmcId) {
+    lines.push(`UR  - https://pmc.ncbi.nlm.nih.gov/articles/${article.pmcId}/`);
   }
 
-  // Abstract
-  tag('AB', article.abstractText);
+  // Keywords — merge article keywords with MeSH descriptor names
+  const keywordSet = new Set<string>();
+  for (const k of article.keywords ?? []) keywordSet.add(k);
+  for (const m of article.meshTerms ?? []) {
+    if (m.descriptorName) keywordSet.add(m.descriptorName);
+  }
+  for (const kw of keywordSet) {
+    tag('KW', kw);
+  }
+
+  // Abstract — collapse internal whitespace so blank lines don't break strict
+  // RIS parsers that terminate records at blank lines
+  if (article.abstractText) {
+    tag('AB', collapseWhitespace(article.abstractText));
+  }
 
   // End of record (trailing space per RIS spec)
   lines.push('ER  - ');
