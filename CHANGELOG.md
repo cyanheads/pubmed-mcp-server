@@ -4,6 +4,26 @@ All notable changes to this project will be documented in this file.
 
 ---
 
+## [2.3.9] - 2026-04-20
+
+### Fixed
+
+- **`pubmed_search_articles` — DOI and PMC IDs missing from every brief summary** (`esummary-parser.ts`): `parseSingleDocumentSummary` matched lowercase keys (`idtype`/`value`) from the JSON ESummary shape, but the call site requests `retmode=xml` and fast-xml-parser preserves element casing. Real NCBI XML returns `{ IdType, IdTypeN, Value }`, so every search summary silently dropped its DOI and PMC ID. Normalized via small accessor helpers that accept both shapes; widened `ESummaryArticleId` to reflect the dual casing. Test fixture updated to use the real XML shape (the prior lowercase fixture passed because it tested the implementation, not the behavior).
+
+### Changed
+
+- **`pubmed_search_articles` — input validation and empty-result guidance** (`search-articles.tool.ts`):
+  - `dateRange.minDate`/`maxDate` now validated by regex (`YYYY`, `YYYY/MM`, or `YYYY/MM/DD` with `/`, `-`, or `.` separators). Empty strings still accepted for the MCP Inspector payload shape; obvious typos like `not-a-date` now fail at the schema boundary with an actionable message instead of degrading silently to 0 results.
+  - `publicationTypes` and `meshTerms` descriptions now state their join semantics (OR'd vs AND'd) — the asymmetry wasn't discoverable from the schema alone.
+  - New optional `notice` field surfaces guidance when the response would otherwise be a bare empty array: suggests `pubmed_spell_check` on no-filter misses, filter relaxation on filtered misses, and flags pagination overshoot (`offset >= totalFound`). Absent on successful pages. Rendered as a blockquote in `format()` so both human and LLM consumers see it.
+
+### References
+
+- Closes [#17](https://github.com/cyanheads/pubmed-mcp-server/issues/17) — DOI/PMC extraction bug surfaced by field-testing `pubmed_search_articles`.
+- Closes [#18](https://github.com/cyanheads/pubmed-mcp-server/issues/18) — UX polish for empty results, input validation, and filter-semantics docs from the same field-test.
+
+---
+
 ## [2.3.8] - 2026-04-20
 
 ### Fixed
