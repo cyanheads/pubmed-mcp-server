@@ -10,32 +10,6 @@ import { parsePmcArticle } from '@/services/ncbi/parsing/pmc-article-parser.js';
 import { ensureArray } from '@/services/ncbi/parsing/xml-helpers.js';
 import type { ParsedPmcArticle, XmlJatsArticle, XmlPmcArticleSet } from '@/services/ncbi/types.js';
 
-// ─── ELink types ─────────────────────────────────────────────────────────────
-
-interface ELinkLinkItem {
-  Id: string | number | { '#text'?: string | number };
-}
-interface ELinkLinkSetDb {
-  Link?: ELinkLinkItem | ELinkLinkItem[];
-  LinkName?: string;
-}
-interface ELinkResultItem {
-  ERROR?: string;
-  LinkSet?: {
-    IdList?: { Id?: string | number | { '#text'?: string | number } };
-    LinkSetDb?: ELinkLinkSetDb | ELinkLinkSetDb[];
-  };
-}
-interface ELinkResponse {
-  eLinkResult?: ELinkResultItem | ELinkResultItem[];
-}
-
-function extractLinkId(field: string | number | { '#text'?: string | number } | undefined): string {
-  if (field === undefined || field === null) return '';
-  if (typeof field === 'object') return field['#text'] !== undefined ? String(field['#text']) : '';
-  return String(field);
-}
-
 function normalizePmcId(id: string): string {
   return id.replace(/^PMC/i, '');
 }
@@ -43,31 +17,11 @@ function normalizePmcId(id: string): string {
 async function resolvePmidsToPmcIds(
   pmids: string[],
 ): Promise<{ resolved: Map<string, string>; unavailable: string[] }> {
-  const eLinkResult = (await getNcbiService().eLink({
-    cmd: 'neighbor',
-    db: 'pmc',
-    dbfrom: 'pubmed',
-    id: pmids.join(','),
-    linkname: 'pubmed_pmc',
-    retmode: 'xml',
-  })) as ELinkResponse;
-
+  const records = await getNcbiService().idConvert(pmids, 'pmid');
   const resolved = new Map<string, string>();
-  for (const result of ensureArray(eLinkResult?.eLinkResult)) {
-    if (result?.ERROR) continue;
-    const linkSet = result?.LinkSet;
-    if (!linkSet?.LinkSetDb) continue;
-    const linkSetDbArray = ensureArray(linkSet.LinkSetDb);
-    const pmcLinkSet =
-      linkSetDbArray.find((db) => db.LinkName === 'pubmed_pmc') ?? linkSetDbArray[0];
-    if (pmcLinkSet?.Link) {
-      const sourcePmid = extractLinkId(
-        linkSet.IdList?.Id as string | number | { '#text'?: string | number } | undefined,
-      );
-      for (const link of ensureArray(pmcLinkSet.Link)) {
-        const pmcId = extractLinkId(link.Id);
-        if (pmcId && sourcePmid) resolved.set(sourcePmid, pmcId);
-      }
+  for (const record of records) {
+    if (record.pmid !== undefined && record.pmcid) {
+      resolved.set(String(record.pmid), normalizePmcId(String(record.pmcid)));
     }
   }
   return { resolved, unavailable: pmids.filter((pmid) => !resolved.has(pmid)) };
@@ -100,7 +54,7 @@ const SectionSchema = z.object({
 
 export const fetchFulltextTool = tool('pubmed_fetch_fulltext', {
   description:
-    'Fetch full-text articles from PubMed Central (PMC). Returns complete article body text, sections, and references for open-access articles. Accepts PMC IDs directly or PubMed IDs (auto-resolved via ELink).',
+    'Fetch full-text articles from PubMed Central (PMC). Returns complete article body text, sections, and references for open-access articles. Accepts PMC IDs directly or PubMed IDs (auto-resolved via the PMC ID Converter).',
   annotations: { readOnlyHint: true, openWorldHint: true },
 
   input: z.object({

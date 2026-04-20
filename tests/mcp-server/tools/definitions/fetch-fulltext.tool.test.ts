@@ -7,10 +7,10 @@ import { createMockContext } from '@cyanheads/mcp-ts-core/testing';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
 const mockEFetch = vi.fn();
-const mockELink = vi.fn();
+const mockIdConvert = vi.fn();
 const mockParsePmcArticle = vi.fn();
 vi.mock('@/services/ncbi/ncbi-service.js', () => ({
-  getNcbiService: () => ({ eFetch: mockEFetch, eLink: mockELink }),
+  getNcbiService: () => ({ eFetch: mockEFetch, idConvert: mockIdConvert }),
 }));
 vi.mock('@/services/ncbi/parsing/pmc-article-parser.js', () => ({
   parsePmcArticle: mockParsePmcArticle,
@@ -21,7 +21,7 @@ const { fetchFulltextTool } = await import('@/mcp-server/tools/definitions/fetch
 describe('fetchFulltextTool', () => {
   beforeEach(() => {
     mockEFetch.mockReset();
-    mockELink.mockReset();
+    mockIdConvert.mockReset();
     mockParsePmcArticle.mockReset();
   });
 
@@ -68,24 +68,10 @@ describe('fetchFulltextTool', () => {
   });
 
   it('resolves PMIDs to PMC IDs and applies section/reference filtering', async () => {
-    mockELink.mockResolvedValue({
-      eLinkResult: [
-        {
-          LinkSet: {
-            IdList: { Id: '12345' },
-            LinkSetDb: {
-              LinkName: 'pubmed_pmc',
-              Link: { Id: { '#text': '777' } },
-            },
-          },
-        },
-        {
-          LinkSet: {
-            IdList: { Id: '99999' },
-          },
-        },
-      ],
-    });
+    mockIdConvert.mockResolvedValue([
+      { 'requested-id': '12345', pmid: '12345', pmcid: 'PMC777' },
+      { 'requested-id': '99999', pmid: '99999' },
+    ]);
     mockParsePmcArticle.mockReturnValue({
       pmcId: 'PMC777',
       pmcUrl: 'https://www.ncbi.nlm.nih.gov/pmc/articles/PMC777/',
@@ -147,7 +133,7 @@ describe('fetchFulltextTool', () => {
   });
 
   it('returns empty when no PMIDs resolve', async () => {
-    mockELink.mockResolvedValue({ eLinkResult: [] });
+    mockIdConvert.mockResolvedValue([{ 'requested-id': '99999', pmid: '99999' }]);
     const ctx = createMockContext();
     const input = fetchFulltextTool.input.parse({ pmids: ['99999'] });
     const result = await fetchFulltextTool.handler(input, ctx);
