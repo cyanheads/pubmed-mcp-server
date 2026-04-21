@@ -4,6 +4,39 @@ All notable changes to this project will be documented in this file.
 
 ---
 
+## [2.5.0] - 2026-04-21
+
+Three feature tracks land together: MCPmed-aligned semantic concept tags on every tool, an HTTP landing page with per-tool view-source links, and a framework bump to `@cyanheads/mcp-ts-core` 0.6.3 that exposes `sourceUrl?` on definitions so the auto-derived path convention is overridable without file renames or type casts.
+
+### Added
+
+- **Ontology-backed semantic concept tags on every tool** (`_concepts.ts`, all 9 `*.tool.ts` files): Each tool now emits `_meta['io.mcpmed/concepts']` with resolvable Schema.org (`SearchAction`, `ScholarlyArticle`, `CreativeWork`, `DefinedTerm`, `DefinedTermSet`) and EDAM (`operation_2421` Database search, `operation_2422` Data retrieval, `operation_3282` ID mapping, `operation_0335` Data formatting, `topic_0089` Ontology and terminology, `data_1187` PubMed ID, `data_2091` Accession) URIs — implementing the concept-mapping proposal from Flotho et al., *Briefings in Bioinformatics* 2026 (doi:10.1093/bib/bbag076) with real URIs rather than the paper's placeholder strings. Namespace key follows the MCP `_meta` spec (`<reverse-dns>/<name>`); the `conceptMeta()` helper declares the key once so a rename-on-review is a single-file change. Draft MCPmed listing PR at `docs/mcpmed-pr-draft.md`.
+- **HTTP landing page + SEP-1649 Server Card** (`src/index.ts`): `createApp({ landing: { ... } })` wires a server-specific tagline, `repoRoot`, four footer links (PubMed, E-utilities docs, NCBI API key signup, MeSH Browser), and `envExample` surfacing `NCBI_API_KEY` / `NCBI_ADMIN_EMAIL` in the STDIO/Claude CLI connect snippets. The page renders at `/` and the Server Card at `/.well-known/mcp.json` — no new env vars required; Cloudflare pass-through already reaches the container for both paths.
+- **Per-tool `sourceUrl` view-source overrides** (all 9 `*.tool.ts` files): Each tool definition now carries an explicit `sourceUrl` pointing at its actual file path. Without the override, the framework's default `snake_case → kebab-case` filename derivation would produce `pubmed-convert-ids.tool.ts` (prefixed) from the tool name `pubmed_convert_ids`, while our actual file is `convert-ids.tool.ts` (unprefixed, since the directory already namespaces). Landing-page per-tool view-source links now resolve.
+
+### Changed
+
+- **Framework bump — `@cyanheads/mcp-ts-core` 0.5.3 → 0.6.3**: 0.5.4 added the `api-linter` skill and a diagnostic breadcrumb on every `LintDiagnostic`; 0.6.0 introduced the landing page, SEP-1649 Server Card, `LandingConfig` export, and directory-based changelog system (opt-in per 0.6.2); 0.6.1 added `envExample` and the tabbed terminal-chrome connect card; 0.6.2 softened the directory-based changelog prescription so runtime-only consumer servers can stay monolithic (closes [cyanheads/mcp-ts-core#41](https://github.com/cyanheads/mcp-ts-core/issues/41)) and clarified `changelog/unreleased.md` as a pristine format reference; 0.6.3 exposed `sourceUrl?: string` on `ToolDefinition` / `ResourceDefinition` / `PromptDefinition` (closes [cyanheads/mcp-ts-core#42](https://github.com/cyanheads/mcp-ts-core/issues/42)).
+- **Test runner — `vitest` 4.1.4 → 4.1.5**: patch bump (bug fixes + experimental istanbul instrumenter option). 392 tests pass on 4.1.5 with no changes required.
+- **`CLAUDE.md` skill table**: added `api-linter` (new in 0.5.4) and `add-app-tool` rows; refreshed `maintenance` description.
+- **Project skills synced**: `add-app-tool` 1.2→1.3, `add-prompt` 1.1→1.2, `add-resource` 1.2→1.3, `add-service` 1.2→1.3, `add-tool` 1.6→1.7, `api-context` 1.0→1.1, `api-services` 1.2→1.3, `api-utils` 2.0→2.1, `design-mcp-server` 2.4→2.5, `maintenance` 1.3→1.4, `polish-docs-meta` 1.4→1.6, `setup` 1.3→1.4. New: `api-linter` v1.0.
+
+### Tests
+
+- **Live end-to-end verification** against pubmed-mcp-server running in HTTP mode:
+  - Landing page (`GET /`) renders identity, tagline, 4 NCBI links, `envExample` keys in all 3 connect-tab panels (STDIO JSON / Claude CLI `--env` / curl), and per-tool view-source URLs resolving to real repo files.
+  - Server Card (`GET /.well-known/mcp.json`) returns correct `server_name`, `server_version`, and all three capability flags `true`.
+  - `pubmed_spell_check("alzhimer disese")` → both `content[].text` and `structuredContent` carry the corrected query, `hasSuggestion: true`, and original input.
+  - `pubmed_search_articles({query: "CRISPR Cas9", maxResults: 3, summaryCount: 2})` → both surfaces populated with 38,563 hits, PMIDs, per-summary fields (authors/doi/pmid/pubDate/pubmedUrl/source/title), and applied filters.
+- Full suite: **392 passed** / 4 skipped / 0 regressions. `bun run devcheck` green across all 8 checks.
+
+### References
+
+- Framework issues closed by upstream: [cyanheads/mcp-ts-core#41](https://github.com/cyanheads/mcp-ts-core/issues/41) (soften directory-based changelog prescription — filed to preserve monolithic `CHANGELOG.md` as a valid choice for runtime-only consumer servers), [cyanheads/mcp-ts-core#42](https://github.com/cyanheads/mcp-ts-core/issues/42) (expose `sourceUrl?` on definitions — unblocks per-tool view-source overrides without file renames or type casts).
+- Upstream: `@cyanheads/mcp-ts-core` 0.6.3 `sourceUrl` export.
+
+---
+
 ## [2.4.1] - 2026-04-20
 
 Adopts `@cyanheads/mcp-ts-core` 0.5.3, whose new `format-parity` lint rule flagged 20 tool fields that were declared in `output` but never rendered by `format()`. Every flagged field now appears in both surfaces, so `content[]`-reading clients (e.g., Claude Desktop) see the same data as `structuredContent`-reading clients (e.g., Claude Code).
