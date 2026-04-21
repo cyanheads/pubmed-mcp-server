@@ -37,10 +37,15 @@ export const spellCheckTool = tool('pubmed_spell_check', {
       return [
         {
           type: 'text',
-          text: `**Suggested correction:** "${result.corrected}" (original: "${result.original}")`,
+          text: `**Suggestion:** "${result.corrected}" (original: "${result.original}")`,
         },
       ];
     }
-    return [{ type: 'text', text: `No spelling corrections suggested for: "${result.original}"` }];
+    return [
+      {
+        type: 'text',
+        text: `No suggestion — query "${result.original}" appears correct as written.`,
+      },
+    ];
   },
 });

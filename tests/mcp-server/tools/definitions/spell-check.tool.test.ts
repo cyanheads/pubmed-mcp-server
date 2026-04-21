@@ -57,7 +57,7 @@ describe('spellCheckTool', () => {
       corrected: 'asthma',
       hasSuggestion: true,
     });
-    expect(blocks[0]?.text).toContain('Suggested correction');
+    expect(blocks[0]?.text).toContain('Suggestion');
     expect(blocks[0]?.text).toContain('asthma');
   });
 
@@ -67,6 +67,6 @@ describe('spellCheckTool', () => {
       corrected: 'cancer',
       hasSuggestion: false,
     });
-    expect(blocks[0]?.text).toContain('No spelling corrections');
+    expect(blocks[0]?.text).toContain('No suggestion');
   });
 });

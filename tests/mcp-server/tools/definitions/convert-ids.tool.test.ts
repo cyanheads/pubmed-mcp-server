@@ -143,7 +143,7 @@ describe('convertIdsTool', () => {
     expect(blocks[0]?.text).toContain('10.1093/nar/gks1195');
   });
 
-  it('formats error records in a separate section (issue #32)', () => {
+  it('renders error records in the unified table', () => {
     const blocks = convertIdsTool.format!({
       records: [{ requestedId: '99999999', errmsg: 'Not a valid ID' }],
       totalConverted: 0,
@@ -152,12 +152,11 @@ describe('convertIdsTool', () => {
 
     const text = blocks[0]?.text ?? '';
     expect(text).toContain('**Converted:** 0/1');
-    expect(text).toContain('### Errors');
-    expect(text).toContain('- **99999999:** Not a valid ID');
-    expect(text).not.toContain('| Requested ID');
+    expect(text).toContain('| Requested ID | PMID | PMCID | DOI | Error |');
+    expect(text).toContain('| 99999999 | - | - | - | Not a valid ID |');
   });
 
-  it('renders the table for successes and a separate errors list for failures (issue #32)', () => {
+  it('renders successes and failures in one table', () => {
     const blocks = convertIdsTool.format!({
       records: [
         {
@@ -173,10 +172,8 @@ describe('convertIdsTool', () => {
     });
 
     const text = blocks[0]?.text ?? '';
-    expect(text).toContain('| 23193287 | 23193287 | PMC3531190 | 10.1093/nar/gks1195 |');
-    expect(text).toContain('### Errors');
-    expect(text).toContain('- **99999999:** Not a valid ID');
-    expect(text).not.toMatch(/\| 99999999 \|/);
+    expect(text).toContain('| 23193287 | 23193287 | PMC3531190 | 10.1093/nar/gks1195 | - |');
+    expect(text).toContain('| 99999999 | - | - | - | Not a valid ID |');
   });
 
   it('formats dash for missing optional fields', () => {

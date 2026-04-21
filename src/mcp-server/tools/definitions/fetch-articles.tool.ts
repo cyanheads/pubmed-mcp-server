@@ -195,21 +195,23 @@ export const fetchArticlesTool = tool('pubmed_fetch_articles', {
       if (a.affiliations?.length) {
         lines.push(`\n**Affiliations:**`);
         for (const [i, aff] of a.affiliations.entries()) {
-          lines.push(`${i + 1}. ${aff}`);
+          lines.push(`- [${i}] ${aff}`);
         }
       }
 
       const ji = a.journalInfo;
       if (ji) {
         const parts: string[] = [];
-        const journalName = ji.isoAbbreviation ?? ji.title;
-        if (journalName) parts.push(journalName);
+        if (ji.title) parts.push(ji.title);
+        if (ji.isoAbbreviation && ji.isoAbbreviation !== ji.title) {
+          parts.push(ji.title ? `(${ji.isoAbbreviation})` : ji.isoAbbreviation);
+        }
         const pubDateStr = formatPublicationDate(ji.publicationDate);
         if (pubDateStr) parts.push(pubDateStr);
         if (ji.volume) parts.push(`**${ji.volume}**${ji.issue ? `(${ji.issue})` : ''}`);
         if (ji.pages) parts.push(ji.pages);
-        const issnPart = ji.eIssn ? `eISSN ${ji.eIssn}` : ji.issn ? `ISSN ${ji.issn}` : undefined;
-        if (issnPart) parts.push(issnPart);
+        if (ji.issn) parts.push(`ISSN ${ji.issn}`);
+        if (ji.eIssn) parts.push(`eISSN ${ji.eIssn}`);
         if (parts.length) lines.push(`\n**Journal:** ${parts.join(', ')}`);
       }
 
@@ -232,14 +234,14 @@ export const fetchArticlesTool = tool('pubmed_fetch_articles', {
           const descriptor = m.descriptorUi
             ? `${m.descriptorName} [${m.descriptorUi}]`
             : m.descriptorName;
-          const major = m.isMajorTopic ? ' *' : '';
+          const major = m.isMajorTopic ? ' (major)' : '';
           const qualifiers = m.qualifiers?.length
             ? ` (${m.qualifiers
                 .map((q) => {
                   const name = q.qualifierUi
                     ? `${q.qualifierName} [${q.qualifierUi}]`
                     : q.qualifierName;
-                  return `${name}${q.isMajorTopic ? '*' : ''}`;
+                  return `${name}${q.isMajorTopic ? ' (major)' : ''}`;
                 })
                 .join(', ')})`
             : '';
@@ -270,22 +272,19 @@ type FormattedAuthor = {
 };
 
 function formatAuthor(au: FormattedAuthor): string {
-  if (au.collectiveName) return `${au.collectiveName} (collective)`;
+  const parts: string[] = [];
+  if (au.collectiveName) parts.push(`${au.collectiveName} (collective)`);
 
-  let name: string;
-  if (au.firstName && au.lastName) {
-    name = `${au.firstName} ${au.lastName}`;
-  } else if (au.lastName) {
-    name = au.initials ? `${au.lastName} ${au.initials}` : au.lastName;
-  } else {
-    name = au.initials ?? 'Unknown';
+  const name = [au.firstName, au.lastName].filter(Boolean).join(' ');
+  if (name) parts.push(name);
+  else if (au.initials) parts.push(au.initials);
+  if (au.initials && name) parts.push(`(${au.initials})`);
+
+  if (au.affiliationIndices?.length) {
+    parts.push(`[aff ${au.affiliationIndices.join(',')}]`);
   }
-
-  const affIndices = au.affiliationIndices?.length
-    ? ` [${au.affiliationIndices.map((i) => i + 1).join(', ')}]`
-    : '';
-  const orcid = au.orcid ? ` · ORCID: ${au.orcid}` : '';
-  return `${name}${affIndices}${orcid}`;
+  if (au.orcid) parts.push(`· ORCID ${au.orcid}`);
+  return parts.join(' ') || 'Unknown';
 }
 
 type FormattedPubDate = {
@@ -297,9 +296,9 @@ type FormattedPubDate = {
 
 function formatPublicationDate(pd: FormattedPubDate | undefined): string | undefined {
   if (!pd) return;
-  if (pd.medlineDate) return pd.medlineDate;
-  if (!pd.year) return;
-  return [pd.year, pd.month, pd.day].filter(Boolean).join(' ');
+  const ymd = [pd.year, pd.month, pd.day].filter(Boolean).join(' ');
+  if (pd.medlineDate && ymd) return `${pd.medlineDate} (${ymd})`;
+  return pd.medlineDate || ymd || undefined;
 }
 
 type FormattedArticleDate = {

@@ -108,6 +108,7 @@ export const lookupCitationTool = tool('pubmed_lookup_citation', {
     for (const r of result.results) {
       lines.push(`\n### ${r.key}`);
       if (r.pmid) lines.push(`**PMID:** ${r.pmid}`);
+      if (r.detail) lines.push(`**Detail:** ${r.detail}`);
       if (r.status === 'matched') {
         lines.push(`**Status:** Matched`);
         lines.push(`**Next Step:** PMID is ready for downstream PubMed fetch or citation tools.`);
@@ -116,7 +117,6 @@ export const lookupCitationTool = tool('pubmed_lookup_citation', {
 
       if (r.status === 'ambiguous') {
         lines.push(`**Status:** Ambiguous`);
-        if (r.detail) lines.push(`**Detail:** ${r.detail}`);
         lines.push(
           `**Next Step:** Add more citation fields such as journal, year, volume, firstPage, or authorName, then retry.`,
         );
@@ -124,7 +124,6 @@ export const lookupCitationTool = tool('pubmed_lookup_citation', {
       }
 
       lines.push(`**Status:** No match`);
-      if (r.detail) lines.push(`**Detail:** ${r.detail}`);
       lines.push(`**Next Step:** Verify the citation details or try pubmed_search_articles.`);
     }
     return [{ type: 'text', text: lines.join('\n') }];

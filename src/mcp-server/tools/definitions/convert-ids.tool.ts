@@ -69,23 +69,17 @@ export const convertIdsTool = tool('pubmed_convert_ids', {
   },
 
   format: (result) => {
-    const successful = result.records.filter((r) => !r.errmsg);
-    const errored = result.records.filter((r) => r.errmsg);
     const lines = [
       `## ID Conversion Results`,
       `**Converted:** ${result.totalConverted}/${result.totalSubmitted}`,
+      '',
+      '| Requested ID | PMID | PMCID | DOI | Error |',
+      '|:---|:---|:---|:---|:---|',
     ];
-    if (successful.length > 0) {
-      lines.push('', '| Requested ID | PMID | PMCID | DOI |', '|:---|:---|:---|:---|');
-      for (const r of successful) {
-        lines.push(`| ${r.requestedId} | ${r.pmid ?? '-'} | ${r.pmcid ?? '-'} | ${r.doi ?? '-'} |`);
-      }
-    }
-    if (errored.length > 0) {
-      lines.push('', '### Errors');
-      for (const r of errored) {
-        lines.push(`- **${r.requestedId}:** ${r.errmsg}`);
-      }
+    for (const r of result.records) {
+      lines.push(
+        `| ${r.requestedId} | ${r.pmid ?? '-'} | ${r.pmcid ?? '-'} | ${r.doi ?? '-'} | ${r.errmsg ?? '-'} |`,
+      );
     }
     return [{ type: 'text', text: lines.join('\n') }];
   },

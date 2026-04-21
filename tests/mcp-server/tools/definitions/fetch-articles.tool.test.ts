@@ -270,7 +270,7 @@ describe('fetchArticlesTool', () => {
     );
     expect(blocks[0]?.text).toContain('**Keywords:** asthma, airway');
     expect(blocks[0]?.text).toContain('#### MeSH Terms');
-    expect(blocks[0]?.text).toContain('- Asthma * (therapy*)');
+    expect(blocks[0]?.text).toContain('- Asthma (major) (therapy (major))');
     expect(blocks[0]?.text).toContain('#### Grants');
     expect(blocks[0]?.text).toContain('R01');
   });
@@ -323,20 +323,20 @@ describe('fetchArticlesTool', () => {
       const text = blocks[0]?.text ?? '';
 
       expect(text).toContain('**Authors (4):**');
-      expect(text).toContain('- Ayat Gamal Lashen [1, 2] · ORCID: 0000-0001-9494-7382');
-      expect(text).toContain('- Michael S Toss [1]');
+      expect(text).toContain('- Ayat Gamal Lashen (AG) [aff 0,1] · ORCID 0000-0001-9494-7382');
+      expect(text).toContain('- Michael S Toss (MS) [aff 0]');
       expect(text).toContain('- Breast Cancer Group (collective)');
-      expect(text).toContain('- Solo S');
+      expect(text).toContain('- Solo (S)');
       expect(text).not.toContain('et al.');
     });
 
-    it('renders affiliations as a 1-based numbered list matching the author markers', () => {
+    it('renders affiliations as a 0-based list matching the author affiliationIndices', () => {
       const blocks = fetchArticlesTool.format!({ articles: [richArticle], totalReturned: 1 });
       const text = blocks[0]?.text ?? '';
 
       expect(text).toContain('**Affiliations:**');
-      expect(text).toContain('1. University of Nottingham');
-      expect(text).toContain('2. Menoufia University');
+      expect(text).toContain('- [0] University of Nottingham');
+      expect(text).toContain('- [1] Menoufia University');
     });
 
     it('renders the full publication date (year, month, day) when available', () => {
@@ -433,7 +433,7 @@ describe('fetchArticlesTool', () => {
         totalReturned: 1,
       });
       const text = blocks[0]?.text ?? '';
-      expect(text).toContain('- Breast Neoplasms [D001943] * (pathology [Q000473])');
+      expect(text).toContain('- Breast Neoplasms [D001943] (major) (pathology [Q000473])');
       expect(text).toContain('- Humans [D006801]');
     });
   });

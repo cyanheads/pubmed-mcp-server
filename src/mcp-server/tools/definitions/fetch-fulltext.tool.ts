@@ -273,8 +273,8 @@ export const fetchFulltextTool = tool('pubmed_fetch_fulltext', {
       if (a.references?.length) {
         lines.push(`\n#### References (${a.references.length})`);
         for (const ref of a.references) {
-          const label = ref.label ?? ref.id ?? '';
-          lines.push(`- ${label ? `[${label}] ` : ''}${ref.citation}`);
+          const tag = [ref.label, ref.id].filter(Boolean).join(' ');
+          lines.push(`- ${tag ? `[${tag}] ` : ''}${ref.citation}`);
         }
       }
     }
@@ -289,9 +289,11 @@ type FormattedPmcAuthor = {
 };
 
 function formatPmcAuthor(au: FormattedPmcAuthor): string {
-  if (au.collectiveName) return `${au.collectiveName} (collective)`;
-  const name = `${au.givenNames ? `${au.givenNames} ` : ''}${au.lastName ?? ''}`.trim();
-  return name || 'Unknown';
+  const parts: string[] = [];
+  if (au.collectiveName) parts.push(`${au.collectiveName} (collective)`);
+  const name = [au.givenNames, au.lastName].filter(Boolean).join(' ');
+  if (name) parts.push(name);
+  return parts.join(' — ') || 'Unknown';
 }
 
 function formatHeading(label: string | undefined, title: string): string {
