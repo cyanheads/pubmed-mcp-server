@@ -4,7 +4,7 @@ description: >
   Design the tool surface, resources, and service layer for a new MCP server. Use when starting a new server, planning a major feature expansion, or when the user describes a domain/API they want to expose via MCP. Produces a design doc at docs/design.md that drives implementation.
 metadata:
   author: cyanheads
-  version: "2.1"
+  version: "2.4"
   audience: external
   type: workflow
 ---
@@ -74,6 +74,7 @@ This is the raw material. Not everything becomes a tool.
 | Primitive | Use when | Examples |
 |:----------|:---------|:--------|
 | **Tool** | The default. Any operation or data access an agent needs to accomplish the server's purpose. | Search, create, update, analyze, fetch-by-ID, list reference data |
+| **App Tool** | Tool whose results benefit from interactive HTML UI (data visualization, forms, rich rendering). Uses `appTool()` + paired `appResource()`. Hosts without MCP Apps support receive the text fallback from `format()`. | Dashboards, data explorers, interactive charts, form-based workflows |
 | **Resource** | *Additionally* expose as a resource when the data is addressable by stable URI, read-only, and useful as injectable context. | Config, schemas, status, entity-by-ID lookups |
 | **Prompt** | Reusable message template that structures how the LLM approaches a task | Analysis framework, report template, review checklist |
 | **Neither** | Internal detail, admin-only, not useful to an LLM | Token refresh, webhook setup, migrations |
@@ -116,9 +117,7 @@ const gitBranch = tool('git_branch', {
 ```ts
 // Workflow tool — search + local filter pipeline, not a raw API proxy
 const findEligibleStudies = tool('clinicaltrials_find_eligible_studies', {
-  description: 'Matches patient demographics and medical profile to eligible clinical trials. '
-    + 'Filters by age, sex, conditions, location, and healthy volunteer status. '
-    + 'Returns ranked list of matching studies with eligibility explanations.',
+  description: 'Matches patient demographics and medical profile to eligible clinical trials. Filters by age, sex, conditions, location, and healthy volunteer status. Returns ranked list of matching studies with eligibility explanations.',
   // handler: listStudies() → filter by eligibility → rank by location proximity → slice
 });
 ```
@@ -141,21 +140,21 @@ The description is the LLM's primary signal for tool selection. It must answer: 
 
 - **Be concrete about capability.** "Search for clinical trial studies using queries and filters" beats "Interact with studies."
 - **Include operational guidance when it matters.** If the tool has prerequisites, constraints, or gotchas the LLM needs to know, say so in the description. Don't add boilerplate workflow hints when the tool is self-explanatory.
+- **Prefer a single cohesive paragraph.** Pack operational guidance into prose sentences (separated by periods or em-dashes) rather than bullet lists or blank-line-separated sections. Descriptions render inline in most clients, and bullet structure reads as visual noise rather than signal. Operation-by-operation bullets also duplicate info that already lives in the `operation` enum's `.describe()`.
+- **Don't leak implementation details.** Descriptions are for the consumer, not the author. Internal endpoint paths, API call counts, internal parameter name mappings, and routing logic don't belong — describe what the tool does and when to use it, not how it's wired up.
 
 ```ts
 // Good — describes a prerequisite the LLM must know
-description: 'Set the session working directory for all git operations. '
-  + 'This allows subsequent git commands to omit the path parameter.'
+description: 'Set the session working directory for all git operations. This allows subsequent git commands to omit the path parameter.'
 
 // Good — self-explanatory, no workflow hints needed
 description: 'Show the working tree status including staged, unstaged, and untracked files.'
 
 // Good — warns about constraints
-description: 'Fetches trial results data for completed studies. '
-  + 'Only available for studies where hasResults is true.'
+description: 'Fetches trial results data for completed studies. Only available for studies where hasResults is true.'
 ```
 
-Context-dependent: a simple read-only tool needs a one-line description. A tool with prerequisites, modes, or non-obvious behavior needs more. Match depth of description to complexity of tool.
+Descriptions should be as long as needed — concise but complete. Don't artificially truncate, and don't pad with filler.
 
 #### Parameter descriptions
 
@@ -170,14 +169,11 @@ Every `.describe()` is prompt text the LLM reads. Parameters should convey: what
 ```ts
 // Good — explains cost, recommends action, names the alternative
 fields: z.array(z.string()).optional()
-  .describe('Specific fields to return (reduces payload size). '
-    + 'STRONGLY RECOMMENDED — without this, the full study record (~70KB each) is returned. '
-    + 'Use full data only when you need detailed eligibility criteria, locations, or results.'),
+  .describe('Specific fields to return (reduces payload size). Without this, the full study record (~70KB each) is returned. Use full data only when you need detailed eligibility criteria, locations, or results.'),
 
 // Good — explains what the flag does AND how to override
 autoExclude: z.boolean().default(true)
-  .describe('Automatically exclude lock files and generated files from diff output '
-    + 'to reduce context bloat. Set to false if you need to inspect these files.'),
+  .describe('Automatically exclude lock files and generated files from diff output to reduce context bloat. Set to false if you need to inspect these files.'),
 
 // Good — names the format and gives one example
 nctIds: z.union([z.string(), z.array(z.string()).max(5)])
@@ -200,13 +196,12 @@ The output schema and `format` function control what the LLM reads back. Design 
 output: z.object({
   diff: z.string().describe('Unified diff output.'),
   excludedFiles: z.array(z.string()).optional()
-    .describe('Files automatically excluded from the diff (e.g., lock files). '
-      + 'Call again with autoExclude=false to include them.'),
+    .describe('Files automatically excluded from the diff (e.g., lock files). Call again with autoExclude=false to include them.'),
 }),
 ```
 
 - **Truncate large output with counts.** When a list exceeds a reasonable display size, show the top N and append "...and X more". Don't silently drop results.
-- **`format()` is the model-facing output — make it content-complete.** MCP `content[]` (populated by `format()`) is the only field most LLM clients forward to the model. `structuredContent` (from `output`) is for programmatic/machine use and is not reliably shown to the LLM. A thin `format()` that returns only a count or title leaves the model blind to the actual data. Render all fields the LLM needs to reason about or act on the result. Use structured markdown (headers, bold labels, lists) for readability.
+- **`format()` is the markdown twin of `structuredContent` — make both content-complete.** Different MCP clients forward different surfaces to the model: some (e.g., Claude Code) read `structuredContent` from `output`, others (e.g., Claude Desktop) read `content[]` from `format()`. Both must carry the same data so every client sees the same picture — `format()` just dresses it up with markdown. A thin `format()` that returns only a count or title leaves `content[]`-only clients blind to data that `structuredContent` clients can see. Render all fields the LLM needs, with structured markdown (headers, bold labels, lists) for readability.
 
 #### Batch input design
 
@@ -243,9 +238,7 @@ When a tool wraps a complex query language or filter system, provide a simple sh
 ```ts
 // text_search handles the common case; query handles everything else
 text_search: z.string().optional()
-  .describe('Convenience shortcut: full-text search across title and abstract. '
-    + 'Equivalent to {"_or":[{"_text_any":{"title":"..."}},{"_text_any":{"abstract":"..."}}]}. '
-    + 'For more control, use the query parameter directly.'),
+  .describe('Convenience shortcut: full-text search across title and abstract. For structured filters or field-specific matching, use the query parameter instead.'),
 query: z.record(z.unknown()).optional()
   .describe('Full query object for structured filters. Supports operators: _eq, _gt, _and, _or, ...'),
 ```
@@ -419,10 +412,11 @@ If the user has already authorized implementation (e.g., "build me a ___ server"
 Execute the plan using the scaffolding skills:
 
 1. `add-service` for each service
-2. `add-tool` for each tool
-3. `add-resource` for each resource
-4. `add-prompt` for each prompt
-5. `devcheck` after each addition
+2. `add-tool` for each standard tool
+3. `add-app-tool` for each MCP Apps tool (creates paired tool + UI resource)
+4. `add-resource` for each standalone resource
+5. `add-prompt` for each prompt
+6. `devcheck` after each addition
 
 ## Checklist
 
@@ -434,10 +428,11 @@ Execute the plan using the scaffolding skills:
 - [ ] Parameter `.describe()` text explains what the value is, what it affects, and tradeoffs
 - [ ] Input schemas use constrained types (enums, literals, regex) over free strings
 - [ ] Output schemas designed for LLM's next action — chaining IDs, post-write state, filtering communicated
-- [ ] `format()` renders all data the LLM needs — `content[]` is the only field most clients forward to the model (not just a count or title)
+- [ ] `format()` renders all data the LLM needs — different clients forward different surfaces (Claude Code → `structuredContent`, Claude Desktop → `content[]`); both must carry the same data, not just a count or title
 - [ ] Error messages guide recovery — name what went wrong and what to do next
 - [ ] Annotations set correctly (`readOnlyHint`, `destructiveHint`, etc.)
 - [ ] Tool surface is self-sufficient — a tool-only agent can accomplish everything the server is for
+- [ ] MCP Apps tools identified where interactive UI adds value (and `format()` provides full text fallback for non-app hosts)
 - [ ] Resource URIs use `{param}` templates, pagination planned for large lists
 - [ ] Service layer planned (or explicitly skipped with reasoning)
 - [ ] Resilience planned for external API services (retry boundary, backoff, parse classification)

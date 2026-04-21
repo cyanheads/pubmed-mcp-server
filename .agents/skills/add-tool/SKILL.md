@@ -4,7 +4,7 @@ description: >
   Scaffold a new MCP tool definition. Use when the user asks to add a tool, create a new tool, or implement a new capability for the server.
 metadata:
   author: cyanheads
-  version: "1.3"
+  version: "1.6"
   audience: external
   type: reference
 ---
@@ -39,6 +39,8 @@ import { tool, z } from '@cyanheads/mcp-ts-core';
 
 export const {{TOOL_EXPORT}} = tool('{{tool_name}}', {
   title: '{{TOOL_TITLE}}',
+  // Single cohesive paragraph — pack operational guidance into prose sentences,
+  // not bullet lists or blank-line-separated sections. Descriptions render inline.
   description: '{{TOOL_DESCRIPTION}}',
   annotations: { readOnlyHint: true },
   input: z.object({
@@ -55,9 +57,10 @@ export const {{TOOL_EXPORT}} = tool('{{tool_name}}', {
     return { /* output */ };
   },
 
-  // format() populates MCP content[] — the only field most LLM clients forward
-  // to the model. structuredContent (from output) is for programmatic use only.
-  // Render ALL data the LLM needs to reason about the result.
+  // format() populates MCP content[] — the markdown twin of structuredContent.
+  // Different clients read different surfaces (Claude Code → structuredContent,
+  // Claude Desktop → content[]), so both must carry the same data.
+  // Enforced at lint time: every field in `output` must appear in the rendered text.
   format: (result) => {
     const lines: string[] = [];
     // Render each item with all relevant fields — not just a count or title.
@@ -310,7 +313,7 @@ Large payloads burn the agent's context window. Default to curated summaries; of
 - [ ] JSDoc `@fileoverview` and `@module` header present
 - [ ] Optional nested objects guarded for empty inner values from form-based clients (check `?.field` truthiness, not just object presence)
 - [ ] `handler(input, ctx)` is pure — throws on failure, no try/catch
-- [ ] `format()` renders all data the LLM needs (not just a count or title) — `content[]` is the only field most clients forward to the model
+- [ ] `format()` renders every field in the output schema — enforced at lint time via sentinel injection, startup fails with `format-parity` errors otherwise. Different clients forward different surfaces (Claude Code → `structuredContent`, Claude Desktop → `content[]`); both must carry the same data. Primary fix: render the missing field in `format()` (use `z.discriminatedUnion` for list/detail variants). Escape hatch: if the output schema was over-typed for a genuinely dynamic upstream API, relax it (`z.object({}).passthrough()`) rather than maintaining aspirational typing
 - [ ] If wrapping external API: output schema and `format()` preserve uncertainty from sparse upstream payloads instead of inventing concrete values
 - [ ] `auth` scopes declared if the tool needs authorization
 - [ ] `task: true` added if the tool is long-running
