@@ -6,11 +6,15 @@
 
 import { tool, z } from '@cyanheads/mcp-ts-core';
 import { getNcbiService } from '@/services/ncbi/ncbi-service.js';
+import { conceptMeta, SCHEMA_SEARCH_ACTION } from './_concepts.js';
 
 export const spellCheckTool = tool('pubmed_spell_check', {
   description:
     "Spell-check a query and get NCBI's suggested correction. Useful for refining search queries.",
   annotations: { readOnlyHint: true, openWorldHint: true },
+  _meta: conceptMeta([SCHEMA_SEARCH_ACTION]),
+  sourceUrl:
+    'https://github.com/cyanheads/pubmed-mcp-server/blob/main/src/mcp-server/tools/definitions/spell-check.tool.ts',
 
   input: z.object({
     query: z.string().min(2).describe('PubMed search query to spell-check'),

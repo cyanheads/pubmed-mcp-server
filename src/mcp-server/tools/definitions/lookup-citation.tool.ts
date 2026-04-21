@@ -7,10 +7,19 @@
 import { tool, z } from '@cyanheads/mcp-ts-core';
 import { getNcbiService } from '@/services/ncbi/ncbi-service.js';
 import type { ECitMatchCitation } from '@/services/ncbi/types.js';
+import {
+  conceptMeta,
+  EDAM_DATA_RETRIEVAL,
+  EDAM_PUBMED_ID,
+  SCHEMA_SCHOLARLY_ARTICLE,
+} from './_concepts.js';
 
 export const lookupCitationTool = tool('pubmed_lookup_citation', {
   description: `Look up PubMed IDs from partial bibliographic citations. Useful when you have a reference (journal, year, volume, page, author) and need the PMID. Uses NCBI ECitMatch for deterministic matching — more reliable than searching by citation fields.`,
   annotations: { readOnlyHint: true, openWorldHint: true },
+  _meta: conceptMeta([SCHEMA_SCHOLARLY_ARTICLE, EDAM_DATA_RETRIEVAL, EDAM_PUBMED_ID]),
+  sourceUrl:
+    'https://github.com/cyanheads/pubmed-mcp-server/blob/main/src/mcp-server/tools/definitions/lookup-citation.tool.ts',
 
   input: z.object({
     citations: z

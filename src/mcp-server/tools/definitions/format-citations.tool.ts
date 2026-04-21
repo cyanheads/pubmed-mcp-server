@@ -13,11 +13,15 @@ import { getNcbiService } from '@/services/ncbi/ncbi-service.js';
 import { parseFullArticle } from '@/services/ncbi/parsing/article-parser.js';
 import { ensureArray } from '@/services/ncbi/parsing/xml-helpers.js';
 import type { XmlPubmedArticle } from '@/services/ncbi/types.js';
+import { conceptMeta, EDAM_DATA_FORMATTING, SCHEMA_CREATIVE_WORK } from './_concepts.js';
 import { pmidStringSchema } from './_schemas.js';
 
 export const formatCitationsTool = tool('pubmed_format_citations', {
   description: 'Get formatted citations for PubMed articles in APA, MLA, BibTeX, or RIS format.',
   annotations: { readOnlyHint: true, openWorldHint: true },
+  _meta: conceptMeta([SCHEMA_CREATIVE_WORK, EDAM_DATA_FORMATTING]),
+  sourceUrl:
+    'https://github.com/cyanheads/pubmed-mcp-server/blob/main/src/mcp-server/tools/definitions/format-citations.tool.ts',
 
   input: z.object({
     pmids: z.array(pmidStringSchema).min(1).max(50).describe('PubMed IDs to cite'),

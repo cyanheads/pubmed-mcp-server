@@ -9,6 +9,7 @@ import { getNcbiService } from '@/services/ncbi/ncbi-service.js';
 import { parsePmcArticle } from '@/services/ncbi/parsing/pmc-article-parser.js';
 import { findAll, findOne, type JatsNodeList } from '@/services/ncbi/parsing/pmc-xml-helpers.js';
 import type { ParsedPmcArticle } from '@/services/ncbi/types.js';
+import { conceptMeta, EDAM_DATA_RETRIEVAL, SCHEMA_SCHOLARLY_ARTICLE } from './_concepts.js';
 import { pmidStringSchema } from './_schemas.js';
 
 function normalizePmcId(id: string): string {
@@ -57,6 +58,9 @@ export const fetchFulltextTool = tool('pubmed_fetch_fulltext', {
   description:
     'Fetch full-text articles from PubMed Central (PMC). Returns complete article body text, sections, and references for open-access articles. Accepts PMC IDs directly or PubMed IDs (auto-resolved via the PMC ID Converter).',
   annotations: { readOnlyHint: true, openWorldHint: true },
+  _meta: conceptMeta([SCHEMA_SCHOLARLY_ARTICLE, EDAM_DATA_RETRIEVAL]),
+  sourceUrl:
+    'https://github.com/cyanheads/pubmed-mcp-server/blob/main/src/mcp-server/tools/definitions/fetch-fulltext.tool.ts',
 
   input: z.object({
     pmcids: z

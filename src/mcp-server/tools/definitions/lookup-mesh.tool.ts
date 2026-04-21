@@ -7,6 +7,13 @@
 import { tool, z } from '@cyanheads/mcp-ts-core';
 import { getNcbiService } from '@/services/ncbi/ncbi-service.js';
 import { ensureArray, getText } from '@/services/ncbi/parsing/xml-helpers.js';
+import {
+  conceptMeta,
+  EDAM_DATA_RETRIEVAL,
+  EDAM_ONTOLOGY_TERMINOLOGY,
+  SCHEMA_DEFINED_TERM,
+  SCHEMA_DEFINED_TERM_SET,
+} from './_concepts.js';
 
 // ─── MeSH eSummary parsing helpers ───────────────────────────────────────────
 
@@ -85,6 +92,14 @@ export const lookupMeshTool = tool('pubmed_lookup_mesh', {
   description:
     'Search and explore MeSH (Medical Subject Headings) vocabulary. Essential for building precise PubMed queries.',
   annotations: { readOnlyHint: true, openWorldHint: true },
+  _meta: conceptMeta([
+    SCHEMA_DEFINED_TERM,
+    SCHEMA_DEFINED_TERM_SET,
+    EDAM_ONTOLOGY_TERMINOLOGY,
+    EDAM_DATA_RETRIEVAL,
+  ]),
+  sourceUrl:
+    'https://github.com/cyanheads/pubmed-mcp-server/blob/main/src/mcp-server/tools/definitions/lookup-mesh.tool.ts',
 
   input: z.object({
     term: z.string().min(1).describe('MeSH term to look up'),

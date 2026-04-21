@@ -8,6 +8,7 @@ import { tool, z } from '@cyanheads/mcp-ts-core';
 import { getNcbiService } from '@/services/ncbi/ncbi-service.js';
 import { extractBriefSummaries } from '@/services/ncbi/parsing/esummary-parser.js';
 import { ensureArray } from '@/services/ncbi/parsing/xml-helpers.js';
+import { conceptMeta, EDAM_DATA_RETRIEVAL, SCHEMA_SCHOLARLY_ARTICLE } from './_concepts.js';
 import { pmidStringSchema } from './_schemas.js';
 
 // ─── ELink XML types ─────────────────────────────────────────────────────────
@@ -43,6 +44,9 @@ export const findRelatedTool = tool('pubmed_find_related', {
   description:
     'Find articles related to a source article — similar content, citing articles, or references.',
   annotations: { readOnlyHint: true, openWorldHint: true },
+  _meta: conceptMeta([SCHEMA_SCHOLARLY_ARTICLE, EDAM_DATA_RETRIEVAL]),
+  sourceUrl:
+    'https://github.com/cyanheads/pubmed-mcp-server/blob/main/src/mcp-server/tools/definitions/find-related.tool.ts',
 
   input: z.object({
     pmid: pmidStringSchema.describe('Source PubMed ID'),

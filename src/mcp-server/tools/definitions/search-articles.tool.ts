@@ -8,6 +8,12 @@ import { tool, z } from '@cyanheads/mcp-ts-core';
 import { sanitization } from '@cyanheads/mcp-ts-core/utils';
 import { getNcbiService } from '@/services/ncbi/ncbi-service.js';
 import { extractBriefSummaries } from '@/services/ncbi/parsing/esummary-parser.js';
+import {
+  conceptMeta,
+  EDAM_DATABASE_SEARCH,
+  EDAM_PUBMED_ID,
+  SCHEMA_SEARCH_ACTION,
+} from './_concepts.js';
 
 /**
  * Accepts empty strings (treated as "no filter" by the handler) or dates in
@@ -78,6 +84,9 @@ export const searchArticlesTool = tool('pubmed_search_articles', {
   description:
     'Search PubMed with full query syntax, filters, and date ranges. Returns PMIDs and optional brief summaries. Supports field-specific filters (author, journal, MeSH terms), common filters (language, species, free full text), and pagination via offset for paging through large result sets.',
   annotations: { readOnlyHint: true, openWorldHint: true },
+  _meta: conceptMeta([SCHEMA_SEARCH_ACTION, EDAM_DATABASE_SEARCH, EDAM_PUBMED_ID]),
+  sourceUrl:
+    'https://github.com/cyanheads/pubmed-mcp-server/blob/main/src/mcp-server/tools/definitions/search-articles.tool.ts',
 
   input: z.object({
     query: z.string().min(1).describe('PubMed search query (supports full NCBI syntax)'),

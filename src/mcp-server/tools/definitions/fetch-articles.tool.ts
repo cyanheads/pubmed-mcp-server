@@ -9,12 +9,21 @@ import { getNcbiService } from '@/services/ncbi/ncbi-service.js';
 import { parseFullArticle } from '@/services/ncbi/parsing/article-parser.js';
 import { ensureArray } from '@/services/ncbi/parsing/xml-helpers.js';
 import type { XmlPubmedArticle } from '@/services/ncbi/types.js';
+import {
+  conceptMeta,
+  EDAM_DATA_RETRIEVAL,
+  EDAM_PUBMED_ID,
+  SCHEMA_SCHOLARLY_ARTICLE,
+} from './_concepts.js';
 import { pmidStringSchema } from './_schemas.js';
 
 export const fetchArticlesTool = tool('pubmed_fetch_articles', {
   description:
     'Fetch full article metadata by PubMed IDs. Returns detailed article information including abstract, authors, journal, MeSH terms.',
   annotations: { readOnlyHint: true, openWorldHint: true },
+  _meta: conceptMeta([SCHEMA_SCHOLARLY_ARTICLE, EDAM_DATA_RETRIEVAL, EDAM_PUBMED_ID]),
+  sourceUrl:
+    'https://github.com/cyanheads/pubmed-mcp-server/blob/main/src/mcp-server/tools/definitions/fetch-articles.tool.ts',
 
   input: z.object({
     pmids: z.array(pmidStringSchema).min(1).max(200).describe('PubMed IDs to fetch'),

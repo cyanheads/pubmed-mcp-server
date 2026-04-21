@@ -32,6 +32,29 @@ await createApp({
   ],
   resources: [databaseInfoResource],
   prompts: [researchPlanPrompt],
+  landing: {
+    tagline:
+      'Search PubMed, fetch articles, generate citations, explore MeSH terms, and discover related research.',
+    repoRoot: 'https://github.com/cyanheads/pubmed-mcp-server',
+    links: [
+      { label: 'PubMed', href: 'https://pubmed.ncbi.nlm.nih.gov/', external: true },
+      {
+        label: 'E-utilities docs',
+        href: 'https://www.ncbi.nlm.nih.gov/books/NBK25501/',
+        external: true,
+      },
+      {
+        label: 'Get an NCBI API key',
+        href: 'https://www.ncbi.nlm.nih.gov/account/settings/',
+        external: true,
+      },
+      { label: 'MeSH Browser', href: 'https://meshb.nlm.nih.gov/', external: true },
+    ],
+    envExample: {
+      NCBI_API_KEY: 'your-ncbi-api-key',
+      NCBI_ADMIN_EMAIL: 'you@example.com',
+    },
+  },
   setup() {
     initNcbiService();
   },
