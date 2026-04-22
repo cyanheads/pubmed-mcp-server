@@ -4,6 +4,36 @@ All notable changes to this project will be documented in this file.
 
 ---
 
+## [2.5.1] - 2026-04-22
+
+End-to-end cancellation. `ctx.signal` from every tool and resource handler now threads through the NCBI service layer into both `fetch()` and the retry-loop backoff sleep, so client cancellations and the new service-level deadline interrupt the *full* retry chain instead of waiting for the next attempt to complete. Adds a `NCBI_TOTAL_DEADLINE_MS` knob (default `60000`) that bounds worst-case tool latency regardless of `NCBI_MAX_RETRIES × backoff`.
+
+### Added
+
+- **Service-level deadline + caller-signal abort propagation** (`src/services/ncbi/ncbi-service.ts`, `src/services/ncbi/api-client.ts`, `src/services/ncbi/types.ts`, `src/config/server-config.ts`, `.env.example`):
+  - New `runWithDeadline()` wrapper composes an internal `AbortController` (fires at `totalDeadlineMs`) with the caller's `ctx.signal` via `AbortSignal.any()`. The combined signal is threaded into both `apiClient.makeRequest` (cancels the in-flight `fetch`) and the backoff sleep (cancels pending retries).
+  - New `abortableSleep()` replaces the bare `setTimeout` in `withRetry()`'s backoff so retry chains short-circuit on abort instead of finishing the current sleep first.
+  - New `NcbiCallOptions { signal? }` exported from `types.ts`. Every public `NcbiService` method (`eSearch`, `eSummary`, `eFetch`, `eLink`, `eSpell`, `eInfo`, `eCitMatch`, `idConvert`) now accepts it as its trailing optional arg.
+  - New `NCBI_TOTAL_DEADLINE_MS` env var (range `5000`–`600000`, default `60000`). Surfaced in `.env.example`, `README.md` config table, and the Zod schema in `src/config/server-config.ts`. Deadline expiry throws `McpError(JsonRpcErrorCode.Timeout)` with `{ deadlineMs }` data.
+  - `NcbiApiClient.makeExternalRequest` (PMC ID Converter — uses `globalThis.fetch` directly, not `fetchWithTimeout`) now composes the per-request `AbortSignal.timeout` with an optional caller signal via `AbortSignal.any()`. `getRequest` / `postRequest` forward an optional `signal` into `fetchWithTimeout` so service-level cancellation reaches the lower-level fetch.
+
+### Changed
+
+- **All 9 tools + database-info resource thread `ctx.signal`** through to the NCBI service (`convert-ids`, `fetch-articles`, `fetch-fulltext`, `find-related`, `format-citations`, `lookup-citation`, `lookup-mesh`, `search-articles`, `database-info.resource`). Single-line wiring per call site — `{ signal: ctx.signal }` is forwarded as the new options arg.
+- **`NCBI_TIMEOUT_MS` description clarified** (`.env.example`, `src/config/server-config.ts`, `README.md`): `Request timeout` → `Per-request HTTP timeout` to disambiguate from the new total-deadline knob.
+- **Framework bump — `@cyanheads/mcp-ts-core` 0.6.3 → 0.6.5** (`package.json`, `bun.lock`): patch bumps with no API surface impact on this server.
+
+### Tests
+
+- **`api-client.test.ts` (+97 lines)**: 6 new tests covering `signal` forwarding on GET / POST / no-signal paths, plus three `makeExternalRequest` cases (timeout-only signal, `AbortSignal.any()` composition, pre-aborted external signal short-circuit).
+- **`ncbi-service.test.ts` (+277 lines)**: three new describe blocks:
+  - **Retry behavior with signals** (4 tests): forwards `signal` to `apiClient.makeRequest`, throws `Timeout` when deadline fires before first attempt, short-circuits the retry chain when caller signal aborts before invocation or mid-flight.
+  - **Real-timer signal wiring during backoff sleep** (4 tests): proves the deadline + caller-signal both cut backoff sleeps short (≤500ms vs the 750–1250ms first-attempt window) for both `eSearch` (`makeRequest` path) and `idConvert` (`makeExternalRequest` path).
+  - **Deadline timer cleanup** (3 tests): pins the contract that every request — success, non-retryable error, exhausted retries — clears its deadline timer (`setTimeout` ↔ `clearTimeout` parity).
+- **9 tool-test assertion updates** in `convert-ids`, `fetch-articles`, `fetch-fulltext` (3 sites), `find-related` (3 sites), `search-articles` (4 sites) test files — switch from positional args to `expect.objectContaining({ signal: expect.any(AbortSignal) })` to verify each tool wires `ctx.signal` through to the service.
+
+---
+
 ## [2.5.0] - 2026-04-21
 
 Three feature tracks land together: MCPmed-aligned semantic concept tags on every tool, an HTTP landing page with per-tool view-source links, and a framework bump to `@cyanheads/mcp-ts-core` 0.6.3 that exposes `sourceUrl?` on definitions so the auto-derived path convention is overridable without file renames or type casts.
