@@ -4,6 +4,27 @@ All notable changes to this project will be documented in this file.
 
 ---
 
+## [2.5.2] - 2026-04-22
+
+Framework patch series bump (`@cyanheads/mcp-ts-core` 0.6.5 → 0.6.8) and documentation refresh. Picks up the new `MCP_PUBLIC_URL` override for TLS-terminating reverse-proxy deployments (0.6.6), template hygiene fixes (0.6.7), and landing-page visual polish plus a new CSS-injection lint rule (0.6.8). No API surface impact on this server.
+
+### Added
+
+- **`MCP_PUBLIC_URL` env var documentation** (`.env.example`, `README.md`, `server.json`): Surfaces the 0.6.6 override for deployments behind Cloudflare Tunnel / Caddy / nginx / ALB so the landing page, SEP-1649 Server Card, and RFC 9728 protected-resource metadata emit the public `https://` origin instead of the internal container hostname. Declared on the `streamable-http` package entry in `server.json` so MCP registry clients advertise it alongside `MCP_HTTP_HOST`/`MCP_HTTP_PORT`.
+- **`MCP_HTTP_ENDPOINT_PATH` env var documentation** (`.env.example`, `README.md`): Documents the existing framework knob for the HTTP mount path (default `/mcp`).
+
+### Changed
+
+- **Framework bump — `@cyanheads/mcp-ts-core` 0.6.5 → 0.6.8** (`package.json`, `bun.lock`): 0.6.6 adds `MCP_PUBLIC_URL` + `design-mcp-server` skill rework (v2.7 codifies the `{server}_{verb}_{noun}` naming default, documents workflow-safety patterns, and diversifies examples beyond email/notifications); 0.6.7 is template hygiene with no consumer impact; 0.6.8 ships landing-page visual polish (auto-derived `--accent-2` secondary token via `oklch` relative color, animated conic-gradient border beam on the connect card, brighter dark-mode surfaces, accent bar prefix on `h2`s) and a new `landing-theme-accent-format` lint rule that rejects CSS-injection payloads in `landing.theme.accent`. Patch series — no breaking changes.
+- **`.dockerignore` adds `.agents`** (`.dockerignore`): Mirrors the 0.6.7 template fix. Keeps agent scratch directories out of the production image, matching the existing `.claude` exclusion.
+- **Project skills synced from 0.6.6** (`skills/`, `.agents/skills/`, `.claude/skills/`): `add-tool` v1.7 → v1.8, `design-mcp-server` v2.5 → v2.7, `field-test` v1.2 → v1.3, `polish-docs-meta` v1.6 → v1.7.
+
+### Tests
+
+- Full suite: **409 passed** / 4 skipped / 0 regressions. `bun run devcheck` green across all 8 checks — the new `landing-theme-accent-format` rule is a no-op here since `src/index.ts` doesn't set `landing.theme.accent`.
+
+---
+
 ## [2.5.1] - 2026-04-22
 
 End-to-end cancellation. `ctx.signal` from every tool and resource handler now threads through the NCBI service layer into both `fetch()` and the retry-loop backoff sleep, so client cancellations and the new service-level deadline interrupt the *full* retry chain instead of waiting for the next attempt to complete. Adds a `NCBI_TOTAL_DEADLINE_MS` knob (default `60000`) that bounds worst-case tool latency regardless of `NCBI_MAX_RETRIES × backoff`.

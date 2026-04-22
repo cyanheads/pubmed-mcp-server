@@ -4,7 +4,7 @@ description: >
   Scaffold a new MCP tool definition. Use when the user asks to add a tool, create a new tool, or implement a new capability for the server.
 metadata:
   author: cyanheads
-  version: "1.6"
+  version: "1.8"
   audience: external
   type: reference
 ---
@@ -13,9 +13,7 @@ metadata:
 
 Tools use the `tool()` builder from `@cyanheads/mcp-ts-core`. Each tool lives in `src/mcp-server/tools/definitions/` with a `.tool.ts` suffix and is registered into `createApp()` in `src/index.ts`. Some larger repos later add `definitions/index.ts` barrels; match the pattern already used by the project you're editing.
 
-For the full `tool()` API, `Context` interface, and error codes, read:
-
-    node_modules/@cyanheads/mcp-ts-core/CLAUDE.md
+For the full `tool()` API, `Context` interface, and error codes, read `node_modules/@cyanheads/mcp-ts-core/CLAUDE.md`.
 
 ## Steps
 
@@ -26,6 +24,16 @@ For the full `tool()` API, `Context` interface, and error codes, read:
 4. **Register** the tool in the project's existing `createApp()` tool list (directly in `src/index.ts` for fresh scaffolds, or via a barrel if the repo already has one)
 5. **Run `bun run devcheck`** to verify
 6. **Smoke-test** with `bun run dev:stdio` or `dev:http`
+
+## Naming
+
+Tools use lowercase snake_case with a canonical server/domain prefix: `{server}_{verb}_{noun}` — 3 words.
+
+Examples: `pubmed_search_articles`, `pubmed_fetch_fulltext`, `clinicaltrials_find_studies`.
+
+The server prefix uses the canonical platform/brand name, not an abbreviation (`patentsview_` not `patents_`, `clinicaltrials_` not `ct_`). When a name resists the schema — can't pick a verb, noun feels generic, wants 4+ segments — that's usually a signal the scope is fuzzy; split the tool, rename, or reconsider.
+
+For shape selection (Workflow or Instruction variants — standard single-action tools are the default), see the `design-mcp-server` skill's Tool shapes section.
 
 ## Template
 
@@ -164,6 +172,8 @@ async handler(input, ctx) {
 },
 ```
 
+**Note on the `try/catch`:** this is the deliberate exception to the "logic throws, framework catches" rule. Per-item isolation is the whole point of partial-success batch tools — one failed item must not abort the batch, and the framework's partial-success telemetry (below) depends on seeing a populated `failed` array. Don't remove it to conform to the handler-level rule.
+
 Single-item tools don't need this — they either succeed or throw. The partial success question only arises with array inputs.
 
 **Telemetry:** The framework automatically detects this pattern — when a handler result contains a non-empty `failed` array, the span gets `mcp.tool.partial_success`, `mcp.tool.batch.succeeded_count`, and `mcp.tool.batch.failed_count` attributes. No manual instrumentation needed.
@@ -242,7 +252,8 @@ import { serviceUnavailable } from '@cyanheads/mcp-ts-core/errors';
 throw serviceUnavailable(`arXiv API returned HTTP ${status}. Retry in a few seconds.`);
 
 // Structured hint for programmatic recovery
-throw new McpError(JsonRpcErrorCode.InvalidParams,
+import { invalidParams } from '@cyanheads/mcp-ts-core/errors';
+throw invalidParams(
   `Date range exceeds 90-day API limit. Narrow the range or split into multiple queries.`,
   { maxDays: 90, requestedDays: daysBetween },
 );
