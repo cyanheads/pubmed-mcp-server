@@ -105,7 +105,11 @@ describe('convertIdsTool', () => {
     const input = convertIdsTool.input.parse({ ids: ['10.1093/nar/gks1195'], idtype: 'doi' });
     await convertIdsTool.handler(input, ctx);
 
-    expect(mockIdConvert).toHaveBeenCalledWith(['10.1093/nar/gks1195'], 'doi');
+    expect(mockIdConvert).toHaveBeenCalledWith(
+      ['10.1093/nar/gks1195'],
+      'doi',
+      expect.objectContaining({ signal: expect.any(AbortSignal) }),
+    );
   });
 
   it('handles batch of multiple IDs', async () => {

@@ -18,8 +18,9 @@ function normalizePmcId(id: string): string {
 
 async function resolvePmidsToPmcIds(
   pmids: string[],
+  signal?: AbortSignal,
 ): Promise<{ resolved: Map<string, string>; unavailable: string[] }> {
-  const records = await getNcbiService().idConvert(pmids, 'pmid');
+  const records = await getNcbiService().idConvert(pmids, 'pmid', signal ? { signal } : undefined);
   const resolved = new Map<string, string>();
   for (const record of records) {
     if (record.pmid !== undefined && record.pmcid) {
@@ -168,7 +169,7 @@ export const fetchFulltextTool = tool('pubmed_fetch_fulltext', {
     let unavailablePmids: string[] | undefined;
 
     if (input.pmids) {
-      const resolution = await resolvePmidsToPmcIds(input.pmids);
+      const resolution = await resolvePmidsToPmcIds(input.pmids, ctx.signal);
       if (resolution.resolved.size === 0) {
         return { articles: [], totalReturned: 0, unavailablePmids: input.pmids };
       }
@@ -180,7 +181,12 @@ export const fetchFulltextTool = tool('pubmed_fetch_fulltext', {
 
     const xmlData = await getNcbiService().eFetch<JatsNodeList>(
       { db: 'pmc', id: pmcIds.join(','), retmode: 'xml' },
-      { retmode: 'xml', useOrderedParser: true, usePost: pmcIds.length > 5 },
+      {
+        retmode: 'xml',
+        useOrderedParser: true,
+        usePost: pmcIds.length > 5,
+        signal: ctx.signal,
+      },
     );
 
     const articleSet = findOne(xmlData, 'pmc-articleset');

@@ -33,6 +33,12 @@ export interface NcbiRequestOptions {
   /** When true and retmode is 'xml', return the raw XML string after error checking. */
   returnRawXml?: boolean;
   /**
+   * Combined abort signal — internal service-level deadline OR'd with the
+   * caller's `ctx.signal`. Cancels the in-flight fetch and short-circuits
+   * backoff sleeps.
+   */
+  signal?: AbortSignal;
+  /**
    * Parse XML in `preserveOrder: true` mode (returns `JatsNodeList`). Required
    * for JATS mixed-content responses (PMC full-text) where inline element order
    * must be preserved in the output. Leave false for all other E-utilities.
@@ -40,6 +46,15 @@ export interface NcbiRequestOptions {
   useOrderedParser?: boolean;
   /** Force HTTP POST (for large payloads). */
   usePost?: boolean;
+}
+
+/**
+ * Runtime options accepted by public NCBI service methods.
+ * Lets callers thread `ctx.signal` (from tool handlers) through the retry layer.
+ */
+export interface NcbiCallOptions {
+  /** Caller-provided abort signal; combined with the service's internal deadline. */
+  signal?: AbortSignal;
 }
 
 /**

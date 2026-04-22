@@ -69,7 +69,12 @@ describe('fetchFulltextTool', () => {
 
     expect(mockEFetch).toHaveBeenCalledWith(
       { db: 'pmc', id: '1234567', retmode: 'xml' },
-      { retmode: 'xml', useOrderedParser: true, usePost: false },
+      expect.objectContaining({
+        retmode: 'xml',
+        useOrderedParser: true,
+        usePost: false,
+        signal: expect.any(AbortSignal),
+      }),
     );
     expect(result.totalReturned).toBe(1);
     expect(result.articles[0]?.pmcId).toBe('PMC1234567');
@@ -104,7 +109,12 @@ describe('fetchFulltextTool', () => {
 
     expect(mockEFetch).toHaveBeenCalledWith(
       { db: 'pmc', id: '777', retmode: 'xml' },
-      { retmode: 'xml', useOrderedParser: true, usePost: false },
+      expect.objectContaining({
+        retmode: 'xml',
+        useOrderedParser: true,
+        usePost: false,
+        signal: expect.any(AbortSignal),
+      }),
     );
     expect(result.unavailablePmids).toEqual(['99999']);
     expect(result.articles[0]?.sections).toEqual([{ title: 'Introduction', text: 'Intro text.' }]);
@@ -128,7 +138,12 @@ describe('fetchFulltextTool', () => {
 
     expect(mockEFetch).toHaveBeenCalledWith(
       { db: 'pmc', id: '111,222,333,444,555,666', retmode: 'xml' },
-      { retmode: 'xml', useOrderedParser: true, usePost: true },
+      expect.objectContaining({
+        retmode: 'xml',
+        useOrderedParser: true,
+        usePost: true,
+        signal: expect.any(AbortSignal),
+      }),
     );
     expect(result.unavailablePmcIds).toEqual(['PMC222', 'PMC333', 'PMC444', 'PMC555', 'PMC666']);
   });

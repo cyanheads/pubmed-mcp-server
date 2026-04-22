@@ -109,17 +109,23 @@ describe('findRelatedTool', () => {
     const input = findRelatedTool.input.parse({ pmid: '12345', maxResults: 2 });
     const result = await findRelatedTool.handler(input, ctx);
 
-    expect(mockELink).toHaveBeenCalledWith({
-      dbfrom: 'pubmed',
-      db: 'pubmed',
-      id: '12345',
-      retmode: 'xml',
-      cmd: 'neighbor_score',
-    });
-    expect(mockESummary).toHaveBeenCalledWith({
-      db: 'pubmed',
-      id: '111,222',
-    });
+    expect(mockELink).toHaveBeenCalledWith(
+      {
+        dbfrom: 'pubmed',
+        db: 'pubmed',
+        id: '12345',
+        retmode: 'xml',
+        cmd: 'neighbor_score',
+      },
+      expect.objectContaining({ signal: expect.any(AbortSignal) }),
+    );
+    expect(mockESummary).toHaveBeenCalledWith(
+      {
+        db: 'pubmed',
+        id: '111,222',
+      },
+      expect.objectContaining({ signal: expect.any(AbortSignal) }),
+    );
     expect(result.totalFound).toBe(2);
     expect(result.articles).toEqual([
       {
@@ -167,14 +173,17 @@ describe('findRelatedTool', () => {
     const input = findRelatedTool.input.parse({ pmid: '12345', relationship: 'cited_by' });
     const result = await findRelatedTool.handler(input, ctx);
 
-    expect(mockELink).toHaveBeenCalledWith({
-      dbfrom: 'pubmed',
-      db: 'pubmed',
-      id: '12345',
-      retmode: 'xml',
-      cmd: 'neighbor',
-      linkname: 'pubmed_pubmed_citedin',
-    });
+    expect(mockELink).toHaveBeenCalledWith(
+      {
+        dbfrom: 'pubmed',
+        db: 'pubmed',
+        id: '12345',
+        retmode: 'xml',
+        cmd: 'neighbor',
+        linkname: 'pubmed_pubmed_citedin',
+      },
+      expect.objectContaining({ signal: expect.any(AbortSignal) }),
+    );
     expect(result.articles[0]).toEqual({
       pmid: '222',
       title: 'Citing Article',
@@ -194,14 +203,17 @@ describe('findRelatedTool', () => {
     const input = findRelatedTool.input.parse({ pmid: '12345', relationship: 'references' });
     const result = await findRelatedTool.handler(input, ctx);
 
-    expect(mockELink).toHaveBeenCalledWith({
-      dbfrom: 'pubmed',
-      db: 'pubmed',
-      id: '12345',
-      retmode: 'xml',
-      cmd: 'neighbor',
-      linkname: 'pubmed_pubmed_refs',
-    });
+    expect(mockELink).toHaveBeenCalledWith(
+      {
+        dbfrom: 'pubmed',
+        db: 'pubmed',
+        id: '12345',
+        retmode: 'xml',
+        cmd: 'neighbor',
+        linkname: 'pubmed_pubmed_refs',
+      },
+      expect.objectContaining({ signal: expect.any(AbortSignal) }),
+    );
     expect(result.totalFound).toBe(0);
   });
 

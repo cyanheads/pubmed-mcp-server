@@ -213,7 +213,7 @@ describe('fetchArticlesTool', () => {
 
     expect(mockEFetch).toHaveBeenCalledWith(
       { db: 'pubmed', id: pmids.join(','), retmode: 'xml' },
-      { retmode: 'xml', usePost: true },
+      expect.objectContaining({ retmode: 'xml', usePost: true, signal: expect.any(AbortSignal) }),
     );
     expect(result.totalReturned).toBe(1);
     expect(result.unavailablePmids).toHaveLength(99);

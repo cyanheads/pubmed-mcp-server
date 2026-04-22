@@ -131,10 +131,11 @@ export const lookupMeshTool = tool('pubmed_lookup_mesh', {
     ctx.log.debug('MeSH lookup started', { term, maxResults, includeDetails });
 
     const hasFieldTag = /\[.+\]/.test(term);
-    const broadSearch = ncbi.eSearch({ db: 'mesh', term, retmax: maxResults });
+    const callOpts = { signal: ctx.signal };
+    const broadSearch = ncbi.eSearch({ db: 'mesh', term, retmax: maxResults }, callOpts);
     const exactSearch = hasFieldTag
       ? undefined
-      : ncbi.eSearch({ db: 'mesh', term: `${term}[MH]`, retmax: 1 });
+      : ncbi.eSearch({ db: 'mesh', term: `${term}[MH]`, retmax: 1 }, callOpts);
     const [broadResult, exactResult] = await Promise.all([broadSearch, exactSearch]);
 
     const seen = new Set<string>();
@@ -149,7 +150,7 @@ export const lookupMeshTool = tool('pubmed_lookup_mesh', {
 
     if (ids.length === 0) return { term, results: [] };
 
-    const summaryData = await ncbi.eSummary({ db: 'mesh', id: ids.join(',') });
+    const summaryData = await ncbi.eSummary({ db: 'mesh', id: ids.join(',') }, callOpts);
     const results = parseSummaryRecords(summaryData, ids, includeDetails);
 
     const termLower = term.toLowerCase();

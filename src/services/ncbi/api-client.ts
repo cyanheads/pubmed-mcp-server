@@ -44,8 +44,8 @@ export class NcbiApiClient {
       } as never);
 
       const response = usePost
-        ? await this.postRequest(url, finalParams)
-        : await this.getRequest(url, finalParams);
+        ? await this.postRequest(url, finalParams, options?.signal)
+        : await this.getRequest(url, finalParams, options?.signal);
 
       if (!response.ok) {
         let code: number;
@@ -79,7 +79,11 @@ export class NcbiApiClient {
    * error status codes — fetchWithTimeout throws before the body can be read.
    * Injects tool and email params but not api_key (eutils-specific).
    */
-  async makeExternalRequest(url: string, params: NcbiRequestParams): Promise<string> {
+  async makeExternalRequest(
+    url: string,
+    params: NcbiRequestParams,
+    externalSignal?: AbortSignal,
+  ): Promise<string> {
     const finalParams: Record<string, string> = {
       tool: this.config.toolIdentifier,
       ...(this.config.adminEmail && { email: this.config.adminEmail }),
@@ -91,11 +95,14 @@ export class NcbiApiClient {
     const qs = new URLSearchParams(finalParams).toString();
     const fullUrl = qs ? `${url}?${qs}` : url;
 
+    const timeoutSignal = AbortSignal.timeout(this.config.timeoutMs);
+    const signal = externalSignal
+      ? AbortSignal.any([timeoutSignal, externalSignal])
+      : timeoutSignal;
+
     try {
       logger.debug(`NCBI external request: GET ${fullUrl}`, { url } as never);
-      const response = await fetch(fullUrl, {
-        signal: AbortSignal.timeout(this.config.timeoutMs),
-      });
+      const response = await fetch(fullUrl, { signal });
 
       const body = await response.text();
 
@@ -148,20 +155,29 @@ export class NcbiApiClient {
     return queryString.length > POST_THRESHOLD;
   }
 
-  private getRequest(url: string, params: Record<string, string>): Promise<Response> {
+  private getRequest(
+    url: string,
+    params: Record<string, string>,
+    signal?: AbortSignal,
+  ): Promise<Response> {
     const qs = new URLSearchParams(params).toString();
     const fullUrl = qs ? `${url}?${qs}` : url;
     const ctx = requestContextService.createRequestContext({ operation: 'NcbiGet', url: fullUrl });
-    return fetchWithTimeout(fullUrl, this.config.timeoutMs, ctx);
+    return fetchWithTimeout(fullUrl, this.config.timeoutMs, ctx, signal ? { signal } : undefined);
   }
 
-  private postRequest(url: string, params: Record<string, string>): Promise<Response> {
+  private postRequest(
+    url: string,
+    params: Record<string, string>,
+    signal?: AbortSignal,
+  ): Promise<Response> {
     const body = new URLSearchParams(params).toString();
     const ctx = requestContextService.createRequestContext({ operation: 'NcbiPost', url });
     return fetchWithTimeout(url, this.config.timeoutMs, ctx, {
       method: 'POST',
       headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
       body,
+      ...(signal && { signal }),
     });
   }
 }

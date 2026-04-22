@@ -109,7 +109,7 @@ export const findRelatedTool = tool('pubmed_find_related', {
         break;
     }
 
-    const eLinkResult = (await ncbi.eLink(eLinkParams)) as ELinkResponse;
+    const eLinkResult = (await ncbi.eLink(eLinkParams, { signal: ctx.signal })) as ELinkResponse;
     const eLinkResultsArray = ensureArray(eLinkResult?.eLinkResult);
     const firstResult = eLinkResultsArray[0] as ELinkResultItem | undefined;
 
@@ -158,10 +158,13 @@ export const findRelatedTool = tool('pubmed_find_related', {
     }
 
     const pmidsToEnrich = foundPmids.slice(0, input.maxResults);
-    const summaryResult = await ncbi.eSummary({
-      db: 'pubmed',
-      id: pmidsToEnrich.map((p) => p.pmid).join(','),
-    });
+    const summaryResult = await ncbi.eSummary(
+      {
+        db: 'pubmed',
+        id: pmidsToEnrich.map((p) => p.pmid).join(','),
+      },
+      { signal: ctx.signal },
+    );
     const briefSummaries = await extractBriefSummaries(summaryResult);
     const summaryMap = new Map(briefSummaries.map((bs) => [bs.pmid, bs]));
 

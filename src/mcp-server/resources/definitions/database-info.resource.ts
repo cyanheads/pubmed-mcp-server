@@ -33,7 +33,10 @@ export const databaseInfoResource = resource('pubmed://database/info', {
   async handler(_params, ctx) {
     ctx.log.info('Fetching PubMed database info');
 
-    const raw = (await getNcbiService().eInfo({ db: 'pubmed' })) as Record<string, unknown>;
+    const raw = (await getNcbiService().eInfo({ db: 'pubmed' }, { signal: ctx.signal })) as Record<
+      string,
+      unknown
+    >;
 
     const eInfoResult = (raw.eInfoResult ?? raw) as Record<string, unknown>;
     const dbInfo = (eInfoResult.DbInfo ?? eInfoResult) as Record<string, unknown>;

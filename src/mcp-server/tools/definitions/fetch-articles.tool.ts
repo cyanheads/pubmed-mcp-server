@@ -142,7 +142,7 @@ export const fetchArticlesTool = tool('pubmed_fetch_articles', {
 
     const xmlData = await getNcbiService().eFetch(
       { db: 'pubmed', id: input.pmids.join(','), retmode: 'xml' },
-      { retmode: 'xml', usePost: input.pmids.length >= 100 },
+      { retmode: 'xml', usePost: input.pmids.length >= 100, signal: ctx.signal },
     );
 
     if (!xmlData || !('PubmedArticleSet' in xmlData)) {

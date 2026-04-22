@@ -14,7 +14,10 @@ vi.mock('@cyanheads/mcp-ts-core/utils', () => ({
   logger: { debug: vi.fn(), info: vi.fn(), notice: vi.fn(), warning: vi.fn(), error: vi.fn() },
 }));
 
-function createMockService() {
+/** Tests use a generous deadline so only explicit deadline tests hit it. */
+const TEST_DEADLINE_MS = 60_000;
+
+function createMockService(deadlineMs = TEST_DEADLINE_MS) {
   const mockApiClient = {
     makeRequest: vi.fn(),
   } as unknown as NcbiApiClient;
@@ -27,7 +30,7 @@ function createMockService() {
     parseAndHandleResponse: vi.fn(),
   } as unknown as NcbiResponseHandler;
 
-  const service = new NcbiService(mockApiClient, mockQueue, mockResponseHandler, 0);
+  const service = new NcbiService(mockApiClient, mockQueue, mockResponseHandler, 0, deadlineMs);
   return { service, mockApiClient, mockQueue, mockResponseHandler };
 }
 
@@ -138,7 +141,13 @@ describe('NcbiService', () => {
       const mockQueue = {
         enqueue: vi.fn(async (task: () => Promise<unknown>) => task()),
       } as unknown as NcbiRequestQueue;
-      const service = new NcbiService(mockApiClient, mockQueue, new NcbiResponseHandler(), 0);
+      const service = new NcbiService(
+        mockApiClient,
+        mockQueue,
+        new NcbiResponseHandler(),
+        0,
+        TEST_DEADLINE_MS,
+      );
 
       const heavyTitle = `Signal${'&#x2013;'.repeat(1001)}axis`;
       (
@@ -311,6 +320,7 @@ describe('NcbiService.idConvert', () => {
       mockQueue,
       {} as unknown as NcbiResponseHandler,
       0,
+      TEST_DEADLINE_MS,
     );
     return { service, mockApiClient };
   }
@@ -395,11 +405,23 @@ describe('NcbiService.idConvert', () => {
 describe('NcbiService retry behavior', () => {
   let setTimeoutSpy: ReturnType<typeof vi.spyOn>;
 
+  /**
+   * Retry backoff delays are capped at 30s (37.5s with jitter). The service-level
+   * deadline timer uses the same `setTimeout` but is typically ≥60s. Threshold
+   * of 50s keeps backoff tests deterministic (fire immediately) while leaving
+   * deadline timers pending — so only tests that explicitly set a short
+   * `totalDeadlineMs` exercise the deadline path.
+   */
   beforeEach(() => {
-    // Execute retry backoff timers immediately so retry behavior stays deterministic.
-    setTimeoutSpy = vi.spyOn(globalThis, 'setTimeout').mockImplementation(((fn: () => void) => {
+    setTimeoutSpy = vi.spyOn(globalThis, 'setTimeout').mockImplementation(((
+      fn: () => void,
+      ms?: number,
+    ) => {
+      if (typeof ms === 'number' && ms >= 50_000) {
+        return 0 as unknown as ReturnType<typeof setTimeout>;
+      }
       fn();
-      return 0;
+      return 0 as unknown as ReturnType<typeof setTimeout>;
     }) as unknown as typeof setTimeout);
   });
 
@@ -407,7 +429,7 @@ describe('NcbiService retry behavior', () => {
     setTimeoutSpy.mockRestore();
   });
 
-  function createRetryService(maxRetries: number) {
+  function createRetryService(maxRetries: number, deadlineMs = TEST_DEADLINE_MS) {
     const mockApiClient = {
       makeRequest: vi.fn(),
     } as unknown as NcbiApiClient;
@@ -420,7 +442,13 @@ describe('NcbiService retry behavior', () => {
       parseAndHandleResponse: vi.fn(),
     } as unknown as NcbiResponseHandler;
 
-    const service = new NcbiService(mockApiClient, mockQueue, mockResponseHandler, maxRetries);
+    const service = new NcbiService(
+      mockApiClient,
+      mockQueue,
+      mockResponseHandler,
+      maxRetries,
+      deadlineMs,
+    );
     return { service, mockApiClient, mockResponseHandler };
   }
 
@@ -623,7 +651,7 @@ describe('NcbiService retry behavior', () => {
 
     const retryDelays = (setTimeoutSpy.mock.calls as [unknown, unknown][])
       .map(([, ms]) => ms)
-      .filter((ms): ms is number => typeof ms === 'number' && ms >= 500);
+      .filter((ms): ms is number => typeof ms === 'number' && ms >= 500 && ms < 50_000);
 
     expect(retryDelays).toHaveLength(3);
     expect(retryDelays[0]).toBeGreaterThanOrEqual(750);
@@ -632,6 +660,281 @@ describe('NcbiService retry behavior', () => {
     expect(retryDelays[1]).toBeLessThanOrEqual(2500);
     expect(retryDelays[2]).toBeGreaterThanOrEqual(3000);
     expect(retryDelays[2]).toBeLessThanOrEqual(5000);
+  });
+
+  it('forwards signal to apiClient.makeRequest', async () => {
+    const { service, mockApiClient, mockResponseHandler } = createRetryService(0);
+    const makeRequest = mockApiClient.makeRequest as ReturnType<typeof vi.fn>;
+    const parseResponse = mockResponseHandler.parseAndHandleResponse as ReturnType<typeof vi.fn>;
+
+    makeRequest.mockResolvedValue('<xml/>');
+    parseResponse.mockReturnValue({
+      eSearchResult: {
+        Count: '0',
+        RetMax: '0',
+        RetStart: '0',
+        QueryTranslation: '',
+      },
+    });
+
+    await service.eSearch({ db: 'pubmed', term: 'test' });
+
+    const options = makeRequest.mock.calls[0]?.[2] as { signal?: AbortSignal } | undefined;
+    expect(options?.signal).toBeInstanceOf(AbortSignal);
+  });
+
+  it('throws Timeout with deadline message when deadline fires before first attempt', async () => {
+    // Deadline 1ms — fires immediately under the setTimeout mock (< 50_000).
+    const { service, mockApiClient } = createRetryService(3, 1);
+    const makeRequest = mockApiClient.makeRequest as ReturnType<typeof vi.fn>;
+
+    // Shouldn't be reached — deadline aborts before the first attempt executes.
+    makeRequest.mockRejectedValue(new McpError(JsonRpcErrorCode.ServiceUnavailable, 'down'));
+
+    await expect(service.eSearch({ db: 'pubmed', term: 'test' })).rejects.toMatchObject({
+      code: JsonRpcErrorCode.Timeout,
+      message: expect.stringMatching(/deadline.*exceeded/i),
+    });
+    expect(makeRequest).not.toHaveBeenCalled();
+  });
+
+  it('short-circuits retry chain when caller signal aborts before invocation', async () => {
+    const { service, mockApiClient } = createRetryService(3);
+    const makeRequest = mockApiClient.makeRequest as ReturnType<typeof vi.fn>;
+
+    makeRequest.mockRejectedValue(new McpError(JsonRpcErrorCode.ServiceUnavailable, 'down'));
+
+    const controller = new AbortController();
+    controller.abort(new Error('client cancelled'));
+
+    await expect(
+      service.eSearch({ db: 'pubmed', term: 'test' }, { signal: controller.signal }),
+    ).rejects.toThrow(/client cancelled/);
+    expect(makeRequest).not.toHaveBeenCalled();
+  });
+
+  it('short-circuits retry chain when caller signal aborts between attempts', async () => {
+    const { service, mockApiClient } = createRetryService(3);
+    const makeRequest = mockApiClient.makeRequest as ReturnType<typeof vi.fn>;
+
+    const controller = new AbortController();
+
+    // Abort after the first attempt fails, before the backoff sleep resumes.
+    makeRequest.mockImplementationOnce(() => {
+      controller.abort(new Error('client cancelled mid-flight'));
+      return Promise.reject(new McpError(JsonRpcErrorCode.ServiceUnavailable, 'down'));
+    });
+
+    await expect(
+      service.eSearch({ db: 'pubmed', term: 'test' }, { signal: controller.signal }),
+    ).rejects.toThrow(/client cancelled mid-flight/);
+    // Only the first attempt should have happened — no retry after abort.
+    expect(makeRequest).toHaveBeenCalledTimes(1);
+  });
+});
+
+/**
+ * Real-timer tests for the deadline + caller-signal wiring *during* backoff
+ * sleeps. The retry-behavior suite above fires all setTimeout callbacks
+ * synchronously, which collapses the backoff window to zero and makes it
+ * impossible to observe what happens when an abort races the sleep. These
+ * tests use real timers and intentionally short delays so the races play out.
+ */
+describe('NcbiService signal wiring during backoff sleep', () => {
+  function createRealTimerService(maxRetries: number, deadlineMs: number) {
+    const mockApiClient = {
+      makeRequest: vi.fn(),
+      makeExternalRequest: vi.fn(),
+    } as unknown as NcbiApiClient;
+
+    const mockQueue = {
+      enqueue: vi.fn(async (task: () => Promise<unknown>) => task()),
+    } as unknown as NcbiRequestQueue;
+
+    const mockResponseHandler = {
+      parseAndHandleResponse: vi.fn(),
+    } as unknown as NcbiResponseHandler;
+
+    const service = new NcbiService(
+      mockApiClient,
+      mockQueue,
+      mockResponseHandler,
+      maxRetries,
+      deadlineMs,
+    );
+    return { service, mockApiClient, mockResponseHandler };
+  }
+
+  it('throws Timeout when deadline expires during backoff sleep', async () => {
+    // Backoff for attempt 0 is 750–1250ms (1000ms ±25% jitter). A 200ms
+    // deadline always expires while the retry loop is sleeping.
+    const { service, mockApiClient } = createRealTimerService(3, 200);
+    const makeRequest = mockApiClient.makeRequest as ReturnType<typeof vi.fn>;
+
+    // First attempt fails fast with a retryable error so the loop enters the sleep.
+    makeRequest.mockRejectedValue(new McpError(JsonRpcErrorCode.ServiceUnavailable, 'down'));
+
+    const started = Date.now();
+    await expect(service.eSearch({ db: 'pubmed', term: 'test' })).rejects.toMatchObject({
+      code: JsonRpcErrorCode.Timeout,
+      message: expect.stringMatching(/deadline.*exceeded/i),
+    });
+    const elapsed = Date.now() - started;
+
+    // Must exit at the deadline (≤ ~500ms), not after the full backoff (≥ 750ms).
+    expect(elapsed).toBeLessThan(500);
+    // Only one attempt fired; the chain was cancelled during the first sleep.
+    expect(makeRequest).toHaveBeenCalledTimes(1);
+  }, 2000);
+
+  it('propagates caller signal abort that fires during backoff sleep', async () => {
+    const { service, mockApiClient } = createRealTimerService(3, 60_000);
+    const makeRequest = mockApiClient.makeRequest as ReturnType<typeof vi.fn>;
+
+    makeRequest.mockRejectedValue(new McpError(JsonRpcErrorCode.ServiceUnavailable, 'down'));
+
+    const controller = new AbortController();
+    // Abort ~200ms in, which lands inside the first backoff sleep (750–1250ms).
+    setTimeout(() => controller.abort(new Error('cancelled during sleep')), 200);
+
+    const started = Date.now();
+    await expect(
+      service.eSearch({ db: 'pubmed', term: 'test' }, { signal: controller.signal }),
+    ).rejects.toThrow(/cancelled during sleep/);
+    const elapsed = Date.now() - started;
+
+    expect(elapsed).toBeLessThan(500);
+    expect(makeRequest).toHaveBeenCalledTimes(1);
+  }, 2000);
+
+  it('idConvert honors deadline during backoff sleep', async () => {
+    // Same race as above, but through the separate runWithDeadline invocation
+    // in idConvert (external-API code path).
+    const { service, mockApiClient } = createRealTimerService(3, 200);
+    const makeExternalRequest = mockApiClient.makeExternalRequest as ReturnType<typeof vi.fn>;
+
+    makeExternalRequest.mockRejectedValue(
+      new McpError(JsonRpcErrorCode.ServiceUnavailable, 'down'),
+    );
+
+    const started = Date.now();
+    await expect(service.idConvert(['123'], 'pmid')).rejects.toMatchObject({
+      code: JsonRpcErrorCode.Timeout,
+      message: expect.stringMatching(/deadline.*exceeded/i),
+    });
+    expect(Date.now() - started).toBeLessThan(500);
+    expect(makeExternalRequest).toHaveBeenCalledTimes(1);
+  }, 2000);
+
+  it('idConvert honors caller signal during backoff sleep', async () => {
+    const { service, mockApiClient } = createRealTimerService(3, 60_000);
+    const makeExternalRequest = mockApiClient.makeExternalRequest as ReturnType<typeof vi.fn>;
+
+    makeExternalRequest.mockRejectedValue(
+      new McpError(JsonRpcErrorCode.ServiceUnavailable, 'down'),
+    );
+
+    const controller = new AbortController();
+    setTimeout(() => controller.abort(new Error('idconv cancelled')), 200);
+
+    const started = Date.now();
+    await expect(service.idConvert(['123'], 'pmid', { signal: controller.signal })).rejects.toThrow(
+      /idconv cancelled/,
+    );
+    expect(Date.now() - started).toBeLessThan(500);
+    expect(makeExternalRequest).toHaveBeenCalledTimes(1);
+  }, 2000);
+});
+
+/**
+ * Timer-leak guardrails. The deadline is implemented via `setTimeout` +
+ * `clearTimeout`; forgetting to clear on any code path would let the timer
+ * fire after the request resolved. These tests pin the contract: every
+ * request — success or failure — clears exactly one deadline timer.
+ */
+describe('NcbiService deadline timer cleanup', () => {
+  let setTimeoutSpy: ReturnType<typeof vi.spyOn>;
+  let clearTimeoutSpy: ReturnType<typeof vi.spyOn>;
+  let timerId = 0;
+
+  beforeEach(() => {
+    timerId = 0;
+    setTimeoutSpy = vi.spyOn(globalThis, 'setTimeout').mockImplementation(((
+      fn: () => void,
+      ms?: number,
+    ) => {
+      timerId += 1;
+      // Short timers fire immediately (backoff sleep); long ones stay pending (deadline).
+      if (typeof ms === 'number' && ms < 50_000) {
+        fn();
+      }
+      return timerId as unknown as ReturnType<typeof setTimeout>;
+    }) as unknown as typeof setTimeout);
+    clearTimeoutSpy = vi.spyOn(globalThis, 'clearTimeout');
+  });
+
+  afterEach(() => {
+    setTimeoutSpy.mockRestore();
+    clearTimeoutSpy.mockRestore();
+  });
+
+  function createService(maxRetries: number) {
+    const mockApiClient = {
+      makeRequest: vi.fn(),
+    } as unknown as NcbiApiClient;
+    const mockQueue = {
+      enqueue: vi.fn(async (task: () => Promise<unknown>) => task()),
+    } as unknown as NcbiRequestQueue;
+    const mockResponseHandler = {
+      parseAndHandleResponse: vi.fn(),
+    } as unknown as NcbiResponseHandler;
+    const service = new NcbiService(
+      mockApiClient,
+      mockQueue,
+      mockResponseHandler,
+      maxRetries,
+      TEST_DEADLINE_MS,
+    );
+    return { service, mockApiClient, mockResponseHandler };
+  }
+
+  /** Only the deadline timer in `runWithDeadline` sets a ≥50_000ms timer. */
+  const deadlineClearCount = () =>
+    clearTimeoutSpy.mock.calls.filter(([id]) => typeof id === 'number' && id > 0).length;
+
+  it('clears deadline timer on successful request', async () => {
+    const { service, mockApiClient, mockResponseHandler } = createService(0);
+    const makeRequest = mockApiClient.makeRequest as ReturnType<typeof vi.fn>;
+    const parseResponse = mockResponseHandler.parseAndHandleResponse as ReturnType<typeof vi.fn>;
+
+    makeRequest.mockResolvedValue('<xml/>');
+    parseResponse.mockReturnValue({
+      eSearchResult: { Count: '0', RetMax: '0', RetStart: '0', QueryTranslation: '' },
+    });
+
+    await service.eSearch({ db: 'pubmed', term: 'test' });
+
+    expect(deadlineClearCount()).toBeGreaterThanOrEqual(1);
+  });
+
+  it('clears deadline timer on non-retryable error', async () => {
+    const { service, mockApiClient } = createService(3);
+    const makeRequest = mockApiClient.makeRequest as ReturnType<typeof vi.fn>;
+
+    makeRequest.mockRejectedValue(new McpError(JsonRpcErrorCode.InvalidRequest, 'bad'));
+
+    await expect(service.eSearch({ db: 'pubmed', term: 'test' })).rejects.toThrow();
+    expect(deadlineClearCount()).toBeGreaterThanOrEqual(1);
+  });
+
+  it('clears deadline timer after retries exhausted', async () => {
+    const { service, mockApiClient } = createService(2);
+    const makeRequest = mockApiClient.makeRequest as ReturnType<typeof vi.fn>;
+
+    makeRequest.mockRejectedValue(new McpError(JsonRpcErrorCode.ServiceUnavailable, 'down'));
+
+    await expect(service.eSearch({ db: 'pubmed', term: 'test' })).rejects.toThrow();
+    expect(deadlineClearCount()).toBeGreaterThanOrEqual(1);
   });
 });
 

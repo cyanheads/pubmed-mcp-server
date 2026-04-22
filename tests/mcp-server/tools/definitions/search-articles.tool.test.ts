@@ -248,6 +248,7 @@ describe('searchArticlesTool', () => {
         usehistory: 'y',
         retstart: 5,
       }),
+      expect.objectContaining({ signal: expect.any(AbortSignal) }),
     );
 
     const calledTerm = mockESearch.mock.calls[0]?.[0]?.term as string;
@@ -264,15 +265,18 @@ describe('searchArticlesTool', () => {
     expect(calledTerm).toContain('free full text[filter]');
     expect(calledTerm).toContain('humans[MeSH Terms]');
 
-    expect(mockESummary).toHaveBeenCalledWith({
-      db: 'pubmed',
-      version: '2.0',
-      retmode: 'xml',
-      WebEnv: 'NCBI_ENV',
-      query_key: '7',
-      retmax: 1,
-      retstart: 5,
-    });
+    expect(mockESummary).toHaveBeenCalledWith(
+      {
+        db: 'pubmed',
+        version: '2.0',
+        retmode: 'xml',
+        WebEnv: 'NCBI_ENV',
+        query_key: '7',
+        retmax: 1,
+        retstart: 5,
+      },
+      expect.objectContaining({ signal: expect.any(AbortSignal) }),
+    );
     expect(result.summaries).toEqual([
       {
         pmid: '111',
@@ -324,15 +328,18 @@ describe('searchArticlesTool', () => {
     });
     await searchArticlesTool.handler(input, ctx);
 
-    expect(mockESummary).toHaveBeenCalledWith({
-      db: 'pubmed',
-      version: '2.0',
-      retmode: 'xml',
-      WebEnv: 'NCBI_ENV',
-      query_key: '7',
-      retmax: 2,
-      retstart: 0,
-    });
+    expect(mockESummary).toHaveBeenCalledWith(
+      {
+        db: 'pubmed',
+        version: '2.0',
+        retmode: 'xml',
+        WebEnv: 'NCBI_ENV',
+        query_key: '7',
+        retmax: 2,
+        retstart: 0,
+      },
+      expect.objectContaining({ signal: expect.any(AbortSignal) }),
+    );
   });
 
   it('falls back to direct PMID summary fetch when history tokens are absent', async () => {
@@ -352,12 +359,15 @@ describe('searchArticlesTool', () => {
     });
     await searchArticlesTool.handler(input, ctx);
 
-    expect(mockESummary).toHaveBeenCalledWith({
-      db: 'pubmed',
-      version: '2.0',
-      retmode: 'xml',
-      id: '111,222',
-    });
+    expect(mockESummary).toHaveBeenCalledWith(
+      {
+        db: 'pubmed',
+        version: '2.0',
+        retmode: 'xml',
+        id: '111,222',
+      },
+      expect.objectContaining({ signal: expect.any(AbortSignal) }),
+    );
   });
 
   describe('empty-result notice', () => {

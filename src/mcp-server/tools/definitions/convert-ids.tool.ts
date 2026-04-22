@@ -52,7 +52,7 @@ export const convertIdsTool = tool('pubmed_convert_ids', {
       idtype: input.idtype,
     });
 
-    const raw = await getNcbiService().idConvert(input.ids, input.idtype);
+    const raw = await getNcbiService().idConvert(input.ids, input.idtype, { signal: ctx.signal });
 
     // NCBI returns pmid as a number in JSON — coerce all ID fields to strings
     const records = raw.map((r) => ({

@@ -26,7 +26,13 @@ const ServerConfigSchema = z.object({
     .min(1000)
     .max(120000)
     .default(30000)
-    .describe('Request timeout in ms'),
+    .describe('Per-request HTTP timeout in ms'),
+  totalDeadlineMs: z.coerce
+    .number()
+    .min(5000)
+    .max(600000)
+    .default(60000)
+    .describe('Total deadline across all retry attempts for one NCBI call, in ms'),
 });
 
 export type ServerConfig = z.infer<typeof ServerConfigSchema>;
@@ -42,6 +48,7 @@ export function getServerConfig(): ServerConfig {
       requestDelayMs: 'NCBI_REQUEST_DELAY_MS',
       maxRetries: 'NCBI_MAX_RETRIES',
       timeoutMs: 'NCBI_TIMEOUT_MS',
+      totalDeadlineMs: 'NCBI_TOTAL_DEADLINE_MS',
     });
     /**
      * An API key raises NCBI's rate ceiling from ~3 req/s to ~10 req/s. If the

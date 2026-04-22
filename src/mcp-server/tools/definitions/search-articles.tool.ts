@@ -230,14 +230,17 @@ export const searchArticlesTool = tool('pubmed_search_articles', {
     if (input.freeFullText) effectiveQuery += ' AND free full text[filter]';
     if (input.species) effectiveQuery += ` AND ${input.species}[MeSH Terms]`;
 
-    const esResult = await ncbi.eSearch({
-      db: 'pubmed',
-      term: effectiveQuery,
-      retmax: input.maxResults,
-      retstart: input.offset,
-      sort: input.sort,
-      usehistory: input.summaryCount > 0 ? 'y' : undefined,
-    });
+    const esResult = await ncbi.eSearch(
+      {
+        db: 'pubmed',
+        term: effectiveQuery,
+        retmax: input.maxResults,
+        retstart: input.offset,
+        sort: input.sort,
+        usehistory: input.summaryCount > 0 ? 'y' : undefined,
+      },
+      { signal: ctx.signal },
+    );
 
     const pmids = esResult.idList;
     let summaries: {
@@ -267,7 +270,7 @@ export const searchArticlesTool = tool('pubmed_search_articles', {
         eSummaryParams.id = pmids.slice(0, input.summaryCount).join(',');
       }
 
-      const eSummaryResult = await ncbi.eSummary(eSummaryParams);
+      const eSummaryResult = await ncbi.eSummary(eSummaryParams, { signal: ctx.signal });
       if (eSummaryResult) {
         const briefSummaries = await extractBriefSummaries(eSummaryResult);
         summaries = briefSummaries.map((s) => ({

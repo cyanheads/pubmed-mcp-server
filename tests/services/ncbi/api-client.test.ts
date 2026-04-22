@@ -133,4 +133,101 @@ describe('NcbiApiClient', () => {
     );
     expect(mockFetch).toHaveBeenCalledOnce();
   });
+
+  it('forwards options.signal to fetchWithTimeout on GET', async () => {
+    mockFetch.mockResolvedValueOnce({ ok: true, status: 200, text: () => Promise.resolve('ok') });
+    const controller = new AbortController();
+    const client = new NcbiApiClient(baseConfig);
+
+    await client.makeRequest('esearch', { db: 'pubmed' }, { signal: controller.signal });
+
+    const options = mockFetch.mock.calls[0]?.[3] as { signal?: AbortSignal } | undefined;
+    expect(options?.signal).toBe(controller.signal);
+  });
+
+  it('forwards options.signal to fetchWithTimeout on POST', async () => {
+    mockFetch.mockResolvedValueOnce({ ok: true, status: 200, text: () => Promise.resolve('ok') });
+    const controller = new AbortController();
+    const client = new NcbiApiClient(baseConfig);
+
+    await client.makeRequest(
+      'efetch',
+      { db: 'pubmed' },
+      { usePost: true, signal: controller.signal },
+    );
+
+    const options = mockFetch.mock.calls[0]?.[3] as { method?: string; signal?: AbortSignal };
+    expect(options.method).toBe('POST');
+    expect(options.signal).toBe(controller.signal);
+  });
+
+  it('omits signal from fetchWithTimeout when none provided', async () => {
+    mockFetch.mockResolvedValueOnce({ ok: true, status: 200, text: () => Promise.resolve('ok') });
+    const client = new NcbiApiClient(baseConfig);
+
+    await client.makeRequest('esearch', { db: 'pubmed' });
+
+    // GET path: no init arg at all when no signal.
+    const initArg = mockFetch.mock.calls[0]?.[3];
+    expect(initArg).toBeUndefined();
+  });
+});
+
+describe('NcbiApiClient.makeExternalRequest', () => {
+  /**
+   * `makeExternalRequest` uses `globalThis.fetch` directly (not `fetchWithTimeout`)
+   * so it can read response bodies on error. When a caller signal is provided it
+   * composes with the per-request `AbortSignal.timeout` via `AbortSignal.any`;
+   * without one, only the timeout signal is used.
+   */
+  let fetchSpy: ReturnType<typeof vi.spyOn>;
+
+  beforeEach(() => {
+    fetchSpy = vi
+      .spyOn(globalThis, 'fetch')
+      .mockResolvedValue(new Response(JSON.stringify({ records: [] }), { status: 200 }));
+  });
+
+  afterEach(() => {
+    fetchSpy.mockRestore();
+  });
+
+  it('uses timeout signal when no external signal provided', async () => {
+    const client = new NcbiApiClient(baseConfig);
+
+    await client.makeExternalRequest('https://example.test/api', { foo: 'bar' });
+
+    const init = fetchSpy.mock.calls[0]?.[1] as RequestInit | undefined;
+    expect(init?.signal).toBeInstanceOf(AbortSignal);
+    // Not aborted at call time — timeout hasn't fired.
+    expect(init?.signal?.aborted).toBe(false);
+  });
+
+  it('composes external signal with internal timeout via AbortSignal.any', async () => {
+    const client = new NcbiApiClient(baseConfig);
+    const controller = new AbortController();
+
+    await client.makeExternalRequest('https://example.test/api', { foo: 'bar' }, controller.signal);
+
+    const init = fetchSpy.mock.calls[0]?.[1] as RequestInit | undefined;
+    const signal = init?.signal;
+    expect(signal).toBeInstanceOf(AbortSignal);
+
+    // Aborting the external controller must cascade to the composed signal.
+    controller.abort(new Error('cancelled'));
+    expect(signal?.aborted).toBe(true);
+  });
+
+  it('short-circuits when external signal is pre-aborted', async () => {
+    // Pre-aborted caller signal composed with a fresh timeout signal produces
+    // an already-aborted composite. fetch() receives it and rejects.
+    fetchSpy.mockRejectedValueOnce(new DOMException('aborted', 'AbortError'));
+    const client = new NcbiApiClient(baseConfig);
+    const controller = new AbortController();
+    controller.abort(new Error('pre-cancelled'));
+
+    await expect(
+      client.makeExternalRequest('https://example.test/api', {}, controller.signal),
+    ).rejects.toThrow();
+  });
 });

@@ -90,7 +90,7 @@ export const lookupCitationTool = tool('pubmed_lookup_citation', {
       key: c.key ?? String(i + 1),
     }));
 
-    const results = await getNcbiService().eCitMatch(citations);
+    const results = await getNcbiService().eCitMatch(citations, { signal: ctx.signal });
 
     const mapped = results.map((r) => ({
       key: r.key,
