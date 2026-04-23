@@ -4,7 +4,7 @@ description: >
   File a bug or feature request against this MCP server's own repo. Use for server-specific issues — tool logic, service integrations, config problems, or domain bugs that aren't caused by the framework.
 metadata:
   author: cyanheads
-  version: "1.1"
+  version: "1.2"
   audience: external
   type: workflow
 ---
@@ -39,6 +39,19 @@ gh issue list --search "your error message or keyword"
 3. **Reproduce the issue** — confirm it's reproducible. Note the exact input, transport mode, and any relevant env vars.
 
 4. **Check logs** — review `ctx.log` output and any framework telemetry for clues. If running HTTP, check the response body for structured error details.
+
+## Writing Well-Structured Issues
+
+Good issues are scannable, concrete, and self-contained. These patterns apply to both bugs and features:
+
+- **Lead with specifics.** Name the tool, handler, service, or symptom. "Currently `search_docs` returns empty arrays for queries containing `&`" beats "Search has a bug." A reader should know what's broken or missing before the end of the first sentence.
+- **Embed library/service links on first mention.** `[Unpaywall](https://unpaywall.org/)`, `[Defuddle](https://github.com/kepano/defuddle)`. Link to the canonical repo or homepage so readers can verify the tool and reach docs in one click.
+- **Use `owner/repo#N` for cross-repo issue references.** GitHub auto-renders them as linked references (e.g. `cyanheads/mcp-ts-core#46`). Bare `#N` only works for same-repo issues — use the full form when linking a framework or upstream issue.
+- **Add a `Related: #N` line** near the top when the issue grows from prior context (discussions, other issues, PRs). Makes provenance clickable.
+- **Lead design sections with a philosophy sentence.** Bold a short principle before the tradeoff details — e.g. "Philosophy: **return best-effort raw text, don't fail the tool call on parsing edge cases.**" Establishes the lens for the rest of the section.
+- **Prefer Markdown tables for comparisons.** When showing options, tiers, sources, or tradeoffs — tables are the highest-density format for scanning N rows × M attributes.
+- **Separate `### Scope` from `### Out of scope`.** The latter is as important as the former — it pre-empts scope-creep debates in comments and signals you've thought about the boundaries.
+- **Use `Depends on: owner/repo#N`** to declare ordering explicitly when implementation is blocked on upstream framework work.
 
 ## Redact Before Posting
 
@@ -158,22 +171,56 @@ gh issue create --template "Feature Request" --web
 
 ### CLI (non-interactive)
 
+Template below demonstrates the richer structure. Omit sections you don't need — simple requests don't require Flow / Design / Dependencies blocks.
+
 ````bash
 gh issue create \
   --title "feat(scope): concise description" \
   --label "enhancement" \
   --body "$(cat <<'ISSUE'
-### Use case
+Concrete statement of what's currently missing, broken, or limited. Name the specific tool, resource, service, or module by name. Two or three sentences — the reader should know the gap before the end of the paragraph.
 
-What problem does this solve? Who benefits?
+Related: #N
 
-### Proposed behavior
+## Proposal
 
-Describe the expected behavior or API change.
+What you want to build, in one paragraph. Link external libraries or services on first mention: [lib name](https://github.com/owner/repo). Include a short justification — what this gives users that we don't have today.
+
+### Flow (optional — for runtime sequences)
+
+1. Step one
+2. Step two
+3. Step three
+
+### Design / Tradeoffs (optional — when there are real choices)
+
+Philosophy: **one-line principle in bold.**
+
+| Source | Approach | Output |
+|:---|:---|:---|
+| A | ... | ... |
+| B | ... | ... |
+
+Schema excerpts in code blocks when they clarify the design.
+
+### Scope
+
+- Files or modules touched
+- New env vars, config keys, or API surface
+- User-visible changes (new tool? extended output? new resource URI?)
+
+### Out of scope
+
+- What we're deliberately not doing
+- Related work deferred to separate issues
+
+### Dependencies (optional)
+
+- Depends on: owner/repo#N  (when blocked on a framework or upstream issue)
 
 ### Alternatives considered
 
-What you tried or considered instead.
+What you tried or evaluated instead, and why it didn't fit.
 ISSUE
 )"
 ````
