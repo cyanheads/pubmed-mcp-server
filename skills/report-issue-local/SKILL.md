@@ -52,6 +52,7 @@ Good issues are scannable, concrete, and self-contained. These patterns apply to
 - **Prefer Markdown tables for comparisons.** When showing options, tiers, sources, or tradeoffs — tables are the highest-density format for scanning N rows × M attributes.
 - **Separate `### Scope` from `### Out of scope`.** The latter is as important as the former — it pre-empts scope-creep debates in comments and signals you've thought about the boundaries.
 - **Use `Depends on: owner/repo#N`** to declare ordering explicitly when implementation is blocked on upstream framework work.
+- **No collaborator-framing sign-offs.** Issues are filed from the maintainer's account to the maintainer's own repo — lines like "Happy to open a PR", "let me know if you'd like", "willing to contribute", "if that's the preferred flow" read as outside-contributor framing and are pure noise. End the body at the last substantive point.
 
 ## Redact Before Posting
 
