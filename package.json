@@ -19,6 +19,7 @@
     "format": "biome check --write --unsafe",
     "test": "bunx vitest run",
     "lint:mcp": "bun run scripts/lint-mcp.ts",
+    "publish-mcp": "mcp-publisher login github -token \"$(security find-generic-password -a \"$USER\" -s mcp-publisher-github-pat -w)\" && mcp-publisher publish",
     "dev:stdio": "MCP_TRANSPORT_TYPE=stdio bun --watch src/index.ts",
     "dev:http": "MCP_TRANSPORT_TYPE=http bun --watch src/index.ts",
     "start:stdio": "MCP_TRANSPORT_TYPE=stdio bun ./dist/index.js",
