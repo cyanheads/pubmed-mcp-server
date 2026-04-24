@@ -1,6 +1,6 @@
 #!/usr/bin/env tsx
 import { type ChildProcess, spawn, spawnSync } from 'node:child_process';
-import { readFileSync } from 'node:fs';
+import { existsSync, readFileSync } from 'node:fs';
 import * as path from 'node:path';
 import process from 'node:process';
 import { fileURLToPath } from 'node:url';
@@ -67,7 +67,7 @@ const createColor = (open: string, close: string, closeRe: RegExp) => (str: stri
   return open + `${str}`.replace(closeRe, close + open) + close;
 };
 
-const esc = (code: string) => new RegExp(code.replace('[', '\\['), 'g');
+const esc = (code: string) => new RegExp(code.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), 'g');
 const c = {
   bold: createColor('\x1b[1m', '\x1b[22m', esc('\x1b[22m')),
   dim: createColor('\x1b[2m', '\x1b[22m', esc('\x1b[22m')),
@@ -238,6 +238,9 @@ interface DevcheckConfig {
   };
   outdated?: {
     allowlist?: string[];
+  };
+  skillsSync?: {
+    ignore?: string[];
   };
 }
 
@@ -411,7 +414,54 @@ const ALL_CHECKS: Check[] = [
     canFix: false,
     getCommand: () => ['bun', 'run', 'scripts/lint-mcp.ts'],
     tip: (c) =>
-      `Fix definition errors reported above. See ${c.bold('validateDefinitions()')} docs for rule details.`,
+      `Fix definition errors above — each diagnostic links to its rule in ${c.bold('skills/api-linter/SKILL.md')}.`,
+  },
+  {
+    name: 'Docs Sync',
+    flag: '--no-docs-sync',
+    canFix: false,
+    getCommand: () => ['bun', 'run', 'scripts/check-docs-sync.ts'],
+    tip: (c) =>
+      `Edit both files together, or run ${c.bold('cp CLAUDE.md AGENTS.md')} (or reverse) to resync.`,
+  },
+  {
+    name: 'Skills Sync',
+    flag: '--no-skills-sync',
+    canFix: false,
+    // Compares canonical skills/ against local mirrors (.agents/skills, .claude/skills).
+    // Skipped when skills/ or both mirrors are absent (non-mirrored projects).
+    // Drift is demoted to a warning via isSuccess — intentional ignores live in
+    // devcheck.config.json `skillsSync.ignore`.
+    getCommand: () => {
+      const hasSkills = existsSync(path.join(ROOT_DIR, 'skills'));
+      const hasMirrors =
+        existsSync(path.join(ROOT_DIR, '.agents/skills')) ||
+        existsSync(path.join(ROOT_DIR, '.claude/skills'));
+      if (!hasSkills || !hasMirrors) return null;
+      return ['bun', 'run', 'scripts/check-skills-sync.ts'];
+    },
+    isSuccess: (result) => {
+      if (result.exitCode === 0) return true;
+      const firstLine = result.stdout.split('\n')[0]?.trim() || 'Skills mirrors have drifted.';
+      return { success: true, warning: firstLine };
+    },
+    tip: (c) =>
+      `Propagate ${c.bold('skills/')} to ${c.bold('.agents/skills/')} and ${c.bold('.claude/skills/')}, or add entries to ${c.bold('devcheck.config.json')} ${c.bold('skillsSync.ignore')}.`,
+  },
+  {
+    name: 'Changelog Sync',
+    flag: '--no-changelog-sync',
+    canFix: false,
+    // --check exits non-zero if CHANGELOG.md drifts from changelog/*.md.
+    // Skipped cleanly when neither CHANGELOG.md nor changelog/ exists (non-mcp-ts-core projects).
+    getCommand: () => {
+      const hasChangelog = existsSync(path.join(ROOT_DIR, 'changelog'));
+      const hasRollup = existsSync(path.join(ROOT_DIR, 'CHANGELOG.md'));
+      if (!hasChangelog && !hasRollup) return null;
+      return ['bun', 'run', 'scripts/build-changelog.ts', '--check'];
+    },
+    tip: (c) =>
+      `Edit the per-version file in ${c.bold('changelog/')} and run ${c.bold('bun run changelog:build')} to regenerate ${c.bold('CHANGELOG.md')}.`,
   },
   {
     name: 'Biome',
@@ -480,6 +530,16 @@ const ALL_CHECKS: Check[] = [
       const output = result.stdout;
       if (output.includes('0 vulnerabilities found')) return true;
 
+      // Detect audit failures (connection errors, registry issues, etc.)
+      // If the output doesn't look like a valid audit response, warn rather than silently passing.
+      const looksLikeAuditOutput = /vulnerabilit|severity|advisori/i.test(output);
+      if (!looksLikeAuditOutput) {
+        return {
+          success: true,
+          warning: `Audit command failed (exit ${result.exitCode}) — could not reach registry. Output: ${output.slice(0, 200).trim() || '(empty)'}`,
+        };
+      }
+
       // Pass if only low/moderate severity
       const hasHighOrCritical = /high|critical/i.test(output);
       if (!hasHighOrCritical) return true;
@@ -544,7 +604,7 @@ const ALL_CHECKS: Check[] = [
       return unexpected.length === 0;
     },
     tip: (c) =>
-      `Run ${c.bold(`${PM_CMD} update`)} to upgrade dependencies. Configure allowlist in ${c.bold('devcheck.config.json')}.`,
+      `Run ${c.bold(`${PM_CMD} update`)} to upgrade; the ${c.bold('maintenance')} skill then investigates changelogs and adopts upstream changes. Configure allowlist in ${c.bold('devcheck.config.json')}.`,
   },
 ];
 
