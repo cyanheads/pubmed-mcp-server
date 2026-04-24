@@ -1,6 +1,6 @@
 # pubmed-mcp-server - Directory Structure
 
-Generated on: 2026-04-24 16:00:05
+Generated on: 2026-04-24 17:59:13
 
 ```text
 pubmed-mcp-server/
@@ -215,20 +215,23 @@ pubmed-mcp-server/
 │   │           ├── search-articles.tool.ts
 │   │           └── spell-check.tool.ts
 │   ├── services/
-│   │   └── ncbi/
-│   │       ├── formatting/
-│   │       │   └── citation-formatter.ts
-│   │       ├── parsing/
-│   │       │   ├── article-parser.ts
-│   │       │   ├── esummary-parser.ts
-│   │       │   ├── pmc-article-parser.ts
-│   │       │   ├── pmc-xml-helpers.ts
-│   │       │   └── xml-helpers.ts
-│   │       ├── api-client.ts
-│   │       ├── ncbi-service.ts
-│   │       ├── request-queue.ts
-│   │       ├── response-handler.ts
-│   │       └── types.ts
+│   │   ├── ncbi/
+│   │   │   ├── formatting/
+│   │   │   │   └── citation-formatter.ts
+│   │   │   ├── parsing/
+│   │   │   │   ├── article-parser.ts
+│   │   │   │   ├── esummary-parser.ts
+│   │   │   │   ├── pmc-article-parser.ts
+│   │   │   │   ├── pmc-xml-helpers.ts
+│   │   │   │   └── xml-helpers.ts
+│   │   │   ├── api-client.ts
+│   │   │   ├── ncbi-service.ts
+│   │   │   ├── request-queue.ts
+│   │   │   ├── response-handler.ts
+│   │   │   └── types.ts
+│   │   └── unpaywall/
+│   │       ├── types.ts
+│   │       └── unpaywall-service.ts
 │   └── index.ts
 ├── tests/
 │   ├── config/
@@ -252,18 +255,20 @@ pubmed-mcp-server/
 │   │           ├── search-articles.tool.test.ts
 │   │           └── spell-check.tool.test.ts
 │   ├── services/
-│   │   └── ncbi/
-│   │       ├── formatting/
-│   │       │   └── citation-formatter.test.ts
-│   │       ├── parsing/
-│   │       │   ├── article-parser.test.ts
-│   │       │   ├── esummary-parser.test.ts
-│   │       │   ├── pmc-article-parser.test.ts
-│   │       │   └── xml-helpers.test.ts
-│   │       ├── api-client.test.ts
-│   │       ├── ncbi-service.test.ts
-│   │       ├── request-queue.test.ts
-│   │       └── response-handler.test.ts
+│   │   ├── ncbi/
+│   │   │   ├── formatting/
+│   │   │   │   └── citation-formatter.test.ts
+│   │   │   ├── parsing/
+│   │   │   │   ├── article-parser.test.ts
+│   │   │   │   ├── esummary-parser.test.ts
+│   │   │   │   ├── pmc-article-parser.test.ts
+│   │   │   │   └── xml-helpers.test.ts
+│   │   │   ├── api-client.test.ts
+│   │   │   ├── ncbi-service.test.ts
+│   │   │   ├── request-queue.test.ts
+│   │   │   └── response-handler.test.ts
+│   │   └── unpaywall/
+│   │       └── unpaywall-service.test.ts
 │   ├── tools/
 │   └── index.test.ts
 ├── .dockerignore

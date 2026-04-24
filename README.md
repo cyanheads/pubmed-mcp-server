@@ -7,7 +7,7 @@
 
 <div align="center">
 
-[![npm](https://img.shields.io/npm/v/@cyanheads/pubmed-mcp-server?style=flat-square&logo=npm&logoColor=white)](https://www.npmjs.com/package/@cyanheads/pubmed-mcp-server) [![Version](https://img.shields.io/badge/Version-2.5.6-blue.svg?style=flat-square)](./CHANGELOG.md) [![Framework](https://img.shields.io/badge/Built%20on-@cyanheads/mcp--ts--core-259?style=flat-square)](https://www.npmjs.com/package/@cyanheads/mcp-ts-core) [![MCP SDK](https://img.shields.io/badge/MCP%20SDK-^1.27.1-green.svg?style=flat-square)](https://modelcontextprotocol.io/) 
+[![npm](https://img.shields.io/npm/v/@cyanheads/pubmed-mcp-server?style=flat-square&logo=npm&logoColor=white)](https://www.npmjs.com/package/@cyanheads/pubmed-mcp-server) [![Version](https://img.shields.io/badge/Version-2.6.0-blue.svg?style=flat-square)](./CHANGELOG.md) [![Framework](https://img.shields.io/badge/Built%20on-@cyanheads/mcp--ts--core-259?style=flat-square)](https://www.npmjs.com/package/@cyanheads/mcp-ts-core) [![MCP SDK](https://img.shields.io/badge/MCP%20SDK-^1.27.1-green.svg?style=flat-square)](https://modelcontextprotocol.io/) 
 
 [![License](https://img.shields.io/badge/License-Apache%202.0-orange.svg?style=flat-square)](./LICENSE) [![TypeScript](https://img.shields.io/badge/TypeScript-^6.0.3-3178C6.svg?style=flat-square)](https://www.typescriptlang.org/) [![Bun](https://img.shields.io/badge/Bun-v1.3.2-blueviolet.svg?style=flat-square)](https://bun.sh/)
 
@@ -29,7 +29,7 @@ Nine tools for working with PubMed and NCBI data:
 |:---|:---|
 | `pubmed_search_articles` | Search PubMed with full query syntax, field-specific filters, date ranges, pagination, and optional brief summaries |
 | `pubmed_fetch_articles` | Fetch full article metadata by PMIDs — abstract, authors, journal, MeSH terms, grants |
-| `pubmed_fetch_fulltext` | Fetch full-text articles from PubMed Central — body sections, references, and metadata for open-access articles |
+| `pubmed_fetch_fulltext` | Fetch full-text articles from PubMed Central, with optional Unpaywall fallback for non-PMC DOIs (HTML → Markdown or PDF → text) |
 | `pubmed_format_citations` | Generate formatted citations in APA 7th, MLA 9th, BibTeX, or RIS |
 | `pubmed_find_related` | Find similar articles, citing articles, or references for a given PMID |
 | `pubmed_spell_check` | Spell-check biomedical queries using NCBI's ESpell service |
@@ -67,15 +67,15 @@ Fetch full article metadata by PubMed IDs.
 
 ### `pubmed_fetch_fulltext`
 
-Fetch full-text articles from PubMed Central (PMC).
+Fetch full-text articles from PubMed Central (PMC), with an optional Unpaywall fallback for articles not in PMC.
 
 - Accepts PMC IDs directly or PubMed IDs (auto-resolved to PMCIDs via ELink)
-- Returns complete article body text organized by sections and subsections
-- Optional reference list from back matter
-- Section filtering by title (case-insensitive match, e.g. `["methods", "results"]`)
-- Configurable max sections to limit response size
+- PMC path returns complete article body organized by sections and subsections, plus optional references from back matter
+- Unpaywall fallback (enabled by setting `UNPAYWALL_EMAIL`) resolves DOIs to legal open-access copies hosted by publishers or institutional repositories; extracts HTML landing pages to Markdown via Defuddle or PDFs to text via unpdf
+- Discriminated output contract — `source: "pmc"` (structured sections) or `source: "unpaywall"` (single body + `contentFormat` metadata: `html-markdown` or `pdf-text`)
+- Structured unavailable reasons (`no-pmc-fallback-disabled`, `no-doi`, `no-oa`, `fetch-failed`, `parse-failed`, `service-error`) so callers can retry or explain to users without parsing text
+- Section filtering by title (case-insensitive match, e.g. `["methods", "results"]`) and configurable max sections apply to PMC output
 - Up to 10 articles per request
-- Only open-access articles available in PMC will return full text
 
 ---
 
@@ -289,6 +289,8 @@ All configuration is validated at startup via Zod schemas in `src/config/server-
 | `NCBI_MAX_RETRIES` | Retry attempts for failed NCBI requests | 6 |
 | `NCBI_TIMEOUT_MS` | Per-request HTTP timeout in ms | `30000` |
 | `NCBI_TOTAL_DEADLINE_MS` | Total deadline across all retry attempts for one NCBI call, in ms | `60000` |
+| `UNPAYWALL_EMAIL` | Contact email for Unpaywall. When set, `pubmed_fetch_fulltext` falls back to Unpaywall open-access copies for non-PMC DOIs | none |
+| `UNPAYWALL_TIMEOUT_MS` | Per-request HTTP timeout for Unpaywall lookups and content fetches, in ms | `20000` |
 | `OTEL_ENABLED` | Enable OpenTelemetry | `false` |
 
 ## Running the server
@@ -321,6 +323,7 @@ All configuration is validated at startup via Zod schemas in `src/config/server-
 | `src/mcp-server/resources` | Resource definitions. Database info resource. |
 | `src/mcp-server/prompts` | Prompt definitions. Research plan prompt. |
 | `src/services/ncbi` | NCBI E-utilities service layer — API client, queue, parser, formatter. |
+| `src/services/unpaywall` | Unpaywall service — DOI → OA location resolution and content fetch (HTML/PDF). |
 | `src/config` | Server-specific environment variable parsing and validation with Zod. |
 | `tests/` | Unit and integration tests, mirroring the `src/` structure. |
 

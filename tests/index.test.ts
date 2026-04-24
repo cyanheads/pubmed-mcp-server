@@ -7,6 +7,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 
 const createApp = vi.fn(async () => undefined);
 const initNcbiService = vi.fn();
+const initUnpaywallService = vi.fn();
 
 const searchArticlesTool = { id: 'search-articles-tool' };
 const fetchArticlesTool = { id: 'fetch-articles-tool' };
@@ -26,6 +27,10 @@ vi.mock('@cyanheads/mcp-ts-core', () => ({
 
 vi.mock('@/services/ncbi/ncbi-service.js', () => ({
   initNcbiService,
+}));
+
+vi.mock('@/services/unpaywall/unpaywall-service.js', () => ({
+  initUnpaywallService,
 }));
 
 vi.mock('@/mcp-server/prompts/definitions/research-plan.prompt.js', () => ({
@@ -80,6 +85,7 @@ describe('server entry point', () => {
   afterEach(() => {
     createApp.mockClear();
     initNcbiService.mockClear();
+    initUnpaywallService.mockClear();
     vi.resetModules();
   });
 
@@ -111,7 +117,7 @@ describe('server entry point', () => {
     expect(appConfig.setup).toEqual(expect.any(Function));
   });
 
-  it('initializes the NCBI service in the app setup hook', async () => {
+  it('initializes the NCBI and Unpaywall services in the app setup hook', async () => {
     await loadModule();
 
     const appConfig = createApp.mock.calls[0]?.[0] as {
@@ -121,5 +127,6 @@ describe('server entry point', () => {
     appConfig.setup();
 
     expect(initNcbiService).toHaveBeenCalledOnce();
+    expect(initUnpaywallService).toHaveBeenCalledOnce();
   });
 });

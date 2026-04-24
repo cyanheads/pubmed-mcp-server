@@ -6,7 +6,7 @@
     "url": "https://github.com/cyanheads/pubmed-mcp-server",
     "source": "github"
   },
-  "version": "2.5.6",
+  "version": "2.6.0",
   "remotes": [
     {
       "type": "streamable-http",
@@ -19,7 +19,7 @@
       "registryBaseUrl": "https://registry.npmjs.org",
       "identifier": "@cyanheads/pubmed-mcp-server",
       "runtimeHint": "bun",
-      "version": "2.5.6",
+      "version": "2.6.0",
       "packageArguments": [
         {
           "type": "positional",
@@ -49,6 +49,12 @@
           "description": "Contact email sent with NCBI requests (recommended by NCBI).",
           "format": "string",
           "isRequired": false
+        },
+        {
+          "name": "UNPAYWALL_EMAIL",
+          "description": "Contact email for Unpaywall. When set, pubmed_fetch_fulltext falls back to Unpaywall open-access copies for DOIs not in PMC.",
+          "format": "string",
+          "isRequired": false
         }
       ],
       "transport": {
@@ -60,7 +66,7 @@
       "registryBaseUrl": "https://registry.npmjs.org",
       "identifier": "@cyanheads/pubmed-mcp-server",
       "runtimeHint": "bun",
-      "version": "2.5.6",
+      "version": "2.6.0",
       "packageArguments": [
         {
           "type": "positional",
@@ -122,6 +128,12 @@
         {
           "name": "NCBI_ADMIN_EMAIL",
           "description": "Contact email sent with NCBI requests (recommended by NCBI).",
+          "format": "string",
+          "isRequired": false
+        },
+        {
+          "name": "UNPAYWALL_EMAIL",
+          "description": "Contact email for Unpaywall. When set, pubmed_fetch_fulltext falls back to Unpaywall open-access copies for DOIs not in PMC.",
           "format": "string",
           "isRequired": false
         }

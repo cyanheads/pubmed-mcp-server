@@ -1,7 +1,7 @@
 name: Bug Report
 description: Report a bug in @cyanheads/pubmed-mcp-server
 labels: ["bug"]
-# assignees: ["your-github-username"]  # uncomment to auto-assign new issues
+assignees: ["cyanheads"]
 body:
   - type: markdown
     attributes:

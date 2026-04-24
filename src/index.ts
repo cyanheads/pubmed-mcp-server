@@ -17,6 +17,7 @@ import { lookupMeshTool } from './mcp-server/tools/definitions/lookup-mesh.tool.
 import { searchArticlesTool } from './mcp-server/tools/definitions/search-articles.tool.js';
 import { spellCheckTool } from './mcp-server/tools/definitions/spell-check.tool.js';
 import { initNcbiService } from './services/ncbi/ncbi-service.js';
+import { initUnpaywallService } from './services/unpaywall/unpaywall-service.js';
 
 await createApp({
   tools: [
@@ -53,9 +54,11 @@ await createApp({
     envExample: {
       NCBI_API_KEY: 'your-ncbi-api-key',
       NCBI_ADMIN_EMAIL: 'you@example.com',
+      UNPAYWALL_EMAIL: 'you@example.com',
     },
   },
   setup() {
     initNcbiService();
+    initUnpaywallService();
   },
 });

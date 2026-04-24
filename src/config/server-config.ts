@@ -33,6 +33,15 @@ const ServerConfigSchema = z.object({
     .max(600000)
     .default(60000)
     .describe('Total deadline across all retry attempts for one NCBI call, in ms'),
+  unpaywallEmail: z
+    .preprocess(emptyAsUndefined, z.email().optional())
+    .describe('Email for Unpaywall API (enables non-PMC full-text fallback when set)'),
+  unpaywallTimeoutMs: z.coerce
+    .number()
+    .min(1000)
+    .max(120000)
+    .default(20000)
+    .describe('Per-request HTTP timeout for Unpaywall lookups and content fetches, in ms'),
 });
 
 export type ServerConfig = z.infer<typeof ServerConfigSchema>;
@@ -49,6 +58,8 @@ export function getServerConfig(): ServerConfig {
       maxRetries: 'NCBI_MAX_RETRIES',
       timeoutMs: 'NCBI_TIMEOUT_MS',
       totalDeadlineMs: 'NCBI_TOTAL_DEADLINE_MS',
+      unpaywallEmail: 'UNPAYWALL_EMAIL',
+      unpaywallTimeoutMs: 'UNPAYWALL_TIMEOUT_MS',
     });
     /**
      * An API key raises NCBI's rate ceiling from ~3 req/s to ~10 req/s. If the

@@ -25,6 +25,8 @@ describe('getServerConfig', () => {
     delete process.env.NCBI_REQUEST_DELAY_MS;
     delete process.env.NCBI_MAX_RETRIES;
     delete process.env.NCBI_TIMEOUT_MS;
+    delete process.env.UNPAYWALL_EMAIL;
+    delete process.env.UNPAYWALL_TIMEOUT_MS;
 
     const getServerConfig = await loadModule();
     const config = getServerConfig();
@@ -35,6 +37,19 @@ describe('getServerConfig', () => {
     expect(config.timeoutMs).toBe(30000);
     expect(config.apiKey).toBeUndefined();
     expect(config.adminEmail).toBeUndefined();
+    expect(config.unpaywallEmail).toBeUndefined();
+    expect(config.unpaywallTimeoutMs).toBe(20000);
+  });
+
+  it('picks up UNPAYWALL_EMAIL and UNPAYWALL_TIMEOUT_MS when set', async () => {
+    vi.stubEnv('UNPAYWALL_EMAIL', 'oa@example.com');
+    vi.stubEnv('UNPAYWALL_TIMEOUT_MS', '15000');
+
+    const getServerConfig = await loadModule();
+    const config = getServerConfig();
+
+    expect(config.unpaywallEmail).toBe('oa@example.com');
+    expect(config.unpaywallTimeoutMs).toBe(15000);
   });
 
   it('picks up env vars when set', async () => {

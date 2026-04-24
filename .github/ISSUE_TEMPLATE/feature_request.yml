@@ -1,7 +1,7 @@
 name: Feature Request
 description: Suggest a new feature or improvement for @cyanheads/pubmed-mcp-server
 labels: ["enhancement"]
-# assignees: ["your-github-username"]  # uncomment to auto-assign new issues
+assignees: ["cyanheads"]
 body:
   - type: markdown
     attributes:
