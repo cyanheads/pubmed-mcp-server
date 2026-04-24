@@ -2,7 +2,7 @@
   "name": "@cyanheads/pubmed-mcp-server",
   "version": "2.6.0",
   "mcpName": "io.github.cyanheads/pubmed-mcp-server",
-  "description": "MCP server for PubMed/NCBI E-utilities integration. Search articles, fetch metadata, generate citations, explore MeSH terms, and discover related research.",
+  "description": "MCP server for PubMed/NCBI E-utilities integration. Search articles, fetch metadata and open-access full text (PMC + Unpaywall), generate citations, explore MeSH terms, and discover related research.",
   "type": "module",
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
@@ -37,7 +37,10 @@
     "mcp-server",
     "typescript",
     "ai-agent",
-    "e-utilities"
+    "e-utilities",
+    "open-access",
+    "full-text",
+    "unpaywall"
   ],
   "repository": {
     "type": "git",
