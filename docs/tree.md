@@ -1,6 +1,6 @@
 # pubmed-mcp-server - Directory Structure
 
-Generated on: 2026-04-21 04:47:09
+Generated on: 2026-04-24 16:00:05
 
 ```text
 pubmed-mcp-server/
@@ -25,6 +25,8 @@ pubmed-mcp-server/
 │       ├── api-context/
 │       │   └── SKILL.md
 │       ├── api-errors/
+│       │   └── SKILL.md
+│       ├── api-linter/
 │       │   └── SKILL.md
 │       ├── api-services/
 │       │   ├── references/
@@ -82,23 +84,31 @@ pubmed-mcp-server/
 │       │   │   ├── readme.md
 │       │   │   └── server-json.md
 │       │   └── SKILL.md
+│       ├── release-and-publish/
+│       │   └── SKILL.md
 │       ├── report-issue-framework/
 │       │   └── SKILL.md
 │       ├── report-issue-local/
+│       │   └── SKILL.md
+│       ├── security-pass/
 │       │   └── SKILL.md
 │       ├── setup/
 │       │   └── SKILL.md
 │       └── writing-humanizer/
 │           └── SKILL.md
 ├── .github/
+│   ├── ISSUE_TEMPLATE/
+│   │   ├── bug_report.yml
+│   │   ├── config.yml
+│   │   └── feature_request.yml
 │   └── FUNDING.yml
 ├── .storage/
 ├── .vscode/
 │   ├── extensions.json
 │   └── settings.json
-├── claude-plans/
 ├── docs/
-│   └── design.md
+│   ├── design.md
+│   └── mcpmed-pr-draft.md
 ├── schemas/
 │   └── ncbi-dtd/
 │       ├── eInfo_020511.dtd
@@ -109,7 +119,10 @@ pubmed-mcp-server/
 │       ├── eSummary_041029.dtd
 │       └── pubmed_250101.dtd
 ├── scripts/
+│   ├── build-changelog.ts
 │   ├── build.ts
+│   ├── check-docs-sync.ts
+│   ├── check-skills-sync.ts
 │   ├── clean.ts
 │   ├── devcheck.ts
 │   ├── lint-mcp.ts
@@ -134,6 +147,8 @@ pubmed-mcp-server/
 │   ├── api-context/
 │   │   └── SKILL.md
 │   ├── api-errors/
+│   │   └── SKILL.md
+│   ├── api-linter/
 │   │   └── SKILL.md
 │   ├── api-services/
 │   │   ├── references/
@@ -166,9 +181,13 @@ pubmed-mcp-server/
 │   │   │   ├── readme.md
 │   │   │   └── server-json.md
 │   │   └── SKILL.md
+│   ├── release-and-publish/
+│   │   └── SKILL.md
 │   ├── report-issue-framework/
 │   │   └── SKILL.md
 │   ├── report-issue-local/
+│   │   └── SKILL.md
+│   ├── security-pass/
 │   │   └── SKILL.md
 │   └── setup/
 │       └── SKILL.md
@@ -184,6 +203,7 @@ pubmed-mcp-server/
 │   │   │       └── database-info.resource.ts
 │   │   └── tools/
 │   │       └── definitions/
+│   │           ├── _concepts.ts
 │   │           ├── _schemas.ts
 │   │           ├── convert-ids.tool.ts
 │   │           ├── fetch-articles.tool.ts

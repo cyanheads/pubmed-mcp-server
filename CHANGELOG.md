@@ -4,7 +4,27 @@ All notable changes to this project will be documented in this file.
 
 ---
 
-## [2.5.4] - 2026-04-24
+## [2.5.5] - 2026-04-24
+
+Framework minor bump (`@cyanheads/mcp-ts-core` 0.6.17 → 0.7.0). Issue-cleanup release from upstream with no runtime breaking changes. Picks up the devcheck changelog-sync crash fix for single-file `CHANGELOG.md` consumers (this server), the flattened ZodError message shape with structured `data.issues`, locale-aware digit-group separators in the `format-parity` linter rule, and new GitHub issue-management scaffolding. Adopts the framework template updates into `CLAUDE.md` / `AGENTS.md`, syncs five skill version bumps, and scaffolds `.github/ISSUE_TEMPLATE/` for bug reports and feature requests.
+
+### Added
+
+- **`.github/ISSUE_TEMPLATE/`** (`bug_report.yml`, `feature_request.yml`, `config.yml`): Copied from `node_modules/@cyanheads/mcp-ts-core/templates/.github/ISSUE_TEMPLATE/` (0.7.0 scaffolding). Structured bug report with runtime / transport / framework-version fields, a feature request form, and disabled blank-issue creation. Both forms reference secondary labels (`regression`, `performance`, `security`, `breaking-change`) documented inline; assignees line left commented. Create missing labels on the repo once with `gh label create <name>` if you want the sidebar hint to resolve.
+- **`security-pass` skill reference in agent protocol** (`CLAUDE.md`, `AGENTS.md`): Added as item #8 in the "What's Next?" list and to the Skills table. The skill file itself was already adopted in 2.5.4; this wires it into the template's orientation surface per 0.7.0.
+
+### Changed
+
+- **Framework bump — `@cyanheads/mcp-ts-core` 0.6.17 → 0.7.0** (`package.json`, `bun.lock`): Issue-cleanup release, no runtime breaking changes.
+  - **Flattened ZodError message shape** (upstream #55): `getErrorMessage(err)` now detects `ZodError` and returns `<first-issue.message> at <path> (+N more)` instead of the raw serialized issue array. Resource param validation, tool output validation, and user-thrown `ZodError` now populate `error.data.issues` with the full `ZodIssue[]`; for tools, issues surface via `_meta.error.data.issues` alongside explicit `McpError.data`. Verified wire-transparent — no code paths in this server's `src/` or `tests/` parse `error.message` JSON, so downstream behavior is unchanged (cleaner logs aside).
+  - **Locale-aware `format-parity` linter** (upstream #54): Numeric sentinel matching now retries against text with common digit-group separators stripped (comma, period, underscore, apostrophe, right single quote, space variants including narrow no-break U+202F, Arabic thousands U+066C). Covers en-US, de-DE, fr-FR, de-CH formatting.
+  - **Devcheck changelog-sync crash fix** (upstream #51): Guard now checks only for the `changelog/` directory; the monolithic `CHANGELOG.md` alone is a supported configuration. This server uses single-file `CHANGELOG.md`, so the step now skips cleanly (⚪ SKIPPED) instead of crashing on `readdirSync` `ENOENT`. We filed this upstream during the 2.5.4 cycle; it's now resolved in the framework directly.
+- **Phase C script sync — `scripts/devcheck.ts`**: Resynced from `@cyanheads/mcp-ts-core/scripts/devcheck.ts` (only framework script whose content hash differed). Picks up the guard described above. Other framework scripts (`build.ts`, `build-changelog.ts`, `check-docs-sync.ts`, `check-skills-sync.ts`, `clean.ts`, `lint-mcp.ts`, `tree.ts`) were already in sync.
+- **Phase A skill sync — five skill version bumps** (`skills/`, `.agents/skills/`, `.claude/skills/`): `api-linter` 1.0 → 1.1 (recursion-rules table for `describe-on-fields`, primitive array elements explicitly skipped, softened "mechanical fix" framing); `maintenance` 1.4 → 1.5 (Step 4 template review defaults to direct application of framework-authored updates; Step 6 splits into two tiers — framework changes default adopt, third-party changes default cost/benefit; Step 8 renames "Needs attention" → "Open decisions"); `release-and-publish` 2.0 → 2.1 (transient-failure retry protocol for network steps 3–6 with short backoff, idempotent-success skip signals for npm / MCP Registry, `docker builder prune -f` before retrying `buildx --push`); `report-issue-framework` 1.2 → 1.3 and `report-issue-local` 1.2 → 1.3 (primary + secondary label restructure, `--assignee "@me"` CLI examples, `gh label create` bootstrap block in the local skill).
+- **Phase B agent skill refresh** (`.claude/skills/`, `.agents/skills/`): All 25 project skills copied end-to-end into both agent-discovery paths, including the five version bumps from Phase A.
+- **`CLAUDE.md` / `AGENTS.md` template sync**: Skill-directory callout now references the maintenance skill's Phase B auto-resync instead of instructing a manual re-copy — matches the v1.5 maintenance flow.
+
+
 
 Framework patch series bump (`@cyanheads/mcp-ts-core` 0.6.10 → 0.6.17) and a code-cohesion pass. Picks up the new recursive `describe-on-fields` linter (0.6.16) and an HTTP transport per-request `McpServer` race fix (0.6.17). Adds the new `security-pass` skill, syncs the Phase C build/check scripts from the package, and refactors two heavy output schemas into named sub-schemas for readability — verified wire-format-transparent. No library API changes, no tool behavior changes.
 
