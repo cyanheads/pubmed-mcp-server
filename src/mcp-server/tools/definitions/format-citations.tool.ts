@@ -34,11 +34,13 @@ export const formatCitationsTool = tool('pubmed_format_citations', {
   output: z.object({
     citations: z
       .array(
-        z.object({
-          pmid: z.string().describe('PubMed ID'),
-          title: z.string().optional().describe('Article title'),
-          citations: z.record(z.string(), z.string()).describe('Citations keyed by style'),
-        }),
+        z
+          .object({
+            pmid: z.string().describe('PubMed ID'),
+            title: z.string().optional().describe('Article title'),
+            citations: z.record(z.string(), z.string()).describe('Citations keyed by style'),
+          })
+          .describe('Citations for a single article'),
       )
       .describe('Citations per article'),
     totalSubmitted: z.number().describe('Number of PMIDs submitted for citation formatting'),

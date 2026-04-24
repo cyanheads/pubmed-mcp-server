@@ -17,6 +17,97 @@ import {
 } from './_concepts.js';
 import { pmidStringSchema } from './_schemas.js';
 
+const AuthorSchema = z
+  .object({
+    lastName: z.string().optional().describe('Last name'),
+    firstName: z.string().optional().describe('First/given name'),
+    initials: z.string().optional().describe('Author initials'),
+    collectiveName: z.string().optional().describe('Group/collective author name'),
+    affiliationIndices: z
+      .array(z.number())
+      .optional()
+      .describe('Indices into the top-level affiliations array'),
+    orcid: z.string().optional().describe('ORCID identifier'),
+  })
+  .describe('Author record');
+
+const JournalPublicationDateSchema = z
+  .object({
+    year: z.string().optional().describe('Publication year'),
+    month: z.string().optional().describe('Publication month'),
+    day: z.string().optional().describe('Publication day'),
+    medlineDate: z.string().optional().describe('Non-standard date string (e.g. "2000 Spring")'),
+  })
+  .describe('Journal publication date');
+
+const JournalInfoSchema = z
+  .object({
+    title: z.string().optional().describe('Full journal title'),
+    isoAbbreviation: z.string().optional().describe('ISO journal abbreviation'),
+    issn: z.string().optional().describe('Print ISSN'),
+    eIssn: z.string().optional().describe('Electronic ISSN'),
+    volume: z.string().optional().describe('Volume number'),
+    issue: z.string().optional().describe('Issue number'),
+    pages: z.string().optional().describe('Page range (e.g. "48-55")'),
+    publicationDate: JournalPublicationDateSchema.optional(),
+  })
+  .describe('Journal information');
+
+const MeshQualifierSchema = z
+  .object({
+    qualifierName: z.string().describe('Qualifier/subheading name'),
+    qualifierUi: z.string().optional().describe('Qualifier unique ID'),
+    isMajorTopic: z.boolean().describe('Whether this qualifier is a major topic'),
+  })
+  .describe('MeSH qualifier/subheading');
+
+const MeshTermSchema = z
+  .object({
+    descriptorName: z.string().optional().describe('MeSH descriptor name'),
+    descriptorUi: z.string().optional().describe('MeSH descriptor unique ID'),
+    isMajorTopic: z.boolean().describe('Whether this is a major topic of the article'),
+    qualifiers: z.array(MeshQualifierSchema).optional().describe('MeSH qualifiers/subheadings'),
+  })
+  .describe('MeSH descriptor term');
+
+const GrantSchema = z
+  .object({
+    grantId: z.string().optional().describe('Grant identifier'),
+    acronym: z.string().optional().describe('Grant acronym'),
+    agency: z.string().optional().describe('Funding agency'),
+    country: z.string().optional().describe('Agency country'),
+  })
+  .describe('Grant record');
+
+const ArticleDateSchema = z
+  .object({
+    dateType: z.string().optional().describe('Date type'),
+    year: z.string().optional().describe('Year'),
+    month: z.string().optional().describe('Month'),
+    day: z.string().optional().describe('Day'),
+  })
+  .describe('Dated article event');
+
+const FetchedArticleSchema = z
+  .object({
+    pmid: z.string().optional().describe('PubMed ID'),
+    title: z.string().optional().describe('Article title'),
+    abstractText: z.string().optional().describe('Abstract text'),
+    affiliations: z.array(z.string()).optional().describe('Deduplicated author affiliations'),
+    authors: z.array(AuthorSchema).optional().describe('Author list'),
+    journalInfo: JournalInfoSchema.optional(),
+    doi: z.string().optional().describe('DOI'),
+    pmcId: z.string().optional().describe('PMC ID'),
+    pubmedUrl: z.string().optional().describe('PubMed article URL'),
+    pmcUrl: z.string().optional().describe('PMC full text URL'),
+    publicationTypes: z.array(z.string()).optional().describe('Publication types'),
+    keywords: z.array(z.string()).optional().describe('Keywords'),
+    meshTerms: z.array(MeshTermSchema).optional().describe('MeSH terms'),
+    grantList: z.array(GrantSchema).optional().describe('Grant information'),
+    articleDates: z.array(ArticleDateSchema).optional().describe('Article dates'),
+  })
+  .describe('Parsed PubMed article');
+
 export const fetchArticlesTool = tool('pubmed_fetch_articles', {
   description:
     'Fetch full article metadata by PubMed IDs. Returns detailed article information including abstract, authors, journal, MeSH terms.',
@@ -32,104 +123,7 @@ export const fetchArticlesTool = tool('pubmed_fetch_articles', {
   }),
 
   output: z.object({
-    articles: z
-      .array(
-        z.object({
-          pmid: z.string().optional().describe('PubMed ID'),
-          title: z.string().optional().describe('Article title'),
-          abstractText: z.string().optional().describe('Abstract text'),
-          affiliations: z.array(z.string()).optional().describe('Deduplicated author affiliations'),
-          authors: z
-            .array(
-              z.object({
-                lastName: z.string().optional().describe('Last name'),
-                firstName: z.string().optional().describe('First/given name'),
-                initials: z.string().optional().describe('Author initials'),
-                collectiveName: z.string().optional().describe('Group/collective author name'),
-                affiliationIndices: z
-                  .array(z.number())
-                  .optional()
-                  .describe('Indices into the top-level affiliations array'),
-                orcid: z.string().optional().describe('ORCID identifier'),
-              }),
-            )
-            .optional()
-            .describe('Author list'),
-          journalInfo: z
-            .object({
-              title: z.string().optional().describe('Full journal title'),
-              isoAbbreviation: z.string().optional().describe('ISO journal abbreviation'),
-              issn: z.string().optional().describe('Print ISSN'),
-              eIssn: z.string().optional().describe('Electronic ISSN'),
-              volume: z.string().optional().describe('Volume number'),
-              issue: z.string().optional().describe('Issue number'),
-              pages: z.string().optional().describe('Page range (e.g. "48-55")'),
-              publicationDate: z
-                .object({
-                  year: z.string().optional().describe('Publication year'),
-                  month: z.string().optional().describe('Publication month'),
-                  day: z.string().optional().describe('Publication day'),
-                  medlineDate: z
-                    .string()
-                    .optional()
-                    .describe('Non-standard date string (e.g. "2000 Spring")'),
-                })
-                .optional()
-                .describe('Journal publication date'),
-            })
-            .optional()
-            .describe('Journal information'),
-          doi: z.string().optional().describe('DOI'),
-          pmcId: z.string().optional().describe('PMC ID'),
-          pubmedUrl: z.string().optional().describe('PubMed article URL'),
-          pmcUrl: z.string().optional().describe('PMC full text URL'),
-          publicationTypes: z.array(z.string()).optional().describe('Publication types'),
-          keywords: z.array(z.string()).optional().describe('Keywords'),
-          meshTerms: z
-            .array(
-              z.object({
-                descriptorName: z.string().optional().describe('MeSH descriptor name'),
-                descriptorUi: z.string().optional().describe('MeSH descriptor unique ID'),
-                isMajorTopic: z.boolean().describe('Whether this is a major topic of the article'),
-                qualifiers: z
-                  .array(
-                    z.object({
-                      qualifierName: z.string().describe('Qualifier/subheading name'),
-                      qualifierUi: z.string().optional().describe('Qualifier unique ID'),
-                      isMajorTopic: z.boolean().describe('Whether this qualifier is a major topic'),
-                    }),
-                  )
-                  .optional()
-                  .describe('MeSH qualifiers/subheadings'),
-              }),
-            )
-            .optional()
-            .describe('MeSH terms'),
-          grantList: z
-            .array(
-              z.object({
-                grantId: z.string().optional().describe('Grant identifier'),
-                acronym: z.string().optional().describe('Grant acronym'),
-                agency: z.string().optional().describe('Funding agency'),
-                country: z.string().optional().describe('Agency country'),
-              }),
-            )
-            .optional()
-            .describe('Grant information'),
-          articleDates: z
-            .array(
-              z.object({
-                dateType: z.string().optional().describe('Date type'),
-                year: z.string().optional().describe('Year'),
-                month: z.string().optional().describe('Month'),
-                day: z.string().optional().describe('Day'),
-              }),
-            )
-            .optional()
-            .describe('Article dates'),
-        }),
-      )
-      .describe('Parsed articles'),
+    articles: z.array(FetchedArticleSchema).describe('Parsed articles'),
     totalReturned: z.number().describe('Number of articles returned'),
     unavailablePmids: z
       .array(z.string())

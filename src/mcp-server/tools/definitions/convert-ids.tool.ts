@@ -33,13 +33,15 @@ export const convertIdsTool = tool('pubmed_convert_ids', {
   output: z.object({
     records: z
       .array(
-        z.object({
-          requestedId: z.string().describe('The ID that was submitted'),
-          pmid: z.string().optional().describe('PubMed ID'),
-          pmcid: z.string().optional().describe('PubMed Central ID'),
-          doi: z.string().optional().describe('Digital Object Identifier'),
-          errmsg: z.string().optional().describe('Error message if conversion failed'),
-        }),
+        z
+          .object({
+            requestedId: z.string().describe('The ID that was submitted'),
+            pmid: z.string().optional().describe('PubMed ID'),
+            pmcid: z.string().optional().describe('PubMed Central ID'),
+            doi: z.string().optional().describe('Digital Object Identifier'),
+            errmsg: z.string().optional().describe('Error message if conversion failed'),
+          })
+          .describe('Per-ID conversion record'),
       )
       .describe('Conversion results, one per input ID'),
     totalConverted: z.number().describe('Number of IDs successfully converted'),

@@ -8,11 +8,13 @@ import { resource, z } from '@cyanheads/mcp-ts-core';
 import { getNcbiService } from '@/services/ncbi/ncbi-service.js';
 import { ensureArray, getText } from '@/services/ncbi/parsing/xml-helpers.js';
 
-const FieldSchema = z.object({
-  name: z.string().describe('Short field name used in queries'),
-  fullName: z.string().optional().describe('Full display name'),
-  description: z.string().optional().describe('Field description'),
-});
+const FieldSchema = z
+  .object({
+    name: z.string().describe('Short field name used in queries'),
+    fullName: z.string().optional().describe('Full display name'),
+    description: z.string().optional().describe('Field description'),
+  })
+  .describe('Searchable field entry');
 
 const OutputSchema = z.object({
   dbName: z.string().describe('Database name'),

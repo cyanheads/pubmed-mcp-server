@@ -64,19 +64,21 @@ export const findRelatedTool = tool('pubmed_find_related', {
     relationship: z.enum(['similar', 'cited_by', 'references']).describe('Relationship type used'),
     articles: z
       .array(
-        z.object({
-          pmid: z.string().describe('PubMed ID'),
-          title: z.string().optional().describe('Article title'),
-          authors: z.string().optional().describe('Author string'),
-          source: z.string().optional().describe('Journal source'),
-          pubDate: z.string().optional().describe('Publication date'),
-          score: z
-            .number()
-            .optional()
-            .describe(
-              'NCBI relevance score (arbitrary scale, higher = more related; only present for similar)',
-            ),
-        }),
+        z
+          .object({
+            pmid: z.string().describe('PubMed ID'),
+            title: z.string().optional().describe('Article title'),
+            authors: z.string().optional().describe('Author string'),
+            source: z.string().optional().describe('Journal source'),
+            pubDate: z.string().optional().describe('Publication date'),
+            score: z
+              .number()
+              .optional()
+              .describe(
+                'NCBI relevance score (arbitrary scale, higher = more related; only present for similar)',
+              ),
+          })
+          .describe('Related article with enriched summary'),
       )
       .describe('Related articles'),
     totalFound: z.number().describe('Total related articles found before truncation'),

@@ -114,13 +114,15 @@ export const lookupMeshTool = tool('pubmed_lookup_mesh', {
     term: z.string().describe('Original search term'),
     results: z
       .array(
-        z.object({
-          meshId: z.string().describe('MeSH descriptor unique identifier'),
-          name: z.string().describe('Descriptor name'),
-          treeNumbers: z.array(z.string()).optional().describe('MeSH tree numbers'),
-          scopeNote: z.string().optional().describe('Scope note'),
-          entryTerms: z.array(z.string()).optional().describe('Synonyms / entry terms'),
-        }),
+        z
+          .object({
+            meshId: z.string().describe('MeSH descriptor unique identifier'),
+            name: z.string().describe('Descriptor name'),
+            treeNumbers: z.array(z.string()).optional().describe('MeSH tree numbers'),
+            scopeNote: z.string().optional().describe('Scope note'),
+            entryTerms: z.array(z.string()).optional().describe('Synonyms / entry terms'),
+          })
+          .describe('Matching MeSH descriptor record'),
       )
       .describe('Matching MeSH records'),
   }),

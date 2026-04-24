@@ -151,17 +151,19 @@ export const searchArticlesTool = tool('pubmed_search_articles', {
     pmids: z.array(z.string()).describe('PubMed IDs'),
     summaries: z
       .array(
-        z.object({
-          pmid: z.string().describe('PubMed ID'),
-          title: z.string().optional().describe('Article title'),
-          authors: z.string().optional().describe('Formatted author string'),
-          source: z.string().optional().describe('Journal source'),
-          pubDate: z.string().optional().describe('Publication date'),
-          doi: z.string().optional().describe('DOI'),
-          pmcId: z.string().optional().describe('PMC ID'),
-          pmcUrl: z.string().optional().describe('PMC URL'),
-          pubmedUrl: z.string().optional().describe('PubMed URL'),
-        }),
+        z
+          .object({
+            pmid: z.string().describe('PubMed ID'),
+            title: z.string().optional().describe('Article title'),
+            authors: z.string().optional().describe('Formatted author string'),
+            source: z.string().optional().describe('Journal source'),
+            pubDate: z.string().optional().describe('Publication date'),
+            doi: z.string().optional().describe('DOI'),
+            pmcId: z.string().optional().describe('PMC ID'),
+            pmcUrl: z.string().optional().describe('PMC URL'),
+            pubmedUrl: z.string().optional().describe('PubMed URL'),
+          })
+          .describe('Brief article summary'),
       )
       .describe('Brief summaries (empty array when summaryCount is 0)'),
     searchUrl: z.string().describe('PubMed search URL'),

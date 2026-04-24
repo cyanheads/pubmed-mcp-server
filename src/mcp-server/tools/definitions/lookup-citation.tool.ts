@@ -24,25 +24,27 @@ export const lookupCitationTool = tool('pubmed_lookup_citation', {
   input: z.object({
     citations: z
       .array(
-        z.object({
-          journal: z
-            .string()
-            .optional()
-            .describe('Journal title or ISO abbreviation (e.g., "proc natl acad sci u s a")'),
-          year: z.string().optional().describe('Publication year (e.g., "1991")'),
-          volume: z.string().optional().describe('Volume number'),
-          firstPage: z.string().optional().describe('First page number'),
-          authorName: z
-            .string()
-            .optional()
-            .describe('Author name, typically "lastname initials" (e.g., "mann bj")'),
-          key: z
-            .string()
-            .optional()
-            .describe(
-              'Arbitrary label to track this citation in results. Auto-assigned if omitted.',
-            ),
-        }),
+        z
+          .object({
+            journal: z
+              .string()
+              .optional()
+              .describe('Journal title or ISO abbreviation (e.g., "proc natl acad sci u s a")'),
+            year: z.string().optional().describe('Publication year (e.g., "1991")'),
+            volume: z.string().optional().describe('Volume number'),
+            firstPage: z.string().optional().describe('First page number'),
+            authorName: z
+              .string()
+              .optional()
+              .describe('Author name, typically "lastname initials" (e.g., "mann bj")'),
+            key: z
+              .string()
+              .optional()
+              .describe(
+                'Arbitrary label to track this citation in results. Auto-assigned if omitted.',
+              ),
+          })
+          .describe('Citation to match against PubMed'),
       )
       .min(1)
       .max(25)
@@ -52,18 +54,20 @@ export const lookupCitationTool = tool('pubmed_lookup_citation', {
   output: z.object({
     results: z
       .array(
-        z.object({
-          key: z.string().describe('Citation tracking key'),
-          pmid: z.string().optional().describe('Matched PubMed ID'),
-          matched: z.boolean().describe('Whether a PMID was found'),
-          status: z
-            .enum(['matched', 'not_found', 'ambiguous'])
-            .describe('Lookup outcome classification for this citation'),
-          detail: z
-            .string()
-            .optional()
-            .describe('Additional detail returned by ECitMatch for non-exact matches'),
-        }),
+        z
+          .object({
+            key: z.string().describe('Citation tracking key'),
+            pmid: z.string().optional().describe('Matched PubMed ID'),
+            matched: z.boolean().describe('Whether a PMID was found'),
+            status: z
+              .enum(['matched', 'not_found', 'ambiguous'])
+              .describe('Lookup outcome classification for this citation'),
+            detail: z
+              .string()
+              .optional()
+              .describe('Additional detail returned by ECitMatch for non-exact matches'),
+          })
+          .describe('Per-citation match result'),
       )
       .describe('Match results, one per input citation'),
     totalMatched: z.number().describe('Number of citations with PMID matches'),

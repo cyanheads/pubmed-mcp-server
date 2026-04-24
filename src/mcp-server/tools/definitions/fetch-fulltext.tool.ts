@@ -42,18 +42,76 @@ function filterSections(
 
 // ─── Tool Definition ─────────────────────────────────────────────────────────
 
-const SubsectionSchema = z.object({
-  title: z.string().optional().describe('Subsection heading'),
-  label: z.string().optional().describe('Subsection label'),
-  text: z.string().describe('Subsection body text'),
-});
+const SubsectionSchema = z
+  .object({
+    title: z.string().optional().describe('Subsection heading'),
+    label: z.string().optional().describe('Subsection label'),
+    text: z.string().describe('Subsection body text'),
+  })
+  .describe('Article subsection');
 
-const SectionSchema = z.object({
-  title: z.string().optional().describe('Section heading'),
-  label: z.string().optional().describe('Section label'),
-  text: z.string().describe('Section body text'),
-  subsections: z.array(SubsectionSchema).optional().describe('Nested subsections'),
-});
+const SectionSchema = z
+  .object({
+    title: z.string().optional().describe('Section heading'),
+    label: z.string().optional().describe('Section label'),
+    text: z.string().describe('Section body text'),
+    subsections: z.array(SubsectionSchema).optional().describe('Nested subsections'),
+  })
+  .describe('Article body section');
+
+const AuthorSchema = z
+  .object({
+    collectiveName: z.string().optional().describe('Group name'),
+    givenNames: z.string().optional().describe('Given names'),
+    lastName: z.string().optional().describe('Last name'),
+  })
+  .describe('Author entry');
+
+const JournalSchema = z
+  .object({
+    title: z.string().optional().describe('Journal title'),
+    issn: z.string().optional().describe('ISSN'),
+    volume: z.string().optional().describe('Volume number'),
+    issue: z.string().optional().describe('Issue number'),
+    pages: z.string().optional().describe('Page range'),
+  })
+  .describe('Journal information');
+
+const ReferenceSchema = z
+  .object({
+    citation: z.string().describe('Citation text'),
+    id: z.string().optional().describe('Reference ID'),
+    label: z.string().optional().describe('Reference label'),
+  })
+  .describe('Reference entry');
+
+const PublicationDateSchema = z
+  .object({
+    year: z.string().optional().describe('Publication year'),
+    month: z.string().optional().describe('Publication month'),
+    day: z.string().optional().describe('Publication day'),
+  })
+  .describe('Publication date');
+
+const FulltextArticleSchema = z
+  .object({
+    pmcId: z.string().describe('PMC ID'),
+    pmcUrl: z.string().describe('PMC URL'),
+    pmid: z.string().optional().describe('PubMed ID'),
+    pubmedUrl: z.string().optional().describe('PubMed URL'),
+    title: z.string().optional().describe('Article title'),
+    abstract: z.string().optional().describe('Abstract'),
+    authors: z.array(AuthorSchema).optional().describe('Authors'),
+    doi: z.string().optional().describe('DOI'),
+    journal: JournalSchema.optional(),
+    keywords: z.array(z.string()).optional().describe('Keywords'),
+    sections: z.array(SectionSchema).describe('Article body sections'),
+    references: z.array(ReferenceSchema).optional().describe('Reference list'),
+    articleType: z.string().optional().describe('Article type'),
+    affiliations: z.array(z.string()).optional().describe('Author affiliations'),
+    publicationDate: PublicationDateSchema.optional(),
+  })
+  .describe('Full-text PMC article');
 
 export const fetchFulltextTool = tool('pubmed_fetch_fulltext', {
   description:
@@ -95,61 +153,7 @@ export const fetchFulltextTool = tool('pubmed_fetch_fulltext', {
   }),
 
   output: z.object({
-    articles: z
-      .array(
-        z.object({
-          pmcId: z.string().describe('PMC ID'),
-          pmcUrl: z.string().describe('PMC URL'),
-          pmid: z.string().optional().describe('PubMed ID'),
-          pubmedUrl: z.string().optional().describe('PubMed URL'),
-          title: z.string().optional().describe('Article title'),
-          abstract: z.string().optional().describe('Abstract'),
-          authors: z
-            .array(
-              z.object({
-                collectiveName: z.string().optional().describe('Group name'),
-                givenNames: z.string().optional().describe('Given names'),
-                lastName: z.string().optional().describe('Last name'),
-              }),
-            )
-            .optional()
-            .describe('Authors'),
-          doi: z.string().optional().describe('DOI'),
-          journal: z
-            .object({
-              title: z.string().optional().describe('Journal title'),
-              issn: z.string().optional().describe('ISSN'),
-              volume: z.string().optional().describe('Volume number'),
-              issue: z.string().optional().describe('Issue number'),
-              pages: z.string().optional().describe('Page range'),
-            })
-            .optional()
-            .describe('Journal information'),
-          keywords: z.array(z.string()).optional().describe('Keywords'),
-          sections: z.array(SectionSchema).describe('Article body sections'),
-          references: z
-            .array(
-              z.object({
-                citation: z.string().describe('Citation text'),
-                id: z.string().optional().describe('Reference ID'),
-                label: z.string().optional().describe('Reference label'),
-              }),
-            )
-            .optional()
-            .describe('Reference list'),
-          articleType: z.string().optional().describe('Article type'),
-          affiliations: z.array(z.string()).optional().describe('Author affiliations'),
-          publicationDate: z
-            .object({
-              year: z.string().optional().describe('Publication year'),
-              month: z.string().optional().describe('Publication month'),
-              day: z.string().optional().describe('Publication day'),
-            })
-            .optional()
-            .describe('Publication date'),
-        }),
-      )
-      .describe('Full-text articles'),
+    articles: z.array(FulltextArticleSchema).describe('Full-text articles'),
     totalReturned: z.number().describe('Number of articles returned'),
     unavailablePmids: z.array(z.string()).optional().describe('PMIDs not available in PMC'),
     unavailablePmcIds: z.array(z.string()).optional().describe('PMC IDs that returned no data'),
