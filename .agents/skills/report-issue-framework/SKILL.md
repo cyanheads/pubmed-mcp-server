@@ -20,6 +20,8 @@ You've isolated a problem to `@cyanheads/mcp-ts-core` itself — not your server
 - Type exports are incorrect or missing (compile error on documented usage)
 - The definition linter (`bun run lint:mcp`) produces false positives or misses real violations
 
+For general `gh` CLI workflows outside issue filing (PRs, workflows, API access), see the `github-cli` skill.
+
 ## Before Filing
 
 1. **Confirm framework version** — `bun pm ls @cyanheads/mcp-ts-core` or check `node_modules/@cyanheads/mcp-ts-core/package.json`
@@ -33,7 +35,7 @@ gh issue list -R cyanheads/mcp-ts-core --search "your error message or keyword"
 
 ## Writing Well-Structured Issues
 
-Good issues are scannable, concrete, and self-contained. These patterns apply to both bugs and features:
+Good issues are scannable, concrete, and self-contained. These patterns apply to both bugs and features — the guidance targets any prose block (Description, Additional context, feature proposals).
 
 - **Lead with specifics.** Name the tool, function, module, or symptom. "Currently `createApp()` throws `ConfigurationError` when `MCP_HTTP_PORT` is set to `0`" beats "There's a problem with the config." A reader should know what's broken or missing before the end of the first sentence.
 - **Embed library/service links on first mention.** `[Hono](https://hono.dev/)`, `[linkedom](https://github.com/WebReflection/linkedom)`. Link to the canonical repo or homepage so readers can verify the dependency and reach docs in one click.
@@ -43,7 +45,7 @@ Good issues are scannable, concrete, and self-contained. These patterns apply to
 - **Prefer Markdown tables for comparisons.** When showing options, tiers, strategies, or tradeoffs — tables are the highest-density format for scanning N rows × M attributes.
 - **Separate `### Scope` from `### Out of scope`.** The latter is as important as the former — it pre-empts scope-creep debates in comments and signals you've thought about the boundaries.
 - **Use `Depends on: owner/repo#N`** to declare ordering explicitly when implementation is blocked on another issue landing first.
-- **No collaborator-framing sign-offs.** Issues are filed from the maintainer's account to the maintainer's own repo — lines like "Happy to open a PR", "let me know if you'd like", "willing to contribute", "if that's the preferred flow" read as outside-contributor framing and are pure noise. End the body at the last substantive point.
+- **Skip collaborator-framing sign-offs.** Lines like "Happy to open a PR", "let me know if you'd like", "willing to contribute", "if that's the preferred flow" read as noise. A PR link beats an offer; if you're the maintainer filing against your own repo, the offer is redundant. End the body at the last substantive point.
 
 ## Redact Before Posting
 
@@ -214,7 +216,11 @@ const result = await withRetry(() => fetchExternal(url), {
 });
 ```
 
-### Design / Tradeoffs
+### Flow (optional)
+
+Ordered steps — e.g. `trigger → resolve → fetch → degrade`. Useful when the change spans multiple phases or fallbacks.
+
+### Design / Tradeoffs (optional)
 
 Philosophy: **one-line principle in bold.**
 

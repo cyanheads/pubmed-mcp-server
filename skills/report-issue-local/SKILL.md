@@ -22,6 +22,8 @@ The bug is in this server's code, not in `@cyanheads/mcp-ts-core`. Typical trigg
 
 **If the issue is in the framework itself** (builders, Context, utilities, type exports, linter), use `report-issue-framework` instead.
 
+For general `gh` CLI workflows outside issue filing (PRs, workflows, API access), see the `github-cli` skill.
+
 ## Before Filing
 
 1. **Identify the repo**:
@@ -42,17 +44,17 @@ gh issue list --search "your error message or keyword"
 
 ## Writing Well-Structured Issues
 
-Good issues are scannable, concrete, and self-contained. These patterns apply to both bugs and features:
+Good issues are scannable, concrete, and self-contained. These patterns apply to both bugs and features — the guidance targets any prose block (Description, Additional context, feature proposals).
 
-- **Lead with specifics.** Name the tool, handler, service, or symptom. "Currently `search_docs` returns empty arrays for queries containing `&`" beats "Search has a bug." A reader should know what's broken or missing before the end of the first sentence.
-- **Embed library/service links on first mention.** `[Unpaywall](https://unpaywall.org/)`, `[Defuddle](https://github.com/kepano/defuddle)`. Link to the canonical repo or homepage so readers can verify the tool and reach docs in one click.
-- **Use `owner/repo#N` for cross-repo issue references.** GitHub auto-renders them as linked references (e.g. `cyanheads/mcp-ts-core#46`). Bare `#N` only works for same-repo issues — use the full form when linking a framework or upstream issue.
+- **Lead with specifics.** Name the tool, service, resource, or symptom. "Currently `search_docs` returns an empty array for queries containing `&`" beats "Search is broken." A reader should know what's wrong before the end of the first sentence.
+- **Embed library/service links on first mention.** `[Hono](https://hono.dev/)`, `[Supabase](https://supabase.com/)`. Link to the canonical repo or homepage so readers can verify the dependency and reach docs in one click.
+- **Use `owner/repo#N` for cross-repo issue references.** GitHub auto-renders them as linked references (e.g. `cyanheads/mcp-ts-core#46`). Bare `#N` only works for same-repo issues — useful when the bug depends on or relates to a framework issue.
 - **Add a `Related: #N` line** near the top when the issue grows from prior context (discussions, other issues, PRs). Makes provenance clickable.
-- **Lead design sections with a philosophy sentence.** Bold a short principle before the tradeoff details — e.g. "Philosophy: **return best-effort raw text, don't fail the tool call on parsing edge cases.**" Establishes the lens for the rest of the section.
-- **Prefer Markdown tables for comparisons.** When showing options, tiers, sources, or tradeoffs — tables are the highest-density format for scanning N rows × M attributes.
+- **Lead design sections with a philosophy sentence.** Bold a short principle before the tradeoff details — e.g. "Philosophy: **return best-effort data, don't fail the tool call on parsing edge cases.**" Establishes the lens for the rest of the section.
+- **Prefer Markdown tables for comparisons.** When showing options, data sources, strategies, or tradeoffs — tables are the highest-density format for scanning N rows × M attributes.
 - **Separate `### Scope` from `### Out of scope`.** The latter is as important as the former — it pre-empts scope-creep debates in comments and signals you've thought about the boundaries.
-- **Use `Depends on: owner/repo#N`** to declare ordering explicitly when implementation is blocked on upstream framework work.
-- **No collaborator-framing sign-offs.** Issues are filed from the maintainer's account to the maintainer's own repo — lines like "Happy to open a PR", "let me know if you'd like", "willing to contribute", "if that's the preferred flow" read as outside-contributor framing and are pure noise. End the body at the last substantive point.
+- **Use `Depends on: owner/repo#N`** to declare ordering explicitly when implementation is blocked on an upstream framework change or another issue landing first.
+- **Skip collaborator-framing sign-offs.** Lines like "Happy to open a PR", "let me know if you'd like", "willing to contribute", "if that's the preferred flow" read as noise. A PR link beats an offer; if you're the maintainer filing against your own repo, the offer is redundant. End the body at the last substantive point.
 
 ## Redact Before Posting
 
@@ -179,45 +181,50 @@ gh issue create \
   --title "feat(scope): concise description" \
   --label "enhancement" \
   --body "$(cat <<'ISSUE'
-Concrete statement of what's currently missing, broken, or limited. Name the specific tool, resource, service, or module by name. Two or three sentences — the reader should know the gap before the end of the paragraph.
+Concrete statement of what's currently missing or broken. Name the specific tool, service, resource, or domain area. Two or three sentences — the reader should know the gap before the end of the paragraph.
 
 Related: #N
 
 ## Proposal
 
-What you want to build, in one paragraph. Link external libraries or services on first mention: [lib name](https://github.com/owner/repo). Include a short justification — what this gives users that we don't have today.
+What you want the server to do, in one paragraph. Link external libraries or services on first mention: [lib name](https://github.com/owner/repo). Include a short justification — what this gives users that they don't have today.
 
-### Flow (optional — for runtime sequences)
+### Proposed behavior
 
-1. Step one
-2. Step two
-3. Step three
+Describe the new behavior or surface. For tool/resource changes, show example input/output or the new schema fields:
 
-### Design / Tradeoffs (optional — when there are real choices)
+```ts
+// Example: new input field or output shape
+```
+
+### Flow (optional)
+
+Ordered steps — e.g. `request → lookup → fallback → respond`. Useful when the change spans multiple phases or fallbacks.
+
+### Design / Tradeoffs (optional)
 
 Philosophy: **one-line principle in bold.**
 
-| Source | Approach | Output |
+| Option | Strengths | Weaknesses |
 |:---|:---|:---|
 | A | ... | ... |
 | B | ... | ... |
 
-Schema excerpts in code blocks when they clarify the design.
-
 ### Scope
 
 - Files or modules touched
-- New env vars, config keys, or API surface
-- User-visible changes (new tool? extended output? new resource URI?)
+- New env vars, config keys, or service integrations
+- New or modified tools / resources / prompts
 
 ### Out of scope
 
 - What we're deliberately not doing
-- Related work deferred to separate issues
+- Adjacent work that belongs in a separate issue
 
 ### Dependencies (optional)
 
-- Depends on: owner/repo#N  (when blocked on a framework or upstream issue)
+- Depends on: cyanheads/mcp-ts-core#N (upstream framework change)
+- Depends on: owner/repo#N (other server work)
 
 ### Alternatives considered
 
