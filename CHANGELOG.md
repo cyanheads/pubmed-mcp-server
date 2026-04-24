@@ -4,6 +4,36 @@ All notable changes to this project will be documented in this file.
 
 ---
 
+## [2.5.4] - 2026-04-24
+
+Framework patch series bump (`@cyanheads/mcp-ts-core` 0.6.10 → 0.6.17) and a code-cohesion pass. Picks up the new recursive `describe-on-fields` linter (0.6.16) and an HTTP transport per-request `McpServer` race fix (0.6.17). Adds the new `security-pass` skill, syncs the Phase C build/check scripts from the package, and refactors two heavy output schemas into named sub-schemas for readability — verified wire-format-transparent. No library API changes, no tool behavior changes.
+
+### Added
+
+- **`security-pass` skill** (`skills/security-pass/`, `.agents/skills/security-pass/`): New v1.1 skill from framework 0.6.14 — systematic audit pass covering secrets, input validation, rate limiting, error surface, and dependency hygiene. Available as first-class skill for post-change security review.
+- **Phase C build/check scripts** (`scripts/build-changelog.ts`, `scripts/check-docs-sync.ts`, `scripts/check-skills-sync.ts`): Copied from `@cyanheads/mcp-ts-core` 0.6.16 as part of the new package → project script sync path. `build-changelog.ts` is invoked by the `devcheck` Changelog Sync step with an added `existsSync(CHANGELOG_DIR)` early-exit to handle single-file `CHANGELOG.md` projects (this server does not use a directory-based changelog). Filed upstream as [cyanheads/mcp-ts-core#51](https://github.com/cyanheads/mcp-ts-core/issues/51).
+
+### Changed
+
+- **Framework bump — `@cyanheads/mcp-ts-core` 0.6.10 → 0.6.17** (`package.json`, `bun.lock`): seven patch releases rolled up.
+  - **0.6.11–0.6.13**: Template + skill polish (internal-audience), no consumer impact.
+  - **0.6.14**: Ships the `security-pass` skill (adopted above).
+  - **0.6.15**: Landing-page hardening.
+  - **0.6.16**: Definition-linter upgrade — `describe-on-fields` now walks nested object properties, array element schemas, and union variants recursively. Flagged 19 missing `.describe()` calls on inner schemas across this server's 9 tools + 1 resource; all added in this release.
+  - **0.6.17**: HTTP transport fix — per-request `McpServer` instantiation resolves a session race where concurrent requests on the same session could see cross-wired tool registrations.
+- **Schema refactor — `fetch-articles.tool.ts`, `fetch-fulltext.tool.ts`**: Extracted deeply nested inline `z.object({...})` output schemas into named module-scoped schemas (`AuthorSchema`, `JournalInfoSchema`, `MeshTermSchema`, `GrantSchema`, `ArticleDateSchema`, `FetchedArticleSchema`, `SubsectionSchema`, `SectionSchema`, `ReferenceSchema`, `PublicationDateSchema`, `FulltextArticleSchema`, etc.). Code-organization change only — verified byte-identical JSON Schema output via `toJSONSchema` from `zod/v4/core`, so MCP SDK's `tools/list` emission and the LLM's view of the tool are unchanged.
+- **`describe-on-fields` compliance** (`convert-ids.tool.ts`, `find-related.tool.ts`, `search-articles.tool.ts`, `lookup-mesh.tool.ts`, `lookup-citation.tool.ts`, `format-citations.tool.ts`, `database-info.resource.ts`): Added `.describe()` on 19 previously unannotated array element schemas and nested object properties flagged by the 0.6.16 recursive linter. Tools' surface descriptions unchanged — this fills in the missing per-field hints for nested structures.
+- **Project skills synced from 0.6.17** (`skills/`, `.agents/skills/`): `security-pass` v1.1 added; `field-test` 1.3 → 2.0 (HTTP + JSON-RPC helper, universal battery vs situational categories); content refreshes at same version on `add-tool`, `design-mcp-server`, `maintenance`, `polish-docs-meta`, `release-and-publish`, `report-issue-framework`, `report-issue-local`, `setup`. Both agent skill directories refreshed end-to-end.
+- **Project scripts synced from 0.6.16** (`scripts/devcheck.ts`, `scripts/lint-mcp.ts`, `scripts/tree.ts`): picked up the new Docs Sync + Changelog Sync + Skills Sync steps in `devcheck.ts` and linter-rule updates in `lint-mcp.ts`.
+- **`AGENTS.md` re-synced from `CLAUDE.md`**: the two were out of sync (2.5.0 vs 2.5.3); the mirror is now re-established.
+- **Biome patch bump — `@biomejs/biome` 2.4.12 → 2.4.13** (`package.json`, `bun.lock`): internal fixes only.
+
+### Tests
+
+- Full suite: **409 passed** / 4 skipped / 0 regressions. `bun run devcheck` green across all 11 checks (Docs Sync, Changelog Sync, Skills Sync, and MCP definition lint included). Field-tested all 9 tools via real HTTP + JSON-RPC transport — happy path, `structuredContent` ↔ `content[]` parity, and input-validation error messages verified.
+
+---
+
 ## [2.5.3] - 2026-04-23
 
 Framework patch bump (`@cyanheads/mcp-ts-core` 0.6.8 → 0.6.10) and agent-protocol polish. 0.6.9 is an internal landing-page refactor with a new CSP header and per-request render memoization; 0.6.10 renames the `release` skill to `release-and-publish` and expands the `setup` skill to cover everything `init` scaffolds. No library API changes — no code edits required.
