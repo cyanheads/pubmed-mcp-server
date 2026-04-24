@@ -268,6 +268,27 @@ describe('NcbiService.eCitMatch', () => {
     ]);
   });
 
+  it('parses AMBIGUOUS response with candidate PMIDs into candidatePmids array', async () => {
+    const { service, mockApiClient, mockResponseHandler } = createMockService();
+    (mockApiClient.makeRequest as ReturnType<typeof vi.fn>).mockResolvedValue('<xml/>');
+    (mockResponseHandler.parseAndHandleResponse as ReturnType<typeof vi.fn>).mockReturnValue(
+      'nature|2020|||zhang f|ref1|AMBIGUOUS 33057196,32076266,32025019\r\n',
+    );
+
+    const results = await service.eCitMatch([
+      { journal: 'nature', year: '2020', authorName: 'zhang f', key: 'ref1' },
+    ]);
+
+    expect(results[0]).toEqual({
+      key: 'ref1',
+      matched: false,
+      pmid: null,
+      status: 'ambiguous',
+      detail: 'AMBIGUOUS 33057196,32076266,32025019',
+      candidatePmids: ['33057196', '32076266', '32025019'],
+    });
+  });
+
   it('parses multiple citations in one response', async () => {
     const { service, mockApiClient, mockResponseHandler } = createMockService();
     (mockApiClient.makeRequest as ReturnType<typeof vi.fn>).mockResolvedValue('<xml/>');

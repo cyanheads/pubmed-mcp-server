@@ -183,12 +183,20 @@ export class NcbiService {
         }
 
         if (rawOutcome.startsWith('AMBIGUOUS')) {
+          const csv = /^AMBIGUOUS\s+([\d,\s]+)/.exec(rawOutcome)?.[1];
+          const candidatePmids = csv
+            ? csv
+                .split(',')
+                .map((p) => p.trim())
+                .filter((p) => /^\d+$/.test(p))
+            : undefined;
           return {
             key,
             matched: false,
             pmid: null,
             status: 'ambiguous' as const,
             detail: rawOutcome,
+            ...(candidatePmids?.length && { candidatePmids }),
           };
         }
 

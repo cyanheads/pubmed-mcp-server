@@ -620,6 +620,11 @@ export interface ECitMatchCitation {
 
 /** Single result from ECitMatch lookup. */
 export interface ECitMatchResult {
+  /**
+   * Candidate PMIDs for AMBIGUOUS results, parsed from the `AMBIGUOUS <csv>`
+   * detail string. Only present when status is `ambiguous`.
+   */
+  candidatePmids?: string[];
   /** Raw non-match detail returned by ECitMatch when present */
   detail?: string;
   /** The tracking key from the input citation */
