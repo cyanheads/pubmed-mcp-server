@@ -198,6 +198,10 @@ describe('findRelatedTool', () => {
     mockELink.mockResolvedValue({
       eLinkResult: [{ LinkSet: {} }],
     });
+    mockESummary.mockResolvedValue({ eSummaryResult: {} });
+    mockExtractBriefSummaries.mockResolvedValue([
+      { pmid: '12345', title: 'Source', pmcId: 'PMC9999' },
+    ]);
 
     const ctx = createMockContext();
     const input = findRelatedTool.input.parse({ pmid: '12345', relationship: 'references' });
@@ -215,6 +219,82 @@ describe('findRelatedTool', () => {
       expect.objectContaining({ signal: expect.any(AbortSignal) }),
     );
     expect(result.totalFound).toBe(0);
+  });
+
+  describe('references notice for non-PMC sources (issue #42)', () => {
+    it('emits a PMC-indexing hint when the source has no PMCID', async () => {
+      mockELink.mockResolvedValue({ eLinkResult: [{ LinkSet: {} }] });
+      mockESummary.mockResolvedValue({ eSummaryResult: {} });
+      mockExtractBriefSummaries.mockResolvedValue([
+        { pmid: '37952131', title: 'Non-PMC source' /* no pmcId */ },
+      ]);
+
+      const ctx = createMockContext();
+      const input = findRelatedTool.input.parse({
+        pmid: '37952131',
+        relationship: 'references',
+      });
+      const result = await findRelatedTool.handler(input, ctx);
+
+      expect(result.totalFound).toBe(0);
+      expect(result.notice).toBeDefined();
+      expect(result.notice).toContain('PMC');
+      expect(result.notice).toContain('37952131');
+      expect(result.notice).toContain('pubmed_fetch_articles');
+    });
+
+    it('emits a PMC-no-refs hint when the source has a PMCID but no references', async () => {
+      mockELink.mockResolvedValue({ eLinkResult: [{ LinkSet: {} }] });
+      mockESummary.mockResolvedValue({ eSummaryResult: {} });
+      mockExtractBriefSummaries.mockResolvedValue([
+        { pmid: '12345', title: 'PMC source', pmcId: 'PMC12345' },
+      ]);
+
+      const ctx = createMockContext();
+      const input = findRelatedTool.input.parse({ pmid: '12345', relationship: 'references' });
+      const result = await findRelatedTool.handler(input, ctx);
+
+      expect(result.notice).toBeDefined();
+      expect(result.notice).toContain('PMCID PMC12345');
+    });
+
+    it('omits notice for similar / cited_by empty results', async () => {
+      mockELink.mockResolvedValue({ eLinkResult: [{ LinkSet: {} }] });
+
+      const ctx = createMockContext();
+      const input = findRelatedTool.input.parse({ pmid: '12345', relationship: 'similar' });
+      const result = await findRelatedTool.handler(input, ctx);
+
+      expect(result.notice).toBeUndefined();
+      // Source ESummary should only fire for the references path
+      expect(mockESummary).not.toHaveBeenCalled();
+    });
+
+    it('falls back gracefully when the ESummary lookup fails', async () => {
+      mockELink.mockResolvedValue({ eLinkResult: [{ LinkSet: {} }] });
+      mockESummary.mockRejectedValue(new Error('NCBI down'));
+
+      const ctx = createMockContext();
+      const input = findRelatedTool.input.parse({ pmid: '12345', relationship: 'references' });
+      const result = await findRelatedTool.handler(input, ctx);
+
+      expect(result.totalFound).toBe(0);
+      expect(result.notice).toBeUndefined();
+    });
+
+    it('renders the notice as a blockquote in format()', () => {
+      const blocks = findRelatedTool.format!({
+        sourcePmid: '37952131',
+        relationship: 'references',
+        articles: [],
+        totalFound: 0,
+        notice:
+          'Reference lists require the source article to be indexed in PMC. PMID 37952131 has no PMCID — references unavailable. Use pubmed_fetch_articles to inspect the article record, or try relationship: "similar" / "cited_by".',
+      });
+      const text = blocks[0]?.text ?? '';
+      expect(text).toContain('> Reference lists require');
+      expect(text).not.toContain('No related articles found.');
+    });
   });
 
   it('formats output with articles', () => {

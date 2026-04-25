@@ -8,6 +8,15 @@ import { tool, z } from '@cyanheads/mcp-ts-core';
 import { getNcbiService } from '@/services/ncbi/ncbi-service.js';
 import { conceptMeta, EDAM_ACCESSION, EDAM_ID_MAPPING } from './_concepts.js';
 
+/**
+ * NCBI's PMC ID Converter returns this exact wording for any non-PMC ID — even
+ * articles that exist in PubMed and have a recoverable DOI. Rewrite to point
+ * the caller at the recovery path; the original is logged at debug.
+ */
+const PMC_NOT_FOUND_RE = /^identifier not found in pmc$/i;
+const PMC_NOT_FOUND_REWRITE =
+  'Not in PMC ID Converter. Article may still exist in PubMed — try pubmed_fetch_articles (PMID → DOI) or pubmed_search_articles.';
+
 export const convertIdsTool = tool('pubmed_convert_ids', {
   description: `Convert between article identifiers (DOI, PMID, PMCID). Accepts up to 50 IDs of a single type per request. Uses the NCBI PMC ID Converter API — only resolves articles indexed in PubMed Central. For articles not in PMC, use pubmed_search_articles instead.`,
   annotations: { readOnlyHint: true, openWorldHint: true },
@@ -57,13 +66,26 @@ export const convertIdsTool = tool('pubmed_convert_ids', {
     const raw = await getNcbiService().idConvert(input.ids, input.idtype, { signal: ctx.signal });
 
     // NCBI returns pmid as a number in JSON — coerce all ID fields to strings
-    const records = raw.map((r) => ({
-      requestedId: String(r['requested-id']),
-      ...(r.pmid !== undefined && { pmid: String(r.pmid) }),
-      ...(r.pmcid !== undefined && { pmcid: String(r.pmcid) }),
-      ...(r.doi !== undefined && { doi: String(r.doi) }),
-      ...(r.errmsg !== undefined && { errmsg: String(r.errmsg) }),
-    }));
+    const records = raw.map((r) => {
+      const requestedId = String(r['requested-id']);
+      let errmsg: string | undefined;
+      if (r.errmsg !== undefined) {
+        const original = String(r.errmsg);
+        if (PMC_NOT_FOUND_RE.test(original)) {
+          ctx.log.debug('Rewriting PMC-not-found errmsg', { requestedId, original });
+          errmsg = PMC_NOT_FOUND_REWRITE;
+        } else {
+          errmsg = original;
+        }
+      }
+      return {
+        requestedId,
+        ...(r.pmid !== undefined && { pmid: String(r.pmid) }),
+        ...(r.pmcid !== undefined && { pmcid: String(r.pmcid) }),
+        ...(r.doi !== undefined && { doi: String(r.doi) }),
+        ...(errmsg !== undefined && { errmsg }),
+      };
+    });
 
     const totalConverted = records.filter((r) => !r.errmsg).length;
     ctx.log.info('pubmed_convert_ids completed', {

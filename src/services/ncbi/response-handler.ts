@@ -128,6 +128,95 @@ function sanitizeNcbiError(message: string): string {
 const ERROR_TAG_REGEX = /<ERROR(?:\s[^>]*)?>/;
 
 /**
+ * Unicode superscript map. Covers digits, common operators, and the few
+ * letters that have superscript codepoints (n, i). `−` (U+2212, the proper
+ * minus) is normalized to U+207B alongside ASCII `-`.
+ */
+const SUPERSCRIPT_MAP: Readonly<Record<string, string>> = {
+  '0': '⁰',
+  '1': '¹',
+  '2': '²',
+  '3': '³',
+  '4': '⁴',
+  '5': '⁵',
+  '6': '⁶',
+  '7': '⁷',
+  '8': '⁸',
+  '9': '⁹',
+  '+': '⁺',
+  '-': '⁻',
+  '−': '⁻',
+  '=': '⁼',
+  '(': '⁽',
+  ')': '⁾',
+  n: 'ⁿ',
+  i: 'ⁱ',
+};
+
+/**
+ * Unicode subscript map. Covers digits and operators; alphabetic subscripts
+ * are limited in Unicode and rarely appear in MEDLINE so they fall through
+ * to the `_X` ASCII fallback.
+ */
+const SUBSCRIPT_MAP: Readonly<Record<string, string>> = {
+  '0': '₀',
+  '1': '₁',
+  '2': '₂',
+  '3': '₃',
+  '4': '₄',
+  '5': '₅',
+  '6': '₆',
+  '7': '₇',
+  '8': '₈',
+  '9': '₉',
+  '+': '₊',
+  '-': '₋',
+  '−': '₋',
+  '=': '₌',
+  '(': '₍',
+  ')': '₎',
+};
+
+function mapInlineContent(
+  content: string,
+  table: Readonly<Record<string, string>>,
+  asciiPrefix: string,
+): string {
+  let out = '';
+  for (const ch of content) {
+    const mapped = table[ch];
+    if (mapped === undefined) return `${asciiPrefix}${content}`;
+    out += mapped;
+  }
+  return out;
+}
+
+/**
+ * Flattens inline mixed-content markup (`<sup>`, `<sub>`, `<inf>`, `<i>`,
+ * `<b>`, `<u>`, `<sc>`) inside PubMed/MEDLINE XML before fast-xml-parser
+ * runs. The non-ordered parser used for EFetch responses doesn't preserve
+ * mixed content — `1.73 m<sup>2</sup>` parses to `{ '#text': '1.73 m', sup:
+ * 2 }`, and `extractAbstractText` only reads `#text`, so the superscript
+ * digit is silently dropped from abstracts and titles.
+ *
+ * Numeric and operator characters map to Unicode (²/³/⁻²/₂…); anything else
+ * falls back to a `^X` / `_X` ASCII prefix so the content survives in a
+ * recognizable form. Italic / bold / underline / small-caps tags are
+ * stripped (content kept) since they don't carry meaning in our text
+ * rendering. Only invoked on the regular parser path; the PMC JATS path
+ * already preserves inline markup via `preserveOrder: true`.
+ *
+ * @internal exported for direct unit tests
+ */
+export function flattenInlineMarkup(xml: string): string {
+  return xml
+    .replace(/<sup>([^<]*)<\/sup>/g, (_, c: string) => mapInlineContent(c, SUPERSCRIPT_MAP, '^'))
+    .replace(/<sub>([^<]*)<\/sub>/g, (_, c: string) => mapInlineContent(c, SUBSCRIPT_MAP, '_'))
+    .replace(/<inf>([^<]*)<\/inf>/g, (_, c: string) => mapInlineContent(c, SUBSCRIPT_MAP, '_'))
+    .replace(/<\/?(?:i|b|u|sc)>/g, '');
+}
+
+/**
  * Parses NCBI E-utility responses (XML, JSON, text) and checks for NCBI-specific
  * error structures embedded in response bodies.
  */
@@ -251,9 +340,13 @@ export class NcbiResponseHandler {
       }
 
       const parser = useOrdered ? this.orderedXmlParser : this.xmlParser;
+      // Pre-flatten <sup>/<sub>/<inf>/<i>/<b>/<u>/<sc> on the regular parser
+      // path. The ordered parser walks mixed content correctly via
+      // preserveOrder; the regular parser does not.
+      const xmlForParse = useOrdered ? responseText : flattenInlineMarkup(responseText);
       let parsedXml: unknown;
       try {
-        parsedXml = parser.parse(responseText);
+        parsedXml = parser.parse(xmlForParse);
       } catch (error: unknown) {
         const parserError = error instanceof Error ? error.message : String(error);
         logger.error('Failed to parse validated XML response from NCBI.', {

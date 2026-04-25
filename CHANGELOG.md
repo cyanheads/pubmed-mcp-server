@@ -4,6 +4,30 @@ All notable changes to this project will be documented in this file.
 
 ---
 
+## [2.6.1] - 2026-04-24
+
+Field-test correctness + DX pass. Closes [#41](https://github.com/cyanheads/pubmed-mcp-server/issues/41) (data-correctness bug — `<sup>`/`<sub>`/`<inf>` content silently dropped from EFetch abstracts), [#42](https://github.com/cyanheads/pubmed-mcp-server/issues/42), [#43](https://github.com/cyanheads/pubmed-mcp-server/issues/43), and [#44](https://github.com/cyanheads/pubmed-mcp-server/issues/44) (DX polish across `find_related`, `convert_ids`, `search_articles`).
+
+### Fixed
+
+- **`pubmed_fetch_articles` and `pubmed_format_citations` preserve superscript/subscript content in abstracts** ([#41](https://github.com/cyanheads/pubmed-mcp-server/issues/41), `src/services/ncbi/response-handler.ts`). Root cause: the non-ordered `XMLParser` used for EFetch responses doesn't preserve mixed content — `1.73 m<sup>2</sup>` parses to `{ '#text': '1.73 m', sup: 2 }`, and `extractAbstractText` only reads `#text`, so the superscript digit was silently dropped from titles and abstracts. Discovered via live field testing: PMID 38785209 abstract showed `1.73 mof body-surface area` instead of `1.73 m² of body-surface area`; PMID 38740993 showed `≥40 kg m` instead of `≥40 kg m⁻²`. Fix: pre-flatten `<sup>`/`<sub>`/`<inf>` to Unicode (or `^X`/`_X` ASCII fallback) before fast-xml-parser runs, and strip emphasis tags (`<i>`, `<b>`, `<u>`, `<sc>`) keeping their content. Scoped to the regular parser path; the PMC JATS path already preserves inline markup via `preserveOrder: true` and is left untouched.
+
+### Changed
+
+- **`pubmed_find_related` returns a relationship-aware notice when `references` yields zero results for a non-PMC source** ([#42](https://github.com/cyanheads/pubmed-mcp-server/issues/42), `src/mcp-server/tools/definitions/find-related.tool.ts`). NCBI's `pubmed_pubmed_refs` ELink only resolves reference lists for PMC-indexed sources, so a perfectly valid PMID without a PMCID returned an empty payload indistinguishable from "this article cites nothing." On a zero-result `references` query, the handler now does a single ESummary lookup on the source PMID and emits a `notice` field — either "Reference lists require the source article to be indexed in PMC. PMID X has no PMCID …" with recovery steps, or "No reference list found in PMC for PMID X (PMCID Y)." when the source IS in PMC. Added `notice?: string` to the output schema; `format()` renders it as a blockquote in place of the generic "No related articles found." line.
+- **`pubmed_convert_ids` rewrites NCBI's "Identifier not found in PMC" errmsg** ([#43](https://github.com/cyanheads/pubmed-mcp-server/issues/43), `src/mcp-server/tools/definitions/convert-ids.tool.ts`). Upstream wording reads as "this PMID doesn't exist," but the article may still be retrievable via `pubmed_fetch_articles`. The handler now matches `/^identifier not found in pmc$/i` and substitutes `"Not in PMC ID Converter. Article may still exist in PubMed — try pubmed_fetch_articles (PMID → DOI) or pubmed_search_articles."`, preserving the original at debug log level. Other NCBI error messages pass through unchanged.
+- **`pubmed_search_articles` `format()` explains the summary/PMID count split** ([#44](https://github.com/cyanheads/pubmed-mcp-server/issues/44), `src/mcp-server/tools/definitions/search-articles.tool.ts`). When `summaryCount < maxResults` the response correctly carries more PMIDs than summaries, but the rendered output didn't say so. Added a one-line blockquote above the Summaries section: `"Summaries shown for top N of M PMIDs. Increase summaryCount (max 50) to fetch more."` Suppressed when summaries == pmids or when summaries are empty.
+
+### Tests
+
+- **Inline markup flattening** (`tests/services/ncbi/response-handler.test.ts`) — 8 new assertions covering `<sup>` digits → Unicode, leading-minus → `⁻²`, `<sub>`/`<inf>` → Unicode, alphabetic fallback to `^X`/`_X`, emphasis-tag stripping, end-to-end AbstractText regression for PMID 38785209, and confirmation that the ordered/PMC parser path is left untouched.
+- **`find_related` references notice** (`tests/mcp-server/tools/definitions/find-related.tool.test.ts`) — 5 new tests covering non-PMC source hint, PMC-source-with-no-refs hint, no-notice for `similar`/`cited_by` paths, graceful degradation when ESummary fails, and `format()` blockquote rendering.
+- **`convert_ids` PMC-not-found rewrite** (`tests/mcp-server/tools/definitions/convert-ids.tool.test.ts`) — 2 new tests confirming the rewrite fires on the matching errmsg and leaves other NCBI errors untouched.
+- **`search_articles` count-split note** (`tests/mcp-server/tools/definitions/search-articles.tool.test.ts`) — 3 new tests covering the partial-summary case, summaries==pmids parity, and empty summaries.
+- Suite: **466 passed** / 4 skipped (up from 449).
+
+---
+
 ## [2.6.0] - 2026-04-24
 
 Closes [#34](https://github.com/cyanheads/pubmed-mcp-server/issues/34) — non-PMC full-text fallback via Unpaywall. `pubmed_fetch_fulltext` previously returned `{ articles: [], unavailable: [...] }` for every article that wasn't in PubMed Central, even when a legal open-access copy existed at the publisher or in an institutional repository. New behavior: when `UNPAYWALL_EMAIL` is configured, articles without a PMCID are routed through [Unpaywall](https://unpaywall.org/) to resolve the DOI to an OA location, the content is fetched (PDF preferred, HTML fallback), and extracted to the LLM-friendly surface (Markdown for HTML via [Defuddle](https://github.com/kepano/defuddle); text for PDF via [unpdf](https://github.com/unjs/unpdf)). Absent `UNPAYWALL_EMAIL`, the tool's legacy behavior is preserved — unavailable results now carry a structured `reason` code so callers can distinguish "fallback disabled" from "no OA copy exists" from "fetch/parse failure."

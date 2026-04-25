@@ -460,6 +460,61 @@ describe('searchArticlesTool', () => {
     expect(blocks[0]?.text).toContain('100');
   });
 
+  describe('count-split note (issue #44)', () => {
+    it('explains the asymmetry when summaries.length < pmids.length', () => {
+      const blocks = searchArticlesTool.format!({
+        query: 'glp-1',
+        effectiveQuery: 'glp-1',
+        appliedFilters: {},
+        totalFound: 4954,
+        offset: 0,
+        pmids: ['1', '2', '3', '4', '5', '6', '7', '8', '9', '10'],
+        summaries: [
+          { pmid: '1', title: 'A', pubmedUrl: 'https://pubmed.ncbi.nlm.nih.gov/1/' },
+          { pmid: '2', title: 'B', pubmedUrl: 'https://pubmed.ncbi.nlm.nih.gov/2/' },
+          { pmid: '3', title: 'C', pubmedUrl: 'https://pubmed.ncbi.nlm.nih.gov/3/' },
+          { pmid: '4', title: 'D', pubmedUrl: 'https://pubmed.ncbi.nlm.nih.gov/4/' },
+          { pmid: '5', title: 'E', pubmedUrl: 'https://pubmed.ncbi.nlm.nih.gov/5/' },
+        ],
+        searchUrl: 'https://pubmed.ncbi.nlm.nih.gov/?term=glp-1',
+      });
+      const text = blocks[0]?.text ?? '';
+      expect(text).toContain('Summaries shown for top 5 of 10 PMIDs');
+      expect(text).toContain('summaryCount');
+    });
+
+    it('omits the note when summaries.length === pmids.length', () => {
+      const blocks = searchArticlesTool.format!({
+        query: 'glp-1',
+        effectiveQuery: 'glp-1',
+        appliedFilters: {},
+        totalFound: 100,
+        offset: 0,
+        pmids: ['1', '2'],
+        summaries: [
+          { pmid: '1', title: 'A', pubmedUrl: 'https://pubmed.ncbi.nlm.nih.gov/1/' },
+          { pmid: '2', title: 'B', pubmedUrl: 'https://pubmed.ncbi.nlm.nih.gov/2/' },
+        ],
+        searchUrl: 'https://pubmed.ncbi.nlm.nih.gov/?term=glp-1',
+      });
+      expect(blocks[0]?.text).not.toContain('Summaries shown for top');
+    });
+
+    it('omits the note when summaries are empty', () => {
+      const blocks = searchArticlesTool.format!({
+        query: 'glp-1',
+        effectiveQuery: 'glp-1',
+        appliedFilters: {},
+        totalFound: 100,
+        offset: 0,
+        pmids: ['1', '2'],
+        summaries: [],
+        searchUrl: 'https://pubmed.ncbi.nlm.nih.gov/?term=glp-1',
+      });
+      expect(blocks[0]?.text).not.toContain('Summaries shown for top');
+    });
+  });
+
   it('formats summaries with article metadata and links', () => {
     const blocks = searchArticlesTool.format!({
       query: 'asthma',

@@ -82,6 +82,12 @@ export const findRelatedTool = tool('pubmed_find_related', {
       )
       .describe('Related articles'),
     totalFound: z.number().describe('Total related articles found before truncation'),
+    notice: z
+      .string()
+      .optional()
+      .describe(
+        'Optional guidance when results are empty due to a known limitation — e.g. references for a non-PMC source. Absent on successful result pages.',
+      ),
   }),
 
   async handler(input, ctx) {
@@ -147,11 +153,32 @@ export const findRelatedTool = tool('pubmed_find_related', {
 
     const totalFound = foundPmids.length;
     if (foundPmids.length === 0) {
+      // NCBI's pubmed_pubmed_refs ELink only resolves reference lists for
+      // PMC-indexed sources, so a valid PMID without a PMCID looks identical
+      // to "this article cites nothing". Look up the source's PMCID so the
+      // caller gets a relationship-aware recovery hint.
+      let notice: string | undefined;
+      if (input.relationship === 'references') {
+        try {
+          const summaryResult = await ncbi.eSummary(
+            { db: 'pubmed', id: input.pmid },
+            { signal: ctx.signal },
+          );
+          const summaries = await extractBriefSummaries(summaryResult);
+          const sourcePmcId = summaries[0]?.pmcId;
+          notice = sourcePmcId
+            ? `No reference list found in PMC for PMID ${input.pmid} (PMCID ${sourcePmcId}).`
+            : `Reference lists require the source article to be indexed in PMC. PMID ${input.pmid} has no PMCID — references unavailable. Use pubmed_fetch_articles to inspect the article record, or try relationship: "similar" / "cited_by".`;
+        } catch (err) {
+          ctx.log.debug('Failed to look up source PMCID for references hint', { err });
+        }
+      }
       return {
         sourcePmid: input.pmid,
         relationship: input.relationship,
         articles: [],
         totalFound: 0,
+        ...(notice && { notice }),
       };
     }
 
@@ -190,8 +217,9 @@ export const findRelatedTool = tool('pubmed_find_related', {
       `# Related Articles for PMID ${result.sourcePmid}`,
       `**Relationship:** ${result.relationship} | **Found:** ${result.totalFound}`,
     ];
+    if (result.notice) lines.push(`\n> ${result.notice}`);
     if (result.articles.length === 0) {
-      lines.push('No related articles found.');
+      if (!result.notice) lines.push('No related articles found.');
     } else {
       for (const a of result.articles) {
         const scorePart = a.score !== undefined ? ` (score: ${a.score})` : '';

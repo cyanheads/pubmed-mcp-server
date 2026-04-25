@@ -85,6 +85,37 @@ describe('convertIdsTool', () => {
     expect(result.records[1]).toEqual({ requestedId: '99999999', errmsg: 'Not a valid ID' });
   });
 
+  describe('PMC-not-found errmsg rewrite (issue #43)', () => {
+    it('rewrites the upstream "Identifier not found in PMC" wording with a recovery hint', async () => {
+      mockIdConvert.mockResolvedValue([
+        {
+          'requested-id': '37952131',
+          pmid: '37952131',
+          errmsg: 'Identifier not found in PMC',
+        },
+      ]);
+
+      const ctx = createMockContext();
+      const input = convertIdsTool.input.parse({ ids: ['37952131'], idtype: 'pmid' });
+      const result = await convertIdsTool.handler(input, ctx);
+
+      expect(result.records[0]?.errmsg).toContain('pubmed_fetch_articles');
+      expect(result.records[0]?.errmsg).not.toBe('Identifier not found in PMC');
+    });
+
+    it('leaves other NCBI error messages untouched', async () => {
+      mockIdConvert.mockResolvedValue([
+        { 'requested-id': '99999999', errmsg: 'Some other error from NCBI' },
+      ]);
+
+      const ctx = createMockContext();
+      const input = convertIdsTool.input.parse({ ids: ['99999999'], idtype: 'pmid' });
+      const result = await convertIdsTool.handler(input, ctx);
+
+      expect(result.records[0]?.errmsg).toBe('Some other error from NCBI');
+    });
+  });
+
   it('omits undefined optional fields from records', async () => {
     mockIdConvert.mockResolvedValue([
       { 'requested-id': 'PMC3531190', pmcid: 'PMC3531190', pmid: '23193287' },

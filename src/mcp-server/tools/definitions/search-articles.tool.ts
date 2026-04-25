@@ -369,6 +369,11 @@ export const searchArticlesTool = tool('pubmed_search_articles', {
     if (result.notice) lines.push(`\n> ${result.notice}`);
     if (result.pmids.length > 0) lines.push(`\n**PMIDs:** ${result.pmids.join(', ')}`);
     if (result.summaries?.length) {
+      if (result.summaries.length < result.pmids.length) {
+        lines.push(
+          `\n> Summaries shown for top ${result.summaries.length} of ${result.pmids.length} PMIDs. Increase \`summaryCount\` (max 50) to fetch more.`,
+        );
+      }
       lines.push('\n### Summaries');
       for (const s of result.summaries) {
         lines.push(`\n#### ${s.title ?? s.pmid}`);
