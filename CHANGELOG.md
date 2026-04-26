@@ -4,6 +4,28 @@ All notable changes to this project will be documented in this file.
 
 ---
 
+## [2.6.2] - 2026-04-26
+
+Maintenance pass — framework `@cyanheads/mcp-ts-core` 0.7.0 → 0.7.5 and `fast-xml-parser` 5.7.1 → 5.7.2. No runtime API changes for this server. Field-tested against the live NCBI surface to confirm the v2.6.1 inline-markup flatten path still survives the parser bump (PMID 38785209 abstract continues to render `1.73 m²`).
+
+### Changed
+
+- **Framework `@cyanheads/mcp-ts-core` 0.7.0 → 0.7.5** picks up: HTTP Origin guard fail-closed default (loopback-only when `MCP_ALLOWED_ORIGINS` unset; explicit `'*'` is now opt-in to disable Origin validation), landing-page `requireAuth` bearer validation via `authStrategy.verify()`, raw-payload removal from default request-completion logs, opt-in `LOG_LLM_INTERACTIONS` for OpenRouter transcripts, `format-parity` numeric normalization that rejects lossy digit-shift transforms while preserving locale support, `landing.connectSnippets` per-tab operator override, Cloudflare Email Obfuscation defense in landing connect cards, and a `describe-on-fields` linter exemption for `z.literal` union variants (canonical form-client safety pattern: `z.union([z.literal(''), z.string().regex(...).describe(...)])`). This server uses none of the affected runtime surfaces (no OpenRouter, no `landing.requireAuth`, no locale-formatted numbers in `format()`), so adoption is transparent.
+- **`fast-xml-parser` 5.7.1 → 5.7.2** picks up a stack-overflow fix on very long tag expressions ([NaturalIntelligence/fast-xml-parser#817](https://github.com/NaturalIntelligence/fast-xml-parser/issues/817)) — marginal hardening for deeply nested PMC full-text articles.
+- **MCP SDK pinned at `^1.29.0`** via the framework. README badge updated.
+
+### Synced
+
+- **Skills resynced** from the framework: `api-linter` 1.1 → 1.2 (canonical form-client safety pattern documented), `maintenance` 1.5 → 1.6 (Step 4 surfaces new/changed skills explicitly), plus content-only refreshes for `field-test` and `design-mcp-server` (description leak audits — implementation details, meta-coaching, consumer-aware phrasing). Mirrored into `.agents/skills/` and `.claude/skills/`.
+- **Scripts resynced** from the framework: `scripts/devcheck.ts` (now wires `Framework Antipatterns` as a check step) and the new `scripts/check-framework-antipatterns.ts` (no consumer-side findings — rules are scoped to framework source patterns).
+- **`CLAUDE.md` / `AGENTS.md` form-client safety bullet** updated to name the union+literal alternative for cases where regex/length constraints matter enough to surface in JSON Schema.
+
+### Tests
+
+- **466 passed** / 4 skipped. No suite changes — the dependency bumps are drop-in.
+
+---
+
 ## [2.6.1] - 2026-04-24
 
 Field-test correctness + DX pass. Closes [#41](https://github.com/cyanheads/pubmed-mcp-server/issues/41) (data-correctness bug — `<sup>`/`<sub>`/`<inf>` content silently dropped from EFetch abstracts), [#42](https://github.com/cyanheads/pubmed-mcp-server/issues/42), [#43](https://github.com/cyanheads/pubmed-mcp-server/issues/43), and [#44](https://github.com/cyanheads/pubmed-mcp-server/issues/44) (DX polish across `find_related`, `convert_ids`, `search_articles`).
