@@ -4,6 +4,18 @@ All notable changes to this project will be documented in this file.
 
 ---
 
+## [2.6.3] - 2026-04-26
+
+Patch release fixing input-validation classification on `pubmed_fetch_fulltext` and `pubmed_lookup_citation`. Both tools were enforcing cross-field input shape constraints with imperative `throw new Error(...)` after schema parsing, so violations leaked as JSON-RPC `-32603` Internal error (with a level-50 server log) instead of `-32602` Invalid params. Production telemetry on `fetch_fulltext` showed 13 unrelated sessions hitting this in a 30-minute window — i.e., real LLM callers were inferring incorrect call shapes from the schema.
+
+### Fixed
+
+- **`pubmed_fetch_fulltext` — XOR `pmcids`/`pmids` constraint now lives in the Zod schema** ([cyanheads/pubmed-mcp-server#46](https://github.com/cyanheads/pubmed-mcp-server/issues/46)). Lifted the "exactly one of `pmcids` or `pmids`" check from imperative `throw new Error(...)` in the handler into a `.refine()` on the input object. Violations now surface as `-32602 Input validation error` with the message `Provide exactly one of \`pmcids\` or \`pmids\` (not both, not neither).` rather than `-32603 UNHANDLED_ERROR` / level-50 log. Updated `describe()` text on both fields to match the new contract. Caveat: Zod's `.refine()` does not serialize into JSON Schema, so the published `inputSchema` still shows both fields as independently optional structurally — the constraint is communicated through the description prose and the runtime validation error.
+- **`pubmed_lookup_citation` — same anti-pattern fixed in the same change.** The "each citation must include at least one bibliographic field (journal, year, volume, firstPage, or authorName)" check has moved from a per-item handler loop into a per-item `.refine()` on the citation schema. Bonus UX win: Zod attaches `path: ["citations", N]` to the error, so callers learn which array index failed — the original imperative throw couldn't.
+- **Tests updated** to assert on `input.safeParse()` failure rather than handler rejection, matching where validation now happens. 462 tests passing (4 skipped).
+
+---
+
 ## [2.6.2] - 2026-04-26
 
 Maintenance pass — framework `@cyanheads/mcp-ts-core` 0.7.0 → 0.7.5 and `fast-xml-parser` 5.7.1 → 5.7.2. No runtime API changes for this server. Field-tested against the live NCBI surface to confirm the v2.6.1 inline-markup flatten path still survives the parser bump (PMID 38785209 abstract continues to render `1.73 m²`).

@@ -60,7 +60,13 @@ export const lookupCitationTool = tool('pubmed_lookup_citation', {
                 'Arbitrary label to track this citation in results. Auto-assigned if omitted.',
               ),
           })
-          .describe('Citation to match against PubMed'),
+          .describe(
+            'Citation to match against PubMed. Must include at least one bibliographic field (journal, year, volume, firstPage, or authorName).',
+          )
+          .refine((c) => !!(c.journal || c.year || c.volume || c.firstPage || c.authorName), {
+            message:
+              'Each citation must include at least one bibliographic field (journal, year, volume, firstPage, or authorName).',
+          }),
       )
       .min(1)
       .max(25)
@@ -122,14 +128,6 @@ export const lookupCitationTool = tool('pubmed_lookup_citation', {
 
   async handler(input, ctx) {
     ctx.log.info('Executing pubmed_lookup_citation', { count: input.citations.length });
-
-    for (const c of input.citations) {
-      if (!c.journal && !c.year && !c.volume && !c.firstPage && !c.authorName) {
-        throw new Error(
-          'Each citation must include at least one bibliographic field (journal, year, volume, firstPage, or authorName).',
-        );
-      }
-    }
 
     const citations: ECitMatchCitation[] = input.citations.map((c, i) => ({
       journal: c.journal,

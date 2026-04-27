@@ -90,19 +90,19 @@ describe('fetchFulltextTool', () => {
     expect(message).toContain('13054692');
   });
 
-  it('throws when neither pmcids nor pmids provided', async () => {
-    const ctx = createMockContext();
-    const input = fetchFulltextTool.input.parse({});
-    await expect(fetchFulltextTool.handler(input, ctx)).rejects.toThrow(/Either pmcids or pmids/);
+  it('rejects input with neither pmcids nor pmids (issue #46)', () => {
+    const parsed = fetchFulltextTool.input.safeParse({});
+    expect(parsed.success).toBe(false);
+    expect(parsed.error?.issues[0]?.message).toMatch(/exactly one of `pmcids` or `pmids`/);
   });
 
-  it('throws when both pmcids and pmids provided', async () => {
-    const ctx = createMockContext();
-    const input = fetchFulltextTool.input.parse({
+  it('rejects input with both pmcids and pmids (issue #46)', () => {
+    const parsed = fetchFulltextTool.input.safeParse({
       pmcids: ['PMC1'],
       pmids: ['12345'],
     });
-    await expect(fetchFulltextTool.handler(input, ctx)).rejects.toThrow(/not both/);
+    expect(parsed.success).toBe(false);
+    expect(parsed.error?.issues[0]?.message).toMatch(/exactly one of `pmcids` or `pmids`/);
   });
 
   it('fetches by PMC IDs', async () => {

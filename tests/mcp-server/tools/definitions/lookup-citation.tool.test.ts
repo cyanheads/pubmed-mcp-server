@@ -352,13 +352,12 @@ describe('lookupCitationTool', () => {
     expect(mockECitMatch.mock.calls[0]?.[0]?.[0]?.key).toBe('ref-A');
   });
 
-  it('throws when citation has no bibliographic fields', async () => {
-    const ctx = createMockContext();
-    const input = lookupCitationTool.input.parse({ citations: [{ key: 'empty' }] });
+  it('rejects citation with no bibliographic fields (issue #46)', () => {
+    const parsed = lookupCitationTool.input.safeParse({ citations: [{ key: 'empty' }] });
 
-    await expect(lookupCitationTool.handler(input, ctx)).rejects.toThrow(
-      /at least one bibliographic field/,
-    );
+    expect(parsed.success).toBe(false);
+    expect(parsed.error?.issues[0]?.message).toMatch(/at least one bibliographic field/);
+    expect(parsed.error?.issues[0]?.path).toEqual(['citations', 0]);
     expect(mockECitMatch).not.toHaveBeenCalled();
   });
 

@@ -191,39 +191,45 @@ export const fetchFulltextTool = tool('pubmed_fetch_fulltext', {
   sourceUrl:
     'https://github.com/cyanheads/pubmed-mcp-server/blob/main/src/mcp-server/tools/definitions/fetch-fulltext.tool.ts',
 
-  input: z.object({
-    pmcids: z
-      .array(z.string())
-      .min(1)
-      .max(10)
-      .optional()
-      .describe('PMC IDs to fetch (e.g. ["PMC9575052"]). Provide this OR pmids, not both.'),
-    pmids: z
-      .array(pmidStringSchema)
-      .min(1)
-      .max(10)
-      .optional()
-      .describe(
-        'PubMed IDs. Articles in PMC are returned as structured JATS. Articles not in PMC are retrieved from Unpaywall when UNPAYWALL_EMAIL is set and a DOI is available. Provide this OR pmcids, not both.',
-      ),
-    includeReferences: z
-      .boolean()
-      .default(false)
-      .describe('Include reference list. Applies to `source=pmc` results only.'),
-    maxSections: z
-      .number()
-      .int()
-      .min(1)
-      .max(50)
-      .optional()
-      .describe('Maximum top-level body sections. Applies to `source=pmc` results only.'),
-    sections: z
-      .array(z.string())
-      .optional()
-      .describe(
-        'Filter to specific sections by title, case-insensitive (e.g. ["Introduction", "Methods", "Results", "Discussion"]). Applies to `source=pmc` results only.',
-      ),
-  }),
+  input: z
+    .object({
+      pmcids: z
+        .array(z.string())
+        .min(1)
+        .max(10)
+        .optional()
+        .describe(
+          'PMC IDs to fetch (e.g. ["PMC9575052"]). Provide exactly one of `pmcids` or `pmids`.',
+        ),
+      pmids: z
+        .array(pmidStringSchema)
+        .min(1)
+        .max(10)
+        .optional()
+        .describe(
+          'PubMed IDs. Provide exactly one of `pmcids` or `pmids`. Articles in PMC are returned as structured JATS; articles not in PMC are retrieved from Unpaywall when UNPAYWALL_EMAIL is set and a DOI is available.',
+        ),
+      includeReferences: z
+        .boolean()
+        .default(false)
+        .describe('Include reference list. Applies to `source=pmc` results only.'),
+      maxSections: z
+        .number()
+        .int()
+        .min(1)
+        .max(50)
+        .optional()
+        .describe('Maximum top-level body sections. Applies to `source=pmc` results only.'),
+      sections: z
+        .array(z.string())
+        .optional()
+        .describe(
+          'Filter to specific sections by title, case-insensitive (e.g. ["Introduction", "Methods", "Results", "Discussion"]). Applies to `source=pmc` results only.',
+        ),
+    })
+    .refine((v) => (v.pmcids === undefined) !== (v.pmids === undefined), {
+      message: 'Provide exactly one of `pmcids` or `pmids` (not both, not neither).',
+    }),
 
   output: z.object({
     articles: z.array(ArticleSchema).describe('Full-text articles'),
@@ -244,9 +250,6 @@ export const fetchFulltextTool = tool('pubmed_fetch_fulltext', {
       hasPmids: !!input.pmids,
       idCount: (input.pmcids ?? input.pmids)?.length,
     });
-
-    if (!input.pmcids && !input.pmids) throw new Error('Either pmcids or pmids must be provided');
-    if (input.pmcids && input.pmids) throw new Error('Provide pmcids or pmids, not both');
 
     // ── PMID path: resolve to PMC + collect unresolved PMIDs for Unpaywall fallback ──
     let pmcIds: string[] = [];
