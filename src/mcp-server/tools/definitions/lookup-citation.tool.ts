@@ -31,7 +31,7 @@ function authorSurnames(authors: string): string[] {
 }
 
 export const lookupCitationTool = tool('pubmed_lookup_citation', {
-  description: `Look up PubMed IDs from partial bibliographic citations. Useful when you have a reference (journal, year, volume, page, author) and need the PMID. Uses NCBI ECitMatch for deterministic matching — more reliable than searching by citation fields.`,
+  description: `Look up PubMed IDs from partial bibliographic citations. Useful when you have a reference (journal, year, volume, page, author) and need the PMID. Uses NCBI ECitMatch for deterministic matching — more reliable than searching by citation fields. Each citation must include at least one bibliographic field (journal, year, volume, firstPage, or authorName); more fields = better match accuracy.`,
   annotations: { readOnlyHint: true, openWorldHint: true },
   _meta: conceptMeta([SCHEMA_SCHOLARLY_ARTICLE, EDAM_DATA_RETRIEVAL, EDAM_PUBMED_ID]),
   sourceUrl:
@@ -92,7 +92,7 @@ export const lookupCitationTool = tool('pubmed_lookup_citation', {
               .array(z.string().describe('PMID'))
               .optional()
               .describe(
-                'PMIDs returned for AMBIGUOUS matches — candidate articles needing more citation fields to disambiguate. Parsed from the raw `AMBIGUOUS <csv>` detail string for programmatic consumption.',
+                'Candidate PMIDs returned when the citation matched ambiguously. Add more bibliographic fields and retry to disambiguate, or fetch each candidate via pubmed_fetch_articles to pick the intended one.',
               ),
             matchedFirstAuthor: z
               .string()
@@ -106,14 +106,14 @@ export const lookupCitationTool = tool('pubmed_lookup_citation', {
                   .object({
                     code: z
                       .enum(['author_mismatch', 'year_mismatch'])
-                      .describe('Machine-readable warning classifier for downstream filtering'),
+                      .describe('Machine-readable warning code'),
                     message: z.string().describe('Human-readable description of the warning'),
                   })
                   .describe('Non-fatal warning about the match'),
               )
               .optional()
               .describe(
-                'Non-fatal warnings about this match. ECitMatch weights journal+volume+page and tolerates author/year disagreement, so a returned PMID may not match the queried author or year — downstream code should key on `code` to decide whether to trust the PMID.',
+                'Non-fatal warnings about this match. A PMID may be returned even when the queried author or year disagrees with the matched article — verify before treating the PMID as authoritative.',
               ),
           })
           .describe('Per-citation match result'),

@@ -101,18 +101,20 @@ export const searchArticlesTool = tool('pubmed_search_articles', {
         minDate: z
           .string()
           .regex(DATE_RE, 'Date must be YYYY, YYYY/MM, or YYYY/MM/DD (/, -, or . separators)')
-          .describe('Start date (YYYY/MM/DD, YYYY/MM, or YYYY)'),
+          .describe('Start date (YYYY/MM/DD, YYYY/MM, or YYYY); empty string disables this bound'),
         maxDate: z
           .string()
           .regex(DATE_RE, 'Date must be YYYY, YYYY/MM, or YYYY/MM/DD (/, -, or . separators)')
-          .describe('End date (YYYY/MM/DD, YYYY/MM, or YYYY)'),
+          .describe('End date (YYYY/MM/DD, YYYY/MM, or YYYY); empty string disables this bound'),
         dateType: z
           .enum(['pdat', 'mdat', 'edat'])
           .default('pdat')
           .describe('Date type: pdat (publication), mdat (modification), edat (entrez)'),
       })
       .optional()
-      .describe('Filter by date range'),
+      .describe(
+        'Filter by date range. The filter is applied only when both `minDate` and `maxDate` are non-empty; either one empty disables the entire date range.',
+      ),
     publicationTypes: z
       .array(z.string())
       .optional()

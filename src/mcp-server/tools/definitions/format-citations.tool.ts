@@ -62,10 +62,6 @@ export const formatCitationsTool = tool('pubmed_format_citations', {
     );
     const xmlArticles: XmlPubmedArticle[] = ensureArray(raw?.PubmedArticleSet?.PubmedArticle);
 
-    if (xmlArticles.length === 0) {
-      throw new Error(`No articles found for PMIDs: ${input.pmids.join(', ')}`);
-    }
-
     const citations = xmlArticles.map((xmlArticle) => {
       const parsed = parseFullArticle(xmlArticle);
       return {
@@ -93,6 +89,11 @@ export const formatCitationsTool = tool('pubmed_format_citations', {
     ];
     if (result.unavailablePmids?.length) {
       lines.push(`**Unavailable PMIDs:** ${result.unavailablePmids.join(', ')}`);
+    }
+    if (result.totalFormatted === 0) {
+      lines.push(
+        `\n> No articles were returned for the submitted PMIDs. They may be invalid, unpublished, or withdrawn. Try \`pubmed_search_articles\` to discover valid PMIDs, or \`pubmed_spell_check\` if these came from a noisy source.`,
+      );
     }
     for (const entry of result.citations) {
       lines.push(`\n## PMID ${entry.pmid}`);

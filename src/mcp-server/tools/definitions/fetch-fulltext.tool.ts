@@ -185,7 +185,7 @@ const UnavailableSchema = z
 
 export const fetchFulltextTool = tool('pubmed_fetch_fulltext', {
   description:
-    'Fetch full-text articles. Primary source is PubMed Central (structured JATS with sections and references). When a PMID has no PMC copy, transparently falls back to Unpaywall (open-access copies hosted by publishers or institutional repositories) and returns best-effort HTML-as-Markdown or PDF-as-text. Set UNPAYWALL_EMAIL to enable the fallback. Accepts PMC IDs directly or PubMed IDs (auto-resolved via the PMC ID Converter).',
+    'Fetch full-text articles. Primary source is PubMed Central (structured JATS with sections and references). When a PMID has no PMC copy, transparently falls back to Unpaywall (open-access copies hosted by publishers or institutional repositories) and returns best-effort HTML-as-Markdown or PDF-as-text. Set UNPAYWALL_EMAIL to enable the fallback. Provide exactly one of `pmcids` (PMC IDs directly) or `pmids` (PubMed IDs, auto-resolved via the PMC ID Converter) — not both, not neither.',
   annotations: { readOnlyHint: true, openWorldHint: true },
   _meta: conceptMeta([SCHEMA_SCHOLARLY_ARTICLE, EDAM_DATA_RETRIEVAL]),
   sourceUrl:
@@ -241,7 +241,9 @@ export const fetchFulltextTool = tool('pubmed_fetch_fulltext', {
     unavailablePmcIds: z
       .array(z.string())
       .optional()
-      .describe('PMC IDs requested directly that returned no data'),
+      .describe(
+        'PMC IDs that returned no data, whether requested directly via `pmcids` or resolved from `pmids` via the PMC ID Converter',
+      ),
   }),
 
   async handler(input, ctx) {

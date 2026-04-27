@@ -45,10 +45,21 @@ export const convertIdsTool = tool('pubmed_convert_ids', {
         z
           .object({
             requestedId: z.string().describe('The ID that was submitted'),
-            pmid: z.string().optional().describe('PubMed ID'),
-            pmcid: z.string().optional().describe('PubMed Central ID'),
-            doi: z.string().optional().describe('Digital Object Identifier'),
-            errmsg: z.string().optional().describe('Error message if conversion failed'),
+            pmid: z.string().optional().describe('PubMed ID; absent if no mapping was found'),
+            pmcid: z
+              .string()
+              .optional()
+              .describe('PubMed Central ID; absent if the article has no PMC copy'),
+            doi: z
+              .string()
+              .optional()
+              .describe('Digital Object Identifier; absent if no DOI is on record'),
+            errmsg: z
+              .string()
+              .optional()
+              .describe(
+                'Error message if conversion failed. Presence of `errmsg` is the failure signal; absence means the conversion succeeded.',
+              ),
           })
           .describe('Per-ID conversion record'),
       )

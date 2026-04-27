@@ -38,12 +38,17 @@ describe('formatCitationsTool', () => {
     expect(message).toContain('13054692');
   });
 
-  it('throws when no articles found', async () => {
+  it('returns structured empty result when no articles match (no throw)', async () => {
     mockEFetch.mockResolvedValue({ PubmedArticleSet: { PubmedArticle: [] } });
     const ctx = createMockContext();
     const input = formatCitationsTool.input.parse({ pmids: ['99999'] });
 
-    await expect(formatCitationsTool.handler(input, ctx)).rejects.toThrow(/No articles found/);
+    const result = await formatCitationsTool.handler(input, ctx);
+
+    expect(result.citations).toEqual([]);
+    expect(result.totalFormatted).toBe(0);
+    expect(result.totalSubmitted).toBe(1);
+    expect(result.unavailablePmids).toEqual(['99999']);
   });
 
   it('generates citations for found articles', async () => {
