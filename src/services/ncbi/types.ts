@@ -63,6 +63,7 @@ export interface NcbiCallOptions {
 export interface ParseFullArticleOptions {
   includeGrants?: boolean;
   includeMesh?: boolean;
+  includeStructuredAbstract?: boolean;
 }
 
 // ─── XML Element Types (PubMed DTD) ─────────────────────────────────────────
@@ -310,6 +311,11 @@ export interface ParsedGrant {
   grantId?: string;
 }
 
+export interface ParsedStructuredAbstractSection {
+  label?: string;
+  text: string;
+}
+
 export interface ParsedArticle {
   abstractText?: string;
   affiliations?: string[];
@@ -323,6 +329,7 @@ export interface ParsedArticle {
   pmcId?: string;
   pmid: string;
   publicationTypes?: string[];
+  structuredAbstract?: ParsedStructuredAbstractSection[];
   title?: string;
   // Add other fields as needed, e.g., language, publication status
 }

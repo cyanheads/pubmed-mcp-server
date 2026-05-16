@@ -12,6 +12,7 @@ import type {
   ParsedJournalInfo,
   ParsedMeshQualifier,
   ParsedMeshTerm,
+  ParsedStructuredAbstractSection,
   ParseFullArticleOptions,
   XmlAbstractText,
   XmlArticle,
@@ -340,23 +341,49 @@ export function extractAbstractText(abstractXml?: XmlArticle['Abstract']): strin
 
   const processedTexts = abstractTexts
     .map((at: XmlAbstractText | string) => {
-      // AbstractText can be string directly or object
-      if (typeof at === 'string') {
-        return at;
-      }
-      // If it's an object, it should have #text or Label
-      const sectionText = getText(at); // Handles at['#text']
+      if (typeof at === 'string') return at;
+      const sectionText = getText(at);
       const label = getAttribute(at, 'Label');
-      if (label && sectionText) {
-        return `${label.trim()}: ${sectionText.trim()}`;
-      }
+      if (label && sectionText) return `${label.trim()}: ${sectionText.trim()}`;
       return sectionText.trim();
     })
-    .filter(Boolean); // Remove any empty strings resulting from empty sections
+    .filter(Boolean);
 
   if (processedTexts.length === 0) return;
+  return processedTexts.join('\n\n').trim() || undefined;
+}
 
-  return processedTexts.join('\n\n').trim() || undefined; // Join sections with double newline
+/**
+ * Extracts structured abstract sections from XML.
+ * Returns individual labeled sections (e.g. BACKGROUND, METHODS, RESULTS, CONCLUSIONS).
+ * Falls back to empty array for unstructured abstracts.
+ * @param abstractXml - The XML Abstract element from an Article.
+ * @returns Array of structured abstract sections, or undefined if no abstract exists.
+ */
+export function extractStructuredAbstract(
+  abstractXml?: XmlArticle['Abstract'],
+): ParsedStructuredAbstractSection[] | undefined {
+  if (!abstractXml?.AbstractText) return;
+
+  const abstractTexts = ensureArray(abstractXml.AbstractText);
+  if (abstractTexts.length === 0) return;
+
+  const sections = abstractTexts
+    .map((at: XmlAbstractText | string) => {
+      if (typeof at === 'string') {
+        return { text: at.trim() };
+      }
+      const sectionText = getText(at);
+      const label = getAttribute(at, 'Label');
+      if (!sectionText?.trim()) return null;
+      return {
+        ...(label?.trim() && { label: label.trim() }),
+        text: sectionText.trim(),
+      };
+    })
+    .filter((s): s is NonNullable<typeof s> => s !== null);
+
+  return sections.length > 0 ? sections : undefined;
 }
 
 /**
@@ -398,9 +425,12 @@ export function parseFullArticle(
 ): ParsedArticle {
   const medlineCitation = xmlArticle.MedlineCitation;
   const article = medlineCitation?.Article;
-  const { includeMesh = true, includeGrants = false } = options;
+  const { includeMesh = true, includeGrants = false, includeStructuredAbstract = false } = options;
 
   const abstractText = extractAbstractText(article?.Abstract);
+  const structuredAbstract = includeStructuredAbstract
+    ? extractStructuredAbstract(article?.Abstract)
+    : undefined;
   const journalInfo = extractJournalInfo(article?.Journal, article);
   const pubmedDataArticleIdList = xmlArticle.PubmedData?.ArticleIdList;
   const doi = extractDoi(article, pubmedDataArticleIdList);
@@ -424,6 +454,7 @@ export function parseFullArticle(
     ...(keywords.length > 0 && { keywords }),
     ...(meshTerms !== undefined && meshTerms.length > 0 && { meshTerms }),
     ...(grantList !== undefined && grantList.length > 0 && { grantList }),
+    ...(structuredAbstract !== undefined && { structuredAbstract }),
     ...(doi !== undefined && { doi }),
     ...(pmcId !== undefined && { pmcId }),
     ...(articleDates.length > 0 && { articleDates }),

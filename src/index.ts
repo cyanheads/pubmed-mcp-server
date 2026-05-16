@@ -8,6 +8,7 @@ import { createApp } from '@cyanheads/mcp-ts-core';
 import { researchPlanPrompt } from './mcp-server/prompts/definitions/research-plan.prompt.js';
 import { databaseInfoResource } from './mcp-server/resources/definitions/database-info.resource.js';
 import { convertIdsTool } from './mcp-server/tools/definitions/convert-ids.tool.js';
+import { europepmcSearchTool } from './mcp-server/tools/definitions/europepmc-search.tool.js';
 import { fetchArticlesTool } from './mcp-server/tools/definitions/fetch-articles.tool.js';
 import { fetchFulltextTool } from './mcp-server/tools/definitions/fetch-fulltext.tool.js';
 import { findRelatedTool } from './mcp-server/tools/definitions/find-related.tool.js';
@@ -22,6 +23,7 @@ import { initUnpaywallService } from './services/unpaywall/unpaywall-service.js'
 await createApp({
   tools: [
     searchArticlesTool,
+    europepmcSearchTool,
     fetchArticlesTool,
     fetchFulltextTool,
     formatCitationsTool,

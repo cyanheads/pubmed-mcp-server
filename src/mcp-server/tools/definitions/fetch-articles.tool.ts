@@ -81,6 +81,13 @@ const GrantSchema = z
   })
   .describe('Grant record');
 
+const StructuredAbstractSectionSchema = z
+  .object({
+    label: z.string().optional().describe('Section label (e.g. BACKGROUND, METHODS, RESULTS)'),
+    text: z.string().describe('Section text content'),
+  })
+  .describe('Structured abstract section');
+
 const ArticleDateSchema = z
   .object({
     dateType: z.string().optional().describe('Date type'),
@@ -106,6 +113,10 @@ const FetchedArticleSchema = z
     keywords: z.array(z.string()).optional().describe('Keywords'),
     meshTerms: z.array(MeshTermSchema).optional().describe('MeSH terms'),
     grantList: z.array(GrantSchema).optional().describe('Grant information'),
+    structuredAbstract: z
+      .array(StructuredAbstractSectionSchema)
+      .optional()
+      .describe('Structured abstract with labeled sections'),
     articleDates: z.array(ArticleDateSchema).optional().describe('Article dates'),
   })
   .describe('Parsed PubMed article');
@@ -133,6 +144,12 @@ export const fetchArticlesTool = tool('pubmed_fetch_articles', {
     pmids: z.array(pmidStringSchema).min(1).max(200).describe('PubMed IDs to fetch'),
     includeMesh: z.boolean().default(true).describe('Include MeSH terms'),
     includeGrants: z.boolean().default(false).describe('Include grant information'),
+    includeStructuredAbstract: z
+      .boolean()
+      .default(false)
+      .describe(
+        'Include structured abstract with labeled sections (BACKGROUND, METHODS, RESULTS, CONCLUSIONS)',
+      ),
   }),
 
   output: z.object({
@@ -168,6 +185,7 @@ export const fetchArticlesTool = tool('pubmed_fetch_articles', {
         const parsed = parseFullArticle(a, {
           includeMesh: input.includeMesh,
           includeGrants: input.includeGrants,
+          includeStructuredAbstract: input.includeStructuredAbstract,
         });
         return {
           ...parsed,
@@ -247,6 +265,13 @@ export const fetchArticlesTool = tool('pubmed_fetch_articles', {
       }
 
       if (a.abstractText) lines.push(`\n#### Abstract\n${a.abstractText}`);
+      if (a.structuredAbstract?.length) {
+        lines.push(`\n#### Structured Abstract`);
+        for (const sec of a.structuredAbstract) {
+          const label = sec.label ? `**${sec.label}:** ` : '';
+          lines.push(`${label}${sec.text}`);
+        }
+      }
       if (a.keywords?.length) lines.push(`\n**Keywords:** ${a.keywords.join(', ')}`);
       if (a.meshTerms?.length) {
         lines.push(`\n#### MeSH Terms`);
