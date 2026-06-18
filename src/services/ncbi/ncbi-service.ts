@@ -257,8 +257,13 @@ export class NcbiService {
     idtype?: string,
     options?: NcbiCallOptions,
   ): Promise<IdConvertRecord[]> {
+    // Normalize PMCID inputs: bare numeric IDs (e.g. "3531190") get "PMC" prefixed
+    // so mixed PMC-prefixed and bare IDs don't trigger a 400 from the converter.
+    const normalized = ids.map((id) =>
+      idtype === 'pmcid' && /^\d+$/.test(id) ? `PMC${id}` : id,
+    );
     const params: NcbiRequestParams = {
-      ids: ids.join(','),
+      ids: normalized.join(','),
       format: 'json',
       ...(idtype && { idtype }),
     };
