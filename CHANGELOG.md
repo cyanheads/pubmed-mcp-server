@@ -2,6 +2,10 @@
 
 All notable changes to this project. Each entry links to its full per-version file in [changelog/](changelog/).
 
+## [2.10.2](changelog/2.10.x/2.10.2.md) — 2026-07-26
+
+Markup strip no longer eats statistical notation like P<0.001 in Europe PMC abstracts; pubmed_europepmc_fetch now resolves source: \"PMC\" refs for articles also indexed in PubMed; doi fields across the tool catalog disclose that casing differs by upstream.
+
 ## [2.10.1](changelog/2.10.x/2.10.1.md) — 2026-07-26
 
 eSearch upstream failures now throw instead of masking as zero-hit searches; pubmed_search_articles surfaces ignored field tags, unmatched phrases, and dropped partial dateRange filters via notice; the summaryCount cap message points at pubmed_fetch_articles when maxed; research_plan's includeAgentPrompts is now correctly advertised as optional.
