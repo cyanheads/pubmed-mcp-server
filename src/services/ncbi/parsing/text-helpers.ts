@@ -21,7 +21,21 @@ const NAMED_ENTITIES: Readonly<Record<string, string>> = {
 
 /** A well-formed numeric (`&#173;`, `&#xAD;`) or named (`&amp;`) character reference. */
 const ENTITY_RE = /&(#x[0-9a-f]+|#\d+|[a-z][a-z0-9]*);/gi;
-const MARKUP_TAG_RE = /<[^>]+>/g;
+/**
+ * A structural tag: `<` immediately followed by an optional `/` and a tag-name
+ * letter, then a tag body carrying no further angle bracket.
+ *
+ * Both restrictions exist to keep statistical notation intact. Requiring a
+ * leading letter leaves `P<0.001` alone; forbidding `<` inside the body stops a
+ * match that opened on a stray `<` from spanning across the next real tag and
+ * swallowing the prose between them (`n<N ... <bold>` keeps its text). The
+ * remaining gap is a stray `<` and `>` pair with a letter after the `<` and no
+ * tag between them — `a<b and c>d` still strips to `a d`. Closing it would take
+ * a tag-name allowlist, which would silently drop unknown JATS elements, so the
+ * looser pattern is deliberate: it errs toward leaving markup visible rather
+ * than deleting text. (#94)
+ */
+const MARKUP_TAG_RE = /<\/?[A-Za-z][^<>]*>/g;
 const SOFT_HYPHEN_RE = /­/g;
 const WHITESPACE_RE = /\s+/g;
 
