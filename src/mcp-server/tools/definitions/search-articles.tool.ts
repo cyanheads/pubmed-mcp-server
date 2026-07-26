@@ -9,6 +9,7 @@ import { sanitization } from '@cyanheads/mcp-ts-core/utils';
 import { NCBI_SERVICE_ERRORS } from '@/services/error-contracts.js';
 import { getNcbiService } from '@/services/ncbi/ncbi-service.js';
 import { extractBriefSummaries } from '@/services/ncbi/parsing/esummary-parser.js';
+import type { ESearchErrorList, ESearchWarningList } from '@/services/ncbi/types.js';
 import {
   conceptMeta,
   EDAM_DATABASE_SEARCH,
@@ -24,28 +25,93 @@ import {
 const DATE_RE = /^$|^\d{4}([/\-.]\d{1,2}([/\-.]\d{1,2})?)?$/;
 
 /**
- * Produces an optional human- and agent-readable hint for edge cases where
- * bare empty arrays leave the caller without enough signal to recover:
+ * NCBI's eSearch serves `retstart` up to 9998 for PubMed and fails the whole
+ * request above it, so the ceiling is enforced at the edge where the caller can
+ * still act on it. The limit is db-specific — it does not apply to db=mesh.
+ */
+const OFFSET_MAX = 9998;
+
+/** Upper bound on brief summaries fetched per call; shared by the schema and the format() cap message. */
+const SUMMARY_COUNT_MAX = 50;
+
+/** Renders a diagnostic list as a comma-separated set of backticked clauses. */
+function quoteClauses(clauses: string[]): string {
+  return clauses.map((clause) => `\`${clause}\``).join(', ');
+}
+
+/**
+ * Produces an optional human- and agent-readable hint for the cases where the
+ * returned PMIDs alone leave the caller without enough signal to recover.
+ *
+ * The signals are independent and can co-occur, so every applicable one is
+ * collected and joined rather than the first match being returned:
+ * - A `dateRange` with one bound filled, which drops the date filter entirely
+ * - Field tags PubMed did not recognize (results silently unrestricted)
+ * - Phrases PubMed matched nothing for
  * - No matches at all (suggest spell-check / removing filters)
- * - Filters applied but nothing matched (suggest relaxing filters)
  * - Pagination overshoot (offset ≥ totalCount)
+ *
+ * The one precedence rule: an unmatched phrase names the exact clause that
+ * returned nothing, so it replaces the generic empty-result guidance, which
+ * would only guess across every filter the request might have set.
  */
 function buildNotice(args: {
   totalCount: number;
   pmidCount: number;
   offset: number;
   hasFilters: boolean;
+  partialDateBound?: { name: 'minDate' | 'maxDate'; value: string };
+  errorList?: ESearchErrorList;
+  warningList?: ESearchWarningList;
 }): string | undefined {
-  const { totalCount, pmidCount, offset, hasFilters } = args;
+  const { totalCount, pmidCount, offset, hasFilters, partialDateBound, errorList, warningList } =
+    args;
+  const notices: string[] = [];
+
+  if (partialDateBound) {
+    const missing = partialDateBound.name === 'minDate' ? 'maxDate' : 'minDate';
+    const sentinel = missing === 'maxDate' ? '3000' : '1800';
+    notices.push(
+      `No date filter was applied: dateRange needs both bounds and only \`${partialDateBound.name}\` ("${partialDateBound.value}") was supplied. Set \`${missing}\` as well — for an open-ended range pass a wide sentinel (e.g. \`${missing}: "${sentinel}"\`).`,
+    );
+  }
+
+  const ignoredFields = [
+    ...(errorList?.FieldNotFound ?? []),
+    ...(warningList?.FieldNotFound ?? []),
+  ];
+  if (ignoredFields.length > 0) {
+    notices.push(
+      `PubMed did not recognize the field tag(s) ${quoteClauses(ignoredFields)} and searched those terms as free text, so these results are not restricted by that field. Correct the tag or drop it.`,
+    );
+  }
+
+  const unmatchedPhrases = [
+    ...(errorList?.PhraseNotFound ?? []),
+    ...(warningList?.PhraseNotFound ?? []),
+    ...(warningList?.QuotedPhraseNotFound ?? []),
+  ];
+  if (unmatchedPhrases.length > 0) {
+    notices.push(
+      `PubMed matched nothing for ${quoteClauses(unmatchedPhrases)}, so that clause contributed no results. Check the spelling, or resolve the term with pubmed_lookup_mesh before filtering on it.`,
+    );
+  }
+
   if (totalCount === 0) {
-    return hasFilters
-      ? 'No results matched your query with the applied filters. Try removing filters (e.g. dateRange, publicationTypes, meshTerms), broadening dates, or verifying author/journal spelling.'
-      : 'No results matched your query. Try running pubmed_spell_check for a suggested correction or broaden the query.';
+    if (unmatchedPhrases.length === 0) {
+      notices.push(
+        hasFilters
+          ? 'No results matched your query with the applied filters. Try removing filters (e.g. dateRange, publicationTypes, meshTerms), broadening dates, or verifying author/journal spelling.'
+          : 'No results matched your query. Try running pubmed_spell_check for a suggested correction or broaden the query.',
+      );
+    }
+  } else if (pmidCount === 0 && offset > 0 && offset >= totalCount) {
+    notices.push(
+      `Offset ${offset} exceeds totalCount (${totalCount}). Reset offset to 0 or reduce it below ${totalCount} to page through results.`,
+    );
   }
-  if (pmidCount === 0 && offset > 0 && offset >= totalCount) {
-    return `Offset ${offset} exceeds totalCount (${totalCount}). Reset offset to 0 or reduce it below ${totalCount} to page through results.`;
-  }
-  return;
+
+  return notices.length > 0 ? notices.join(' ') : undefined;
 }
 
 const AppliedFiltersSchema = z.object({
@@ -94,7 +160,15 @@ export const searchArticlesTool = tool('pubmed_search_articles', {
   input: z.object({
     query: z.string().min(1).describe('PubMed search query (supports full NCBI syntax)'),
     maxResults: z.number().int().min(1).max(1000).default(20).describe('Maximum results to return'),
-    offset: z.number().int().min(0).default(0).describe('Result offset for pagination (0-based)'),
+    offset: z
+      .number()
+      .int()
+      .min(0)
+      .max(OFFSET_MAX)
+      .default(0)
+      .describe(
+        `Result offset for pagination (0-based). PubMed serves at most the first ${OFFSET_MAX + 1} records of a result set, so this caps at ${OFFSET_MAX}; narrow the query or add filters to reach anything beyond it.`,
+      ),
     sort: z
       .enum(['relevance', 'pub_date', 'author', 'journal'])
       .default('relevance')
@@ -138,9 +212,11 @@ export const searchArticlesTool = tool('pubmed_search_articles', {
       .number()
       .int()
       .min(0)
-      .max(50)
+      .max(SUMMARY_COUNT_MAX)
       .default(0)
-      .describe('Fetch brief summaries for top N results (0 = PMIDs only)'),
+      .describe(
+        `Fetch brief summaries for top N results (0 = PMIDs only). Above the ${SUMMARY_COUNT_MAX} cap, pass the remaining PMIDs to pubmed_fetch_articles.`,
+      ),
   }),
 
   output: z.object({
@@ -183,7 +259,7 @@ export const searchArticlesTool = tool('pubmed_search_articles', {
       .string()
       .optional()
       .describe(
-        'Optional guidance when results are empty or paging overshot — e.g. how to broaden filters or reset offset. Absent on successful result pages.',
+        'Optional guidance when the result set does not reflect what was asked for — a field tag PubMed ignored, a phrase it matched nothing for, a dateRange dropped for having one bound, no matches at all, or paging past the end. Absent when nothing applies.',
       ),
   },
 
@@ -229,14 +305,25 @@ export const searchArticlesTool = tool('pubmed_search_articles', {
     let normalizedDateRange:
       | { minDate: string; maxDate: string; dateType: 'pdat' | 'mdat' | 'edat' }
       | undefined;
-    if (input.dateRange?.minDate && input.dateRange?.maxDate) {
+    const { dateRange } = input;
+    const minDate = dateRange?.minDate.trim() ?? '';
+    const maxDate = dateRange?.maxDate.trim() ?? '';
+    if (dateRange && minDate && maxDate) {
       normalizedDateRange = {
-        minDate: input.dateRange.minDate.trim().replace(/[-.]/g, '/'),
-        maxDate: input.dateRange.maxDate.trim().replace(/[-.]/g, '/'),
-        dateType: input.dateRange.dateType,
+        minDate: minDate.replace(/[-.]/g, '/'),
+        maxDate: maxDate.replace(/[-.]/g, '/'),
+        dateType: dateRange.dateType,
       };
       effectiveQuery += ` AND (${normalizedDateRange.minDate}[${normalizedDateRange.dateType}] : ${normalizedDateRange.maxDate}[${normalizedDateRange.dateType}])`;
     }
+    // Both bounds are required for the filter to apply, so one filled bound is a
+    // dropped date range the caller gets no other signal about.
+    const partialDateBound =
+      minDate && !maxDate
+        ? ({ name: 'minDate', value: minDate } as const)
+        : maxDate && !minDate
+          ? ({ name: 'maxDate', value: maxDate } as const)
+          : undefined;
 
     let sanitizedPubTypes: string[] | undefined;
     if (input.publicationTypes?.length) {
@@ -355,6 +442,9 @@ export const searchArticlesTool = tool('pubmed_search_articles', {
       pmidCount: pmids.length,
       offset: input.offset,
       hasFilters: Object.keys(appliedFilters).length > 0,
+      ...(partialDateBound && { partialDateBound }),
+      ...(esResult.errorList && { errorList: esResult.errorList }),
+      ...(esResult.warningList && { warningList: esResult.warningList }),
     });
 
     ctx.enrich({ effectiveQuery, appliedFilters });
@@ -380,8 +470,13 @@ export const searchArticlesTool = tool('pubmed_search_articles', {
     if (result.pmids.length > 0) lines.push(`\n**PMIDs:** ${result.pmids.join(', ')}`);
     if (result.summaries?.length) {
       if (result.summaries.length < result.pmids.length) {
+        const shown = `Summaries shown for top ${result.summaries.length} of ${result.pmids.length} PMIDs`;
         lines.push(
-          `\n> Summaries shown for top ${result.summaries.length} of ${result.pmids.length} PMIDs. Increase \`summaryCount\` (max 50) to fetch more.`,
+          // At the cap there is no knob left to raise, so point at the tool that
+          // can read the rest instead of at `summaryCount`.
+          result.summaries.length >= SUMMARY_COUNT_MAX
+            ? `\n> ${shown} — \`summaryCount\` is at its maximum (${SUMMARY_COUNT_MAX}). Fetch the remaining ${result.pmids.length - result.summaries.length} with \`pubmed_fetch_articles\` using the PMIDs above.`
+            : `\n> ${shown}. Increase \`summaryCount\` (max ${SUMMARY_COUNT_MAX}) to fetch more.`,
         );
       }
       lines.push('\n### Summaries');

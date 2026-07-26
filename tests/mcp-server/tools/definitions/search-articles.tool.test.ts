@@ -37,6 +37,23 @@ describe('searchArticlesTool', () => {
     expect(input.summaryCount).toBe(0);
   });
 
+  describe('offset ceiling (issue #95)', () => {
+    it('accepts an offset at PubMed’s retstart ceiling', () => {
+      const result = searchArticlesTool.input.safeParse({ query: 'cancer', offset: 9998 });
+      expect(result.success).toBe(true);
+    });
+
+    it('rejects an offset above the ceiling before it reaches NCBI', async () => {
+      const result = searchArticlesTool.input.safeParse({ query: 'cancer', offset: 9999 });
+      expect(result.success).toBe(false);
+      expect(mockESearch).not.toHaveBeenCalled();
+    });
+
+    it('documents the ceiling in the offset description', () => {
+      expect(searchArticlesTool.input.shape.offset.description).toContain('9998');
+    });
+  });
+
   describe('dateRange handling', () => {
     it('accepts dateRange with empty strings (MCP Inspector payload)', () => {
       const result = searchArticlesTool.input.safeParse({
@@ -117,6 +134,68 @@ describe('searchArticlesTool', () => {
 
       const calledTerm = mockESearch.mock.calls.at(-1)?.[0]?.term as string;
       expect(calledTerm).not.toContain('[pdat]');
+    });
+
+    describe('partial dateRange notice (issue #97)', () => {
+      beforeEach(() => {
+        mockESearch.mockResolvedValue({
+          count: 69489,
+          idList: ['111'],
+          retmax: 20,
+          retstart: 0,
+          queryTranslation: 'crispr[All Fields]',
+        });
+      });
+
+      it('discloses the dropped filter when only minDate is supplied', async () => {
+        const ctx = createMockContext();
+        const input = searchArticlesTool.input.parse({
+          query: 'crispr',
+          dateRange: { minDate: '2024', maxDate: '' },
+        });
+        await searchArticlesTool.handler(input, ctx);
+
+        const notice = getEnrichment(ctx).notice as string;
+        expect(notice).toContain('No date filter was applied');
+        expect(notice).toContain('`minDate` ("2024")');
+        expect(notice).toContain('`maxDate: "3000"`');
+        expect(getEnrichment(ctx).appliedFilters).toEqual({});
+      });
+
+      it('discloses the dropped filter when only maxDate is supplied', async () => {
+        const ctx = createMockContext();
+        const input = searchArticlesTool.input.parse({
+          query: 'crispr',
+          dateRange: { minDate: '', maxDate: '2024' },
+        });
+        await searchArticlesTool.handler(input, ctx);
+
+        const notice = getEnrichment(ctx).notice as string;
+        expect(notice).toContain('`maxDate` ("2024")');
+        expect(notice).toContain('`minDate: "1800"`');
+      });
+
+      it('stays silent when both bounds are empty', async () => {
+        const ctx = createMockContext();
+        const input = searchArticlesTool.input.parse({
+          query: 'crispr',
+          dateRange: { minDate: '', maxDate: '' },
+        });
+        await searchArticlesTool.handler(input, ctx);
+
+        expect(getEnrichment(ctx).notice).toBeUndefined();
+      });
+
+      it('stays silent when both bounds are supplied', async () => {
+        const ctx = createMockContext();
+        const input = searchArticlesTool.input.parse({
+          query: 'crispr',
+          dateRange: { minDate: '2024', maxDate: '2026' },
+        });
+        await searchArticlesTool.handler(input, ctx);
+
+        expect(getEnrichment(ctx).notice).toBeUndefined();
+      });
     });
 
     it('skips date clause when dateRange is omitted', async () => {
@@ -449,6 +528,221 @@ describe('searchArticlesTool', () => {
     });
   });
 
+  describe('upstream ErrorList / WarningList diagnostics (issue #96)', () => {
+    it('flags an ignored field tag even when the search returned hits', async () => {
+      // NCBI drops the unknown field restriction and searches free text, so the
+      // count is the unrestricted one — nothing else distinguishes it.
+      mockESearch.mockResolvedValue({
+        count: 870,
+        idList: ['111', '222'],
+        retmax: 20,
+        retstart: 0,
+        queryTranslation: 'lecanemab[All Fields]',
+        errorList: { FieldNotFound: ['NoSuchField'] },
+      });
+
+      const ctx = createMockContext();
+      const input = searchArticlesTool.input.parse({ query: 'lecanemab[NoSuchField]' });
+      await searchArticlesTool.handler(input, ctx);
+
+      const notice = getEnrichment(ctx).notice as string;
+      expect(notice).toContain('`NoSuchField`');
+      expect(notice).toContain('free text');
+    });
+
+    it('names every ignored field tag when NCBI reports more than one', async () => {
+      mockESearch.mockResolvedValue({
+        count: 12,
+        idList: ['111'],
+        retmax: 20,
+        retstart: 0,
+        queryTranslation: 'smith[All Fields]',
+        errorList: { FieldNotFound: ['Aithor', 'Jrnal'] },
+      });
+
+      const ctx = createMockContext();
+      const input = searchArticlesTool.input.parse({ query: 'smith[Aithor] AND x[Jrnal]' });
+      await searchArticlesTool.handler(input, ctx);
+
+      const notice = getEnrichment(ctx).notice as string;
+      expect(notice).toContain('`Aithor`, `Jrnal`');
+    });
+
+    it('names the unmatched clause instead of the generic filter guidance', async () => {
+      mockESearch.mockResolvedValue({
+        count: 0,
+        idList: [],
+        retmax: 20,
+        retstart: 0,
+        queryTranslation: 'lecanemab[All Fields]',
+        warningList: {
+          QuotedPhraseNotFound: ['"Notarealmeshterm"[MeSH Terms]'],
+          OutputMessage: ['No items found.'],
+        },
+      });
+
+      const ctx = createMockContext();
+      const input = searchArticlesTool.input.parse({
+        query: 'lecanemab',
+        meshTerms: ['Notarealmeshterm'],
+      });
+      await searchArticlesTool.handler(input, ctx);
+
+      const notice = getEnrichment(ctx).notice as string;
+      expect(notice).toContain('`"Notarealmeshterm"[MeSH Terms]`');
+      expect(notice).toContain('pubmed_lookup_mesh');
+      // The precise clause replaces the guess-across-every-filter message.
+      expect(notice).not.toContain('Try removing filters');
+    });
+
+    it('surfaces ErrorList.PhraseNotFound alongside hits', async () => {
+      mockESearch.mockResolvedValue({
+        count: 5,
+        idList: ['111'],
+        retmax: 20,
+        retstart: 0,
+        queryTranslation: 'x[All Fields]',
+        errorList: { PhraseNotFound: ['zzznomatch'] },
+      });
+
+      const ctx = createMockContext();
+      const input = searchArticlesTool.input.parse({ query: 'x zzznomatch' });
+      await searchArticlesTool.handler(input, ctx);
+
+      expect(getEnrichment(ctx).notice).toContain('`zzznomatch`');
+    });
+
+    it('ignores OutputMessage-only warnings on a normal result page', async () => {
+      mockESearch.mockResolvedValue({
+        count: 5580000,
+        idList: ['111'],
+        retmax: 20,
+        retstart: 0,
+        queryTranslation: 'cancer[All Fields]',
+        warningList: { OutputMessage: ['Restrictions achieved. start and count adjusted to 0, 1'] },
+      });
+
+      const ctx = createMockContext();
+      const input = searchArticlesTool.input.parse({ query: 'cancer' });
+      await searchArticlesTool.handler(input, ctx);
+
+      expect(getEnrichment(ctx).notice).toBeUndefined();
+    });
+  });
+
+  describe('notice composition across signals (issues #95, #96, #97)', () => {
+    it('composes a partial dateRange with an ignored field tag on a hit-bearing page', async () => {
+      mockESearch.mockResolvedValue({
+        count: 870,
+        idList: ['111'],
+        retmax: 20,
+        retstart: 0,
+        queryTranslation: 'lecanemab[All Fields]',
+        errorList: { FieldNotFound: ['NoSuchField'] },
+      });
+
+      const ctx = createMockContext();
+      const input = searchArticlesTool.input.parse({
+        query: 'lecanemab[NoSuchField]',
+        dateRange: { minDate: '2024', maxDate: '' },
+      });
+      await searchArticlesTool.handler(input, ctx);
+
+      const notice = getEnrichment(ctx).notice as string;
+      expect(notice).toContain('No date filter was applied');
+      expect(notice).toContain('`NoSuchField`');
+    });
+
+    it('composes a partial dateRange with the generic empty-result guidance', async () => {
+      mockESearch.mockResolvedValue({
+        count: 0,
+        idList: [],
+        retmax: 20,
+        retstart: 0,
+        queryTranslation: 'zzz[All Fields]',
+      });
+
+      const ctx = createMockContext();
+      const input = searchArticlesTool.input.parse({
+        query: 'zzz',
+        dateRange: { minDate: '', maxDate: '2024' },
+      });
+      await searchArticlesTool.handler(input, ctx);
+
+      const notice = getEnrichment(ctx).notice as string;
+      expect(notice).toContain('No date filter was applied');
+      expect(notice).toContain('pubmed_spell_check');
+    });
+
+    it('composes a partial dateRange with the offset-overshoot warning', async () => {
+      mockESearch.mockResolvedValue({
+        count: 100,
+        idList: [],
+        retmax: 20,
+        retstart: 200,
+        queryTranslation: 'cancer[All Fields]',
+      });
+
+      const ctx = createMockContext();
+      const input = searchArticlesTool.input.parse({
+        query: 'cancer',
+        offset: 200,
+        dateRange: { minDate: '2024', maxDate: '' },
+      });
+      await searchArticlesTool.handler(input, ctx);
+
+      const notice = getEnrichment(ctx).notice as string;
+      expect(notice).toContain('No date filter was applied');
+      expect(notice).toContain('Offset 200 exceeds totalCount (100)');
+    });
+
+    it('composes an ignored field tag with the offset-overshoot warning', async () => {
+      mockESearch.mockResolvedValue({
+        count: 100,
+        idList: [],
+        retmax: 20,
+        retstart: 200,
+        queryTranslation: 'smith[All Fields]',
+        errorList: { FieldNotFound: ['Aithor'] },
+      });
+
+      const ctx = createMockContext();
+      const input = searchArticlesTool.input.parse({ query: 'smith[Aithor]', offset: 200 });
+      await searchArticlesTool.handler(input, ctx);
+
+      const notice = getEnrichment(ctx).notice as string;
+      expect(notice).toContain('`Aithor`');
+      expect(notice).toContain('Offset 200 exceeds totalCount (100)');
+    });
+
+    it('composes every signal that applies to an empty filtered result', async () => {
+      mockESearch.mockResolvedValue({
+        count: 0,
+        idList: [],
+        retmax: 20,
+        retstart: 0,
+        queryTranslation: 'smith[All Fields]',
+        errorList: { FieldNotFound: ['Aithor'] },
+        warningList: { QuotedPhraseNotFound: ['"Notarealmeshterm"[MeSH Terms]'] },
+      });
+
+      const ctx = createMockContext();
+      const input = searchArticlesTool.input.parse({
+        query: 'smith[Aithor]',
+        meshTerms: ['Notarealmeshterm'],
+        dateRange: { minDate: '2024', maxDate: '' },
+      });
+      await searchArticlesTool.handler(input, ctx);
+
+      const notice = getEnrichment(ctx).notice as string;
+      expect(notice).toContain('No date filter was applied');
+      expect(notice).toContain('`Aithor`');
+      expect(notice).toContain('`"Notarealmeshterm"[MeSH Terms]`');
+      // Named clauses win over the generic filter guidance.
+      expect(notice).not.toContain('Try removing filters');
+    });
+  });
+
   it('formats output', () => {
     const blocks = searchArticlesTool.format!({
       query: 'cancer',
@@ -504,6 +798,45 @@ describe('searchArticlesTool', () => {
         searchUrl: 'https://pubmed.ncbi.nlm.nih.gov/?term=glp-1',
       });
       expect(blocks[0]?.text).not.toContain('Summaries shown for top');
+    });
+
+    describe('at the summaryCount cap (issue #97)', () => {
+      /** `format()` sees only the result, so "at the cap" is read off the rendered summary count. */
+      const pmids = (n: number) => Array.from({ length: n }, (_, i) => String(i + 1));
+      const summaries = (n: number) =>
+        pmids(n).map((pmid) => ({
+          pmid,
+          title: `Article ${pmid}`,
+          pubmedUrl: `https://pubmed.ncbi.nlm.nih.gov/${pmid}/`,
+        }));
+
+      it('points at pubmed_fetch_articles when the cap is reached', () => {
+        const blocks = searchArticlesTool.format!({
+          query: 'glp-1',
+          offset: 0,
+          pmids: pmids(60),
+          summaries: summaries(50),
+          searchUrl: 'https://pubmed.ncbi.nlm.nih.gov/?term=glp-1',
+        });
+        const text = blocks[0]?.text ?? '';
+        expect(text).toContain('Summaries shown for top 50 of 60 PMIDs');
+        expect(text).toContain('`summaryCount` is at its maximum (50)');
+        expect(text).toContain('Fetch the remaining 10 with `pubmed_fetch_articles`');
+        expect(text).not.toContain('Increase `summaryCount`');
+      });
+
+      it('still advises raising summaryCount below the cap', () => {
+        const blocks = searchArticlesTool.format!({
+          query: 'glp-1',
+          offset: 0,
+          pmids: pmids(60),
+          summaries: summaries(49),
+          searchUrl: 'https://pubmed.ncbi.nlm.nih.gov/?term=glp-1',
+        });
+        const text = blocks[0]?.text ?? '';
+        expect(text).toContain('Increase `summaryCount` (max 50)');
+        expect(text).not.toContain('pubmed_fetch_articles');
+      });
     });
   });
 

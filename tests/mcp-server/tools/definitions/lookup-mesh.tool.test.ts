@@ -45,6 +45,13 @@ describe('lookupMeshTool', () => {
     expect(() => lookupMeshTool.input.parse({ query: 'cancer', offset: -1 })).toThrow();
   });
 
+  it('accepts offsets past 9998 — the retstart ceiling is PubMed-only, db=mesh has none', () => {
+    // Verified against eSearch db=mesh: retstart is served all the way to the
+    // match count and returns an empty page beyond it, never an ERROR.
+    expect(lookupMeshTool.input.safeParse({ query: 'cancer', offset: 9999 }).success).toBe(true);
+    expect(lookupMeshTool.input.safeParse({ query: 'cancer', offset: 300000 }).success).toBe(true);
+  });
+
   it('returns empty results with a recovery notice when no MeSH IDs found', async () => {
     mockESearch.mockResolvedValue({ idList: [], count: 0 });
 
