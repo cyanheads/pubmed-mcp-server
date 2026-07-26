@@ -232,7 +232,12 @@ export const searchArticlesTool = tool('pubmed_search_articles', {
             authors: z.string().optional().describe('Formatted author string'),
             source: z.string().optional().describe('Journal source'),
             pubDate: z.string().optional().describe('Publication date'),
-            doi: z.string().optional().describe('DOI'),
+            doi: z
+              .string()
+              .optional()
+              .describe(
+                'DOI, cased as NCBI reports it. DOIs are case-insensitive by spec and no case normalization is applied here, so casing can differ from a Europe PMC-sourced `doi` — compare the two case-insensitively.',
+              ),
             pmcId: z.string().optional().describe('PMC ID'),
             pmcUrl: z.string().optional().describe('PMC URL'),
             pubmedUrl: z.string().optional().describe('PubMed URL'),

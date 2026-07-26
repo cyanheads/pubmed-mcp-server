@@ -125,7 +125,12 @@ export const pubmedEuropepmcSearchTool = tool('pubmed_europepmc_search', {
               .describe('First publication date (ISO YYYY-MM-DD)'),
             pmid: z.string().optional().describe('PMID when present in PubMed'),
             pmcId: z.string().optional().describe('PMC ID when present in PMC'),
-            doi: z.string().optional().describe('DOI when present'),
+            doi: z
+              .string()
+              .optional()
+              .describe(
+                'DOI when present, cased as Europe PMC reports it. DOIs are case-insensitive by spec and no case normalization is applied here, so the same DOI can arrive in a different case from `pubmed_fetch_articles` (Europe PMC `10.1056/nejmoa2212948`, NCBI `10.1056/NEJMoa2212948`) — a byte-for-byte comparison across the two reports a false mismatch.',
+              ),
             isOpenAccess: z
               .boolean()
               .optional()

@@ -236,7 +236,12 @@ const PmcArticleSchema = z
     pmcUrl: z.string().optional().describe('PMC URL — derived from `pmcId` when present'),
     pmid: z.string().optional().describe('PubMed ID'),
     pubmedUrl: z.string().optional().describe('PubMed URL'),
-    doi: z.string().optional().describe('DOI'),
+    doi: z
+      .string()
+      .optional()
+      .describe(
+        'DOI, cased as the tier that served this record reports it (NCBI PMC, Europe PMC, or Unpaywall). DOIs are case-insensitive by spec and no case normalization is applied here, so casing can differ between tiers and from other tools — compare case-insensitively.',
+      ),
     title: z.string().optional().describe('Article title'),
     abstract: z.string().optional().describe('Abstract'),
     authors: z.array(AuthorSchema).optional().describe('Authors'),

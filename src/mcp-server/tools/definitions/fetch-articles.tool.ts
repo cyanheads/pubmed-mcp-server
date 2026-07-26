@@ -98,7 +98,12 @@ const FetchedArticleSchema = z
     affiliations: z.array(z.string()).optional().describe('Deduplicated author affiliations'),
     authors: z.array(AuthorSchema).optional().describe('Author list'),
     journalInfo: JournalInfoSchema.optional(),
-    doi: z.string().optional().describe('DOI'),
+    doi: z
+      .string()
+      .optional()
+      .describe(
+        "DOI, cased as NCBI reports it (usually the publisher's mixed case). DOIs are case-insensitive by spec and no case normalization is applied here, so the same DOI can arrive in a different case from `pubmed_europepmc_search` and `pubmed_europepmc_fetch` (NCBI `10.1056/NEJMoa2212948`, Europe PMC `10.1056/nejmoa2212948`) — a byte-for-byte comparison across the two reports a false mismatch.",
+      ),
     pmcId: z.string().optional().describe('PMC ID'),
     pubmedUrl: z.string().optional().describe('PubMed article URL'),
     pmcUrl: z.string().optional().describe('PMC full text URL'),

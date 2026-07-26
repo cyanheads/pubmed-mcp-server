@@ -56,7 +56,9 @@ export const convertIdsTool = tool('pubmed_convert_ids', {
             doi: z
               .string()
               .optional()
-              .describe('Digital Object Identifier; absent if no DOI is on record'),
+              .describe(
+                'Digital Object Identifier, cased as the PMC ID Converter reports it; absent if no DOI is on record. DOIs are case-insensitive by spec and no case normalization is applied here, so casing can differ from a Europe PMC-sourced `doi` — compare the two case-insensitively.',
+              ),
             errmsg: z
               .string()
               .optional()
