@@ -1,6 +1,7 @@
 /**
  * @fileoverview MeSH (Medical Subject Headings) vocabulary lookup tool.
- * Searches the NCBI MeSH database and optionally retrieves detailed records.
+ * Searches the NCBI MeSH database with offset pagination and optionally
+ * retrieves detailed records.
  * @module src/mcp-server/tools/definitions/lookup-mesh.tool
  */
 
@@ -115,7 +116,7 @@ function parseSummaryRecords(data: unknown, ids: string[], includeDetails: boole
 
 export const lookupMeshTool = tool('pubmed_lookup_mesh', {
   description:
-    'Search and explore the MeSH (Medical Subject Headings) controlled vocabulary. Returns descriptor records with tree numbers, scope notes, and entry terms.',
+    'Search and explore the MeSH (Medical Subject Headings) controlled vocabulary. Returns descriptor records with tree numbers, scope notes, and entry terms, plus pagination via offset for paging past the maxResults cap.',
   annotations: { readOnlyHint: true, openWorldHint: true },
   _meta: conceptMeta([
     SCHEMA_DEFINED_TERM,
@@ -131,6 +132,14 @@ export const lookupMeshTool = tool('pubmed_lookup_mesh', {
   input: z.object({
     query: z.string().min(1).describe('MeSH descriptor name or free-text term to look up'),
     maxResults: z.number().int().min(1).max(50).default(10).describe('Maximum results'),
+    offset: z
+      .number()
+      .int()
+      .min(0)
+      .default(0)
+      .describe(
+        'Result offset for pagination (0-based). Pass the `nextOffset` from the previous response to get the following page; the exact-descriptor match is pinned to the first page only.',
+      ),
     includeDetails: z
       .boolean()
       .default(true)
@@ -139,6 +148,13 @@ export const lookupMeshTool = tool('pubmed_lookup_mesh', {
 
   output: z.object({
     query: z.string().describe('Original search query'),
+    offset: z.number().describe('Result offset this page was read from'),
+    nextOffset: z
+      .number()
+      .optional()
+      .describe(
+        'Offset to request for the next page. Omitted when this is the last page, so its absence is the end-of-results signal.',
+      ),
     results: z
       .array(
         z
@@ -168,48 +184,78 @@ export const lookupMeshTool = tool('pubmed_lookup_mesh', {
       .describe('Matching MeSH records'),
   }),
 
-  // Result-set context — total match count for disclosure against the maxResults cap,
-  // and recovery guidance when no descriptor matched. Surfaced via ctx.enrich(...)
-  // to structuredContent and content[]; absent on success.
+  // Result-set context — the upstream match count for disclosure against the maxResults
+  // cap, and recovery guidance when no descriptor matched or the offset overshot.
+  // Surfaced via ctx.enrich(...) to structuredContent and content[] alike.
   enrichment: {
-    totalCount: z.number().describe('Total matching MeSH descriptors'),
+    totalCount: z
+      .number()
+      .describe('Total MeSH descriptors matching the query upstream, before the maxResults cap'),
     notice: z
       .string()
       .optional()
       .describe(
-        'Optional guidance when no descriptors matched — suggests spell-check or free-text search. Absent on successful results.',
+        'Optional guidance when no descriptors matched or the offset overshot the result set — suggests spell-check, free-text search, or resetting the offset. Absent on successful result pages.',
       ),
   },
 
   async handler(input, ctx) {
-    const { query, maxResults, includeDetails } = input;
+    const { query, maxResults, offset, includeDetails } = input;
     const ncbi = getNcbiService();
-    ctx.log.debug('MeSH lookup started', { query, maxResults, includeDetails });
+    ctx.log.debug('MeSH lookup started', { query, maxResults, offset, includeDetails });
 
     const hasFieldTag = /\[.+\]/.test(query);
     const callOpts = { signal: ctx.signal };
-    const broadSearch = ncbi.eSearch({ db: 'mesh', term: query, retmax: maxResults }, callOpts);
+    const broadSearch = ncbi.eSearch(
+      { db: 'mesh', term: query, retmax: maxResults, retstart: offset },
+      callOpts,
+    );
+    // The exact-descriptor match is resolved on every page, not just the first: it is
+    // normally a member of the ranked list too, so every page has to know which UID to
+    // hold back. The first page leads with it; later pages skip it where it ranks.
     const exactSearch = hasFieldTag
       ? undefined
       : ncbi.eSearch({ db: 'mesh', term: `${query}[MH]`, retmax: 1 }, callOpts);
     const [broadResult, exactResult] = await Promise.all([broadSearch, exactSearch]);
 
-    const seen = new Set<string>();
+    const totalCount = broadResult.count;
+    const pinnedUid = exactResult?.idList[0];
     const ids: string[] = [];
-    for (const id of [...(exactResult?.idList ?? []), ...broadResult.idList]) {
-      if (!seen.has(id)) {
-        seen.add(id);
-        ids.push(id);
+    if (pinnedUid !== undefined && offset === 0) ids.push(pinnedUid);
+    // Count the ranked records this page consumed rather than assuming maxResults:
+    // a pinned exact match outside the ranked window displaces one, and the next
+    // offset has to resume exactly where this page stopped or that record is lost.
+    let consumed = 0;
+    for (const id of broadResult.idList) {
+      // The pinned descriptor is served once, on the first page. Count its rank slot
+      // as consumed wherever it lands so no later page hands it back a second time.
+      if (id === pinnedUid) {
+        consumed++;
+        continue;
       }
+      if (ids.length >= maxResults) break;
+      consumed++;
+      ids.push(id);
     }
-    ids.length = Math.min(ids.length, maxResults);
+
+    const nextOffset = offset + consumed;
+    const hasMore = consumed > 0 && nextOffset < totalCount;
 
     if (ids.length === 0) {
-      ctx.enrich.total(0);
-      ctx.enrich.notice(
-        `No MeSH descriptors matched "${query}". Try \`pubmed_spell_check\` for a suggested correction, broaden the term, or use \`pubmed_search_articles\` for free-text discovery against article metadata.`,
-      );
-      return { query, results: [] };
+      ctx.enrich.total(totalCount);
+      let notice: string;
+      if (totalCount === 0) {
+        notice = `No MeSH descriptors matched "${query}". Try \`pubmed_spell_check\` for a suggested correction, broaden the term, or use \`pubmed_search_articles\` for free-text discovery against article metadata.`;
+      } else if (consumed > 0) {
+        // The window held nothing but the pinned descriptor, already served at offset 0.
+        notice = `Offset ${offset} held only the exact-descriptor match for "${query}", which was returned on the first page.${
+          hasMore ? ` Continue with offset ${nextOffset}.` : ''
+        }`;
+      } else {
+        notice = `Offset ${offset} returned no records — "${query}" matches ${totalCount} MeSH descriptor(s). Reset offset to 0 or lower it below ${totalCount}.`;
+      }
+      ctx.enrich.notice(notice);
+      return { query, offset, ...(hasMore && { nextOffset }), results: [] };
     }
 
     const summaryData = await ncbi.eSummary({ db: 'mesh', id: ids.join(',') }, callOpts);
@@ -222,15 +268,26 @@ export const lookupMeshTool = tool('pubmed_lookup_mesh', {
       return aExact - bExact;
     });
 
-    ctx.enrich.total(results.length);
-    return { query, results };
+    ctx.enrich.total(totalCount);
+    // A page filled entirely by the pinned exact match consumed no ranked record,
+    // so there is no offset that advances — say so instead of emitting one that
+    // would replay this page.
+    if (consumed === 0 && totalCount > 0) {
+      ctx.enrich.notice(
+        `The exact-descriptor match filled this page of ${maxResults}. Raise maxResults to see the ${totalCount} ranked match(es) for "${query}".`,
+      );
+    }
+    return { query, offset, ...(hasMore && { nextOffset }), results };
   },
 
   format: (result) => {
     const lines = [
       `# MeSH Lookup: "${result.query}"`,
-      `Found **${result.results.length}** result(s).`,
+      `Found **${result.results.length}** result(s) at offset **${result.offset}**.`,
     ];
+    if (result.nextOffset !== undefined) {
+      lines.push(`More available — call again with \`offset: ${result.nextOffset}\`.`);
+    }
     for (const r of result.results) {
       lines.push(`\n## ${r.name}`);
       lines.push(`- **MeSH ID:** ${r.meshId}`);

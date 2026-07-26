@@ -14,6 +14,19 @@ vi.mock('@/services/ncbi/ncbi-service.js', () => ({
 
 const { lookupMeshTool } = await import('@/mcp-server/tools/definitions/lookup-mesh.tool.js');
 
+/** Minimal MeSH DocSum for an id, named `Descriptor <n>` off the trailing digits. */
+function docSum(id: string) {
+  return {
+    Id: id,
+    Item: [{ '@_Name': 'DS_MeshTerms', Item: [{ '#text': `Descriptor ${id}` }] }],
+  };
+}
+
+/** ESummary payload covering exactly the ids the handler asked for, in order. */
+function summaryFor(ids: string[]) {
+  return { eSummaryResult: { DocSum: ids.map(docSum) } };
+}
+
 describe('lookupMeshTool', () => {
   beforeEach(() => {
     mockESearch.mockReset();
@@ -24,11 +37,16 @@ describe('lookupMeshTool', () => {
     const input = lookupMeshTool.input.parse({ query: 'Neoplasms' });
     expect(input.query).toBe('Neoplasms');
     expect(input.maxResults).toBe(10);
+    expect(input.offset).toBe(0);
     expect(input.includeDetails).toBe(true);
   });
 
+  it('rejects a negative offset', () => {
+    expect(() => lookupMeshTool.input.parse({ query: 'cancer', offset: -1 })).toThrow();
+  });
+
   it('returns empty results with a recovery notice when no MeSH IDs found', async () => {
-    mockESearch.mockResolvedValue({ idList: [] });
+    mockESearch.mockResolvedValue({ idList: [], count: 0 });
 
     const ctx = createMockContext();
     const input = lookupMeshTool.input.parse({ query: 'xyznonexistent' });
@@ -37,12 +55,13 @@ describe('lookupMeshTool', () => {
 
     expect(result.results).toEqual([]);
     expect(result.query).toBe('xyznonexistent');
+    expect(enrichment.totalCount).toBe(0);
     expect(enrichment.notice).toMatch(/xyznonexistent/);
     expect(enrichment.notice).toMatch(/spell_check|search_articles/);
   });
 
   it('returns parsed MeSH records', async () => {
-    mockESearch.mockResolvedValue({ idList: ['68009369'] });
+    mockESearch.mockResolvedValue({ idList: ['68009369'], count: 1 });
     mockESummary.mockResolvedValue({
       eSummaryResult: {
         DocSum: [
@@ -79,8 +98,8 @@ describe('lookupMeshTool', () => {
 
   it('deduplicates exact matches, respects maxResults, and parses detailed tree metadata', async () => {
     mockESearch.mockImplementation(async (params: { term: string }) => {
-      if (params.term.endsWith('[MH]')) return { idList: ['68009369'] };
-      return { idList: ['68001234', '68009369', '68009999'] };
+      if (params.term.endsWith('[MH]')) return { idList: ['68009369'], count: 1 };
+      return { idList: ['68001234', '68009369', '68009999'], count: 3 };
     });
     mockESummary.mockResolvedValue({
       eSummaryResult: {
@@ -125,7 +144,7 @@ describe('lookupMeshTool', () => {
     const result = await lookupMeshTool.handler(input, ctx);
 
     expect(mockESearch).toHaveBeenCalledWith(
-      { db: 'mesh', term: 'Neoplasms', retmax: 2 },
+      { db: 'mesh', term: 'Neoplasms', retmax: 2, retstart: 0 },
       expect.objectContaining({ signal: expect.any(AbortSignal) }),
     );
     expect(mockESearch).toHaveBeenCalledWith(
@@ -149,7 +168,9 @@ describe('lookupMeshTool', () => {
 
   it('filters non-navigable @-pointer "tree numbers" from SCRs (#76)', async () => {
     mockESearch.mockImplementation(async (params: { term: string }) =>
-      params.term.endsWith('[MH]') ? { idList: [] } : { idList: ['67585596', '68008687'] },
+      params.term.endsWith('[MH]')
+        ? { idList: [], count: 0 }
+        : { idList: ['67585596', '68008687'], count: 2 },
     );
     mockESummary.mockResolvedValue({
       eSummaryResult: {
@@ -198,7 +219,7 @@ describe('lookupMeshTool', () => {
   });
 
   it('skips exact MeSH search for tagged queries and omits details when requested', async () => {
-    mockESearch.mockResolvedValue({ idList: ['68009369'] });
+    mockESearch.mockResolvedValue({ idList: ['68009369'], count: 1 });
     mockESummary.mockResolvedValue({
       DocSum: {
         Id: '68009369',
@@ -221,7 +242,7 @@ describe('lookupMeshTool', () => {
 
     expect(mockESearch).toHaveBeenCalledTimes(1);
     expect(mockESearch).toHaveBeenCalledWith(
-      { db: 'mesh', term: 'Neoplasms[MH]', retmax: 10 },
+      { db: 'mesh', term: 'Neoplasms[MH]', retmax: 10, retstart: 0 },
       expect.objectContaining({ signal: expect.any(AbortSignal) }),
     );
     expect(result.results).toEqual([
@@ -231,7 +252,7 @@ describe('lookupMeshTool', () => {
 
   it('falls back to requested IDs when ESummary returns no records', async () => {
     mockESearch.mockImplementation(async (params: { term: string }) =>
-      params.term.endsWith('[MH]') ? { idList: [] } : { idList: ['68000001'] },
+      params.term.endsWith('[MH]') ? { idList: [], count: 0 } : { idList: ['68000001'], count: 1 },
     );
     mockESummary.mockResolvedValue({});
 
@@ -247,8 +268,8 @@ describe('lookupMeshTool', () => {
   it('decodes Entrez mesh UIDs to canonical DescriptorUIs and keeps the raw UID; non-decodable UIDs fall back', async () => {
     mockESearch.mockImplementation(async (params: { term: string }) =>
       params.term.endsWith('[MH]')
-        ? { idList: [] }
-        : { idList: ['68003924', '67000123', '81000628', '2025952'] },
+        ? { idList: [], count: 0 }
+        : { idList: ['68003924', '67000123', '81000628', '2025952'], count: 4 },
     );
     mockESummary.mockResolvedValue({
       eSummaryResult: {
@@ -285,9 +306,301 @@ describe('lookupMeshTool', () => {
     ]);
   });
 
-  it('formats output', () => {
+  /* ────────────────────────────────────────────────────────────────────────── */
+  /*  totalCount (#82) and offset pagination (#84)                              */
+  /* ────────────────────────────────────────────────────────────────────────── */
+
+  describe('totalCount reports the upstream match count, not the page size (#82)', () => {
+    it.each([1, 5])('reports the same total for maxResults=%i', async (maxResults) => {
+      mockESearch.mockImplementation(async (params: { term: string; retmax: number }) =>
+        params.term.endsWith('[MH]')
+          ? { idList: [], count: 0 }
+          : {
+              idList: Array.from({ length: params.retmax }, (_, i) => `6800000${i}`),
+              count: 4213,
+            },
+      );
+      mockESummary.mockImplementation(async (params: { id: string }) =>
+        summaryFor(params.id.split(',')),
+      );
+
+      const ctx = createMockContext();
+      const input = lookupMeshTool.input.parse({
+        query: 'cancer',
+        maxResults,
+        includeDetails: false,
+      });
+      const result = await lookupMeshTool.handler(input, ctx);
+
+      expect(result.results).toHaveLength(maxResults);
+      expect(getEnrichment(ctx).totalCount).toBe(4213);
+    });
+  });
+
+  describe('offset pagination (#84)', () => {
+    /** 7 ranked descriptors; the [MH] pin resolves to the second of them. */
+    const ranked = ['68000000', '68000001', '68000002', '68000003', '68000004', '68000005'];
+
+    function mockRanked(pinned: string | undefined, total = ranked.length) {
+      mockESearch.mockImplementation(
+        async (params: { term: string; retmax: number; retstart?: number }) => {
+          if (params.term.endsWith('[MH]')) {
+            return { idList: pinned ? [pinned] : [], count: pinned ? 1 : 0 };
+          }
+          const start = params.retstart ?? 0;
+          return { idList: ranked.slice(start, start + params.retmax), count: total };
+        },
+      );
+      mockESummary.mockImplementation(async (params: { id: string }) =>
+        summaryFor(params.id.split(',')),
+      );
+    }
+
+    it('returns the first page and points at the next offset', async () => {
+      mockRanked('68000001');
+
+      const ctx = createMockContext();
+      const input = lookupMeshTool.input.parse({
+        query: 'cancer',
+        maxResults: 2,
+        includeDetails: false,
+      });
+      const result = await lookupMeshTool.handler(input, ctx);
+
+      // The pinned exact match leads; it is deduped against the ranked window.
+      expect(result.results.map((r) => r.entrezUid)).toEqual(['68000001', '68000000']);
+      expect(result.offset).toBe(0);
+      expect(result.nextOffset).toBe(2);
+      expect(getEnrichment(ctx).totalCount).toBe(6);
+    });
+
+    it('returns the next distinct records on the second page and skips the [MH] pin', async () => {
+      mockRanked('68000001');
+
+      const ctx = createMockContext();
+      const input = lookupMeshTool.input.parse({
+        query: 'cancer',
+        maxResults: 2,
+        offset: 2,
+        includeDetails: false,
+      });
+      const result = await lookupMeshTool.handler(input, ctx);
+
+      expect(result.results.map((r) => r.entrezUid)).toEqual(['68000002', '68000003']);
+      expect(result.offset).toBe(2);
+      expect(result.nextOffset).toBe(4);
+      // The exact-descriptor search runs on every page — the pinned UID is what
+      // later pages need in order to hold it back at its ranked position (#91).
+      expect(mockESearch).toHaveBeenCalledTimes(2);
+      expect(mockESearch).toHaveBeenCalledWith(
+        { db: 'mesh', term: 'cancer', retmax: 2, retstart: 2 },
+        expect.objectContaining({ signal: expect.any(AbortSignal) }),
+      );
+      expect(mockESearch).toHaveBeenCalledWith(
+        { db: 'mesh', term: 'cancer[MH]', retmax: 1 },
+        expect.objectContaining({ signal: expect.any(AbortSignal) }),
+      );
+    });
+
+    it('resumes where the page stopped when the pin displaced a ranked record', async () => {
+      // The pin is outside the ranked list, so page 1 shows it plus one ranked
+      // record — the next offset must be 1, not maxResults, or 68000001 is lost.
+      mockRanked('68999999');
+
+      const first = await lookupMeshTool.handler(
+        lookupMeshTool.input.parse({ query: 'cancer', maxResults: 2, includeDetails: false }),
+        createMockContext(),
+      );
+      expect(first.results.map((r) => r.entrezUid)).toEqual(['68999999', '68000000']);
+      expect(first.nextOffset).toBe(1);
+
+      const second = await lookupMeshTool.handler(
+        lookupMeshTool.input.parse({
+          query: 'cancer',
+          maxResults: 2,
+          offset: first.nextOffset,
+          includeDetails: false,
+        }),
+        createMockContext(),
+      );
+      expect(second.results.map((r) => r.entrezUid)).toEqual(['68000001', '68000002']);
+    });
+
+    it('omits nextOffset on the final partial page', async () => {
+      mockRanked(undefined);
+
+      const ctx = createMockContext();
+      const input = lookupMeshTool.input.parse({
+        query: 'cancer',
+        maxResults: 4,
+        offset: 4,
+        includeDetails: false,
+      });
+      const result = await lookupMeshTool.handler(input, ctx);
+
+      expect(result.results.map((r) => r.entrezUid)).toEqual(['68000004', '68000005']);
+      expect(result.offset).toBe(4);
+      expect(result.nextOffset).toBeUndefined();
+      expect(getEnrichment(ctx).totalCount).toBe(6);
+    });
+
+    it('reports an overshooting offset instead of claiming no matches', async () => {
+      mockRanked(undefined);
+
+      const ctx = createMockContext();
+      const input = lookupMeshTool.input.parse({
+        query: 'cancer',
+        maxResults: 5,
+        offset: 500,
+        includeDetails: false,
+      });
+      const result = await lookupMeshTool.handler(input, ctx);
+      const enrichment = getEnrichment(ctx);
+
+      expect(result.results).toEqual([]);
+      expect(result.offset).toBe(500);
+      expect(result.nextOffset).toBeUndefined();
+      expect(enrichment.totalCount).toBe(6);
+      expect(enrichment.notice).toMatch(/Offset 500/);
+      expect(enrichment.notice).toMatch(/Reset offset to 0/);
+      // Not the empty-result guidance — the query did match.
+      expect(enrichment.notice).not.toMatch(/spell_check/);
+    });
+
+    it('flags a page the pinned exact match filled on its own', async () => {
+      mockRanked('68999999');
+
+      const ctx = createMockContext();
+      const input = lookupMeshTool.input.parse({
+        query: 'cancer',
+        maxResults: 1,
+        includeDetails: false,
+      });
+      const result = await lookupMeshTool.handler(input, ctx);
+
+      expect(result.results.map((r) => r.entrezUid)).toEqual(['68999999']);
+      // No offset would advance past this page, so none is offered.
+      expect(result.nextOffset).toBeUndefined();
+      expect(getEnrichment(ctx).notice).toMatch(/Raise maxResults/);
+    });
+  });
+
+  /* ────────────────────────────────────────────────────────────────────────── */
+  /*  The pinned descriptor is served exactly once across a full walk (#91)     */
+  /* ────────────────────────────────────────────────────────────────────────── */
+
+  describe('a full offset → nextOffset walk serves every descriptor exactly once (#91)', () => {
+    /** 13 ranked descriptors, mirroring a real MeSH result set. */
+    const ranked = Array.from({ length: 13 }, (_, i) => `6800${String(100 + i)}`);
+
+    function mockWalk(pinned: string | undefined) {
+      mockESearch.mockImplementation(
+        async (params: { term: string; retmax: number; retstart?: number }) => {
+          if (params.term.endsWith('[MH]')) {
+            return { idList: pinned ? [pinned] : [], count: pinned ? 1 : 0 };
+          }
+          const start = params.retstart ?? 0;
+          return { idList: ranked.slice(start, start + params.retmax), count: ranked.length };
+        },
+      );
+      mockESummary.mockImplementation(async (params: { id: string }) =>
+        summaryFor(params.id.split(',')),
+      );
+    }
+
+    /** Walks offset → nextOffset from 0 until the server stops offering one. */
+    async function walkAllPages(maxResults: number) {
+      const pages: string[][] = [];
+      let offset: number | undefined = 0;
+      while (offset !== undefined) {
+        if (pages.length > ranked.length) throw new Error('pagination did not terminate');
+        const result = await lookupMeshTool.handler(
+          lookupMeshTool.input.parse({
+            query: 'cancer',
+            maxResults,
+            offset,
+            includeDetails: false,
+          }),
+          createMockContext(),
+        );
+        pages.push(result.results.map((r) => r.entrezUid));
+        offset = result.nextOffset;
+      }
+      return { pages, collected: pages.flat() };
+    }
+
+    it('covers the set without duplicates when the pin ranks inside the first window', async () => {
+      const pin = ranked[4];
+      mockWalk(pin);
+
+      const { pages, collected } = await walkAllPages(5);
+
+      expect(pages).toEqual([
+        [pin, ranked[0], ranked[1], ranked[2], ranked[3]],
+        [ranked[5], ranked[6], ranked[7], ranked[8], ranked[9]],
+        [ranked[10], ranked[11], ranked[12]],
+      ]);
+      expect(new Set(collected).size).toBe(collected.length);
+      expect([...collected].sort()).toEqual([...ranked].sort());
+    });
+
+    it('covers the set without duplicates when the pin ranks beyond the first window', async () => {
+      const pin = ranked[6];
+      mockWalk(pin);
+
+      const { pages, collected } = await walkAllPages(5);
+
+      expect(pages).toEqual([
+        // The pin displaces one ranked record, so the page stops at ranked index 3.
+        [pin, ranked[0], ranked[1], ranked[2], ranked[3]],
+        // The pin ranks inside this window and is held back, not served twice.
+        [ranked[4], ranked[5], ranked[7], ranked[8]],
+        [ranked[9], ranked[10], ranked[11], ranked[12]],
+      ]);
+      expect(new Set(collected).size).toBe(collected.length);
+      expect([...collected].sort()).toEqual([...ranked].sort());
+    });
+
+    it('covers the set without duplicates when there is no exact-descriptor match', async () => {
+      mockWalk(undefined);
+
+      const { pages, collected } = await walkAllPages(5);
+
+      expect(pages).toEqual([ranked.slice(0, 5), ranked.slice(5, 10), ranked.slice(10, 13)]);
+      expect(new Set(collected).size).toBe(collected.length);
+      expect([...collected].sort()).toEqual([...ranked].sort());
+    });
+
+    it('keeps paging when a window holds nothing but the already-served pin', async () => {
+      const pin = ranked[6];
+      mockWalk(pin);
+
+      const ctx = createMockContext();
+      const result = await lookupMeshTool.handler(
+        lookupMeshTool.input.parse({
+          query: 'cancer',
+          maxResults: 1,
+          offset: 6,
+          includeDetails: false,
+        }),
+        ctx,
+      );
+
+      expect(result.results).toEqual([]);
+      // The rank slot is consumed, so the walk advances past it rather than stalling.
+      expect(result.nextOffset).toBe(7);
+      expect(getEnrichment(ctx).notice).toMatch(/exact-descriptor match/);
+      expect(getEnrichment(ctx).notice).toMatch(/Continue with offset 7/);
+      // Not the overshoot guidance — there are more records to read.
+      expect(getEnrichment(ctx).notice).not.toMatch(/Reset offset to 0/);
+    });
+  });
+
+  it('formats output with the offset and next-page hint', () => {
     const blocks = lookupMeshTool.format!({
       query: 'Neoplasms',
+      offset: 10,
+      nextOffset: 20,
       results: [
         {
           entrezUid: '68009369',
@@ -304,13 +617,17 @@ describe('lookupMeshTool', () => {
     expect(blocks[0]?.text).toContain('D009369');
     expect(blocks[0]?.text).toContain('Entrez UID');
     expect(blocks[0]?.text).toContain('68009369');
+    expect(blocks[0]?.text).toContain('at offset **10**');
+    expect(blocks[0]?.text).toContain('`offset: 20`');
   });
 
   it('renders empty results; the recovery notice is enrichment, not format output', () => {
     const blocks = lookupMeshTool.format!({
       query: 'xyznonexistent',
+      offset: 0,
       results: [],
     });
-    expect(blocks[0]?.text).toContain('Found **0** result(s).');
+    expect(blocks[0]?.text).toContain('Found **0** result(s) at offset **0**.');
+    expect(blocks[0]?.text).not.toContain('offset:');
   });
 });
