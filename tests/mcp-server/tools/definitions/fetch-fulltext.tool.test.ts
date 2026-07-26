@@ -2007,6 +2007,558 @@ describe('fetchFulltextTool', () => {
     });
   });
 
+  describe('character budget (issue #81)', () => {
+    /** Stage a single PMC article with the given body sections. */
+    function stagePmcArticle(sections: unknown[]) {
+      mockParsePmcArticle.mockReturnValue({
+        pmcId: 'PMC81',
+        pmcUrl: 'https://www.ncbi.nlm.nih.gov/pmc/articles/PMC81/',
+        pmid: '4242',
+        doi: '10.1000/budget',
+        title: 'Budgeted Article',
+        sections,
+      });
+      mockEFetch.mockResolvedValue([{ 'pmc-articleset': [{ article: [] }] }]);
+    }
+
+    function pmcSections(result: Awaited<ReturnType<typeof fetchFulltextTool.handler>>) {
+      const article = result.articles[0];
+      if (article?.source !== 'pmc') throw new Error('expected a pmc article');
+      return article.sections;
+    }
+
+    function stageUnpaywallBody(content: string) {
+      mockIdConvert.mockResolvedValue([{ 'requested-id': '42', pmid: '42' }]);
+      mockEFetchBy({ pubmedDois: { '42': '10.1000/example' } });
+      mockGetUnpaywallService.mockReturnValue({
+        resolve: mockUnpaywallResolve,
+        fetchContent: mockUnpaywallFetchContent,
+      });
+      mockUnpaywallResolve.mockResolvedValue({
+        kind: 'found',
+        location: { url: 'https://repo.example.org/paper' },
+      });
+      mockUnpaywallFetchContent.mockResolvedValue({
+        kind: 'html',
+        fetchedUrl: 'https://repo.example.org/paper',
+        body: '<html><body>Long</body></html>',
+      });
+      mockHtmlExtract.mockResolvedValue({ title: 'A Paper', content });
+    }
+
+    it('returns the full body and no truncation metadata when no budget is requested', async () => {
+      stagePmcArticle([{ title: 'Introduction', text: 'A'.repeat(5000) }]);
+
+      const ctx = createMockContext();
+      const input = fetchFulltextTool.input.parse({ pmcids: ['PMC81'] });
+      const result = await fetchFulltextTool.handler(input, ctx);
+
+      expect(result.truncation).toBeUndefined();
+      expect(pmcSections(result)[0]?.text).toHaveLength(5000);
+      expect(getEnrichment(ctx).notice).toBeUndefined();
+    });
+
+    it('leaves the response untouched when the body exactly meets the budget', async () => {
+      stagePmcArticle([{ title: 'Introduction', text: 'A'.repeat(100) }]);
+
+      const ctx = createMockContext();
+      const input = fetchFulltextTool.input.parse({ pmcids: ['PMC81'], maxCharacters: 100 });
+      const result = await fetchFulltextTool.handler(input, ctx);
+
+      expect(result.truncation).toBeUndefined();
+      expect(pmcSections(result)[0]?.text).toHaveLength(100);
+    });
+
+    it('truncates and reports counts when the body exceeds the budget by one character', async () => {
+      stagePmcArticle([{ title: 'Introduction', text: 'A'.repeat(101) }]);
+
+      const ctx = createMockContext();
+      const input = fetchFulltextTool.input.parse({ pmcids: ['PMC81'], maxCharacters: 100 });
+      const result = await fetchFulltextTool.handler(input, ctx);
+
+      expect(pmcSections(result)[0]?.text).toHaveLength(100);
+      expect(result.truncation).toEqual({
+        mode: 'truncate',
+        maxCharacters: 100,
+        originalCharacters: 101,
+        returnedCharacters: 100,
+        omittedSections: 0,
+        articles: [
+          {
+            id: 'PMC81',
+            source: 'pmc',
+            originalCharacters: 101,
+            returnedCharacters: 100,
+            sections: [
+              {
+                title: 'Introduction',
+                originalCharacters: 101,
+                returnedCharacters: 100,
+                truncated: true,
+              },
+            ],
+          },
+        ],
+      });
+
+      const notice = getEnrichment(ctx).notice;
+      expect(notice).toContain('100 of 101 body characters');
+      expect(notice).toContain('truncate mode');
+    });
+
+    it('drops sections past an exhausted budget and counts them as omitted', async () => {
+      stagePmcArticle([
+        { title: 'Introduction', text: 'A'.repeat(500) },
+        { title: 'Methods', text: 'B'.repeat(300) },
+      ]);
+
+      const ctx = createMockContext();
+      const input = fetchFulltextTool.input.parse({ pmcids: ['PMC81'], maxCharacters: 200 });
+      const result = await fetchFulltextTool.handler(input, ctx);
+
+      const sections = pmcSections(result);
+      expect(sections).toHaveLength(1);
+      expect(sections[0]?.title).toBe('Introduction');
+      expect(sections[0]?.text).toBe('A'.repeat(200));
+      expect(result.truncation?.omittedSections).toBe(1);
+      // The dropped section still reports its heading and original size, so the
+      // caller can see what exists without receiving it.
+      expect(result.truncation?.articles[0]?.sections).toEqual([
+        {
+          title: 'Introduction',
+          originalCharacters: 500,
+          returnedCharacters: 200,
+          truncated: true,
+        },
+        { title: 'Methods', originalCharacters: 300, returnedCharacters: 0, truncated: true },
+      ]);
+      expect(getEnrichment(ctx).notice).toContain('1 section(s) were dropped');
+    });
+
+    it('lets maxCharactersPerSection cap a section the total budget would have allowed', async () => {
+      stagePmcArticle([
+        { title: 'Introduction', text: 'A'.repeat(500) },
+        { title: 'Methods', text: 'B'.repeat(500) },
+      ]);
+
+      const ctx = createMockContext();
+      const input = fetchFulltextTool.input.parse({
+        pmcids: ['PMC81'],
+        maxCharacters: 600,
+        maxCharactersPerSection: 250,
+      });
+      const result = await fetchFulltextTool.handler(input, ctx);
+
+      expect(pmcSections(result).map((s) => s.text.length)).toEqual([250, 250]);
+      expect(result.truncation?.returnedCharacters).toBe(500);
+      expect(result.truncation?.omittedSections).toBe(0);
+      expect(result.truncation?.maxCharactersPerSection).toBe(250);
+    });
+
+    it('spends the per-section budget across a section and its subsections in order', async () => {
+      stagePmcArticle([
+        {
+          title: 'Results',
+          text: 'A'.repeat(60),
+          subsections: [
+            { title: 'Cohort', text: 'B'.repeat(60) },
+            { title: 'Outcomes', text: 'C'.repeat(60) },
+          ],
+        },
+      ]);
+
+      const ctx = createMockContext();
+      const input = fetchFulltextTool.input.parse({
+        pmcids: ['PMC81'],
+        maxCharactersPerSection: 100,
+      });
+      const result = await fetchFulltextTool.handler(input, ctx);
+
+      const section = pmcSections(result)[0];
+      expect(section?.text).toHaveLength(60);
+      expect(section?.subsections?.map((s) => s.text.length)).toEqual([40, 0]);
+      expect(section?.subsections?.map((s) => s.title)).toEqual(['Cohort', 'Outcomes']);
+      expect(result.truncation?.articles[0]?.sections).toEqual([
+        { title: 'Results', originalCharacters: 180, returnedCharacters: 100, truncated: true },
+      ]);
+    });
+
+    it('outline mode keeps every heading and identifier with an even share of the budget', async () => {
+      stagePmcArticle([
+        { title: 'Introduction', text: 'A'.repeat(500) },
+        { title: 'Methods', text: 'B'.repeat(500) },
+        { title: 'Results', text: 'C'.repeat(500) },
+      ]);
+
+      const ctx = createMockContext();
+      const input = fetchFulltextTool.input.parse({
+        pmcids: ['PMC81'],
+        maxCharacters: 300,
+        overflowMode: 'outline',
+      });
+      const result = await fetchFulltextTool.handler(input, ctx);
+
+      const article = result.articles[0];
+      expect(article?.source).toBe('pmc');
+      if (article?.source === 'pmc') {
+        expect(article.pmcId).toBe('PMC81');
+        expect(article.pmid).toBe('4242');
+        expect(article.doi).toBe('10.1000/budget');
+        expect(article.title).toBe('Budgeted Article');
+        expect(article.sections.map((s) => s.title)).toEqual([
+          'Introduction',
+          'Methods',
+          'Results',
+        ]);
+        expect(article.sections.map((s) => s.text.length)).toEqual([100, 100, 100]);
+      }
+      expect(result.truncation?.mode).toBe('outline');
+      expect(result.truncation?.omittedSections).toBe(0);
+      expect(result.truncation?.returnedCharacters).toBe(300);
+    });
+
+    it('outline mode reallocates the budget a short section did not need', async () => {
+      stagePmcArticle([
+        { title: 'Abstract', text: 'A'.repeat(100) },
+        { title: 'Methods', text: 'B'.repeat(1000) },
+        { title: 'Results', text: 'C'.repeat(1000) },
+      ]);
+
+      const ctx = createMockContext();
+      const input = fetchFulltextTool.input.parse({
+        pmcids: ['PMC81'],
+        maxCharacters: 900,
+        overflowMode: 'outline',
+      });
+      const result = await fetchFulltextTool.handler(input, ctx);
+
+      // An even split alone would give 300 each and strand 200 characters on the
+      // 100-character section; the leftover goes back to the sections still capped.
+      expect(pmcSections(result).map((s) => s.text.length)).toEqual([100, 400, 400]);
+      expect(result.truncation?.returnedCharacters).toBe(900);
+    });
+
+    it('applies the budget after the sections and maxSections filters', async () => {
+      stagePmcArticle([
+        { title: 'Introduction', text: 'A'.repeat(500) },
+        { title: 'Methods', text: 'B'.repeat(500) },
+        { title: 'Discussion', text: 'C'.repeat(500) },
+      ]);
+
+      const ctx = createMockContext();
+      const input = fetchFulltextTool.input.parse({
+        pmcids: ['PMC81'],
+        sections: ['methods', 'discussion'],
+        maxSections: 1,
+        maxCharacters: 10,
+      });
+      const result = await fetchFulltextTool.handler(input, ctx);
+
+      const sections = pmcSections(result);
+      expect(sections.map((s) => s.title)).toEqual(['Methods']);
+      expect(sections[0]?.text).toBe('B'.repeat(10));
+      // Only the surviving section is accounted for — the budget never sees the
+      // sections the semantic filters already removed.
+      expect(result.truncation?.articles[0]?.sections).toEqual([
+        { title: 'Methods', originalCharacters: 500, returnedCharacters: 10, truncated: true },
+      ]);
+    });
+
+    it('budgets a Europe PMC-served body and rolls its accounting into the response', async () => {
+      // The EPMC tier budgets through its own accumulation path — the per-article
+      // accounting and the omitted-section count travel back out of the stage
+      // rather than being collected inline like the PMC tier's.
+      mockGetEpmcService.mockReturnValue({
+        search: mockEpmcSearch,
+        fullTextXml: mockEpmcFullTextXml,
+        parseFullTextXml: mockEpmcParseFullTextXml,
+      });
+      mockIdConvert.mockResolvedValue([{ 'requested-id': '42', pmid: '42' }]);
+      mockEpmcSearch.mockResolvedValue({
+        hits: [{ id: '42', source: 'MED', pmid: '42', pmcid: 'PMC42' }],
+        hitCount: 1,
+        cursorMark: '*',
+      });
+      mockEpmcFullTextXml.mockResolvedValue({
+        kind: 'found',
+        xml: '<article/>',
+        epmcId: 'PMC42',
+        source: 'MED',
+      });
+      mockEpmcParseFullTextXml.mockReturnValue({ article: [{ body: [] }] });
+      mockParsePmcArticle.mockReturnValue({
+        pmcId: 'PMC42',
+        pmcUrl: 'https://www.ncbi.nlm.nih.gov/pmc/articles/PMC42/',
+        title: 'EPMC-served article',
+        sections: [
+          { title: 'Background', text: 'A'.repeat(500) },
+          { title: 'Methods', text: 'B'.repeat(500) },
+        ],
+      });
+
+      const ctx = createMockContext();
+      const input = fetchFulltextTool.input.parse({ pmids: ['42'], maxCharacters: 200 });
+      const result = await fetchFulltextTool.handler(input, ctx);
+
+      const article = result.articles[0];
+      expect(article?.source).toBe('pmc');
+      if (article?.source === 'pmc') {
+        expect(article.viaSource).toBe('europepmc');
+        expect(article.sections).toHaveLength(1);
+        expect(article.sections[0]?.text).toBe('A'.repeat(200));
+      }
+      expect(result.truncation).toEqual({
+        mode: 'truncate',
+        maxCharacters: 200,
+        originalCharacters: 1000,
+        returnedCharacters: 200,
+        omittedSections: 1,
+        articles: [
+          {
+            id: 'PMC42',
+            source: 'pmc',
+            originalCharacters: 1000,
+            returnedCharacters: 200,
+            sections: [
+              {
+                title: 'Background',
+                originalCharacters: 500,
+                returnedCharacters: 200,
+                truncated: true,
+              },
+              { title: 'Methods', originalCharacters: 500, returnedCharacters: 0, truncated: true },
+            ],
+          },
+        ],
+      });
+      expect(getEnrichment(ctx).notice).toContain('200 of 1000 body characters');
+    });
+
+    it('names only the budget the request set in the truncation notice', async () => {
+      stagePmcArticle([{ title: 'Introduction', text: 'A'.repeat(500) }]);
+
+      const ctx = createMockContext();
+      const input = fetchFulltextTool.input.parse({
+        pmcids: ['PMC81'],
+        maxCharactersPerSection: 100,
+      });
+      await fetchFulltextTool.handler(input, ctx);
+
+      const notice = getEnrichment(ctx).notice;
+      expect(notice).toContain('raise `maxCharactersPerSection` or narrow `sections`');
+      // `maxCharacters` was never set — pointing at it would send the caller to
+      // a knob that does not exist on this request.
+      expect(notice).not.toContain('`maxCharacters`');
+    });
+
+    it('caps an Unpaywall body with maxCharacters', async () => {
+      stageUnpaywallBody('Z'.repeat(4000));
+
+      const result = await fetchFulltextTool.handler(
+        fetchFulltextTool.input.parse({ pmids: ['42'], maxCharacters: 250 }),
+        createMockContext(),
+      );
+
+      const article = result.articles[0];
+      expect(article?.source).toBe('unpaywall');
+      if (article?.source === 'unpaywall') expect(article.content).toBe('Z'.repeat(250));
+      expect(result.truncation?.articles).toEqual([
+        { id: '42', source: 'unpaywall', originalCharacters: 4000, returnedCharacters: 250 },
+      ]);
+    });
+
+    it('leaves an Unpaywall body alone under maxCharactersPerSection, which is pmc-only', async () => {
+      stageUnpaywallBody('Z'.repeat(4000));
+
+      const result = await fetchFulltextTool.handler(
+        fetchFulltextTool.input.parse({ pmids: ['42'], maxCharactersPerSection: 250 }),
+        createMockContext(),
+      );
+
+      const article = result.articles[0];
+      if (article?.source === 'unpaywall') expect(article.content).toHaveLength(4000);
+      expect(result.truncation).toBeUndefined();
+    });
+
+    it('budgets a huge PMC section and an Unpaywall body in one response, on both surfaces', async () => {
+      mockIdConvert.mockResolvedValue([
+        { 'requested-id': '1', pmid: '1', pmcid: 'PMC100' },
+        { 'requested-id': '2', pmid: '2' },
+      ]);
+      mockParsePmcArticle.mockReturnValue({
+        pmcId: 'PMC100',
+        pmcUrl: 'https://www.ncbi.nlm.nih.gov/pmc/articles/PMC100/',
+        pmid: '1',
+        title: 'PMC Hit',
+        sections: [
+          { title: 'Introduction', text: 'A'.repeat(9000) },
+          { title: 'Methods', text: 'B'.repeat(9000) },
+        ],
+      });
+      mockEFetchBy({
+        pmc: [{ 'pmc-articleset': [{ article: [] }] }],
+        pubmedDois: { '2': '10.1000/two' },
+      });
+      mockGetUnpaywallService.mockReturnValue({
+        resolve: mockUnpaywallResolve,
+        fetchContent: mockUnpaywallFetchContent,
+      });
+      mockUnpaywallResolve.mockResolvedValue({
+        kind: 'found',
+        location: { url: 'https://repo.example.org/two' },
+      });
+      mockUnpaywallFetchContent.mockResolvedValue({
+        kind: 'html',
+        fetchedUrl: 'https://repo.example.org/two',
+        body: '<html><body>Two</body></html>',
+      });
+      mockHtmlExtract.mockResolvedValue({ title: 'Two', content: 'Z'.repeat(7000) });
+
+      const ctx = createMockContext();
+      const input = fetchFulltextTool.input.parse({ pmids: ['1', '2'], maxCharacters: 200 });
+      const result = await fetchFulltextTool.handler(input, ctx);
+
+      // structuredContent surface.
+      expect(result.totalReturned).toBe(2);
+      expect(result.truncation?.originalCharacters).toBe(25000);
+      expect(result.truncation?.returnedCharacters).toBe(400);
+      expect(result.truncation?.omittedSections).toBe(1);
+      expect(result.truncation?.articles.map((a) => [a.id, a.source])).toEqual([
+        ['PMC100', 'pmc'],
+        ['2', 'unpaywall'],
+      ]);
+      const pmc = result.articles[0];
+      if (pmc?.source === 'pmc') {
+        expect(pmc.sections).toHaveLength(1);
+        expect(pmc.sections[0]?.text).toHaveLength(200);
+      }
+      const oa = result.articles[1];
+      if (oa?.source === 'unpaywall') expect(oa.content).toHaveLength(200);
+
+      // content[] surface — the same accounting has to reach clients that never
+      // read structuredContent.
+      const text = fetchFulltextTool.format!(result)[0]?.text ?? '';
+      expect(text).toContain('**Truncated (truncate mode):** 400 of 25000 body characters');
+      expect(text).toContain('Budget applied: maxCharacters 200');
+      expect(text).toContain('- PMC100 (pmc): 200 of 18000 characters');
+      expect(text).toContain('Introduction — 200 of 9000 characters (truncated: true)');
+      expect(text).toContain('Methods — 0 of 9000 characters (truncated: true)');
+      expect(text).toContain('- 2 (unpaywall): 200 of 7000 characters');
+      expect(text).toContain('Body shortened to fit the requested character budget');
+      expect(text).not.toContain('A'.repeat(201));
+      expect(text).not.toContain('Z'.repeat(201));
+    });
+
+    describe('surrogate-safe cuts (issue #93)', () => {
+      /** DNA emoji U+1F9EC — one code point, two UTF-16 code units. */
+      const ASTRAL = '\u{1F9EC}';
+
+      it('backs a section cut off a code unit rather than splitting a surrogate pair', async () => {
+        // Code unit 99 is the high surrogate, so a 100-unit cut would split it.
+        stagePmcArticle([
+          { title: 'Introduction', text: `${'A'.repeat(99)}${ASTRAL}${'B'.repeat(50)}` },
+        ]);
+
+        const ctx = createMockContext();
+        const input = fetchFulltextTool.input.parse({ pmcids: ['PMC81'], maxCharacters: 100 });
+        const result = await fetchFulltextTool.handler(input, ctx);
+
+        const text = pmcSections(result)[0]?.text ?? '';
+        expect(text).toBe('A'.repeat(99));
+        expect(text.isWellFormed()).toBe(true);
+        // One under the allowance, and the counts report what came back.
+        expect(result.truncation?.returnedCharacters).toBe(99);
+        expect(result.truncation?.articles[0]?.sections?.[0]).toEqual({
+          title: 'Introduction',
+          originalCharacters: 151,
+          returnedCharacters: 99,
+          truncated: true,
+        });
+      });
+
+      it('keeps an astral character whole when the cut lands just after it', async () => {
+        // Code units 98–99 are the pair, so a 100-unit cut ends on the low half.
+        stagePmcArticle([
+          { title: 'Introduction', text: `${'A'.repeat(98)}${ASTRAL}${'B'.repeat(50)}` },
+        ]);
+
+        const result = await fetchFulltextTool.handler(
+          fetchFulltextTool.input.parse({ pmcids: ['PMC81'], maxCharacters: 100 }),
+          createMockContext(),
+        );
+
+        const text = pmcSections(result)[0]?.text ?? '';
+        expect(text).toBe(`${'A'.repeat(98)}${ASTRAL}`);
+        expect(text.isWellFormed()).toBe(true);
+        expect(result.truncation?.returnedCharacters).toBe(100);
+      });
+
+      it('spends the full allowance when the cut lands just before an astral character', async () => {
+        stagePmcArticle([
+          { title: 'Introduction', text: `${'A'.repeat(100)}${ASTRAL}${'B'.repeat(50)}` },
+        ]);
+
+        const result = await fetchFulltextTool.handler(
+          fetchFulltextTool.input.parse({ pmcids: ['PMC81'], maxCharacters: 100 }),
+          createMockContext(),
+        );
+
+        const text = pmcSections(result)[0]?.text ?? '';
+        expect(text).toBe('A'.repeat(100));
+        expect(text.isWellFormed()).toBe(true);
+        expect(result.truncation?.returnedCharacters).toBe(100);
+      });
+
+      it('hands a section its leftover code unit when the previous field backed off', async () => {
+        // The section's own text backs off one unit; that unit is still available
+        // to the subsection, so the pair spends the allowance without exceeding it.
+        stagePmcArticle([
+          {
+            title: 'Introduction',
+            text: `${'A'.repeat(99)}${ASTRAL}${'B'.repeat(50)}`,
+            subsections: [{ title: 'Background', text: 'C'.repeat(80) }],
+          },
+        ]);
+
+        const result = await fetchFulltextTool.handler(
+          fetchFulltextTool.input.parse({
+            pmcids: ['PMC81'],
+            maxCharacters: 100,
+            maxCharactersPerSection: 100,
+          }),
+          createMockContext(),
+        );
+
+        const section = pmcSections(result)[0];
+        expect(section?.text).toBe('A'.repeat(99));
+        expect(section?.subsections?.[0]?.text).toBe('C');
+        const returned =
+          (section?.text.length ?? 0) + (section?.subsections?.[0]?.text.length ?? 0);
+        expect(returned).toBe(100);
+        expect(result.truncation?.returnedCharacters).toBe(100);
+      });
+
+      it('backs an Unpaywall body cut off a code unit and reports the real length', async () => {
+        stageUnpaywallBody(`${'Z'.repeat(249)}${ASTRAL}${'Z'.repeat(200)}`);
+
+        const result = await fetchFulltextTool.handler(
+          fetchFulltextTool.input.parse({ pmids: ['42'], maxCharacters: 250 }),
+          createMockContext(),
+        );
+
+        const article = result.articles[0];
+        expect(article?.source).toBe('unpaywall');
+        if (article?.source === 'unpaywall') {
+          expect(article.content).toBe('Z'.repeat(249));
+          expect(article.content.isWellFormed()).toBe(true);
+        }
+        expect(result.truncation?.articles).toEqual([
+          { id: '42', source: 'unpaywall', originalCharacters: 451, returnedCharacters: 249 },
+        ]);
+      });
+    });
+  });
+
   describe('format()', () => {
     it('formats a PMC article with full metadata', () => {
       const blocks = fetchFulltextTool.format!({
