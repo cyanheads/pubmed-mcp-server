@@ -241,11 +241,7 @@ describe('fetchFulltextTool', () => {
               detail: 'PMC EFetch response missing pmc-articleset wrapper',
             },
             { tier: 'europepmc', outcome: 'not-attempted', detail: 'EUROPEPMC_ENABLED=false' },
-            {
-              tier: 'unpaywall',
-              outcome: 'not-attempted',
-              detail: 'pmcids input does not resolve a DOI for Unpaywall',
-            },
+            { tier: 'unpaywall', outcome: 'not-attempted', detail: 'UNPAYWALL_EMAIL is not set' },
           ],
         },
       ]);
@@ -267,11 +263,7 @@ describe('fetchFulltextTool', () => {
           triedTiers: [
             { tier: 'pmc', outcome: 'service-error', detail: 'NCBI 503' },
             { tier: 'europepmc', outcome: 'not-attempted', detail: 'EUROPEPMC_ENABLED=false' },
-            {
-              tier: 'unpaywall',
-              outcome: 'not-attempted',
-              detail: 'pmcids input does not resolve a DOI for Unpaywall',
-            },
+            { tier: 'unpaywall', outcome: 'not-attempted', detail: 'UNPAYWALL_EMAIL is not set' },
           ],
         },
         {
@@ -281,11 +273,7 @@ describe('fetchFulltextTool', () => {
           triedTiers: [
             { tier: 'pmc', outcome: 'service-error', detail: 'NCBI 503' },
             { tier: 'europepmc', outcome: 'not-attempted', detail: 'EUROPEPMC_ENABLED=false' },
-            {
-              tier: 'unpaywall',
-              outcome: 'not-attempted',
-              detail: 'pmcids input does not resolve a DOI for Unpaywall',
-            },
+            { tier: 'unpaywall', outcome: 'not-attempted', detail: 'UNPAYWALL_EMAIL is not set' },
           ],
         },
       ]);
@@ -308,11 +296,7 @@ describe('fetchFulltextTool', () => {
           triedTiers: [
             { tier: 'pmc', outcome: 'miss' },
             { tier: 'europepmc', outcome: 'not-attempted', detail: 'EUROPEPMC_ENABLED=false' },
-            {
-              tier: 'unpaywall',
-              outcome: 'not-attempted',
-              detail: 'pmcids input does not resolve a DOI for Unpaywall',
-            },
+            { tier: 'unpaywall', outcome: 'not-attempted', detail: 'UNPAYWALL_EMAIL is not set' },
           ],
         },
       ]);
@@ -323,7 +307,7 @@ describe('fetchFulltextTool', () => {
         pmcId: 'PMC111',
         pmcUrl: 'https://www.ncbi.nlm.nih.gov/pmc/articles/PMC111/',
         title: 'Direct PMC Article',
-        sections: [],
+        sections: [{ title: 'Introduction', text: 'Body.' }],
       });
       mockEFetch.mockResolvedValue([{ 'pmc-articleset': [{ article: [] }] }]);
 
@@ -345,11 +329,7 @@ describe('fetchFulltextTool', () => {
       const expectedPmcMissChain = [
         { tier: 'pmc', outcome: 'miss' },
         { tier: 'europepmc', outcome: 'not-attempted', detail: 'EUROPEPMC_ENABLED=false' },
-        {
-          tier: 'unpaywall',
-          outcome: 'not-attempted',
-          detail: 'pmcids input does not resolve a DOI for Unpaywall',
-        },
+        { tier: 'unpaywall', outcome: 'not-attempted', detail: 'UNPAYWALL_EMAIL is not set' },
       ];
       expect(result.unavailable).toEqual([
         { id: 'PMC222', idType: 'pmcid', reason: 'not-found', triedTiers: expectedPmcMissChain },
@@ -542,7 +522,7 @@ describe('fetchFulltextTool', () => {
         pmcId: 'PMC9999',
         pmcUrl: 'https://www.ncbi.nlm.nih.gov/pmc/articles/PMC9999/',
         title: 'EPMC-served PMC article',
-        sections: [],
+        sections: [{ title: 'Introduction', text: 'Body.' }],
       });
       mockEFetch.mockResolvedValue([{ 'pmc-articleset': [] }]);
 
@@ -655,7 +635,7 @@ describe('fetchFulltextTool', () => {
         pmcId: 'PMC42',
         pmcUrl: 'https://www.ncbi.nlm.nih.gov/pmc/articles/PMC42/',
         title: 'EPMC-recovered article',
-        sections: [],
+        sections: [{ title: 'Introduction', text: 'Body.' }],
       });
 
       const ctx = createMockContext();
@@ -1048,7 +1028,7 @@ describe('fetchFulltextTool', () => {
         pmcUrl: 'https://www.ncbi.nlm.nih.gov/pmc/articles/PMC100/',
         pmid: '1',
         title: 'PMC Hit',
-        sections: [],
+        sections: [{ title: 'Introduction', text: 'Body.' }],
       });
       mockEFetchBy({
         pmc: [{ 'pmc-articleset': [{ article: [] }] }],
@@ -1315,7 +1295,7 @@ describe('fetchFulltextTool', () => {
         pmcUrl: 'https://www.ncbi.nlm.nih.gov/pmc/articles/PMC500/',
         doi: '10.1/inpmc',
         title: 'In PMC',
-        sections: [],
+        sections: [{ title: 'Introduction', text: 'Body.' }],
       });
       mockEFetch.mockResolvedValue([{ 'pmc-articleset': [{ article: [] }] }]);
       mockEpmcSearch.mockResolvedValue({ hits: [], hitCount: 0, cursorMark: '*' });
@@ -1494,8 +1474,10 @@ describe('fetchFulltextTool', () => {
       expect(getEnrichment(ctx).notice).toBeUndefined();
     });
 
-    it('does not emit a notice when the article had no body sections upstream', async () => {
-      // Empty body is an upstream absence, not a filter miss — no notice fires.
+    it('does not report a section-filter miss when the article had no body sections upstream', async () => {
+      // Empty body is an upstream absence, not a filter miss. The record is
+      // demoted as metadata-only (#86), so the notice names that recovery rather
+      // than the section filter.
       mockParsePmcArticle.mockReturnValue({
         pmcId: 'PMC3531190',
         pmcUrl: 'https://www.ncbi.nlm.nih.gov/pmc/articles/PMC3531190/',
@@ -1511,7 +1493,9 @@ describe('fetchFulltextTool', () => {
       });
       await fetchFulltextTool.handler(input, ctx);
 
-      expect(getEnrichment(ctx).notice).toBeUndefined();
+      const notice = getEnrichment(ctx).notice;
+      expect(notice).not.toMatch(/section filter/i);
+      expect(notice).toContain('front matter');
     });
 
     it('emits the notice for an EPMC-served article whose sections filter misses', async () => {
@@ -1559,6 +1543,467 @@ describe('fetchFulltextTool', () => {
       expect(notice).toBeDefined();
       expect(notice).toContain('NoSuchSection');
       expect(notice).toContain('PMC42');
+    });
+  });
+
+  describe('Europe PMC query shapes (issue #85)', () => {
+    function withEpmcMock() {
+      mockGetEpmcService.mockReturnValue({
+        search: mockEpmcSearch,
+        fullTextXml: mockEpmcFullTextXml,
+        parseFullTextXml: mockEpmcParseFullTextXml,
+      });
+    }
+
+    it('searches by unquoted EXT_ID on the pmids branch', async () => {
+      // Europe PMC matches zero records for `EXT_ID:"<pmid>" AND SRC:MED`; the
+      // quotes only survive while no `AND SRC:` clause follows.
+      withEpmcMock();
+      mockIdConvert.mockResolvedValue([{ 'requested-id': '23193287', pmid: '23193287' }]);
+      mockEFetchBy({ pubmedDois: {} });
+      mockEpmcSearch.mockResolvedValue({ hits: [], hitCount: 0, cursorMark: '*' });
+
+      const ctx = createMockContext();
+      const input = fetchFulltextTool.input.parse({ pmids: ['23193287'] });
+      await fetchFulltextTool.handler(input, ctx);
+
+      expect(mockEpmcSearch).toHaveBeenCalledWith(
+        expect.objectContaining({ query: 'EXT_ID:23193287 AND SRC:MED' }),
+      );
+    });
+
+    it('searches by unquoted PMCID with no source filter on the pmcids branch', async () => {
+      // `AND SRC:PMC` excludes the record it is meant to find — EPMC's canonical
+      // entry for a PMC-indexed article has `source: MED` and carries the PMCID
+      // as a field.
+      withEpmcMock();
+      mockEFetch.mockResolvedValue([{ 'pmc-articleset': [] }]);
+      mockEpmcSearch.mockResolvedValue({ hits: [], hitCount: 0, cursorMark: '*' });
+
+      const ctx = createMockContext();
+      const input = fetchFulltextTool.input.parse({ pmcids: ['PMC3531190'] });
+      await fetchFulltextTool.handler(input, ctx);
+
+      expect(mockEpmcSearch).toHaveBeenCalledWith(
+        expect.objectContaining({ query: 'PMCID:PMC3531190' }),
+      );
+      const query = mockEpmcSearch.mock.calls[0]?.[0]?.query as string;
+      expect(query).not.toContain('SRC:');
+      expect(query).not.toContain('"');
+    });
+
+    it('keeps the DOI quoted on the dois branch', async () => {
+      // DOIs carry slashes and dots, so `DOI:"..."` is the shape that matches.
+      withEpmcMock();
+      mockIdConvert.mockResolvedValue([
+        { 'requested-id': '10.1523/JNEUROSCI.3043-08.2008', errmsg: 'Identifier not found in PMC' },
+      ]);
+      mockEpmcSearch.mockResolvedValue({ hits: [], hitCount: 0, cursorMark: '*' });
+
+      const ctx = createMockContext();
+      const input = fetchFulltextTool.input.parse({ dois: ['10.1523/JNEUROSCI.3043-08.2008'] });
+      await fetchFulltextTool.handler(input, ctx);
+
+      expect(mockEpmcSearch).toHaveBeenCalledWith(
+        expect.objectContaining({ query: 'DOI:"10.1523/JNEUROSCI.3043-08.2008"' }),
+      );
+    });
+  });
+
+  describe('metadata-only records (issue #86)', () => {
+    function withEpmcAndUnpaywall() {
+      mockGetEpmcService.mockReturnValue({
+        search: mockEpmcSearch,
+        fullTextXml: mockEpmcFullTextXml,
+        parseFullTextXml: mockEpmcParseFullTextXml,
+      });
+      mockGetUnpaywallService.mockReturnValue({
+        resolve: mockUnpaywallResolve,
+        fetchContent: mockUnpaywallFetchContent,
+      });
+    }
+
+    /** PMC EFetch shape for a publisher that blocks full-text XML: an
+     *  `<article>` with populated front matter and no `<body>`. */
+    function withBodylessPmcArticle(pmcId: string, doi: string) {
+      mockParsePmcArticle.mockReturnValue({
+        pmcId,
+        pmcUrl: `https://www.ncbi.nlm.nih.gov/pmc/articles/${pmcId}/`,
+        doi,
+        title: 'Publisher blocks XML download',
+        abstract: 'Abstract text.',
+        sections: [],
+      });
+      mockEFetch.mockResolvedValue([{ 'pmc-articleset': [{ article: [] }] }]);
+    }
+
+    it('does not count a bodyless PMC article as a hit and recovers it via Unpaywall', async () => {
+      withEpmcAndUnpaywall();
+      withBodylessPmcArticle('PMC2600426', '10.1523/JNEUROSCI.3043-08.2008');
+      mockEpmcSearch.mockResolvedValue({
+        hits: [
+          {
+            id: '19052211',
+            source: 'MED',
+            pmid: '19052211',
+            pmcid: 'PMC2600426',
+            doi: '10.1523/jneurosci.3043-08.2008',
+          },
+        ],
+        hitCount: 1,
+        cursorMark: '*',
+      });
+      mockEpmcFullTextXml.mockResolvedValue({ kind: 'not-available', reason: 'no XML' });
+      mockUnpaywallResolve.mockResolvedValue({
+        kind: 'found',
+        location: {
+          url: 'https://www.jneurosci.org/content/28/49/13202',
+          url_for_pdf: 'https://www.jneurosci.org/content/jneuro/28/49/13202.full.pdf',
+          host_type: 'publisher',
+          version: 'publishedVersion',
+        },
+      });
+      mockUnpaywallFetchContent.mockResolvedValue({
+        kind: 'pdf',
+        fetchedUrl: 'https://www.jneurosci.org/content/jneuro/28/49/13202.full.pdf',
+        body: new Uint8Array([0x25, 0x50, 0x44, 0x46]),
+      });
+      mockPdfExtractText.mockResolvedValue({ totalPages: 12, text: 'Recovered body text' });
+
+      const ctx = createMockContext();
+      const input = fetchFulltextTool.input.parse({ pmcids: ['PMC2600426'] });
+      const result = await fetchFulltextTool.handler(input, ctx);
+
+      expect(result.totalReturned).toBe(1);
+      const article = result.articles[0];
+      expect(article?.source).toBe('unpaywall');
+      if (article?.source === 'unpaywall') {
+        expect(article.content).toBe('Recovered body text');
+        expect(article.version).toBe('publishedVersion');
+      }
+      expect(result.unavailable).toBeUndefined();
+      // Recovered — the metadata-only notice is for records nothing recovers.
+      expect(getEnrichment(ctx).notice).toBeUndefined();
+    });
+
+    it('reports a bodyless PMC record as no-body with a recovery notice when nothing recovers it', async () => {
+      // EPMC and Unpaywall are both unconfigured, so the chain ends at PMC.
+      withBodylessPmcArticle('PMC2600426', '10.1523/JNEUROSCI.3043-08.2008');
+
+      const ctx = createMockContext();
+      const input = fetchFulltextTool.input.parse({ pmcids: ['PMC2600426'] });
+      const result = await fetchFulltextTool.handler(input, ctx);
+
+      expect(result.totalReturned).toBe(0);
+      expect(result.articles).toEqual([]);
+      expect(result.unavailable).toEqual([
+        {
+          id: 'PMC2600426',
+          idType: 'pmcid',
+          reason: 'no-body',
+          triedTiers: [
+            {
+              tier: 'pmc',
+              outcome: 'no-body',
+              detail: 'PMC returned front matter and abstract only, with no body sections',
+            },
+            { tier: 'europepmc', outcome: 'not-attempted', detail: 'EUROPEPMC_ENABLED=false' },
+            { tier: 'unpaywall', outcome: 'not-attempted', detail: 'UNPAYWALL_EMAIL is not set' },
+          ],
+        },
+      ]);
+
+      const notice = getEnrichment(ctx).notice;
+      expect(notice).toContain('PMC2600426');
+      expect(notice).toContain('pubmed_fetch_articles');
+    });
+
+    it('demotes a bodyless EPMC fullTextXML to no-body and continues the chain', async () => {
+      withEpmcAndUnpaywall();
+      mockIdConvert.mockResolvedValue([{ 'requested-id': '42', pmid: '42' }]);
+      mockEFetchBy({ pubmedDois: { '42': '10.1000/example' } });
+      mockEpmcSearch.mockResolvedValue({
+        hits: [{ id: '42', source: 'MED', pmid: '42', pmcid: 'PMC42', doi: '10.1000/example' }],
+        hitCount: 1,
+        cursorMark: '*',
+      });
+      mockEpmcFullTextXml.mockResolvedValue({
+        kind: 'found',
+        xml: '<article/>',
+        epmcId: 'PMC42',
+        source: 'MED',
+      });
+      mockEpmcParseFullTextXml.mockReturnValue({ article: [{ front: [] }] });
+      mockParsePmcArticle.mockReturnValue({
+        pmcId: 'PMC42',
+        pmcUrl: 'https://www.ncbi.nlm.nih.gov/pmc/articles/PMC42/',
+        title: 'EPMC front matter only',
+        sections: [],
+      });
+      mockUnpaywallResolve.mockResolvedValue({
+        kind: 'no-oa',
+        reason: 'No open-access copy indexed',
+      });
+
+      const ctx = createMockContext();
+      const input = fetchFulltextTool.input.parse({ pmids: ['42'] });
+      const result = await fetchFulltextTool.handler(input, ctx);
+
+      expect(result.totalReturned).toBe(0);
+      expect(result.unavailable?.[0]?.triedTiers).toEqual([
+        { tier: 'pmc', outcome: 'not-attempted', detail: 'PMID has no PMC counterpart' },
+        {
+          tier: 'europepmc',
+          outcome: 'no-body',
+          detail: 'EPMC fullTextXML carried front matter and abstract only, with no body sections',
+        },
+        { tier: 'unpaywall', outcome: 'no-oa', detail: 'No open-access copy indexed' },
+      ]);
+      expect(getEnrichment(ctx).notice).toContain('42');
+    });
+  });
+
+  describe('pmcids branch reaches Unpaywall (issue #88)', () => {
+    function withEpmcAndUnpaywall() {
+      mockGetEpmcService.mockReturnValue({
+        search: mockEpmcSearch,
+        fullTextXml: mockEpmcFullTextXml,
+        parseFullTextXml: mockEpmcParseFullTextXml,
+      });
+      mockGetUnpaywallService.mockReturnValue({
+        resolve: mockUnpaywallResolve,
+        fetchContent: mockUnpaywallFetchContent,
+      });
+    }
+
+    it('uses the DOI from the EPMC hit when EPMC has no fullTextXML', async () => {
+      withEpmcAndUnpaywall();
+      mockEFetch.mockResolvedValue([{ 'pmc-articleset': [] }]);
+      mockEpmcSearch.mockResolvedValue({
+        hits: [
+          {
+            id: '19052211',
+            source: 'MED',
+            pmid: '19052211',
+            pmcid: 'PMC2600426',
+            doi: '10.1523/jneurosci.3043-08.2008',
+          },
+        ],
+        hitCount: 1,
+        cursorMark: '*',
+      });
+      mockEpmcFullTextXml.mockResolvedValue({ kind: 'not-available', reason: 'no XML' });
+      mockUnpaywallResolve.mockResolvedValue({
+        kind: 'found',
+        location: { url: 'https://repo.example.org/paper' },
+      });
+      mockUnpaywallFetchContent.mockResolvedValue({
+        kind: 'html',
+        fetchedUrl: 'https://repo.example.org/paper',
+        body: '<html><body>Body</body></html>',
+      });
+      mockHtmlExtract.mockResolvedValue({ content: 'Body content' });
+
+      const ctx = createMockContext();
+      const input = fetchFulltextTool.input.parse({ pmcids: ['PMC2600426'] });
+      const result = await fetchFulltextTool.handler(input, ctx);
+
+      expect(mockUnpaywallResolve).toHaveBeenCalledWith(
+        '10.1523/jneurosci.3043-08.2008',
+        expect.any(AbortSignal),
+      );
+      // The EPMC hit already carried the DOI — no ID Converter round-trip.
+      expect(mockIdConvert).not.toHaveBeenCalled();
+      expect(result.totalReturned).toBe(1);
+      expect(result.articles[0]?.source).toBe('unpaywall');
+      expect(result.unavailable).toBeUndefined();
+    });
+
+    it('falls back to the PMC ID Converter when EPMC never resolved the record', async () => {
+      withEpmcAndUnpaywall();
+      mockEFetch.mockResolvedValue([{ 'pmc-articleset': [] }]);
+      mockEpmcSearch.mockResolvedValue({ hits: [], hitCount: 0, cursorMark: '*' });
+      mockIdConvert.mockResolvedValue([
+        {
+          'requested-id': 'PMC2600426',
+          pmcid: 'PMC2600426',
+          pmid: '19052211',
+          doi: '10.1523/JNEUROSCI.3043-08.2008',
+        },
+      ]);
+      mockUnpaywallResolve.mockResolvedValue({
+        kind: 'found',
+        location: { url_for_pdf: 'https://repo.example.org/paper.pdf' },
+      });
+      mockUnpaywallFetchContent.mockResolvedValue({
+        kind: 'pdf',
+        fetchedUrl: 'https://repo.example.org/paper.pdf',
+        body: new Uint8Array([0x25, 0x50, 0x44, 0x46]),
+      });
+      mockPdfExtractText.mockResolvedValue({ totalPages: 12, text: 'Paper text' });
+
+      const ctx = createMockContext();
+      const input = fetchFulltextTool.input.parse({ pmcids: ['PMC2600426'] });
+      const result = await fetchFulltextTool.handler(input, ctx);
+
+      expect(mockIdConvert).toHaveBeenCalledWith(
+        ['PMC2600426'],
+        'pmcid',
+        expect.objectContaining({ signal: expect.any(AbortSignal) }),
+      );
+      expect(mockUnpaywallResolve).toHaveBeenCalledWith(
+        '10.1523/JNEUROSCI.3043-08.2008',
+        expect.any(AbortSignal),
+      );
+      expect(result.totalReturned).toBe(1);
+      expect(result.articles[0]?.source).toBe('unpaywall');
+    });
+
+    it('keeps no-doi for a PMCID that resolves to no DOI', async () => {
+      withEpmcAndUnpaywall();
+      mockEFetch.mockResolvedValue([{ 'pmc-articleset': [] }]);
+      mockEpmcSearch.mockResolvedValue({ hits: [], hitCount: 0, cursorMark: '*' });
+      mockIdConvert.mockResolvedValue([{ 'requested-id': 'PMC999', pmcid: 'PMC999', pmid: '999' }]);
+
+      const ctx = createMockContext();
+      const input = fetchFulltextTool.input.parse({ pmcids: ['PMC999'] });
+      const result = await fetchFulltextTool.handler(input, ctx);
+
+      expect(mockUnpaywallResolve).not.toHaveBeenCalled();
+      expect(result.unavailable).toEqual([
+        {
+          id: 'PMC999',
+          idType: 'pmcid',
+          reason: 'no-doi',
+          triedTiers: [
+            { tier: 'pmc', outcome: 'miss' },
+            { tier: 'europepmc', outcome: 'miss' },
+            { tier: 'unpaywall', outcome: 'no-doi' },
+          ],
+        },
+      ]);
+    });
+
+    it('still records not-attempted when Unpaywall is unconfigured', async () => {
+      mockGetEpmcService.mockReturnValue({
+        search: mockEpmcSearch,
+        fullTextXml: mockEpmcFullTextXml,
+        parseFullTextXml: mockEpmcParseFullTextXml,
+      });
+      mockEFetch.mockResolvedValue([{ 'pmc-articleset': [] }]);
+      mockEpmcSearch.mockResolvedValue({ hits: [], hitCount: 0, cursorMark: '*' });
+
+      const ctx = createMockContext();
+      const input = fetchFulltextTool.input.parse({ pmcids: ['PMC999'] });
+      const result = await fetchFulltextTool.handler(input, ctx);
+
+      expect(mockIdConvert).not.toHaveBeenCalled();
+      expect(result.unavailable?.[0]?.triedTiers.at(-1)).toEqual({
+        tier: 'unpaywall',
+        outcome: 'not-attempted',
+        detail: 'UNPAYWALL_EMAIL is not set',
+      });
+    });
+  });
+
+  describe('pmcids branch backlinks the requested PMC ID (issue #92)', () => {
+    const RECOVERED = 'PMC3006432';
+    const FAILED = 'PMC2600426';
+    const RECOVERED_DOI = '10.1111/j.1530-0277.1989.tb00307.x';
+    const FAILED_DOI = '10.1523/jneurosci.3043-08.2008';
+
+    /**
+     * Both PMCIDs miss PMC EFetch and are indexed by EPMC with a DOI but no
+     * fullTextXML, so both reach Unpaywall. Only the first one downloads.
+     */
+    function mockPartiallyRecoveredBatch() {
+      mockGetEpmcService.mockReturnValue({
+        search: mockEpmcSearch,
+        fullTextXml: mockEpmcFullTextXml,
+        parseFullTextXml: mockEpmcParseFullTextXml,
+      });
+      mockGetUnpaywallService.mockReturnValue({
+        resolve: mockUnpaywallResolve,
+        fetchContent: mockUnpaywallFetchContent,
+      });
+      mockEFetch.mockResolvedValue([{ 'pmc-articleset': [] }]);
+      mockEpmcSearch.mockImplementation(async ({ query }: { query: string }) => {
+        const [id, doi] = query.includes(RECOVERED)
+          ? [RECOVERED, RECOVERED_DOI]
+          : [FAILED, FAILED_DOI];
+        return { hits: [{ id, source: 'MED', pmcid: id, doi }], hitCount: 1, cursorMark: '*' };
+      });
+      mockEpmcFullTextXml.mockResolvedValue({ kind: 'not-available', reason: 'no XML' });
+      mockUnpaywallResolve.mockImplementation(async (doi: string) => ({
+        kind: 'found',
+        location: { url: `https://oa.example.org/${doi}` },
+      }));
+      mockUnpaywallFetchContent.mockImplementation(async (location: { url: string }) => {
+        if (location.url.includes(FAILED_DOI)) throw new Error('403 Forbidden');
+        return { kind: 'html', fetchedUrl: location.url, body: '<html>body</html>' };
+      });
+      mockHtmlExtract.mockResolvedValue({ content: 'Recovered body', wordCount: 2321 });
+    }
+
+    it('keys a recovered article to the PMC ID it was requested under', async () => {
+      mockPartiallyRecoveredBatch();
+
+      const ctx = createMockContext();
+      const input = fetchFulltextTool.input.parse({ pmcids: [RECOVERED, FAILED] });
+      const result = await fetchFulltextTool.handler(input, ctx);
+
+      expect(result.totalReturned).toBe(1);
+      const article = result.articles[0];
+      expect(article).toMatchObject({
+        source: 'unpaywall',
+        pmcId: RECOVERED,
+        doi: RECOVERED_DOI,
+      });
+      // The failure is keyed by PMCID; the success must be too, or the caller
+      // cannot map either result back to what it asked for.
+      expect(result.unavailable).toHaveLength(1);
+      expect(result.unavailable?.[0]).toMatchObject({
+        id: FAILED,
+        idType: 'pmcid',
+        reason: 'fetch-failed',
+      });
+    });
+
+    it('renders the requested PMC ID in content[] for structuredContent parity', async () => {
+      mockPartiallyRecoveredBatch();
+
+      const ctx = createMockContext();
+      const input = fetchFulltextTool.input.parse({ pmcids: [RECOVERED, FAILED] });
+      const result = await fetchFulltextTool.handler(input, ctx);
+      const text = fetchFulltextTool.format!(result)[0]?.text ?? '';
+
+      expect(text).toContain(`**PMCID:** ${RECOVERED}`);
+      expect(text).toContain(`[pmcid] ${FAILED}`);
+    });
+
+    it('leaves pmcId absent for the pmids branch', async () => {
+      mockGetUnpaywallService.mockReturnValue({
+        resolve: mockUnpaywallResolve,
+        fetchContent: mockUnpaywallFetchContent,
+      });
+      mockIdConvert.mockResolvedValue([{ pmid: '42', doi: '10.1000/example' }]);
+      mockUnpaywallResolve.mockResolvedValue({
+        kind: 'found',
+        location: { url: 'https://oa.example.org/paper' },
+      });
+      mockUnpaywallFetchContent.mockResolvedValue({
+        kind: 'html',
+        fetchedUrl: 'https://oa.example.org/paper',
+        body: '<html>body</html>',
+      });
+      mockHtmlExtract.mockResolvedValue({ content: 'Body' });
+
+      const ctx = createMockContext();
+      const input = fetchFulltextTool.input.parse({ pmids: ['42'] });
+      const result = await fetchFulltextTool.handler(input, ctx);
+
+      expect(result.articles[0]).toMatchObject({ source: 'unpaywall', pmid: '42' });
+      expect(result.articles[0]).not.toHaveProperty('pmcId');
     });
   });
 

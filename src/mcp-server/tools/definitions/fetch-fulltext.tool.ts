@@ -109,6 +109,19 @@ function isSectionFilterMiss(
   );
 }
 
+/**
+ * True when the upstream JATS carried no body sections at all — front matter and
+ * abstract only. Publishers that block full-text XML download still return an
+ * `<article>` with a populated `<front>`, so the parsed article looks like a hit
+ * while carrying nothing to read. Distinct from {@link isSectionFilterMiss},
+ * which needs a non-empty pre-filter body: the two never overlap. Evaluated
+ * against the *pre-filter* article so a `sections` filter can't be mistaken for
+ * an upstream absence. (#86)
+ */
+function isBodylessArticle(before: ParsedPmcArticle): boolean {
+  return before.sections.length === 0;
+}
+
 /** Pick the best human-readable identifier for an article whose section filter
  *  missed, for the recovery notice. Treats empty strings as absent — EPMC-only
  *  records carry an empty `pmcId`. */
@@ -131,6 +144,23 @@ function buildSectionFilterMissNotice(affectedIds: string[], sectionFilter: stri
   const subject =
     affectedIds.length === 1 ? `article ${affectedIds[0]}` : `articles ${affectedIds.join(', ')}`;
   return `No body sections matched the requested section filter (${terms}) for ${subject}. The full text was retrieved but every body section was filtered out. Retry without \`sections\`, or filter on broader headings such as Introduction, Methods, Results, or Discussion.`;
+}
+
+/**
+ * Compose the recovery notice for identifiers whose only retrievable record was
+ * metadata-only — PMC or Europe PMC returned front matter with no body, and no
+ * later tier recovered a full-text copy. Points at the tool that still serves
+ * the abstract so the metadata isn't simply lost.
+ *
+ * States what the chain observed rather than asserting the article has no body:
+ * a later tier may well have located an open-access copy and failed to download
+ * it (`unpaywall:fetch-failed`), so the per-tier outcomes are the honest answer
+ * and the notice defers to them. (#86)
+ */
+function buildBodylessNotice(affectedIds: string[]): string {
+  const subject =
+    affectedIds.length === 1 ? `article ${affectedIds[0]}` : `articles ${affectedIds.join(', ')}`;
+  return `No body text could be retrieved for ${subject} — the full-text source returned front matter and abstract only, and no later tier recovered a copy. See \`triedTiers\` on the \`unavailable\` entry for what each tier reported, and use \`pubmed_fetch_articles\` for the abstract and metadata.`;
 }
 
 // ─── Schemas ─────────────────────────────────────────────────────────────────
@@ -246,10 +276,16 @@ const UnpaywallArticleSchema = z
       .describe(
         'How `content` was extracted. html-markdown: Defuddle extracted Markdown from an HTML landing page; light section structure may survive but is not guaranteed. pdf-text: unpdf extracted plain text from a PDF; no section, reference, or heading structure.',
       ),
+    pmcId: z
+      .string()
+      .optional()
+      .describe(
+        'PMC ID this article was requested under, in `PMC<digits>` form — present for `pmcids` input, absent for `pmids` and `dois` input. Ties the article back to the requested identifier, which `unavailable[]` keys on for the ids that found nothing.',
+      ),
     pmid: z
       .string()
       .optional()
-      .describe('PubMed ID when input was `pmids`; absent for `dois` input'),
+      .describe('PubMed ID when input was `pmids`; absent for `pmcids` and `dois` input'),
     pubmedUrl: z.string().optional().describe('PubMed URL — present when `pmid` is set'),
     doi: z.string().describe('DOI used to locate the open-access copy'),
     sourceUrl: z.string().describe('URL the content was fetched from'),
@@ -286,6 +322,7 @@ const UnavailableReasonSchema = z
     'not-found',
     'no-pmc-fallback-disabled',
     'no-epmc-fulltext',
+    'no-body',
     'no-doi',
     'no-oa',
     'fetch-failed',
@@ -293,7 +330,7 @@ const UnavailableReasonSchema = z
     'service-error',
   ])
   .describe(
-    'Why no full text was returned. not-found: upstream returned no record for this ID. no-pmc-fallback-disabled: every tier was skipped (`triedTiers` is all `not-attempted`) — typically because EPMC (`EUROPEPMC_ENABLED`) and Unpaywall (`UNPAYWALL_EMAIL`) are not configured. no-epmc-fulltext: EPMC indexed the record but publishes no fullTextXML. no-doi: no DOI to query Unpaywall. no-oa: Unpaywall has no OA copy. fetch-failed: download failed. parse-failed: extraction empty. service-error: upstream server failure (threw, timed out, or returned malformed data).',
+    'Why no full text was returned. not-found: upstream returned no record for this ID. no-pmc-fallback-disabled: every tier was skipped (`triedTiers` is all `not-attempted`) — typically because EPMC (`EUROPEPMC_ENABLED`) and Unpaywall (`UNPAYWALL_EMAIL`) are not configured. no-epmc-fulltext: EPMC indexed the record but publishes no fullTextXML. no-body: the record was retrieved but carries front matter and abstract only, with no body sections — use `pubmed_fetch_articles` for the metadata. no-doi: no DOI to query Unpaywall. no-oa: Unpaywall has no OA copy. fetch-failed: download failed. parse-failed: extraction empty. service-error: upstream server failure (threw, timed out, or returned malformed data).',
   );
 
 const TierOutcomeSchema = z
@@ -301,6 +338,7 @@ const TierOutcomeSchema = z
     'not-attempted',
     'miss',
     'no-fulltext',
+    'no-body',
     'no-doi',
     'no-oa',
     'fetch-failed',
@@ -308,7 +346,7 @@ const TierOutcomeSchema = z
     'service-error',
   ])
   .describe(
-    'Per-tier outcome. not-attempted: tier was skipped. miss: tier returned no record. no-fulltext: EPMC indexed the record but publishes no fullTextXML. no-doi: no DOI to query Unpaywall. no-oa: Unpaywall reports no open-access copy. fetch-failed: OA copy download failed. parse-failed: extraction produced empty content. service-error: tier service threw.',
+    'Per-tier outcome. not-attempted: tier was skipped. miss: tier returned no record. no-fulltext: EPMC indexed the record but publishes no fullTextXML. no-body: the tier returned a record with front matter and abstract but no body sections, so the chain continued. no-doi: no DOI to query Unpaywall. no-oa: Unpaywall reports no open-access copy. fetch-failed: OA copy download failed. parse-failed: extraction produced empty content. service-error: tier service threw.',
   );
 
 const TriedTierSchema = z
@@ -412,7 +450,7 @@ export const fetchFulltextTool = tool('pubmed_fetch_fulltext', {
         .max(10)
         .optional()
         .describe(
-          'PMC IDs to fetch (e.g. ["PMC9575052"]). Provide exactly one of `pmcids`, `pmids`, or `dois`.',
+          'PMC IDs to fetch (e.g. ["PMC9575052"]). Provide exactly one of `pmcids`, `pmids`, or `dois`. PMC IDs with no retrievable full text fall through to Europe PMC, then to Unpaywall on the DOI the chain resolves for them.',
         ),
       pmids: z
         .array(pmidStringSchema)
@@ -463,15 +501,16 @@ export const fetchFulltextTool = tool('pubmed_fetch_fulltext', {
       ),
   }),
 
-  // Recovery guidance when a `sections` filter removes every body section from
-  // an article that has one — agent-facing context surfaced via ctx.enrich.notice()
-  // to structuredContent and content[]; absent when no filter ran or sections matched. (#80)
+  // Recovery guidance for two empty-body cases — a `sections` filter that removed
+  // every body section (#80), and a record the chain could only retrieve as front
+  // matter (#86). Agent-facing context surfaced via ctx.enrich.notice() to
+  // structuredContent and content[]; absent when neither applies.
   enrichment: {
     notice: z
       .string()
       .optional()
       .describe(
-        'Optional guidance when a `sections` filter removed every body section — names the requested section terms and the affected article id(s), and suggests retrying without `sections` or using broader headings. Absent when no section filter was applied or sections matched.',
+        'Optional guidance for empty bodies. A `sections`-filter miss names the requested terms and affected article id(s) and suggests retrying without `sections` or using broader headings. A metadata-only record names the id(s) the chain could retrieve as front matter only and points at `pubmed_fetch_articles` for the abstract. Absent when neither case applies.',
       ),
   },
 
@@ -501,6 +540,10 @@ export const fetchFulltextTool = tool('pubmed_fetch_fulltext', {
     // section — collected across the PMC and EPMC stages to drive one recovery
     // notice via ctx.enrich.notice (#80).
     const sectionFilterMisses: string[] = [];
+    // Input ids whose PMC or EPMC record carried no body sections at all. Those
+    // records are not full-text hits, so the chain continues past them; ids still
+    // unrecovered at the end drive the metadata-only recovery notice (#86).
+    const bodylessInputIds = new Set<string>();
 
     const idType: 'pmid' | 'pmcid' | 'doi' = input.pmids ? 'pmid' : input.pmcids ? 'pmcid' : 'doi';
 
@@ -637,20 +680,25 @@ export const fetchFulltextTool = tool('pubmed_fetch_fulltext', {
           throw new Error('PMC EFetch response missing pmc-articleset wrapper');
         }
 
-        const parsed = findAll(articleSet, 'article').map((node) => {
+        // A parsed article with no body sections is front matter only — PMC
+        // returns one whenever the publisher blocks full-text XML download. It
+        // is not a hit: it never enters `articles[]`, and its id is routed to
+        // the remaining tiers like any other PMC miss. (#86)
+        const bodylessPmcIds = new Set<string>();
+        const parsed: z.infer<typeof PmcArticleSchema>[] = [];
+        for (const node of findAll(articleSet, 'article')) {
           const before = parsePmcArticle(node);
+          if (isBodylessArticle(before)) {
+            if (before.pmcId) bodylessPmcIds.add(before.pmcId);
+            continue;
+          }
           const after = applyPmcFilters(before, input);
           if (isSectionFilterMiss(before, after, input.sections)) {
             sectionFilterMisses.push(articleSectionMissId(after));
           }
-          return after;
-        });
-
-        pmcArticles = parsed.map((a) => ({
-          source: 'pmc' as const,
-          viaSource: 'pmc' as const,
-          ...a,
-        }));
+          parsed.push({ source: 'pmc' as const, viaSource: 'pmc' as const, ...after });
+        }
+        pmcArticles = parsed;
 
         const returnedPmcIds = new Set(
           pmcArticles.map((a) => a.pmcId).filter((id): id is string => !!id),
@@ -663,7 +711,16 @@ export const fetchFulltextTool = tool('pubmed_fetch_fulltext', {
           .filter((id) => !returnedPmcIds.has(id));
         for (const prefixed of missing) {
           const inputId = pmcidToInputId.get(prefixed) ?? prefixed;
-          chainByInput.get(inputId)?.push({ tier: 'pmc', outcome: 'miss' });
+          if (bodylessPmcIds.has(prefixed)) {
+            bodylessInputIds.add(inputId);
+            chainByInput.get(inputId)?.push({
+              tier: 'pmc',
+              outcome: 'no-body',
+              detail: 'PMC returned front matter and abstract only, with no body sections',
+            });
+          } else {
+            chainByInput.get(inputId)?.push({ tier: 'pmc', outcome: 'miss' });
+          }
         }
         routePmcMissesToFallback(missing);
       } catch (error: unknown) {
@@ -719,28 +776,19 @@ export const fetchFulltextTool = tool('pubmed_fetch_fulltext', {
       }
       for (const c of doiCandidates) chainByInput.get(c.doi)?.push(epmcDisabledEntry);
     } else {
-      for (const [pmid, outcome] of epmcOutcomes.pmidOutcomes) {
-        if (outcome.kind === 'hit') {
-          recoveredIds.add(pmid);
-          continue;
-        }
-        chainByInput.get(pmid)?.push(epmcTierFromOutcome(outcome));
-      }
-      for (const [prefixed, outcome] of epmcOutcomes.pmcidOutcomes) {
-        const inputId = pmcidToInputId.get(prefixed) ?? prefixed;
+      const foldEpmcOutcome = (inputId: string, outcome: EpmcCandidateOutcome) => {
         if (outcome.kind === 'hit') {
           recoveredIds.add(inputId);
-          continue;
+          return;
         }
+        if (outcome.kind === 'no-body') bodylessInputIds.add(inputId);
         chainByInput.get(inputId)?.push(epmcTierFromOutcome(outcome));
+      };
+      for (const [pmid, outcome] of epmcOutcomes.pmidOutcomes) foldEpmcOutcome(pmid, outcome);
+      for (const [prefixed, outcome] of epmcOutcomes.pmcidOutcomes) {
+        foldEpmcOutcome(pmcidToInputId.get(prefixed) ?? prefixed, outcome);
       }
-      for (const [doi, outcome] of epmcOutcomes.doiOutcomes) {
-        if (outcome.kind === 'hit') {
-          recoveredIds.add(doi);
-          continue;
-        }
-        chainByInput.get(doi)?.push(epmcTierFromOutcome(outcome));
-      }
+      for (const [doi, outcome] of epmcOutcomes.doiOutcomes) foldEpmcOutcome(doi, outcome);
     }
 
     pmidFallbackCandidates = epmcOutcomes.remainingPmid;
@@ -752,15 +800,79 @@ export const fetchFulltextTool = tool('pubmed_fetch_fulltext', {
     const unpaywall = getUnpaywallService();
     const fallbackArticles: z.infer<typeof UnpaywallArticleSchema>[] = [];
 
-    // PMC misses on `pmcids` input don't get an Unpaywall attempt — the current
-    // implementation doesn't resolve PMCID → DOI for that branch.
-    for (const c of pmcidFallbackCandidates) {
-      const prefixed = withPmcPrefix(c.pmcid);
-      chainByInput.get(pmcidToInputId.get(prefixed) ?? prefixed)?.push({
-        tier: 'unpaywall',
-        outcome: 'not-attempted',
-        detail: 'pmcids input does not resolve a DOI for Unpaywall',
-      });
+    // `pmcids` input reaches Unpaywall on the DOI the chain already holds: the
+    // EPMC stage searches by PMCID and its hit carries one, captured on non-hit
+    // outcomes too. PMCIDs EPMC never resolved fall back to the PMC ID
+    // Converter, which returns DOIs for PMC-indexed records. (#88)
+    if (pmcidFallbackCandidates.length > 0) {
+      if (!unpaywall) {
+        for (const c of pmcidFallbackCandidates) {
+          const prefixed = withPmcPrefix(c.pmcid);
+          chainByInput.get(pmcidToInputId.get(prefixed) ?? prefixed)?.push({
+            tier: 'unpaywall',
+            outcome: 'not-attempted',
+            detail: 'UNPAYWALL_EMAIL is not set',
+          });
+        }
+      } else {
+        const needDoi = pmcidFallbackCandidates
+          .filter((c) => !c.doi)
+          .map((c) => withPmcPrefix(c.pmcid));
+        if (needDoi.length > 0) {
+          try {
+            const records = await getNcbiService().idConvert(
+              needDoi,
+              'pmcid',
+              ctx.signal ? { signal: ctx.signal } : undefined,
+            );
+            const doiByPmcid = new Map<string, string>();
+            for (const r of records) {
+              if (r.pmcid && r.doi) {
+                doiByPmcid.set(withPmcPrefix(normalizePmcId(String(r.pmcid))), String(r.doi));
+              }
+            }
+            pmcidFallbackCandidates = pmcidFallbackCandidates.map((c) => {
+              if (c.doi) return c;
+              const doi = doiByPmcid.get(withPmcPrefix(c.pmcid));
+              return doi ? { ...c, doi } : c;
+            });
+          } catch (error: unknown) {
+            ctx.log.warning('Failed to resolve PMCID → DOI for the Unpaywall fallback', {
+              error: error instanceof Error ? error.message : String(error),
+              pmcidCount: needDoi.length,
+            });
+          }
+        }
+
+        const outcomes = await Promise.all(
+          pmcidFallbackCandidates.map(async (candidate) => {
+            // The prefixed PMCID is the id `unavailable[]` keys on, so stamping
+            // it on the article makes a partially-recovered batch report its
+            // successes and its failures under the same identifier. (#92)
+            const pmcId = withPmcPrefix(candidate.pmcid);
+            return {
+              pmcId,
+              result: candidate.doi
+                ? await resolveUnpaywall({ pmcId, doi: candidate.doi }, unpaywall, ctx)
+                : ({ unavailable: { reason: 'no-doi' } } as FallbackOutcome),
+            };
+          }),
+        );
+        for (const { pmcId, result } of outcomes) {
+          const inputId = pmcidToInputId.get(pmcId) ?? pmcId;
+          if ('article' in result) {
+            fallbackArticles.push(result.article);
+            recoveredIds.add(inputId);
+          } else {
+            const u = result.unavailable;
+            chainByInput.get(inputId)?.push({
+              tier: 'unpaywall',
+              outcome: unpaywallReasonToTierOutcome(u.reason),
+              ...(u.detail && { detail: u.detail }),
+            });
+          }
+        }
+      }
     }
 
     if (pmidFallbackCandidates.length > 0) {
@@ -874,9 +986,15 @@ export const fetchFulltextTool = tool('pubmed_fetch_fulltext', {
       unavailable: unavailable.length,
     });
 
+    // Only the last ctx.enrich.notice survives, so the applicable fragments are
+    // collected and emitted once.
+    const notices: string[] = [];
     if (input.sections?.length && sectionFilterMisses.length > 0) {
-      ctx.enrich.notice(buildSectionFilterMissNotice(sectionFilterMisses, input.sections));
+      notices.push(buildSectionFilterMissNotice(sectionFilterMisses, input.sections));
     }
+    const unrecoveredBodyless = [...bodylessInputIds].filter((id) => !recoveredIds.has(id));
+    if (unrecoveredBodyless.length > 0) notices.push(buildBodylessNotice(unrecoveredBodyless));
+    if (notices.length > 0) ctx.enrich.notice(notices.join(' '));
 
     return {
       articles,
@@ -923,8 +1041,13 @@ export const fetchFulltextTool = tool('pubmed_fetch_fulltext', {
 /** A PMID not present in PMC, optionally paired with a DOI for Unpaywall lookup. */
 type PmidCandidate = { pmid: string; doi?: string };
 
-/** A PMCID requested directly but not returned by PMC EFetch. */
-type PmcidCandidate = { pmcid: string };
+/**
+ * A PMCID requested directly but not returned by PMC EFetch, optionally paired
+ * with a DOI for the Unpaywall lookup. The DOI arrives from the Europe PMC hit
+ * the stage already made, or from the PMC ID Converter when EPMC never resolved
+ * the record. (#88)
+ */
+type PmcidCandidate = { pmcid: string; doi?: string };
 
 /** A DOI candidate for direct DOI input. */
 type DoiCandidate = { doi: string };
@@ -953,6 +1076,7 @@ type EpmcCandidateOutcome =
   | { kind: 'hit' }
   | { kind: 'miss' }
   | { kind: 'no-fulltext'; detail?: string }
+  | { kind: 'no-body'; detail: string }
   | { kind: 'service-error'; detail: string };
 
 interface EpmcStageOutput {
@@ -990,6 +1114,9 @@ async function runEpmcStage(
     outcome: EpmcCandidateOutcome;
     article?: z.infer<typeof PmcArticleSchema>;
     sectionFilterMiss?: boolean;
+    /** DOI carried by the EPMC hit, captured on non-hit outcomes too so the
+     *  Unpaywall stage can use it for `pmcids` input. (#88) */
+    doi?: string;
   };
 
   const runOne = async <C>(
@@ -1002,28 +1129,43 @@ async function runEpmcStage(
       return { c, outcome: { kind: 'service-error', detail: search.detail } };
     }
     if (search.kind === 'miss') return { c, outcome: { kind: 'miss' } };
+    const doi = search.hit.doi ? { doi: search.hit.doi } : {};
     const fetched = await fetchEpmcArticle(epmc, search.hit, args, contextPmid);
     if (fetched.kind === 'error') {
-      return { c, outcome: { kind: 'service-error', detail: fetched.detail } };
+      return { c, ...doi, outcome: { kind: 'service-error', detail: fetched.detail } };
     }
     if (fetched.kind === 'no-fulltext') {
       return {
         c,
+        ...doi,
         outcome: { kind: 'no-fulltext', ...(fetched.detail && { detail: fetched.detail }) },
       };
     }
+    if (fetched.kind === 'no-body') {
+      return { c, ...doi, outcome: { kind: 'no-body', detail: fetched.detail } };
+    }
     return {
       c,
+      ...doi,
       outcome: { kind: 'hit' },
       article: fetched.article,
       sectionFilterMiss: fetched.sectionFilterMiss,
     };
   };
 
-  const fetchForPmid = (c: PmidCandidate) => runOne(c, `EXT_ID:"${c.pmid}" AND SRC:MED`, c.pmid);
+  /**
+   * Query shapes are load-bearing and not interchangeable with their quoted
+   * variants. Europe PMC matches zero records for `EXT_ID:"<pmid>" AND SRC:MED`
+   * and `PMCID:"PMC<digits>"` — the quotes only survive as long as no `AND SRC:`
+   * clause follows. `SRC:PMC` is likewise wrong for a PMCID lookup: EPMC's
+   * canonical record for a PMC-indexed article has `source: MED` and carries the
+   * PMCID as a field, so the filter excludes the very record being sought. DOIs
+   * keep their quotes — they carry slashes and dots that need them. (#85)
+   */
+  const fetchForPmid = (c: PmidCandidate) => runOne(c, `EXT_ID:${c.pmid} AND SRC:MED`, c.pmid);
   const fetchForPmcid = (c: PmcidCandidate) => {
     const normalized = withPmcPrefix(c.pmcid);
-    return runOne({ c, normalized }, `PMCID:"${normalized}" AND SRC:PMC`, undefined);
+    return runOne({ c, normalized }, `PMCID:${normalized}`, undefined);
   };
   const fetchForDoi = (c: DoiCandidate) => runOne(c, `DOI:"${c.doi}"`, undefined);
 
@@ -1049,12 +1191,12 @@ async function runEpmcStage(
       if (sectionFilterMiss) sectionFilterMisses.push(articleSectionMissId(article));
     } else remainingPmid.push(c);
   }
-  for (const { c: pair, outcome, article, sectionFilterMiss } of pmcidResults) {
+  for (const { c: pair, outcome, article, sectionFilterMiss, doi } of pmcidResults) {
     pmcidOutcomes.set(pair.normalized, outcome);
     if (article) {
       articles.push(article);
       if (sectionFilterMiss) sectionFilterMisses.push(articleSectionMissId(article));
-    } else remainingPmcid.push(pair.c);
+    } else remainingPmcid.push(doi && !pair.c.doi ? { ...pair.c, doi } : pair.c);
   }
   for (const { c, outcome, article, sectionFilterMiss } of doiResults) {
     doiOutcomes.set(c.doi, outcome);
@@ -1113,6 +1255,7 @@ async function searchEpmcSafe(
 type EpmcFetchResult =
   | { kind: 'article'; article: z.infer<typeof PmcArticleSchema>; sectionFilterMiss: boolean }
   | { kind: 'no-fulltext'; detail?: string }
+  | { kind: 'no-body'; detail: string }
   | { kind: 'error'; detail: string };
 
 /**
@@ -1149,6 +1292,13 @@ async function fetchEpmcArticle(
     }
 
     const beforeFilter = parsePmcArticle(articleNode);
+    if (isBodylessArticle(beforeFilter)) {
+      return {
+        kind: 'no-body',
+        detail: 'EPMC fullTextXML carried front matter and abstract only, with no body sections',
+      };
+    }
+
     const parsed = applyPmcFilters(beforeFilter, args.input);
     const sectionFilterMiss = isSectionFilterMiss(beforeFilter, parsed, args.input.sections);
 
@@ -1221,16 +1371,17 @@ async function fetchPubmedDois(
 }
 
 /**
- * Resolve a DOI to an open-access article via Unpaywall. `pmid`, when set,
- * is stamped onto the resulting article so the pmid-input branch carries its
- * cross-reference through.
+ * Resolve a DOI to an open-access article via Unpaywall. `pmcId` and `pmid`,
+ * when set, are stamped onto the resulting article so the branch that requested
+ * it carries its identifier through — Unpaywall itself only knows the DOI.
  */
 async function resolveUnpaywall(
-  args: { pmid?: string; doi: string },
+  args: { pmcId?: string; pmid?: string; doi: string },
   service: UnpaywallService,
   ctx: Context,
 ): Promise<FallbackOutcome> {
-  const { pmid, doi } = args;
+  const { pmcId, pmid, doi } = args;
+  const requestedIds = { ...(pmcId && { pmcId }), ...(pmid && { pmid }) };
 
   let resolution: UnpaywallResolution;
   try {
@@ -1271,7 +1422,7 @@ async function resolveUnpaywall(
       }
       return {
         article: buildUnpaywallArticle({
-          ...(pmid && { pmid }),
+          ...requestedIds,
           doi,
           sourceUrl: content.fetchedUrl,
           location: resolution.location,
@@ -1292,7 +1443,7 @@ async function resolveUnpaywall(
     }
     return {
       article: buildUnpaywallArticle({
-        ...(pmid && { pmid }),
+        ...requestedIds,
         doi,
         sourceUrl: content.fetchedUrl,
         location: resolution.location,
@@ -1309,6 +1460,7 @@ async function resolveUnpaywall(
 }
 
 function buildUnpaywallArticle(args: {
+  pmcId?: string;
   pmid?: string;
   doi: string;
   sourceUrl: string;
@@ -1324,6 +1476,7 @@ function buildUnpaywallArticle(args: {
     source: 'unpaywall',
     viaSource: 'unpaywall',
     contentFormat: args.contentFormat,
+    ...(args.pmcId && { pmcId: args.pmcId }),
     ...(args.pmid && {
       pmid: args.pmid,
       pubmedUrl: `https://pubmed.ncbi.nlm.nih.gov/${args.pmid}/`,
@@ -1357,6 +1510,8 @@ function epmcTierFromOutcome(
         outcome: 'no-fulltext',
         ...(outcome.detail && { detail: outcome.detail }),
       };
+    case 'no-body':
+      return { tier: 'europepmc', outcome: 'no-body', detail: outcome.detail };
     case 'service-error':
       return { tier: 'europepmc', outcome: 'service-error', detail: outcome.detail };
   }
@@ -1373,6 +1528,7 @@ function unpaywallReasonToTierOutcome(
   reason: z.infer<typeof UnavailableReasonSchema>,
 ): z.infer<typeof TierOutcomeSchema> {
   switch (reason) {
+    case 'no-body':
     case 'no-doi':
     case 'no-oa':
     case 'fetch-failed':
@@ -1411,6 +1567,9 @@ function reasonFromChain(
       return 'not-found';
     case 'europepmc:no-fulltext':
       return 'no-epmc-fulltext';
+    case 'pmc:no-body':
+    case 'europepmc:no-body':
+      return 'no-body';
     case 'unpaywall:no-doi':
       return 'no-doi';
     case 'unpaywall:no-oa':
@@ -1493,13 +1652,15 @@ function formatPmcArticle(a: z.infer<typeof PmcArticleSchema>, lines: string[]):
 }
 
 function formatUnpaywallArticle(a: z.infer<typeof UnpaywallArticleSchema>, lines: string[]): void {
-  const heading = a.title ?? (a.pmid ? `PMID ${a.pmid}` : `DOI ${a.doi}`);
+  const requestedId = a.pmcId ? `PMCID ${a.pmcId}` : a.pmid ? `PMID ${a.pmid}` : `DOI ${a.doi}`;
+  const heading = a.title ?? requestedId;
   const formatLabel =
     a.contentFormat === 'html-markdown'
       ? 'Unpaywall (HTML → Markdown, best-effort)'
       : 'Unpaywall (PDF → plain text)';
   lines.push(`### ${heading}`);
   lines.push(`**Source:** ${formatLabel}`);
+  if (a.pmcId) lines.push(`**PMCID:** ${a.pmcId}`);
   if (a.pmid) lines.push(`**PMID:** ${a.pmid}`);
   lines.push(`**DOI:** ${a.doi}`);
   if (a.pubmedUrl) lines.push(`**PubMed:** ${a.pubmedUrl}`);

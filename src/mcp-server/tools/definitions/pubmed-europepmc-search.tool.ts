@@ -56,7 +56,7 @@ export const pubmedEuropepmcSearchTool = tool('pubmed_europepmc_search', {
       .string()
       .min(1)
       .describe(
-        'Europe PMC search query. Supports field tokens like `AUTH:"<name>"`, `JOURNAL:"<title>"`, `TITLE:"<words>"`, `PUB_YEAR:[2020 TO 2024]`, `DOI:"..."`, `EXT_ID:"<pmid>" AND SRC:MED`. Free text is matched broadly across abstract/title/keywords.',
+        'Europe PMC search query. Supports field tokens like `AUTH:"<name>"`, `JOURNAL:"<title>"`, `TITLE:"<words>"`, `PUB_YEAR:[2020 TO 2024]`, `DOI:"..."`, `EXT_ID:<pmid> AND SRC:MED`, `PMCID:PMC<digits>`. Identifier tokens combined with `AND SRC:` must be unquoted — the quoted form matches nothing. Free text is matched broadly across abstract/title/keywords.',
       ),
     pageSize: z
       .number()
