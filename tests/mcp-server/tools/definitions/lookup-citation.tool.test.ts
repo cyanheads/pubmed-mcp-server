@@ -78,7 +78,11 @@ describe('lookupCitationTool', () => {
       { key: '1', matched: true, pmid: '8400044', status: 'matched' },
     ]);
     mockExtractBriefSummaries.mockResolvedValue([
-      { pmid: '8400044', authors: 'Mann BJ, Lockhart BE, Albert MJ' },
+      {
+        pmid: '8400044',
+        authors: 'Mann BJ, Lockhart BE, Albert MJ',
+        authorNames: ['Mann BJ', 'Lockhart BE', 'Albert MJ'],
+      },
     ]);
 
     const ctx = createMockContext();
@@ -110,7 +114,11 @@ describe('lookupCitationTool', () => {
       { key: 'pioneer-6', matched: true, pmid: '31189511', status: 'matched' },
     ]);
     mockExtractBriefSummaries.mockResolvedValue([
-      { pmid: '31189511', authors: 'Gerstein HC, Colhoun HM, Dagenais GR, et al.' },
+      {
+        pmid: '31189511',
+        authors: 'Gerstein HC, Colhoun HM, Dagenais GR, et al.',
+        authorNames: ['Gerstein HC', 'Colhoun HM', 'Dagenais GR', 'Ryden L'],
+      },
     ]);
 
     const ctx = createMockContext();
@@ -136,13 +144,73 @@ describe('lookupCitationTool', () => {
     expect(r.warnings).toHaveLength(1);
     expect(r.warnings?.[0]?.code).toBe('author_mismatch');
     expect(r.warnings?.[0]?.message).toContain('husain m');
+    // The message reports the full roster size so the truncated display list
+    // reads as partial rather than complete.
+    expect(r.warnings?.[0]?.message).toContain('4-author roster');
     expect(result.totalWarnings).toBe(1);
+  });
+
+  it('does not warn when the queried author ranks fourth or later (#87)', async () => {
+    mockECitMatch.mockResolvedValue([
+      { key: 'fourth-author', matched: true, pmid: '41952275', status: 'matched' },
+    ]);
+    // `authors` is the display string — truncated to three names by
+    // formatESummaryAuthors. Paramanik S is the genuine fourth author.
+    mockExtractBriefSummaries.mockResolvedValue([
+      {
+        pmid: '41952275',
+        authors: 'Das U, Prasad SS, Sahoo T, et al.',
+        authorNames: ['Das U', 'Prasad SS', 'Sahoo T', 'Paramanik S', 'Halder A', 'S P'],
+      },
+    ]);
+
+    const ctx = createMockContext();
+    const input = lookupCitationTool.input.parse({
+      citations: [
+        {
+          journal: 'Plant Signal Behav',
+          year: '2026',
+          volume: '21',
+          firstPage: '2656013',
+          authorName: 'paramanik s',
+          key: 'fourth-author',
+        },
+      ],
+    });
+    const result = await lookupCitationTool.handler(input, ctx);
+
+    const r = result.results[0]!;
+    expect(r.pmid).toBe('41952275');
+    expect(r.matched).toBe(true);
+    expect(r.warnings).toBeUndefined();
+    expect(r.matchedFirstAuthor).toBe('Das U');
+    expect(result.totalWarnings).toBe(0);
+  });
+
+  it('does not warn when the queried author is the last of a long roster (#87)', async () => {
+    mockECitMatch.mockResolvedValue([{ key: '1', matched: true, pmid: '555', status: 'matched' }]);
+    mockExtractBriefSummaries.mockResolvedValue([
+      {
+        pmid: '555',
+        authors: 'Alpha A, Beta B, Gamma C, et al.',
+        authorNames: ['Alpha A', 'Beta B', 'Gamma C', 'Delta D', 'Epsilon E', 'Omega Z'],
+      },
+    ]);
+
+    const ctx = createMockContext();
+    const input = lookupCitationTool.input.parse({
+      citations: [{ journal: 'Nature', year: '2020', authorName: 'omega z' }],
+    });
+    const result = await lookupCitationTool.handler(input, ctx);
+
+    expect(result.results[0]?.warnings).toBeUndefined();
+    expect(result.totalWarnings).toBe(0);
   });
 
   it('does not false-positive on substring surname collisions (Smith vs Smithson)', async () => {
     mockECitMatch.mockResolvedValue([{ key: '1', matched: true, pmid: '999', status: 'matched' }]);
     mockExtractBriefSummaries.mockResolvedValue([
-      { pmid: '999', authors: 'Smithson JA, Jones BB' },
+      { pmid: '999', authors: 'Smithson JA, Jones BB', authorNames: ['Smithson JA', 'Jones BB'] },
     ]);
 
     const ctx = createMockContext();
@@ -193,8 +261,8 @@ describe('lookupCitationTool', () => {
       { key: '3', matched: false, pmid: null, status: 'not_found' },
     ]);
     mockExtractBriefSummaries.mockResolvedValue([
-      { pmid: '111', authors: 'Alice AA' },
-      { pmid: '222', authors: 'Bob BB' },
+      { pmid: '111', authors: 'Alice AA', authorNames: ['Alice AA'] },
+      { pmid: '222', authors: 'Bob BB', authorNames: ['Bob BB'] },
     ]);
 
     const ctx = createMockContext();
@@ -239,7 +307,7 @@ describe('lookupCitationTool', () => {
       { key: '1', matched: true, pmid: '12345', status: 'matched' },
     ]);
     mockExtractBriefSummaries.mockResolvedValue([
-      { pmid: '12345', authors: 'Smith JA', pubDate: '2020-01-01' },
+      { pmid: '12345', authors: 'Smith JA', authorNames: ['Smith JA'], pubDate: '2020-01-01' },
     ]);
 
     const ctx = createMockContext();
@@ -257,7 +325,12 @@ describe('lookupCitationTool', () => {
       { key: '1', matched: true, pmid: '31189511', status: 'matched' },
     ]);
     mockExtractBriefSummaries.mockResolvedValue([
-      { pmid: '31189511', authors: 'Gerstein HC, Colhoun HM', pubDate: '2020-01-01' },
+      {
+        pmid: '31189511',
+        authors: 'Gerstein HC, Colhoun HM',
+        authorNames: ['Gerstein HC', 'Colhoun HM'],
+        pubDate: '2020-01-01',
+      },
     ]);
 
     const ctx = createMockContext();

@@ -449,7 +449,13 @@ export interface ESummaryResponseContainer {
 
 // Parsed brief summary (application-level)
 export interface ParsedBriefSummary {
-  authors?: string; // Formatted string
+  /**
+   * Full, untruncated author roster from ESummary. `authors` collapses to three
+   * names for display, so any check that must consider every author (e.g.
+   * verifying a queried author appears on the article) reads this instead.
+   */
+  authorNames?: string[];
+  authors?: string; // Display string — first 3 authors, then 'et al.'
   doi?: string;
   epubDate?: string; // Standardized YYYY-MM-DD
   pmcId?: string;

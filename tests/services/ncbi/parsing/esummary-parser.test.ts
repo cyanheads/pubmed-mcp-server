@@ -304,6 +304,45 @@ describe('extractBriefSummaries', () => {
     expect(summaries[0]?.title).toBe('Old Format Article');
   });
 
+  it('carries the full author roster alongside the truncated display string (#87)', async () => {
+    const names = ['Das U', 'Prasad SS', 'Sahoo T', 'Paramanik S', 'Halder A', 'S P'];
+    const result: ESummaryResult = {
+      DocumentSummarySet: {
+        DocumentSummary: [{ '@_uid': '41952275', Authors: names.map((Name) => ({ Name })) }],
+      },
+    };
+    const summaries = await extractBriefSummaries(result);
+
+    expect(summaries[0]?.authors).toBe('Das U, Prasad SS, Sahoo T, et al.');
+    expect(summaries[0]?.authorNames).toEqual(names);
+  });
+
+  it('carries the full author roster from the old DocSum format (#87)', async () => {
+    const names = ['Doe J', 'Roe R', 'Poe P', 'Moe M'];
+    const result: ESummaryResult = {
+      DocSum: [
+        {
+          Id: '67890',
+          Item: [
+            {
+              '@_Name': 'AuthorList',
+              '@_Type': 'List',
+              Item: names.map((name) => ({
+                '@_Name': 'Author',
+                '@_Type': 'String' as const,
+                '#text': name,
+              })),
+            },
+          ],
+        },
+      ],
+    };
+    const summaries = await extractBriefSummaries(result);
+
+    expect(summaries[0]?.authors).toBe('Doe J, Roe R, Poe P, et al.');
+    expect(summaries[0]?.authorNames).toEqual(names);
+  });
+
   it('extracts DOI and PMC ID from DocumentSummary ArticleIds (JSON/lowercase shape)', async () => {
     const result: ESummaryResult = {
       DocumentSummarySet: {

@@ -23,14 +23,6 @@ function surname(name: string): string {
   return name.trim().split(/\s+/)[0]?.toLowerCase() ?? '';
 }
 
-/** Split a formatted authors string ("Lastname FI, Lastname FI, et al.") into surnames. */
-function authorSurnames(authors: string): string[] {
-  return authors
-    .split(', ')
-    .map((a) => surname(a))
-    .filter((s) => s.length > 0 && s !== 'et');
-}
-
 export const lookupCitationTool = tool('pubmed_lookup_citation', {
   description: `Look up PubMed IDs from partial bibliographic citations. Useful when you have a reference (journal, year, volume, page, author) and need the PMID — deterministic citation matching, more reliable than free-text search for structured references. Each citation must include at least journal or year (ECitMatch primary-keys on journal+volume+page; author-only or volume-only inputs guarantee no match); more fields = better match accuracy.`,
   annotations: { readOnlyHint: true, openWorldHint: true },
@@ -155,7 +147,10 @@ export const lookupCitationTool = tool('pubmed_lookup_citation', {
       new Set(results.filter((r) => r.matched && r.pmid).map((r) => r.pmid as string)),
     );
 
-    const summaryByPmid = new Map<string, { authors?: string; pubDate?: string }>();
+    const summaryByPmid = new Map<
+      string,
+      { authors?: string; authorNames?: string[]; pubDate?: string }
+    >();
     if (matchedPmids.length > 0) {
       const summaryResult = await ncbi.eSummary(
         { db: 'pubmed', id: matchedPmids.join(',') },
@@ -165,6 +160,7 @@ export const lookupCitationTool = tool('pubmed_lookup_citation', {
       for (const s of summaries) {
         summaryByPmid.set(s.pmid, {
           ...(s.authors && { authors: s.authors }),
+          ...(s.authorNames?.length && { authorNames: s.authorNames }),
           ...(s.pubDate && { pubDate: s.pubDate }),
         });
       }
@@ -202,26 +198,29 @@ export const lookupCitationTool = tool('pubmed_lookup_citation', {
       if (!summary) return base;
 
       const warnings: Warning[] = [];
-      const { authors, pubDate } = summary;
+      const { authors, authorNames, pubDate } = summary;
 
       if (authors) {
         const firstAuthor = authors.split(', ')[0]?.trim();
         if (firstAuthor && firstAuthor !== 'et al.') base.matchedFirstAuthor = firstAuthor;
 
         const queried = queriedAuthorByKey.get(r.key);
-        if (queried) {
+        // Verified against the full roster, not `authors` — that display string
+        // collapses to three names plus "et al.", so matching on it flags a
+        // genuine fourth-or-later author as a mismatch. (#87)
+        if (queried && authorNames?.length) {
           const querySurname = surname(queried);
-          const articleSurnames = authorSurnames(authors);
+          const articleSurnames = authorNames.map(surname);
           if (querySurname && !articleSurnames.includes(querySurname)) {
             warnings.push({
               code: 'author_mismatch',
-              message: `Queried author "${queried}" not found in matched article authors (${authors}). ECitMatch weights journal+volume+page and may return a PMID whose authors disagree with the query — verify before using this PMID.`,
+              message: `Queried author "${queried}" not found in the matched article's ${authorNames.length}-author roster (${authors}). ECitMatch weights journal+volume+page and may return a PMID whose authors disagree with the query — verify before using this PMID.`,
             });
             ctx.log.warning('Citation match returned PMID with author mismatch', {
               key: r.key,
               pmid: r.pmid,
               queriedAuthor: queried,
-              matchedAuthors: authors,
+              matchedAuthorCount: authorNames.length,
             });
           }
         }
