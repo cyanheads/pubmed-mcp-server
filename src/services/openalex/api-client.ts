@@ -48,6 +48,7 @@ export class OpenAlexApiClient {
     try {
       response = await fetchWithTimeout(url, this.config.timeoutMs, ctx, {
         headers: { Accept: 'application/json', 'User-Agent': USER_AGENT },
+        expectedStatuses: [404],
         ...(signal && { signal }),
       });
     } catch (error: unknown) {

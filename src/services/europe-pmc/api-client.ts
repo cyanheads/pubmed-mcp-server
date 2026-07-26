@@ -92,6 +92,7 @@ export class EuropePmcApiClient {
           Accept: 'application/xml, text/xml, */*;q=0.5',
           'User-Agent': USER_AGENT,
         },
+        expectedStatuses: [404],
         ...(signal && { signal }),
       });
     } catch (error: unknown) {

@@ -1,6 +1,6 @@
 # pubmed-mcp-server - Directory Structure
 
-Generated on: 2026-06-20 08:41:47
+Generated on: 2026-07-26 12:33:29
 
 ```text
 pubmed-mcp-server/
@@ -14,7 +14,8 @@ pubmed-mcp-server/
 │   │   ├── bug_report.yml
 │   │   ├── config.yml
 │   │   └── feature_request.yml
-│   └── FUNDING.yml
+│   ├── FUNDING.yml
+│   └── SECURITY.md
 ├── .storage/
 ├── .vscode/
 │   ├── extensions.json
@@ -252,6 +253,7 @@ pubmed-mcp-server/
 │   └── index.test.ts
 ├── .dockerignore
 ├── .env.example
+├── .gitattributes
 ├── .gitignore
 ├── .mcpbignore
 ├── AGENTS.md

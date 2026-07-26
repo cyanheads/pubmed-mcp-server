@@ -59,6 +59,7 @@ export class UnpaywallService {
     try {
       response = await fetchWithTimeout(url, this.timeoutMs, ctx, {
         headers: { Accept: 'application/json', 'User-Agent': USER_AGENT },
+        expectedStatuses: [404, 422],
         ...(signal && { signal }),
       });
     } catch (error: unknown) {

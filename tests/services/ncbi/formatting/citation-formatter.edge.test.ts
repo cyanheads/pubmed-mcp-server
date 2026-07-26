@@ -178,17 +178,14 @@ describe('formatApa — date fallback to articleDates', () => {
 // ─── formatCitation dispatcher ───────────────────────────────────────────────
 
 describe('formatCitation', () => {
-  it.each([
-    'apa',
-    'mla',
-    'bibtex',
-    'ris',
-    'vancouver',
-  ] as const)('returns a non-empty string for style=%s', (style) => {
-    const result = formatCitation(baseArticle, style);
-    expect(typeof result).toBe('string');
-    expect(result.length).toBeGreaterThan(0);
-  });
+  it.each(['apa', 'mla', 'bibtex', 'ris', 'vancouver'] as const)(
+    'returns a non-empty string for style=%s',
+    (style) => {
+      const result = formatCitation(baseArticle, style);
+      expect(typeof result).toBe('string');
+      expect(result.length).toBeGreaterThan(0);
+    },
+  );
 
   it('apa result contains journal name and year', () => {
     expect(formatCitation(baseArticle, 'apa')).toContain('Test Journal');

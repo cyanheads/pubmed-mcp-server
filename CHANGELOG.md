@@ -2,6 +2,10 @@
 
 All notable changes to this project. Each entry links to its full per-version file in [changelog/](changelog/).
 
+## [2.9.9](changelog/2.9.x/2.9.9.md) — 2026-07-26
+
+pubmed_lookup_mesh gets true upstream totalCount plus offset/nextOffset pagination; pubmed_lookup_citation stops false-flagging authors ranked 4th or later; pubmed_spell_check threads ctx.signal into ESpell. Adopts mcp-ts-core 0.11.0.
+
 ## [2.9.8](changelog/2.9.x/2.9.8.md) — 2026-06-30
 
 pubmed_fetch_fulltext surfaces a recovery notice when a sections filter removes every body section from an article that had one — naming the requested terms and affected article ids, still returning the article; detected on both the PMC and Europe PMC paths. Adopts mcp-ts-core 0.10.10.
