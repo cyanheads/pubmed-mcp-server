@@ -66,6 +66,7 @@ const NCBI_ARRAY_JPATHS = new Set([
  */
 const ERROR_PATHS = [
   'eLinkResult.ERROR',
+  'eSearchResult.ERROR',
   'eSummaryResult.ERROR',
   'PubmedArticleSet.ErrorList.CannotRetrievePMID',
   'ERROR',

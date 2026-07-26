@@ -155,6 +155,26 @@ describe('NcbiResponseHandler', () => {
       }
     });
 
+    it('throws on eSearchResult.ERROR instead of parsing it as a zero-hit result', () => {
+      const handler = createHandler();
+      // Without this path an upstream eSearch failure parses cleanly, leaving no
+      // Count to read — the caller sees totalCount 0 and an empty PMID list.
+      const xml = `<?xml version="1.0"?><eSearchResult><ERROR>Search Backend failed: Exception: 'retstart' cannot be larger than 9998.</ERROR></eSearchResult>`;
+      try {
+        handler.parseAndHandleResponse(xml, 'esearch', { retmode: 'xml' });
+        throw new Error('Expected parseAndHandleResponse to throw');
+      } catch (error: unknown) {
+        expect(error).toMatchObject({
+          code: JsonRpcErrorCode.ServiceUnavailable,
+          data: {
+            reason: 'ncbi_unreachable',
+            endpoint: 'esearch',
+            ncbiErrors: [expect.stringContaining("'retstart' cannot be larger than 9998")],
+          },
+        });
+      }
+    });
+
     it('classifies "cannot get document summary" as NotFound (not retryable)', () => {
       const handler = createHandler();
       const xml =
