@@ -281,6 +281,69 @@ describe('EuropePmcService.search', () => {
   });
 });
 
+describe('EuropePmcService.fetchRecords', () => {
+  beforeEach(() => {
+    mockFetchWithTimeout.mockReset();
+  });
+
+  /** Query as it reaches the wire, URL-decoded out of the request URL. */
+  const sentQuery = () =>
+    new URL(String(mockFetchWithTimeout.mock.calls[0]?.[0])).searchParams.get('query');
+
+  it('OR-joins one unquoted EXT_ID/SRC clause per ref into a single request', async () => {
+    mockFetchWithTimeout.mockResolvedValue(
+      jsonResponse({
+        hitCount: 2,
+        resultList: {
+          result: [
+            { id: 'KR20120031038', source: 'PAT', abstractText: 'long patent abstract' },
+            { id: 'IND609436151', source: 'AGR' },
+          ],
+        },
+      }),
+    );
+    const service = makeService();
+    const hits = await service.fetchRecords([
+      { source: 'PAT', epmcId: 'KR20120031038' },
+      { source: 'AGR', epmcId: 'IND609436151' },
+    ]);
+
+    expect(mockFetchWithTimeout).toHaveBeenCalledTimes(1);
+    // Quoting the identifier or the SRC value makes Europe PMC match nothing.
+    expect(sentQuery()).toBe(
+      '(EXT_ID:KR20120031038 AND SRC:PAT) OR (EXT_ID:IND609436151 AND SRC:AGR)',
+    );
+    expect(hits.map((h) => h.id)).toEqual(['KR20120031038', 'IND609436151']);
+    expect(hits[0]?.abstractText).toBe('long patent abstract');
+  });
+
+  it('requests core results sized to the batch and adds no source filter clause', async () => {
+    mockFetchWithTimeout.mockResolvedValue(
+      jsonResponse({ hitCount: 0, resultList: { result: [] } }),
+    );
+    const service = makeService();
+    await service.fetchRecords([{ source: 'PPR', epmcId: 'PPR1283828' }]);
+
+    const url = new URL(String(mockFetchWithTimeout.mock.calls[0]?.[0]));
+    expect(url.searchParams.get('resultType')).toBe('core');
+    expect(url.searchParams.get('pageSize')).toBe('1');
+    expect(sentQuery()).toBe('(EXT_ID:PPR1283828 AND SRC:PPR)');
+  });
+
+  it('returns only what Europe PMC resolved, leaving misses to the caller', async () => {
+    mockFetchWithTimeout.mockResolvedValue(
+      jsonResponse({ hitCount: 1, resultList: { result: { id: 'PPR1283828', source: 'PPR' } } }),
+    );
+    const service = makeService();
+    const hits = await service.fetchRecords([
+      { source: 'PPR', epmcId: 'PPR1283828' },
+      { source: 'AGR', epmcId: 'IND000000000' },
+    ]);
+    expect(hits).toHaveLength(1);
+    expect(hits[0]?.id).toBe('PPR1283828');
+  });
+});
+
 describe('EuropePmcService.fullTextXml', () => {
   beforeEach(() => {
     mockFetchWithTimeout.mockReset();

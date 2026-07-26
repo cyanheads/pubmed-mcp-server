@@ -21,6 +21,7 @@ const lookupMeshTool = { id: 'lookup-mesh-tool' };
 const lookupCitationTool = { id: 'lookup-citation-tool' };
 const convertIdsTool = { id: 'convert-ids-tool' };
 const pubmedEuropepmcSearchTool = { id: 'pubmed-europepmc-search-tool' };
+const pubmedEuropepmcFetchTool = { id: 'pubmed-europepmc-fetch-tool' };
 const databaseInfoResource = { id: 'database-info-resource' };
 const researchPlanPrompt = { id: 'research-plan-prompt' };
 
@@ -96,6 +97,10 @@ vi.mock('@/mcp-server/tools/definitions/pubmed-europepmc-search.tool.js', () => 
   pubmedEuropepmcSearchTool,
 }));
 
+vi.mock('@/mcp-server/tools/definitions/pubmed-europepmc-fetch.tool.js', () => ({
+  pubmedEuropepmcFetchTool,
+}));
+
 async function loadModule() {
   await import('@/index.js');
 }
@@ -137,17 +142,19 @@ describe('server entry point', () => {
       lookupCitationTool,
       convertIdsTool,
       pubmedEuropepmcSearchTool,
+      pubmedEuropepmcFetchTool,
     ]);
     expect(appConfig.resources).toEqual([databaseInfoResource]);
     expect(appConfig.prompts).toEqual([researchPlanPrompt]);
     expect(appConfig.setup).toEqual(expect.any(Function));
   });
 
-  it('omits the EPMC search tool when EUROPEPMC_ENABLED is false', async () => {
+  it('omits both EPMC tools when EUROPEPMC_ENABLED is false', async () => {
     getServerConfig.mockReturnValue({ europepmcEnabled: false });
     await loadModule();
     const appConfig = createApp.mock.calls[0]?.[0] as { tools: unknown[] };
     expect(appConfig.tools).not.toContain(pubmedEuropepmcSearchTool);
+    expect(appConfig.tools).not.toContain(pubmedEuropepmcFetchTool);
     expect(appConfig.tools).toHaveLength(9);
   });
 

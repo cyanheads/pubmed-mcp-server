@@ -1,9 +1,11 @@
 /**
  * @fileoverview Europe PMC service. Wraps the EPMC REST API with rate-limiting,
- * retries, and JATS XML parsing. Two methods: `search()` for keyword discovery
- * across the EPMC corpus (MED/PMC/PPR/PAT/AGR) and `fullTextXml()` for fetching
- * a record's full-text JATS. The XML parser matches NCBI's ordered config so
- * `parsePmcArticle` consumes the result without modification.
+ * retries, and JATS XML parsing. `search()` covers keyword discovery across the
+ * EPMC corpus (MED/PMC/PPR/PAT/AGR), `fetchRecords()` resolves specific records
+ * by `source` + EPMC id, `fullTextXml()` fetches a record's full-text JATS, and
+ * `citations()` / `references()` walk EPMC's link graph. The XML parser matches
+ * NCBI's ordered config so `parsePmcArticle` consumes the result without
+ * modification.
  *
  * Optional service: only constructed when `EUROPEPMC_ENABLED=true` (the
  * default). `getEuropePmcService()` returns `undefined` when disabled so
@@ -32,6 +34,7 @@ import { EuropePmcRequestQueue } from './request-queue.js';
 import type {
   EuropePmcFullTextResult,
   EuropePmcLinksResponse,
+  EuropePmcRecordRef,
   EuropePmcRelatedRecord,
   EuropePmcRelatedResult,
   EuropePmcSearchHit,
@@ -67,11 +70,25 @@ function abortableSleep(ms: number, signal?: AbortSignal): Promise<void> {
 }
 
 /**
- * Facade over the Europe PMC REST API. Two methods:
- *   - `search()` — keyword search across MED/PMC/PPR/PAT/AGR.
- *   - `fullTextXml()` — JATS full text for an EPMC record.
+ * Europe PMC lookup clause for one record addressed by `source` + EPMC id.
  *
- * Both honor `ctx.signal` for cancellation and retry transient failures with
+ * The unquoted form is load-bearing: Europe PMC matches zero records for
+ * `EXT_ID:"<id>" AND SRC:<source>` — quotes survive on an identifier token only
+ * while no `AND SRC:` clause follows it. Callers pass ids through a schema that
+ * restricts them to identifier characters, so no escaping is applied here.
+ */
+function recordLookupQuery({ epmcId, source }: EuropePmcRecordRef): string {
+  return `(EXT_ID:${epmcId} AND SRC:${source})`;
+}
+
+/**
+ * Facade over the Europe PMC REST API:
+ *   - `search()` — keyword search across MED/PMC/PPR/PAT/AGR.
+ *   - `fetchRecords()` — batch lookup of specific records by source + EPMC id.
+ *   - `fullTextXml()` — JATS full text for an EPMC record.
+ *   - `citations()` / `references()` — EPMC's link graph for a PubMed article.
+ *
+ * All honor `ctx.signal` for cancellation and retry transient failures with
  * capped exponential backoff plus jitter.
  */
 export class EuropePmcService {
@@ -196,6 +213,28 @@ export class EuropePmcService {
       cursorMark,
       query: echoed,
     };
+  }
+
+  /**
+   * Look up specific records by `source` + EPMC id. One search request covers
+   * the whole batch: each ref becomes an `(EXT_ID:<id> AND SRC:<source>)`
+   * clause, OR-joined into a single query.
+   *
+   * Returns the hits Europe PMC resolved, in the order it returned them.
+   * Unmatched refs are simply absent — callers diff against their own request
+   * to report misses rather than getting a padded array back.
+   */
+  async fetchRecords(
+    refs: readonly EuropePmcRecordRef[],
+    signal?: AbortSignal,
+  ): Promise<EuropePmcSearchHit[]> {
+    const result = await this.search({
+      query: refs.map(recordLookupQuery).join(' OR '),
+      resultType: 'core',
+      pageSize: refs.length,
+      ...(signal && { signal }),
+    });
+    return result.hits;
   }
 
   /**

@@ -28,14 +28,24 @@ import {
   EDAM_PUBMED_ID,
   SCHEMA_SEARCH_ACTION,
 } from './_concepts.js';
+import { sliceCodeUnits } from './_text.js';
 
 const SourceEnum = z.enum(['MED', 'PMC', 'PPR', 'PAT', 'AGR']);
+
+/**
+ * Character budget for `abstractSnippet`. Keeps a search page bounded no matter
+ * how many hits carry long abstracts; `pubmed_europepmc_fetch` serves the
+ * complete text for the records a caller actually wants. A cut that would split
+ * a surrogate pair backs off a code unit, so a snippet can come back one
+ * character under the budget. (#93)
+ */
+const ABSTRACT_SNIPPET_LIMIT = 400;
 
 // ─── Tool Definition ─────────────────────────────────────────────────────────
 
 export const pubmedEuropepmcSearchTool = tool('pubmed_europepmc_search', {
   description:
-    'Search Europe PMC, a broad open-access biomedical corpus. Surfaces preprints (`source: PPR`), patents (`source: PAT`), Agricola (`source: AGR`), plus everything in PubMed (`MED`) and PMC. Use when additional coverage is needed — preprints and EPMC-only OA records are the typical recovery. Paginate via `cursorMark`. Defaults to `MED`, `PMC`, and `PPR`; pass `sources` to include `PAT` / `AGR`.',
+    'Search Europe PMC, a broad open-access biomedical corpus. Surfaces preprints (`source: PPR`), patents (`source: PAT`), Agricola (`source: AGR`), plus everything in PubMed (`MED`) and PMC. Use when additional coverage is needed — preprints and EPMC-only OA records are the typical recovery. Paginate via `cursorMark`. Defaults to `MED`, `PMC`, and `PPR`; pass `sources` to include `PAT` / `AGR`. Abstracts arrive as a bounded `abstractSnippet` with `abstractTruncated` marking the cut ones — pass a hit’s `source` and `epmcId` to `pubmed_europepmc_fetch` for the complete abstract.',
   annotations: { readOnlyHint: true, openWorldHint: true },
   _meta: conceptMeta([SCHEMA_SEARCH_ACTION, EDAM_DATABASE_SEARCH, EDAM_PUBMED_ID]),
   sourceUrl:
@@ -102,7 +112,9 @@ export const pubmedEuropepmcSearchTool = tool('pubmed_europepmc_search', {
             ),
             epmcId: z
               .string()
-              .describe("Europe PMC's internal record id; key for `fullTextXML` lookup"),
+              .describe(
+                "Europe PMC's internal record id. Pass it with this hit's `source` to `pubmed_europepmc_fetch` for the complete record. Europe PMC's `fullTextXML` is keyed on `pmcId`, not on this id, so records without a PMC counterpart have no full text to fetch.",
+              ),
             title: z.string().optional().describe('Article title'),
             authors: z.string().optional().describe('Formatted author string'),
             journal: z.string().optional().describe('Journal title'),
@@ -128,7 +140,13 @@ export const pubmedEuropepmcSearchTool = tool('pubmed_europepmc_search', {
               .string()
               .optional()
               .describe(
-                'First few hundred characters of the abstract as display-ready plain text — JATS/HTML markup stripped and HTML entities decoded — when `resultType: "core"` is requested',
+                `First ${ABSTRACT_SNIPPET_LIMIT} characters of the abstract as display-ready plain text — JATS/HTML markup stripped and HTML entities decoded — when \`resultType: "core"\` is requested, with a trailing … appended when the abstract was cut. Check \`abstractTruncated\` before treating it as the whole abstract.`,
+              ),
+            abstractTruncated: z
+              .boolean()
+              .optional()
+              .describe(
+                'Whether `abstractSnippet` was cut short of the full abstract. Retrieve the complete text with `pubmed_europepmc_fetch` using this record’s `source` and `epmcId`. Present whenever `abstractSnippet` is; omitted when Europe PMC carries no abstract.',
               ),
             citedByCount: z.number().optional().describe('Citation count reported by Europe PMC'),
             epmcUrl: z.string().describe('Europe PMC article URL'),
@@ -196,7 +214,8 @@ export const pubmedEuropepmcSearchTool = tool('pubmed_europepmc_search', {
       // un-decoded entities, and soft hyphens (no XML parser runs on it). Clean it
       // to display-ready plain text before truncating, so the snippet budget is
       // spent on text and soft hyphens don't corrupt downstream token matching. (#74)
-      const snippet = h.abstractText ? toDisplayText(h.abstractText) : '';
+      const abstract = h.abstractText ? toDisplayText(h.abstractText) : '';
+      const truncated = abstract.length > ABSTRACT_SNIPPET_LIMIT;
       return {
         source: h.source as 'MED' | 'PMC' | 'PPR' | 'PAT' | 'AGR',
         epmcId: h.id,
@@ -210,8 +229,11 @@ export const pubmedEuropepmcSearchTool = tool('pubmed_europepmc_search', {
         ...(h.doi && { doi: h.doi }),
         ...(h.isOpenAccess !== undefined && { isOpenAccess: h.isOpenAccess === 'Y' }),
         ...(h.inPMC !== undefined && { hasFullTextXml: h.inPMC === 'Y' }),
-        ...(snippet && {
-          abstractSnippet: snippet.length > 400 ? `${snippet.slice(0, 400)}…` : snippet,
+        ...(abstract && {
+          abstractSnippet: truncated
+            ? `${sliceCodeUnits(abstract, ABSTRACT_SNIPPET_LIMIT)}…`
+            : abstract,
+          abstractTruncated: truncated,
         }),
         ...(typeof h.citedByCount === 'number' && { citedByCount: h.citedByCount }),
         epmcUrl: `https://europepmc.org/article/${h.source}/${h.id}`,
@@ -282,7 +304,14 @@ export const pubmedEuropepmcSearchTool = tool('pubmed_europepmc_search', {
         }
         if (typeof h.citedByCount === 'number') lines.push(`**Cited by:** ${h.citedByCount}`);
         lines.push(`**URL:** ${h.epmcUrl}`);
-        if (h.abstractSnippet) lines.push(`\n${h.abstractSnippet}`);
+        if (h.abstractSnippet) {
+          lines.push(`\n${h.abstractSnippet}`);
+          if (h.abstractTruncated) {
+            lines.push(
+              `_Abstract truncated at ${ABSTRACT_SNIPPET_LIMIT} characters — call \`pubmed_europepmc_fetch\` with this record's \`source\` and \`epmcId\` for the complete text._`,
+            );
+          }
+        }
       }
     }
 

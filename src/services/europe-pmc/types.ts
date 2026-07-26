@@ -123,6 +123,16 @@ export interface EuropePmcSearchParams {
   sources?: readonly EuropePmcSource[];
 }
 
+/**
+ * Address of one Europe PMC record: the corpus it lives in plus EPMC's own
+ * identifier within that corpus. The pair is the only identifier many PPR,
+ * PAT, and AGR records carry — they frequently have no PMID and no DOI.
+ */
+export interface EuropePmcRecordRef {
+  epmcId: string;
+  source: EuropePmcSource;
+}
+
 /** Outcome of a fullTextXML lookup. */
 export type EuropePmcFullTextResult =
   | { kind: 'found'; xml: string; epmcId: string; source: EuropePmcSource }

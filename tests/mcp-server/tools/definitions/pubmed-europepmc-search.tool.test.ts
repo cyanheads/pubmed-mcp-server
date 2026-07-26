@@ -139,6 +139,86 @@ describe('pubmedEuropepmcSearchTool', () => {
     expect(getEnrichment(ctx).notice).toMatch(/No results/);
   });
 
+  describe('abstractTruncated disclosure (issue #83)', () => {
+    const runWith = async (abstractText: string | undefined) => {
+      mockSearch.mockResolvedValue({
+        hits: [{ id: '7', source: 'PAT', title: 't', ...(abstractText && { abstractText }) }],
+        hitCount: 1,
+        cursorMark: '*',
+        query: 'foo',
+      });
+      return pubmedEuropepmcSearchTool.handler(
+        pubmedEuropepmcSearchTool.input.parse({ query: 'foo' }),
+        createMockContext(),
+      );
+    };
+
+    it('flags a cut abstract and points at the fetch tool in content[]', async () => {
+      const result = await runWith('b'.repeat(900));
+      const hit = result.hits[0];
+      expect(hit?.abstractTruncated).toBe(true);
+      expect(hit?.abstractSnippet).toHaveLength(401);
+
+      const text = pubmedEuropepmcSearchTool.format?.(result)[0]?.text ?? '';
+      expect(text).toContain('Abstract truncated at 400 characters');
+      expect(text).toContain('pubmed_europepmc_fetch');
+    });
+
+    it('reports false for an abstract that fits, with no truncation note', async () => {
+      const result = await runWith('short abstract');
+      expect(result.hits[0]?.abstractTruncated).toBe(false);
+      expect(result.hits[0]?.abstractSnippet).toBe('short abstract');
+
+      const text = pubmedEuropepmcSearchTool.format?.(result)[0]?.text ?? '';
+      expect(text).toContain('short abstract');
+      expect(text).not.toContain('Abstract truncated');
+    });
+
+    it('reports an abstract of exactly the budget as complete', async () => {
+      const result = await runWith('c'.repeat(400));
+      expect(result.hits[0]?.abstractTruncated).toBe(false);
+      expect(result.hits[0]?.abstractSnippet).toHaveLength(400);
+    });
+
+    it('omits the flag entirely when Europe PMC carries no abstract', async () => {
+      const result = await runWith(undefined);
+      expect(result.hits[0]?.abstractSnippet).toBeUndefined();
+      expect(result.hits[0]?.abstractTruncated).toBeUndefined();
+    });
+
+    describe('surrogate-safe snippet cuts (issue #93)', () => {
+      /** DNA emoji U+1F9EC — one code point, two UTF-16 code units. */
+      const ASTRAL = '\u{1F9EC}';
+
+      it('backs the cut off a code unit rather than splitting a surrogate pair', async () => {
+        // Code unit 399 is the high surrogate, so a 400-unit cut would split it.
+        const result = await runWith(`${'a'.repeat(399)}${ASTRAL}${'b'.repeat(100)}`);
+
+        const snippet = result.hits[0]?.abstractSnippet ?? '';
+        expect(snippet).toBe(`${'a'.repeat(399)}…`);
+        expect(snippet.isWellFormed()).toBe(true);
+        expect(result.hits[0]?.abstractTruncated).toBe(true);
+      });
+
+      it('keeps an astral character whole when the cut lands just after it', async () => {
+        // Code units 398–399 are the pair, so a 400-unit cut ends on the low half.
+        const result = await runWith(`${'a'.repeat(398)}${ASTRAL}${'b'.repeat(100)}`);
+
+        const snippet = result.hits[0]?.abstractSnippet ?? '';
+        expect(snippet).toBe(`${'a'.repeat(398)}${ASTRAL}…`);
+        expect(snippet.isWellFormed()).toBe(true);
+      });
+
+      it('spends the full budget when the cut lands just before an astral character', async () => {
+        const result = await runWith(`${'a'.repeat(400)}${ASTRAL}${'b'.repeat(100)}`);
+
+        const snippet = result.hits[0]?.abstractSnippet ?? '';
+        expect(snippet).toBe(`${'a'.repeat(400)}…`);
+        expect(snippet.isWellFormed()).toBe(true);
+      });
+    });
+  });
+
   it('normalizes abstractSnippet: strips JATS/HTML, decodes entities, drops soft hyphens (#74)', async () => {
     mockSearch.mockResolvedValue({
       hits: [
@@ -284,6 +364,7 @@ describe('pubmedEuropepmcSearchTool', () => {
             hasFullTextXml: true,
             citedByCount: 13,
             abstractSnippet: 'Abstract goes here',
+            abstractTruncated: false,
             epmcUrl: 'https://europepmc.org/article/MED/42',
           },
         ],
