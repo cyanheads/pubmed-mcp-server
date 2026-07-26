@@ -2,6 +2,10 @@
 
 All notable changes to this project. Each entry links to its full per-version file in [changelog/](changelog/).
 
+## [2.10.1](changelog/2.10.x/2.10.1.md) — 2026-07-26
+
+eSearch upstream failures now throw instead of masking as zero-hit searches; pubmed_search_articles surfaces ignored field tags, unmatched phrases, and dropped partial dateRange filters via notice; the summaryCount cap message points at pubmed_fetch_articles when maxed; research_plan's includeAgentPrompts is now correctly advertised as optional.
+
 ## [2.10.0](changelog/2.10.x/2.10.0.md) — 2026-07-26
 
 New pubmed_europepmc_fetch tool (11th tool) resolves full Europe PMC records by source + epmcId; pubmed_fetch_fulltext gains maxCharacters/maxCharactersPerSection/overflowMode budget controls; a shared surrogate-pair-safe slice helper backs both.
