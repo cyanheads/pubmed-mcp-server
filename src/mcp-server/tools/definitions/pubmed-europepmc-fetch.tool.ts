@@ -41,10 +41,13 @@ const epmcIdSchema = z
   )
   .max(64);
 
+/** An `epmcId` in PMCID shape — `pubmed_fetch_fulltext` addresses these directly. */
+const PMCID_SHAPED_RE = /^PMC\d+$/i;
+
 const RecordRefSchema = z
   .object({
     source: SourceEnum.describe(
-      "Europe PMC source corpus — `MED` (PubMed), `PMC` (PubMed Central), `PPR` (preprint), `PAT` (patent), `AGR` (Agricola). Copy it from the search hit's `source`.",
+      "Europe PMC source corpus — `MED` (PubMed), `PMC` (PubMed Central), `PPR` (preprint), `PAT` (patent), `AGR` (Agricola). Copy it from the search hit's `source`. `PMC` paired with a PMCID resolves whether or not the article is also indexed in PubMed, and a PubMed-indexed one comes back as its canonical `MED` record carrying that PMCID in `pmcId`.",
     ),
     epmcId: epmcIdSchema.describe(
       "Europe PMC's own record id within that source. Copy it from the search hit's `epmcId` — for `MED` records this is the PMID; for the other sources it is an EPMC-native accession.",
@@ -63,7 +66,12 @@ const FetchedRecordSchema = z
     firstPublicationDate: z.string().optional().describe('First publication date (ISO YYYY-MM-DD)'),
     pmid: z.string().optional().describe('PMID when present in PubMed'),
     pmcId: z.string().optional().describe('PMC ID when present in PMC'),
-    doi: z.string().optional().describe('DOI when present'),
+    doi: z
+      .string()
+      .optional()
+      .describe(
+        'DOI when present, cased as Europe PMC reports it. DOIs are case-insensitive by spec and no case normalization is applied here, so the same DOI can arrive in a different case from `pubmed_fetch_articles` (Europe PMC `10.1056/nejmoa2212948`, NCBI `10.1056/NEJMoa2212948`) — a byte-for-byte comparison across the two reports a false mismatch.',
+      ),
     isOpenAccess: z
       .boolean()
       .optional()
@@ -176,19 +184,32 @@ export const pubmedEuropepmcFetchTool = tool('pubmed_europepmc_fetch', {
     // Europe PMC treats identifiers case-insensitively, so match the request
     // against the response on an upper-cased key rather than reporting a hit as
     // missing over a casing difference.
-    const refKey = (ref: { source: string; epmcId: string }) =>
-      `${ref.source}:${ref.epmcId.toUpperCase()}`;
-    const resolved = new Set(records.map(refKey));
-    const notFound = input.records.filter((ref) => !resolved.has(refKey(ref)));
+    const refKey = (source: string, id: string) => `${source}:${id.toUpperCase()}`;
+    const resolved = new Set<string>();
+    for (const r of records) {
+      resolved.add(refKey(r.source, r.epmcId));
+      // A `PMC` request for a PubMed-indexed article resolves to that article's
+      // canonical `MED` record, which reports the requested PMCID in `pmcId`
+      // instead of as its own id. Without this alias the record comes back in
+      // `records` and is reported missing in the same response.
+      if (r.pmcId) resolved.add(refKey('PMC', r.pmcId));
+    }
+    const notFound = input.records.filter((ref) => !resolved.has(refKey(ref.source, ref.epmcId)));
 
     ctx.log.info('pubmed_europepmc_fetch completed', {
       requested: input.records.length,
       returned: records.length,
     });
 
+    // An unresolved id shaped like a PMCID is reachable by another route:
+    // pubmed_fetch_fulltext addresses PMCIDs directly, with no `source` pair.
+    const pmcidHint = notFound.some((r) => PMCID_SHAPED_RE.test(r.epmcId))
+      ? ' An id shaped like a PMCID also resolves through pubmed_fetch_fulltext, whose `pmcids` input takes it on its own.'
+      : '';
+
     if (records.length === 0) {
       ctx.enrich.notice(
-        'Europe PMC returned no record for any requested pair. Both fields must be copied verbatim from a pubmed_europepmc_search hit — `epmcId` is Europe PMC\'s own id (the PMID only for `source: "MED"`), and it must be paired with the same hit\'s `source`.',
+        `Europe PMC returned no record for any requested pair. Both fields must be copied verbatim from a pubmed_europepmc_search hit — \`epmcId\` is Europe PMC's own id (the PMID only for \`source: "MED"\`), and it must be paired with the same hit's \`source\`.${pmcidHint}`,
       );
     } else if (notFound.length > 0) {
       ctx.enrich.notice(
@@ -196,7 +217,7 @@ export const pubmedEuropepmcFetchTool = tool('pubmed_europepmc_fetch', {
           .map((r) => `${r.source}/${r.epmcId}`)
           .join(
             ', ',
-          )}. Verify each against its pubmed_europepmc_search hit — a mismatched \`source\` is the usual cause.`,
+          )}. Verify each against its pubmed_europepmc_search hit — a mismatched \`source\` is the usual cause.${pmcidHint}`,
       );
     }
 

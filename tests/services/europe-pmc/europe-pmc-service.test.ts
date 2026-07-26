@@ -330,6 +330,53 @@ describe('EuropePmcService.fetchRecords', () => {
     expect(sentQuery()).toBe('(EXT_ID:PPR1283828 AND SRC:PPR)');
   });
 
+  it('ORs a bare PMCID clause into a PMC ref so a PubMed-indexed article resolves (#94)', async () => {
+    // EPMC's PMC corpus holds only articles it has no PubMed record for. Once an
+    // article is indexed in PubMed its canonical record moves to MED and carries
+    // the PMCID as a field, so `EXT_ID:PMC8371605 AND SRC:PMC` matches nothing.
+    mockFetchWithTimeout.mockResolvedValue(
+      jsonResponse({
+        hitCount: 1,
+        resultList: { result: [{ id: '34265844', source: 'MED', pmcid: 'PMC8371605' }] },
+      }),
+    );
+    const service = makeService();
+    const hits = await service.fetchRecords([{ source: 'PMC', epmcId: 'PMC8371605' }]);
+
+    expect(sentQuery()).toBe('(EXT_ID:PMC8371605 AND SRC:PMC) OR (PMCID:PMC8371605)');
+    expect(hits[0]?.source).toBe('MED');
+    expect(hits[0]?.pmcid).toBe('PMC8371605');
+  });
+
+  it('keeps serving PMC-only records through the same OR-ed clause (#94)', async () => {
+    mockFetchWithTimeout.mockResolvedValue(
+      jsonResponse({
+        hitCount: 1,
+        resultList: { result: [{ id: 'PMC13294766', source: 'PMC' }] },
+      }),
+    );
+    const service = makeService();
+    const hits = await service.fetchRecords([{ source: 'PMC', epmcId: 'PMC13294766' }]);
+    expect(hits[0]?.id).toBe('PMC13294766');
+    expect(hits[0]?.source).toBe('PMC');
+  });
+
+  it('adds the PMCID clause only for PMC refs, mixing sources in one query (#94)', async () => {
+    mockFetchWithTimeout.mockResolvedValue(
+      jsonResponse({ hitCount: 0, resultList: { result: [] } }),
+    );
+    const service = makeService();
+    await service.fetchRecords([
+      { source: 'MED', epmcId: '36449413' },
+      { source: 'PMC', epmcId: 'PMC8371605' },
+      { source: 'PPR', epmcId: 'PPR1283828' },
+    ]);
+
+    expect(sentQuery()).toBe(
+      '(EXT_ID:36449413 AND SRC:MED) OR (EXT_ID:PMC8371605 AND SRC:PMC) OR (PMCID:PMC8371605) OR (EXT_ID:PPR1283828 AND SRC:PPR)',
+    );
+  });
+
   it('returns only what Europe PMC resolved, leaving misses to the caller', async () => {
     mockFetchWithTimeout.mockResolvedValue(
       jsonResponse({ hitCount: 1, resultList: { result: { id: 'PPR1283828', source: 'PPR' } } }),

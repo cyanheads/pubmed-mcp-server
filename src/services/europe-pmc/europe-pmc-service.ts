@@ -76,9 +76,20 @@ function abortableSleep(ms: number, signal?: AbortSignal): Promise<void> {
  * `EXT_ID:"<id>" AND SRC:<source>` — quotes survive on an identifier token only
  * while no `AND SRC:` clause follows it. Callers pass ids through a schema that
  * restricts them to identifier characters, so no escaping is applied here.
+ *
+ * `SRC:PMC` alone under-resolves: the PMC corpus holds only articles Europe PMC
+ * has no PubMed record for. Once an article is indexed in PubMed its canonical
+ * record moves to `MED` and carries the PMCID as a field, so `EXT_ID:PMC8371605
+ * AND SRC:PMC` matches nothing while `PMCID:PMC8371605` resolves it. OR the two
+ * together for `PMC` so both corpus placements resolve from one request. The
+ * same asymmetry drove the PMCID branch of `pubmed_fetch_fulltext` (#85); that
+ * path can drop the `SRC:PMC` clause outright because it never takes a
+ * caller-supplied source, whereas this one must still serve genuine PMC-only
+ * records. (#94)
  */
 function recordLookupQuery({ epmcId, source }: EuropePmcRecordRef): string {
-  return `(EXT_ID:${epmcId} AND SRC:${source})`;
+  const extIdClause = `(EXT_ID:${epmcId} AND SRC:${source})`;
+  return source === 'PMC' ? `${extIdClause} OR (PMCID:${epmcId})` : extIdClause;
 }
 
 /**
@@ -217,12 +228,14 @@ export class EuropePmcService {
 
   /**
    * Look up specific records by `source` + EPMC id. One search request covers
-   * the whole batch: each ref becomes an `(EXT_ID:<id> AND SRC:<source>)`
-   * clause, OR-joined into a single query.
+   * the whole batch: each ref becomes a `recordLookupQuery` clause, OR-joined
+   * into a single query.
    *
    * Returns the hits Europe PMC resolved, in the order it returned them.
    * Unmatched refs are simply absent — callers diff against their own request
-   * to report misses rather than getting a padded array back.
+   * to report misses rather than getting a padded array back. A `PMC` ref can
+   * resolve to a `MED`-source hit that reports the requested PMCID in `pmcid`
+   * rather than as its `id`, so that diff matches on the PMCID too.
    */
   async fetchRecords(
     refs: readonly EuropePmcRecordRef[],

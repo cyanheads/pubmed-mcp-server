@@ -135,6 +135,27 @@ describe('pubmedEuropepmcFetchTool', () => {
     expect(result.records[0]?.abstract).toBe('Background: Emergency & clinical triage <LLMs>');
   });
 
+  it('keeps the results text a P value used to swallow (#94)', async () => {
+    mockFetchRecords.mockResolvedValue([
+      {
+        id: 'PPR3',
+        source: 'PPR',
+        // Europe PMC ships the `<` of a P value raw, not entity-encoded, so it
+        // reaches the tag strip as a literal `<`.
+        abstractText:
+          '<p>Change was -0.45 (95% CI, -0.67 to -0.23; P<0.001).</p><title>Conclusions</title><p>Treatment slowed decline.</p>',
+      },
+    ]);
+    const ctx = createMockContext();
+    const result = await pubmedEuropepmcFetchTool.handler(
+      pubmedEuropepmcFetchTool.input.parse({ records: [{ source: 'PPR', epmcId: 'PPR3' }] }),
+      ctx,
+    );
+    expect(result.records[0]?.abstract).toBe(
+      'Change was -0.45 (95% CI, -0.67 to -0.23; P<0.001). Conclusions Treatment slowed decline.',
+    );
+  });
+
   it('omits `abstract` when Europe PMC carries none', async () => {
     mockFetchRecords.mockResolvedValue([{ id: 'PMC13294766', source: 'PMC' }]);
     const ctx = createMockContext();
@@ -176,6 +197,29 @@ describe('pubmedEuropepmcFetchTool', () => {
         expect(result.records.map((r) => r.epmcId)).toContain(id);
         expect(text).toContain(id);
       }
+    });
+
+    it('counts a PMC request satisfied by its canonical MED record as resolved (#94)', async () => {
+      // The PMCID clause resolves a PubMed-indexed article to its MED record,
+      // whose `id` is the PMID — the requested PMCID arrives in `pmcid`. Keying
+      // the diff on `id` alone returned the record and reported it missing in
+      // the same response.
+      mockFetchRecords.mockResolvedValue([
+        { id: '34265844', source: 'MED', pmid: '34265844', pmcid: 'PMC8371605' },
+      ]);
+      const ctx = createMockContext();
+      const result = await pubmedEuropepmcFetchTool.handler(
+        pubmedEuropepmcFetchTool.input.parse({
+          records: [{ source: 'PMC', epmcId: 'PMC8371605' }],
+        }),
+        ctx,
+      );
+
+      expect(result.records).toHaveLength(1);
+      expect(result.records[0]?.source).toBe('MED');
+      expect(result.records[0]?.pmcId).toBe('PMC8371605');
+      expect(result.notFound).toBeUndefined();
+      expect(getEnrichment(ctx).notice).toBeUndefined();
     });
 
     it('matches the response to the request case-insensitively', async () => {
@@ -224,6 +268,37 @@ describe('pubmedEuropepmcFetchTool', () => {
       expect(result.records).toEqual([]);
       expect(result.notFound).toEqual([{ source: 'AGR', epmcId: 'IND000000000' }]);
       expect(getEnrichment(ctx).notice).toMatch(/no record for any requested pair/i);
+      expect(getEnrichment(ctx).notice).not.toContain('pubmed_fetch_fulltext');
+    });
+
+    it('points an unresolved PMCID-shaped id at pubmed_fetch_fulltext (#94)', async () => {
+      mockFetchRecords.mockResolvedValue([]);
+      const ctx = createMockContext();
+      const result = await pubmedEuropepmcFetchTool.handler(
+        pubmedEuropepmcFetchTool.input.parse({
+          records: [{ source: 'MED', epmcId: 'PMC8371605' }],
+        }),
+        ctx,
+      );
+
+      expect(result.notFound).toEqual([{ source: 'MED', epmcId: 'PMC8371605' }]);
+      expect(getEnrichment(ctx).notice).toContain('pubmed_fetch_fulltext');
+    });
+
+    it('carries the pubmed_fetch_fulltext pointer on a partially-missing batch (#94)', async () => {
+      mockFetchRecords.mockResolvedValue([patHit]);
+      const ctx = createMockContext();
+      await pubmedEuropepmcFetchTool.handler(
+        pubmedEuropepmcFetchTool.input.parse({
+          records: [
+            { source: 'PAT', epmcId: 'KR20120031038' },
+            { source: 'PMC', epmcId: 'PMC00000000' },
+          ],
+        }),
+        ctx,
+      );
+      expect(getEnrichment(ctx).notice).toContain('PMC/PMC00000000');
+      expect(getEnrichment(ctx).notice).toContain('pubmed_fetch_fulltext');
     });
   });
 
