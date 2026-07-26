@@ -4,6 +4,7 @@
  * @module tests/services/openalex/openalex-service.test
  */
 
+import { JsonRpcErrorCode, McpError } from '@cyanheads/mcp-ts-core/errors';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 const mockFetchWithTimeout = vi.fn();
@@ -24,6 +25,24 @@ function jsonResponse(body: unknown, init: ResponseInit = {}) {
     status: 200,
     headers: { 'content-type': 'application/json' },
     ...init,
+  });
+}
+
+/**
+ * Reproduce what `fetchWithTimeout` actually does on a non-2xx: it throws a
+ * status-mapped `McpError` carrying `errorSource: 'FetchHttpError'`, never
+ * resolves with the failing `Response`. `expectedStatuses` only lowers the log
+ * severity. Mocking a resolved 404 `Response` models a state the real helper
+ * cannot produce, and certifies branches that never execute. (#90)
+ */
+function httpErrorRejection(status: number, code: JsonRpcErrorCode, body = '') {
+  return new McpError(code, `Fetch failed for <upstream>. Status: ${status}`, {
+    status,
+    statusText: '',
+    body,
+    statusCode: status,
+    responseBody: body,
+    errorSource: 'FetchHttpError',
   });
 }
 
@@ -103,13 +122,26 @@ describe('OpenAlexService.similar', () => {
   });
 
   it('returns empty when source PMID not found in OpenAlex', async () => {
-    mockFetchWithTimeout.mockResolvedValueOnce(new Response('not found', { status: 404 }));
+    mockFetchWithTimeout.mockRejectedValueOnce(
+      httpErrorRejection(404, JsonRpcErrorCode.NotFound, 'not found'),
+    );
 
     const service = makeService();
     const result = await service.similar('99999999', 10);
 
     expect(result.pmids).toEqual([]);
     expect(result.totalCount).toBe(0);
+    // Only the work lookup ran — no batch-resolve call follows a null work.
+    expect(mockFetchWithTimeout).toHaveBeenCalledTimes(1);
+  });
+
+  it('rethrows a non-404 work-lookup failure', async () => {
+    mockFetchWithTimeout.mockRejectedValueOnce(
+      httpErrorRejection(500, JsonRpcErrorCode.InternalError, 'boom'),
+    );
+
+    const service = makeService();
+    await expect(service.similar('31295471', 10)).rejects.toThrow(/500/);
   });
 
   it('returns empty when related_works list is empty', async () => {
@@ -204,6 +236,27 @@ describe('OpenAlexService.citedBy', () => {
     expect(result.pmids).toEqual(['33333']);
   });
 
+  it('returns empty when source PMID not found in OpenAlex', async () => {
+    mockFetchWithTimeout.mockRejectedValueOnce(
+      httpErrorRejection(404, JsonRpcErrorCode.NotFound, 'not found'),
+    );
+
+    const service = makeService();
+    const result = await service.citedBy('99999999', 10);
+
+    expect(result).toEqual({ pmids: [], totalCount: 0 });
+    expect(mockFetchWithTimeout).toHaveBeenCalledTimes(1);
+  });
+
+  it('propagates a 5xx from the cited_by lookup', async () => {
+    mockFetchWithTimeout
+      .mockResolvedValueOnce(jsonResponse({ id: 'https://openalex.org/W1234' }))
+      .mockRejectedValueOnce(httpErrorRejection(503, JsonRpcErrorCode.ServiceUnavailable, 'down'));
+
+    const service = makeService();
+    await expect(service.citedBy('31295471', 10)).rejects.toThrow(/503/);
+  });
+
   it('excludes source PMID from results', async () => {
     mockFetchWithTimeout
       .mockResolvedValueOnce(
@@ -278,6 +331,18 @@ describe('OpenAlexService.references', () => {
     expect(result.pmids).toEqual(['55555']);
     expect(result.pmids).not.toContain(null);
     expect(result.pmids).not.toContain(undefined);
+  });
+
+  it('returns empty when source PMID not found in OpenAlex', async () => {
+    mockFetchWithTimeout.mockRejectedValueOnce(
+      httpErrorRejection(404, JsonRpcErrorCode.NotFound, 'not found'),
+    );
+
+    const service = makeService();
+    const result = await service.references('99999999', 10);
+
+    expect(result).toEqual({ pmids: [], totalCount: 0 });
+    expect(mockFetchWithTimeout).toHaveBeenCalledTimes(1);
   });
 
   it('returns empty when referenced_works is absent', async () => {

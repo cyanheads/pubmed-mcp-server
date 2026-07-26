@@ -5,13 +5,8 @@
  * @module src/services/openalex/api-client
  */
 
-import { McpError, serviceUnavailable } from '@cyanheads/mcp-ts-core/errors';
-import {
-  fetchWithTimeout,
-  httpErrorFromResponse,
-  logger,
-  requestContextService,
-} from '@cyanheads/mcp-ts-core/utils';
+import { JsonRpcErrorCode, McpError, serviceUnavailable } from '@cyanheads/mcp-ts-core/errors';
+import { fetchWithTimeout, logger, requestContextService } from '@cyanheads/mcp-ts-core/utils';
 
 import { recoveryFor } from '@/services/error-contracts.js';
 import { OPENALEX_API_BASE, type OpenAlexWork, type OpenAlexWorksResponse } from './types.js';
@@ -24,13 +19,27 @@ export interface OpenAlexApiClientConfig {
   timeoutMs: number;
 }
 
-/** Low-level HTTP client for OpenAlex. Single-attempt — retries upstream. */
+/**
+ * Low-level HTTP client for OpenAlex. Single-attempt — retries upstream.
+ *
+ * Every method here resolves only on HTTP 2xx: `fetchWithTimeout` throws a
+ * status-mapped `McpError` for any non-2xx rather than returning the failing
+ * `Response`, so a `!response.ok` check after the call can never run. A status
+ * that needs graceful handling is converted in the catch block by inspecting
+ * `error.code` — see `getWorkByPmid`'s 404 → `null`. (#90)
+ */
 export class OpenAlexApiClient {
   constructor(private readonly config: OpenAlexApiClientConfig) {}
 
   /**
    * Fetch a single work by PMID. Returns the work record (with related_works
    * and referenced_works populated) or null when the PMID is unknown.
+   *
+   * `fetchWithTimeout` throws a status-mapped `McpError` on any non-2xx rather
+   * than resolving with the `Response` (`expectedStatuses` only lowers the log
+   * severity), so a PMID OpenAlex doesn't index arrives here as
+   * `McpError(NotFound)` and must be converted in the catch block. Every other
+   * failure keeps throwing. (#90)
    */
   async getWorkByPmid(pmid: string, signal?: AbortSignal): Promise<OpenAlexWork | null> {
     const params = new URLSearchParams({
@@ -52,22 +61,16 @@ export class OpenAlexApiClient {
         ...(signal && { signal }),
       });
     } catch (error: unknown) {
-      if (error instanceof McpError) throw error;
+      if (error instanceof McpError) {
+        if (error.code === JsonRpcErrorCode.NotFound) return null;
+        throw error;
+      }
       const msg = error instanceof Error ? error.message : String(error);
       throw serviceUnavailable(
         `OpenAlex request failed: ${msg}`,
         { reason: 'openalex_unreachable', ...recoveryFor('openalex_unreachable') },
         { cause: error },
       );
-    }
-
-    if (response.status === 404) return null;
-
-    if (!response.ok) {
-      throw await httpErrorFromResponse(response, {
-        service: 'OpenAlex',
-        data: { url, reason: 'openalex_unreachable', ...recoveryFor('openalex_unreachable') },
-      });
     }
 
     const text = await response.text();
@@ -149,13 +152,6 @@ export class OpenAlexApiClient {
       );
     }
 
-    if (!response.ok) {
-      throw await httpErrorFromResponse(response, {
-        service: 'OpenAlex',
-        data: { url, reason: 'openalex_unreachable', ...recoveryFor('openalex_unreachable') },
-      });
-    }
-
     const text = await response.text();
     let parsed: OpenAlexWorksResponse;
     try {
@@ -206,13 +202,6 @@ export class OpenAlexApiClient {
         { reason: 'openalex_unreachable', ...recoveryFor('openalex_unreachable') },
         { cause: error },
       );
-    }
-
-    if (!response.ok) {
-      throw await httpErrorFromResponse(response, {
-        service: 'OpenAlex',
-        data: { url, reason: 'openalex_unreachable', ...recoveryFor('openalex_unreachable') },
-      });
     }
 
     const text = await response.text();

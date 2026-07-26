@@ -5,13 +5,8 @@
  * @module src/services/europe-pmc/api-client
  */
 
-import { McpError, serviceUnavailable } from '@cyanheads/mcp-ts-core/errors';
-import {
-  fetchWithTimeout,
-  httpErrorFromResponse,
-  logger,
-  requestContextService,
-} from '@cyanheads/mcp-ts-core/utils';
+import { JsonRpcErrorCode, McpError, serviceUnavailable } from '@cyanheads/mcp-ts-core/errors';
+import { fetchWithTimeout, logger, requestContextService } from '@cyanheads/mcp-ts-core/utils';
 
 import { recoveryFor } from '@/services/error-contracts.js';
 import { EUROPEPMC_API_BASE, type EuropePmcSearchParams } from './types.js';
@@ -31,7 +26,15 @@ export type EuropePmcFullTextFetchResult =
   | { kind: 'found'; xml: string }
   | { kind: 'not-available'; reason: string };
 
-/** Low-level HTTP client for Europe PMC. Single-attempt — retries upstream. */
+/**
+ * Low-level HTTP client for Europe PMC. Single-attempt — retries upstream.
+ *
+ * Every method here resolves only on HTTP 2xx: `fetchWithTimeout` throws a
+ * status-mapped `McpError` for any non-2xx rather than returning the failing
+ * `Response`, so a `!response.ok` check after the call can never run. A status
+ * that needs graceful handling is converted in the catch block by inspecting
+ * `error.code` — see `fullTextXml`'s 404 → `not-available`. (#90)
+ */
 export class EuropePmcApiClient {
   constructor(private readonly config: EuropePmcApiClientConfig) {}
 
@@ -63,13 +66,6 @@ export class EuropePmcApiClient {
       );
     }
 
-    if (!response.ok) {
-      throw await httpErrorFromResponse(response, {
-        service: 'Europe PMC',
-        data: { url, reason: 'europepmc_unreachable', ...recoveryFor('europepmc_unreachable') },
-      });
-    }
-
     return response.text();
   }
 
@@ -77,6 +73,11 @@ export class EuropePmcApiClient {
    * Fetch the JATS full-text XML for an EPMC record by its internal id.
    * Returns `{ kind: 'not-available' }` for 404 — EPMC has the record but
    * doesn't publish a full-text XML for it (very common for preprints).
+   *
+   * `fetchWithTimeout` throws a status-mapped `McpError` on any non-2xx rather
+   * than resolving with the `Response` (`expectedStatuses` only lowers the log
+   * severity), so the 404 arrives here as `McpError(NotFound)` and must be
+   * converted in the catch block. Every other failure keeps throwing. (#90)
    */
   async fullTextXml(epmcId: string, signal?: AbortSignal): Promise<EuropePmcFullTextFetchResult> {
     const url = `${EUROPEPMC_API_BASE}/${encodeURIComponent(epmcId)}/fullTextXML`;
@@ -96,24 +97,18 @@ export class EuropePmcApiClient {
         ...(signal && { signal }),
       });
     } catch (error: unknown) {
-      if (error instanceof McpError) throw error;
+      if (error instanceof McpError) {
+        if (error.code === JsonRpcErrorCode.NotFound) {
+          return { kind: 'not-available', reason: 'EPMC has no fullTextXML for this record' };
+        }
+        throw error;
+      }
       const msg = error instanceof Error ? error.message : String(error);
       throw serviceUnavailable(
         `Europe PMC fullTextXML request failed: ${msg}`,
         { reason: 'europepmc_unreachable', epmcId, ...recoveryFor('europepmc_unreachable') },
         { cause: error },
       );
-    }
-
-    if (response.status === 404) {
-      return { kind: 'not-available', reason: 'EPMC has no fullTextXML for this record' };
-    }
-
-    if (!response.ok) {
-      throw await httpErrorFromResponse(response, {
-        service: 'Europe PMC fullTextXML',
-        data: { epmcId, reason: 'europepmc_unreachable', ...recoveryFor('europepmc_unreachable') },
-      });
     }
 
     const xml = await response.text();
@@ -173,13 +168,6 @@ export class EuropePmcApiClient {
         { reason: 'europepmc_unreachable', ...recoveryFor('europepmc_unreachable') },
         { cause: error },
       );
-    }
-
-    if (!response.ok) {
-      throw await httpErrorFromResponse(response, {
-        service: 'Europe PMC',
-        data: { url, reason: 'europepmc_unreachable', ...recoveryFor('europepmc_unreachable') },
-      });
     }
 
     return response.text();

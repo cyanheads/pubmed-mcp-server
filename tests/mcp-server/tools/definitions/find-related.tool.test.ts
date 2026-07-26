@@ -265,6 +265,40 @@ describe('findRelatedTool', () => {
     expect(result.articles[0]?.pmid).toBe('777');
   });
 
+  it('OpenAlex serves an empty set for a PMID it does not index (issue #90)', async () => {
+    // `OpenAlexApiClient.getWorkByPmid` converts an upstream 404 to `null`, so
+    // `OpenAlexService.similar`'s `if (!work)` guard runs for the first time.
+    // The tool degrades to an empty result set instead of reporting every
+    // provider as failed.
+    mockELink.mockRejectedValue(new McpError(JsonRpcErrorCode.ServiceUnavailable, 'NCBI down'));
+    mockOaSimilar.mockResolvedValue({ pmids: [], totalCount: 0 });
+
+    const ctx = createMockContext();
+    const input = findRelatedTool.input.parse({ pmid: '99999999', relationship: 'similar' });
+    const result = await findRelatedTool.handler(input, ctx);
+
+    expect(result.articles).toEqual([]);
+    expect(getEnrichment(ctx).source).toBe('openalex');
+    expect(getEnrichment(ctx).totalCount).toBe(0);
+    expect(getEnrichment(ctx).notice).not.toContain('All providers failed');
+    // No PMIDs to enrich — the eSummary round-trip is skipped entirely.
+    expect(mockESummary).not.toHaveBeenCalled();
+  });
+
+  it('OpenAlex serves an empty cited_by set for a PMID it does not index (issue #90)', async () => {
+    mockELink.mockRejectedValue(new McpError(JsonRpcErrorCode.ServiceUnavailable, 'NCBI down'));
+    mockEpmcCitations.mockResolvedValue({ pmids: [], totalCount: 0 });
+    mockOaCitedBy.mockResolvedValue({ pmids: [], totalCount: 0 });
+
+    const ctx = createMockContext();
+    const input = findRelatedTool.input.parse({ pmid: '99999999', relationship: 'cited_by' });
+    const result = await findRelatedTool.handler(input, ctx);
+
+    expect(result.articles).toEqual([]);
+    expect(getEnrichment(ctx).source).toBe('openalex');
+    expect(getEnrichment(ctx).notice).not.toContain('All providers failed');
+  });
+
   it('all providers fail: returns empty + all-fail notice', async () => {
     mockELink.mockRejectedValue(new McpError(JsonRpcErrorCode.ServiceUnavailable, 'NCBI down'));
     mockEpmcCitations.mockRejectedValue(

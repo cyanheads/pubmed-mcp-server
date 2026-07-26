@@ -3,6 +3,7 @@
  * @module tests/services/europe-pmc/europe-pmc-service.test
  */
 
+import { JsonRpcErrorCode, McpError } from '@cyanheads/mcp-ts-core/errors';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 const mockFetchWithTimeout = vi.fn();
@@ -32,6 +33,24 @@ function xmlResponse(body: string, init: ResponseInit = {}) {
     status: 200,
     headers: { 'content-type': 'application/xml' },
     ...init,
+  });
+}
+
+/**
+ * Reproduce what `fetchWithTimeout` actually does on a non-2xx: it throws a
+ * status-mapped `McpError` carrying `errorSource: 'FetchHttpError'`, never
+ * resolves with the failing `Response`. `expectedStatuses` only lowers the log
+ * severity. Mocking a resolved 404/503 `Response` models a state the real helper
+ * cannot produce, and certifies branches that never execute. (#90)
+ */
+function httpErrorRejection(status: number, code: JsonRpcErrorCode, body = '') {
+  return new McpError(code, `Fetch failed for <upstream>. Status: ${status}`, {
+    status,
+    statusText: '',
+    body,
+    statusCode: status,
+    responseBody: body,
+    errorSource: 'FetchHttpError',
   });
 }
 
@@ -243,7 +262,9 @@ describe('EuropePmcService.search', () => {
   });
 
   it('throws ServiceUnavailable on 5xx', async () => {
-    mockFetchWithTimeout.mockResolvedValue(new Response('down', { status: 503 }));
+    mockFetchWithTimeout.mockRejectedValue(
+      httpErrorRejection(503, JsonRpcErrorCode.ServiceUnavailable, 'down'),
+    );
     const service = makeService();
     await expect(service.search({ query: 'foo' })).rejects.toThrow(/503/);
   });
@@ -280,7 +301,9 @@ describe('EuropePmcService.fullTextXml', () => {
   });
 
   it('returns `not-available` for 404', async () => {
-    mockFetchWithTimeout.mockResolvedValue(new Response('nope', { status: 404 }));
+    mockFetchWithTimeout.mockRejectedValue(
+      httpErrorRejection(404, JsonRpcErrorCode.NotFound, 'nope'),
+    );
     const service = makeService();
     const result = await service.fullTextXml('PPR404', 'PPR');
     expect(result.kind).toBe('not-available');
@@ -294,9 +317,21 @@ describe('EuropePmcService.fullTextXml', () => {
   });
 
   it('throws ServiceUnavailable on 5xx', async () => {
-    mockFetchWithTimeout.mockResolvedValue(new Response('down', { status: 503 }));
+    mockFetchWithTimeout.mockRejectedValue(
+      httpErrorRejection(503, JsonRpcErrorCode.ServiceUnavailable, 'down'),
+    );
     const service = makeService();
     await expect(service.fullTextXml('X', 'PMC')).rejects.toThrow(/503/);
+  });
+
+  it('throws NotFound onward for a 404 on a non-fullTextXML endpoint', async () => {
+    // The 404 → `not-available` conversion is scoped to fullTextXml; a 404 from
+    // any other Europe PMC endpoint keeps propagating. (#90)
+    mockFetchWithTimeout.mockRejectedValue(
+      httpErrorRejection(404, JsonRpcErrorCode.NotFound, 'nope'),
+    );
+    const service = makeService();
+    await expect(service.search({ query: 'foo' })).rejects.toThrow(/404/);
   });
 
   it('uses the single-id URL pattern, not source/id', async () => {
@@ -409,7 +444,9 @@ describe('EuropePmcService.citations', () => {
   });
 
   it('throws ServiceUnavailable on 5xx', async () => {
-    mockFetchWithTimeout.mockResolvedValue(new Response('down', { status: 503 }));
+    mockFetchWithTimeout.mockRejectedValue(
+      httpErrorRejection(503, JsonRpcErrorCode.ServiceUnavailable, 'down'),
+    );
     const service = makeService();
     await expect(service.citations('12345', 10, 1)).rejects.toThrow(/503/);
   });
