@@ -2,6 +2,10 @@
 
 All notable changes to this project. Each entry links to its full per-version file in [changelog/](changelog/).
 
+## [2.9.10](changelog/2.9.x/2.9.10.md) — 2026-07-26
+
+pubmed_fetch_fulltext: EPMC/PMCID query builders fixed, front-matter-only records fall through the retrieval chain instead of being dropped, pmcids input reaches Unpaywall via a resolved DOI, and Unpaywall articles carry a pmcId backlink. Dead 404-handling branches removed from the Europe PMC and OpenAlex clients.
+
 ## [2.9.9](changelog/2.9.x/2.9.9.md) — 2026-07-26
 
 pubmed_lookup_mesh gets true upstream totalCount plus offset/nextOffset pagination; pubmed_lookup_citation stops false-flagging authors ranked 4th or later; pubmed_spell_check threads ctx.signal into ESpell. Adopts mcp-ts-core 0.11.0.
