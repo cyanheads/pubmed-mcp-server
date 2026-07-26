@@ -1,7 +1,7 @@
 <div align="center">
   <h1>@cyanheads/pubmed-mcp-server</h1>
   <p><b>Search PubMed/Europe PMC, fetch articles and full text (PMC/EPMC/Unpaywall), citations, MeSH terms via MCP. STDIO or Streamable HTTP.</b>
-  <div>10 Tools • 1 Resource • 1 Prompt</div>
+  <div>11 Tools • 1 Resource • 1 Prompt</div>
   </p>
 </div>
 
@@ -9,7 +9,7 @@
 
 
 
-[![Version](https://img.shields.io/badge/Version-2.9.10-blue.svg?style=flat-square)](./CHANGELOG.md) [![License](https://img.shields.io/badge/License-Apache%202.0-orange.svg?style=flat-square)](./LICENSE) [![Docker](https://img.shields.io/badge/Docker-ghcr.io-2496ED?style=flat-square&logo=docker&logoColor=white)](https://github.com/users/cyanheads/packages/container/package/pubmed-mcp-server) [![MCP SDK](https://img.shields.io/badge/MCP%20SDK-^1.29.0-green.svg?style=flat-square)](https://modelcontextprotocol.io/) [![npm](https://img.shields.io/npm/v/@cyanheads/pubmed-mcp-server?style=flat-square&logo=npm&logoColor=white)](https://www.npmjs.com/package/@cyanheads/pubmed-mcp-server) [![TypeScript](https://img.shields.io/badge/TypeScript-^7.0.2-3178C6.svg?style=flat-square)](https://www.typescriptlang.org/) [![Bun](https://img.shields.io/badge/Bun-v1.3.14-blueviolet.svg?style=flat-square)](https://bun.sh/)
+[![Version](https://img.shields.io/badge/Version-2.10.0-blue.svg?style=flat-square)](./CHANGELOG.md) [![License](https://img.shields.io/badge/License-Apache%202.0-orange.svg?style=flat-square)](./LICENSE) [![Docker](https://img.shields.io/badge/Docker-ghcr.io-2496ED?style=flat-square&logo=docker&logoColor=white)](https://github.com/users/cyanheads/packages/container/package/pubmed-mcp-server) [![MCP SDK](https://img.shields.io/badge/MCP%20SDK-^1.29.0-green.svg?style=flat-square)](https://modelcontextprotocol.io/) [![npm](https://img.shields.io/npm/v/@cyanheads/pubmed-mcp-server?style=flat-square&logo=npm&logoColor=white)](https://www.npmjs.com/package/@cyanheads/pubmed-mcp-server) [![TypeScript](https://img.shields.io/badge/TypeScript-^7.0.2-3178C6.svg?style=flat-square)](https://www.typescriptlang.org/) [![Bun](https://img.shields.io/badge/Bun-v1.3.14-blueviolet.svg?style=flat-square)](https://bun.sh/)
 
 </div>
 
@@ -31,12 +31,13 @@
 
 ## Tools
 
-10 tools for working with PubMed, PubMed Central, and Europe PMC data:
+11 tools for working with PubMed, PubMed Central, and Europe PMC data:
 
 | Tool | Description |
 |:---|:---|
 | `pubmed_search_articles` | Search PubMed with full query syntax, field-specific filters, date ranges, pagination, and optional brief summaries |
 | `pubmed_europepmc_search` | Search Europe PMC for preprints, patents, Agricola, and EPMC-only OA records that don't surface in PubMed. Cursor-based pagination. |
+| `pubmed_europepmc_fetch` | Fetch complete Europe PMC records — including the untruncated abstract — by `source` + `epmcId`, the only identifier many preprint, patent, and Agricola records carry |
 | `pubmed_fetch_articles` | Fetch full article metadata by PMIDs — abstract, authors, journal, MeSH terms, grants |
 | `pubmed_fetch_fulltext` | Fetch full-text articles via a chain: NCBI PMC EFetch → Europe PMC `fullTextXML` → Unpaywall. Accepts PMIDs, PMCIDs, or DOIs. |
 | `pubmed_format_citations` | Generate formatted citations in APA 7th, MLA 9th, BibTeX, RIS, or Vancouver (ICMJE/NLM) |
@@ -86,6 +87,7 @@ Fetch full-text articles via a three-stage chain: NCBI PMC EFetch → Europe PMC
 - Structured unavailable reasons (`not-found`, `no-pmc-fallback-disabled`, `no-epmc-fulltext`, `no-doi`, `no-oa`, `fetch-failed`, `parse-failed`, `service-error`) so callers can retry or explain to users without parsing text
 - Each `unavailable` entry carries `idType` (`pmid` / `pmcid` / `doi`) and `triedTiers` — per-tier outcomes (`not-attempted`, `miss`, `no-fulltext`, `service-error`, …) in execution order, so callers can see which stage failed and why
 - Section filtering by title (case-insensitive match, e.g. `["methods", "results"]`) and configurable max sections apply to PMC output
+- Character budgets keep context size predictable: `maxCharacters` caps body text per article (PMC sections and subsections, or the Unpaywall body), `maxCharactersPerSection` caps a single PMC section, and `overflowMode` picks between `truncate` (fill sections in document order) and `outline` (split the budget evenly so every heading survives with an excerpt). Budgets run after the semantic filters, and a `truncation` object reports per-article and per-section character counts whenever anything was shortened
 - Up to 10 articles per request
 
 ---
@@ -98,6 +100,19 @@ Search Europe PMC (EBI/EMBL-EBI), a broader open-access biomedical corpus than P
 - Default sources `["MED", "PMC", "PPR"]`; pass `sources` to include `PAT` / `AGR`
 - Cursor-based pagination via `cursorMark` (unlike `pubmed_search_articles`, which uses offset) — `*` for the first page, return `nextCursorMark` for the next
 - Output discriminator on `source` plus optional `pmid` / `pmcId` / `doi` cross-walking
+- `abstractSnippet` is capped at 400 characters to keep a page bounded; `abstractTruncated` says whether it was cut, and `pubmed_europepmc_fetch` returns the whole abstract for the records worth reading in full
+- Disabled when `EUROPEPMC_ENABLED=false`; tool is not registered in that case
+
+---
+
+### `pubmed_europepmc_fetch`
+
+Fetch complete Europe PMC records by `source` + `epmcId`, the detail counterpart to `pubmed_europepmc_search`.
+
+- Returns the full, untruncated abstract as display-ready plain text — markup stripped, HTML entities decoded
+- Addressed by the `source` and `epmcId` of a search hit, the only identifier preprint (`PPR`), patent (`PAT`), and Agricola (`AGR`) records reliably carry — `pubmed_fetch_articles` needs a PMID and `pubmed_fetch_fulltext` needs a PMCID, PMID, or DOI
+- Up to 25 records per call, resolved in a single Europe PMC request
+- Pairs unresolved requests back to the caller in `notFound` instead of failing the batch
 - Disabled when `EUROPEPMC_ENABLED=false`; tool is not registered in that case
 
 ---
@@ -355,7 +370,7 @@ All configuration is validated at startup via Zod schemas in `src/config/server-
 
 | Directory | Purpose |
 |:---|:---|
-| `src/mcp-server/tools` | Tool definitions (`*.tool.ts`). Ten tools across PubMed, PMC, and Europe PMC. |
+| `src/mcp-server/tools` | Tool definitions (`*.tool.ts`). Eleven tools across PubMed, PMC, and Europe PMC. |
 | `src/mcp-server/resources` | Resource definitions. Database info resource. |
 | `src/mcp-server/prompts` | Prompt definitions. Research plan prompt. |
 | `src/services/ncbi` | NCBI E-utilities service layer — API client, queue, parser, formatter. |

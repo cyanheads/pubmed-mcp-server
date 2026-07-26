@@ -2,6 +2,10 @@
 
 All notable changes to this project. Each entry links to its full per-version file in [changelog/](changelog/).
 
+## [2.10.0](changelog/2.10.x/2.10.0.md) — 2026-07-26
+
+New pubmed_europepmc_fetch tool (11th tool) resolves full Europe PMC records by source + epmcId; pubmed_fetch_fulltext gains maxCharacters/maxCharactersPerSection/overflowMode budget controls; a shared surrogate-pair-safe slice helper backs both.
+
 ## [2.9.10](changelog/2.9.x/2.9.10.md) — 2026-07-26
 
 pubmed_fetch_fulltext: EPMC/PMCID query builders fixed, front-matter-only records fall through the retrieval chain instead of being dropped, pmcids input reaches Unpaywall via a resolved DOI, and Unpaywall articles carry a pmcId backlink. Dead 404-handling branches removed from the Europe PMC and OpenAlex clients.

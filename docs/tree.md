@@ -1,6 +1,6 @@
 # pubmed-mcp-server - Directory Structure
 
-Generated on: 2026-07-26 12:33:29
+Generated on: 2026-07-26 15:08:34
 
 ```text
 pubmed-mcp-server/
@@ -24,6 +24,7 @@ pubmed-mcp-server/
 ├── changelog/
 │   ├── 2.0.x/
 │   ├── 2.1.x/
+│   ├── 2.10.x/
 │   ├── 2.2.x/
 │   ├── 2.3.x/
 │   ├── 2.4.x/
@@ -160,6 +161,7 @@ pubmed-mcp-server/
 │   │       └── definitions/
 │   │           ├── _concepts.ts
 │   │           ├── _schemas.ts
+│   │           ├── _text.ts
 │   │           ├── convert-ids.tool.ts
 │   │           ├── fetch-articles.tool.ts
 │   │           ├── fetch-fulltext.tool.ts
@@ -167,6 +169,7 @@ pubmed-mcp-server/
 │   │           ├── format-citations.tool.ts
 │   │           ├── lookup-citation.tool.ts
 │   │           ├── lookup-mesh.tool.ts
+│   │           ├── pubmed-europepmc-fetch.tool.ts
 │   │           ├── pubmed-europepmc-search.tool.ts
 │   │           ├── search-articles.tool.ts
 │   │           └── spell-check.tool.ts
@@ -213,6 +216,7 @@ pubmed-mcp-server/
 │   │   └── tools/
 │   │       └── definitions/
 │   │           ├── _fuzz-helpers.ts
+│   │           ├── _text.test.ts
 │   │           ├── convert-ids.tool.test.ts
 │   │           ├── fetch-articles.tool.test.ts
 │   │           ├── fetch-fulltext.tool.test.ts
@@ -220,6 +224,7 @@ pubmed-mcp-server/
 │   │           ├── format-citations.tool.test.ts
 │   │           ├── lookup-citation.tool.test.ts
 │   │           ├── lookup-mesh.tool.test.ts
+│   │           ├── pubmed-europepmc-fetch.tool.test.ts
 │   │           ├── pubmed-europepmc-search.tool.test.ts
 │   │           ├── search-articles.tool.test.ts
 │   │           ├── security.test.ts

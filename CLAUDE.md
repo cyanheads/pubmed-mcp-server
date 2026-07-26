@@ -1,7 +1,7 @@
 # Agent Protocol
 
 **Server:** @cyanheads/pubmed-mcp-server
-**Version:** 2.9.10
+**Version:** 2.10.0
 **Framework:** [@cyanheads/mcp-ts-core](https://www.npmjs.com/package/@cyanheads/mcp-ts-core) `^0.11.0`
 **Engines:** Bun ≥1.3.0, Node ≥24.0.0
 
@@ -246,7 +246,7 @@ src/
       parsing/                          # XML parsers (article, esummary, PMC)
       formatting/                       # Citation formatter (APA, MLA, BibTeX, RIS)
   mcp-server/
-    tools/definitions/                  # 9 tool definitions (*.tool.ts)
+    tools/definitions/                  # 11 tool definitions (*.tool.ts)
     resources/definitions/              # database-info.resource.ts
     prompts/definitions/                # research-plan.prompt.ts
 ```
