@@ -75,6 +75,73 @@ describe('NcbiService', () => {
       expect(result.count).toBe(0);
       expect(result.idList).toEqual([]);
     });
+
+    it('omits errorList and warningList when upstream reports neither', async () => {
+      const { service, mockApiClient, mockResponseHandler } = createMockService();
+      (mockApiClient.makeRequest as ReturnType<typeof vi.fn>).mockResolvedValue('<xml/>');
+      (mockResponseHandler.parseAndHandleResponse as ReturnType<typeof vi.fn>).mockReturnValue({
+        eSearchResult: {
+          Count: '1',
+          RetMax: '1',
+          RetStart: '0',
+          IdList: { Id: ['111'] },
+          QueryTranslation: 'cancer[All Fields]',
+        },
+      });
+
+      const result = await service.eSearch({ db: 'pubmed', term: 'cancer' });
+      expect(result.errorList).toBeUndefined();
+      expect(result.warningList).toBeUndefined();
+    });
+
+    it('normalizes single-entry ErrorList/WarningList members to string arrays', async () => {
+      const { service, mockApiClient, mockResponseHandler } = createMockService();
+      (mockApiClient.makeRequest as ReturnType<typeof vi.fn>).mockResolvedValue('<xml/>');
+      // NCBI collapses a one-entry list to a scalar, and parseTagValue coerces a
+      // numeric-looking phrase to a number.
+      (mockResponseHandler.parseAndHandleResponse as ReturnType<typeof vi.fn>).mockReturnValue({
+        eSearchResult: {
+          Count: '870',
+          RetMax: '20',
+          RetStart: '0',
+          IdList: { Id: ['111'] },
+          QueryTranslation: 'lecanemab[All Fields]',
+          ErrorList: { FieldNotFound: 'NoSuchField' },
+          WarningList: { QuotedPhraseNotFound: 2024, OutputMessage: 'No items found.' },
+        },
+      });
+
+      const result = await service.eSearch({ db: 'pubmed', term: 'lecanemab[NoSuchField]' });
+      expect(result.errorList).toEqual({ FieldNotFound: ['NoSuchField'] });
+      expect(result.warningList).toEqual({
+        QuotedPhraseNotFound: ['2024'],
+        OutputMessage: ['No items found.'],
+      });
+    });
+
+    it('passes multi-entry ErrorList/WarningList members through unchanged', async () => {
+      const { service, mockApiClient, mockResponseHandler } = createMockService();
+      (mockApiClient.makeRequest as ReturnType<typeof vi.fn>).mockResolvedValue('<xml/>');
+      (mockResponseHandler.parseAndHandleResponse as ReturnType<typeof vi.fn>).mockReturnValue({
+        eSearchResult: {
+          Count: '0',
+          RetMax: '20',
+          RetStart: '0',
+          QueryTranslation: 'x',
+          ErrorList: { FieldNotFound: ['Aithor', 'Jrnal'], PhraseNotFound: ['nomatch'] },
+          WarningList: { QuotedPhraseNotFound: ['"Notarealmeshterm"[MeSH Terms]'] },
+        },
+      });
+
+      const result = await service.eSearch({ db: 'pubmed', term: 'x' });
+      expect(result.errorList).toEqual({
+        FieldNotFound: ['Aithor', 'Jrnal'],
+        PhraseNotFound: ['nomatch'],
+      });
+      expect(result.warningList).toEqual({
+        QuotedPhraseNotFound: ['"Notarealmeshterm"[MeSH Terms]'],
+      });
+    });
   });
 
   describe('eSpell', () => {

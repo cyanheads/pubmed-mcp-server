@@ -23,8 +23,10 @@ import { NcbiResponseHandler } from './response-handler.js';
 import {
   type ECitMatchCitation,
   type ECitMatchResult,
+  type ESearchErrorList,
   type ESearchResponseContainer,
   type ESearchResult,
+  type ESearchWarningList,
   type ESpellResponseContainer,
   type ESpellResult,
   type ESummaryResponseContainer,
@@ -49,6 +51,28 @@ const ID_CONVERT_FORMAT_HINTS: Record<string, string> = {
   pmcid: '"PMC" + digits or bare digits, e.g. "PMC3531190" or "3531190"',
   doi: 'starts with "10.", e.g. "10.1093/nar/gks1195"',
 };
+
+/** Every member either list can carry; both shapes are all-optional string arrays. */
+type ESearchDiagnostics = ESearchErrorList & ESearchWarningList;
+
+/**
+ * NCBI collapses a single-entry `ErrorList`/`WarningList` member to a scalar and
+ * leaves multi-entry members as arrays, and `parseTagValue` coerces a numeric-looking
+ * phrase to a number. Normalize every member to `string[]` so `ESearchErrorList` /
+ * `ESearchWarningList` describe what callers actually receive.
+ */
+function normalizeDiagnosticList(
+  list: ESearchDiagnostics | undefined,
+): ESearchDiagnostics | undefined {
+  if (!list) return;
+  const normalized: ESearchDiagnostics = {};
+  for (const [key, value] of Object.entries(list)) {
+    normalized[key as keyof ESearchDiagnostics] = (Array.isArray(value) ? value : [value]).map(
+      String,
+    );
+  }
+  return normalized;
+}
 
 /** Sentinel reason used when the service-level deadline expires. */
 class NcbiDeadlineExceeded extends Error {
@@ -98,6 +122,8 @@ export class NcbiService {
     });
 
     const esResult = response.eSearchResult;
+    const errorList = normalizeDiagnosticList(esResult.ErrorList);
+    const warningList = normalizeDiagnosticList(esResult.WarningList);
     return {
       count: parseInt(esResult.Count, 10) || 0,
       retmax: parseInt(esResult.RetMax, 10) || 0,
@@ -106,8 +132,8 @@ export class NcbiService {
       ...(esResult.WebEnv !== undefined && { webEnv: esResult.WebEnv }),
       idList: (esResult.IdList?.Id ?? []).map(String),
       queryTranslation: esResult.QueryTranslation,
-      ...(esResult.ErrorList !== undefined && { errorList: esResult.ErrorList }),
-      ...(esResult.WarningList !== undefined && { warningList: esResult.WarningList }),
+      ...(errorList !== undefined && { errorList }),
+      ...(warningList !== undefined && { warningList }),
     };
   }
 
