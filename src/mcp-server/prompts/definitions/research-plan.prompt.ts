@@ -12,11 +12,18 @@ const ArgsSchema = z.object({
   goal: z.string().describe('Primary research goal'),
   keywords: z.string().describe('Research keywords (comma-separated)'),
   organism: z.string().optional().describe('Target organism'),
+  /**
+   * `.optional()` rather than `.default('false')`: the SDK derives each prompt
+   * argument's `required` flag from whether the field is optional, and a
+   * `ZodDefault` does not read as optional — a defaulted field is advertised as
+   * required in `prompts/list`. `buildPlan` compares against `'true'`, so an
+   * omitted value behaves exactly as `'false'` did.
+   */
   includeAgentPrompts: z
     .enum(['true', 'false'])
-    .default('false')
+    .optional()
     .describe(
-      'Include inline guidance blocks under each phase with execution-time hints ("true" or "false")',
+      'Include inline guidance blocks under each phase with execution-time hints ("true" or "false"; omitted = "false")',
     ),
 });
 

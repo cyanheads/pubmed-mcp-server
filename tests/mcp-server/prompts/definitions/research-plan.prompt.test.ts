@@ -14,7 +14,16 @@ describe('researchPlanPrompt', () => {
       keywords: 'CRISPR, gene therapy, oncology',
     });
     expect(args.title).toBe('Gene Therapy Study');
-    expect(args.includeAgentPrompts).toBe('false');
+    // Optional, not defaulted — a ZodDefault is advertised as a required
+    // argument in prompts/list even though the prompt runs fine without it.
+    expect(args.includeAgentPrompts).toBeUndefined();
+  });
+
+  it('advertises includeAgentPrompts as optional', () => {
+    expect(researchPlanPrompt.args.shape.includeAgentPrompts.def.type).toBe('optional');
+    expect(
+      researchPlanPrompt.args.safeParse({ title: 't', goal: 'g', keywords: 'k' }).success,
+    ).toBe(true);
   });
 
   it('generates a multi-message prompt', () => {
