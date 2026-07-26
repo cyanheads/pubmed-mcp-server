@@ -38,6 +38,19 @@ describe('spellCheckTool', () => {
     expect(result.hasSuggestion).toBe(true);
   });
 
+  it('threads ctx.signal into the ESpell call so cancellation reaches NCBI (#89)', async () => {
+    mockESpell.mockResolvedValue({ original: 'astma', corrected: 'asthma', hasSuggestion: true });
+    const ctx = createMockContext();
+    const input = spellCheckTool.input.parse({ query: 'astma' });
+    await spellCheckTool.handler(input, ctx);
+
+    expect(mockESpell).toHaveBeenCalledWith(
+      { db: 'pubmed', term: 'astma' },
+      { signal: ctx.signal },
+    );
+    expect(ctx.signal).toBeInstanceOf(AbortSignal);
+  });
+
   it('returns original when no suggestion', async () => {
     mockESpell.mockResolvedValue({
       original: 'cancer',

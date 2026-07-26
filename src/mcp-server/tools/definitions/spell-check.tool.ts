@@ -30,8 +30,11 @@ export const spellCheckTool = tool('pubmed_spell_check', {
   }),
 
   async handler(input, ctx) {
-    ctx.log.info('Executing pubmed_spell tool', { query: input.query });
-    const result = await getNcbiService().eSpell({ db: 'pubmed', term: input.query });
+    ctx.log.info('Executing pubmed_spell_check tool', { query: input.query });
+    const result = await getNcbiService().eSpell(
+      { db: 'pubmed', term: input.query },
+      { signal: ctx.signal },
+    );
     return {
       original: result.original,
       corrected: result.corrected,
