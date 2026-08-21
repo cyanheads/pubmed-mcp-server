@@ -3,8 +3,14 @@
 #
 # This stage installs all dependencies (including dev), builds the TypeScript
 # source code into JavaScript, and prepares the production assets.
+#
+# Pinned to $BUILDPLATFORM so this stage runs natively on the builder instead of
+# under emulation. `dist/` is pure JavaScript — tsc output plus tsc-alias path
+# rewriting, with no native artifacts — so it is identical across targets, and
+# the production stage installs its own runtime dependencies per target.
+# Emulating this stage aborts `tsc` on a source tree this size.
 # ==============================================================================
-FROM oven/bun:1.4.0 AS build
+FROM --platform=$BUILDPLATFORM oven/bun:1.4.0 AS build
 
 WORKDIR /usr/src/app
 

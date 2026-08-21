@@ -2,6 +2,10 @@
 
 All notable changes to this project. Each entry links to its full per-version file in [changelog/](changelog/).
 
+## [2.10.4](changelog/2.10.x/2.10.4.md) — 2026-08-21
+
+Pins the Docker build stage to $BUILDPLATFORM so the multi-arch image publishes again — the emulated linux/amd64 leg aborted tsc.
+
 ## [2.10.3](changelog/2.10.x/2.10.3.md) — 2026-08-21
 
 Adopts mcp-ts-core 0.12.3 and the v2 MCP SDK packages; pubmed_fetch_fulltext gains a truncated enrichment flag.
