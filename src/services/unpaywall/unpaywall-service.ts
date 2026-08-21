@@ -48,7 +48,10 @@ export class UnpaywallService {
     if (!normalized) return { kind: 'no-oa', reason: 'Invalid DOI' };
 
     const url = `${UNPAYWALL_API_BASE}/${encodeURIComponent(normalized)}?email=${encodeURIComponent(this.email)}`;
-    const ctx = requestContextService.createRequestContext({ operation: 'UnpaywallResolve', doi });
+    const ctx = requestContextService.createRequestContext({
+      operation: 'UnpaywallResolve',
+      additionalContext: { doi },
+    });
 
     // `fetchWithTimeout` throws on any non-2xx response, so the explicit
     // `response.status === 404` / `=== 422` checks the API actually returns
@@ -93,10 +96,12 @@ export class UnpaywallService {
       'Unpaywall resolved DOI',
       requestContextService.createRequestContext({
         operation: 'UnpaywallResolved',
-        doi: normalized,
-        hostType: location.host_type ?? null,
-        license: location.license ?? null,
-        version: location.version ?? null,
+        additionalContext: {
+          doi: normalized,
+          hostType: location.host_type ?? null,
+          license: location.license ?? null,
+          version: location.version ?? null,
+        },
       }),
     );
 
@@ -121,8 +126,10 @@ export class UnpaywallService {
           'Unpaywall PDF fetch failed; falling back to HTML URL',
           requestContextService.createRequestContext({
             operation: 'UnpaywallPdfFallback',
-            url: pdfUrl,
-            error: pdfErr instanceof Error ? pdfErr.message : String(pdfErr),
+            additionalContext: {
+              url: pdfUrl,
+              error: pdfErr instanceof Error ? pdfErr.message : String(pdfErr),
+            },
           }),
         );
       }
@@ -138,8 +145,7 @@ export class UnpaywallService {
   ): Promise<UnpaywallContent> {
     const ctx = requestContextService.createRequestContext({
       operation: 'UnpaywallFetch',
-      url,
-      expected,
+      additionalContext: { url, expected },
     });
 
     const accept =
@@ -214,7 +220,7 @@ export function initUnpaywallService(): void {
     'Unpaywall service initialized.',
     requestContextService.createRequestContext({
       operation: 'UnpaywallInit',
-      timeoutMs: config.unpaywallTimeoutMs,
+      additionalContext: { timeoutMs: config.unpaywallTimeoutMs },
     }),
   );
 }

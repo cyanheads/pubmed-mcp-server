@@ -293,8 +293,7 @@ export class NcbiResponseHandler {
       'NCBI API returned an error in XML response.',
       requestContextService.createRequestContext({
         operation: 'NcbiXmlError',
-        endpoint,
-        errors: errorMessages,
+        additionalContext: { endpoint, errors: errorMessages },
       }),
     );
 
@@ -349,8 +348,7 @@ export class NcbiResponseHandler {
         'Received text response from NCBI.',
         requestContextService.createRequestContext({
           operation: 'NcbiParseText',
-          endpoint,
-          retmode,
+          additionalContext: { endpoint, retmode },
         }),
       );
       return responseText as T;
@@ -361,8 +359,7 @@ export class NcbiResponseHandler {
         'Parsing XML response from NCBI.',
         requestContextService.createRequestContext({
           operation: 'NcbiParseXml',
-          endpoint,
-          retmode,
+          additionalContext: { endpoint, retmode },
         }),
       );
 
@@ -372,7 +369,7 @@ export class NcbiResponseHandler {
           'NCBI returned HTML instead of XML (likely rate-limited).',
           requestContextService.createRequestContext({
             operation: 'NcbiHtmlResponse',
-            endpoint,
+            additionalContext: { endpoint },
           }),
         );
         throw serviceUnavailable(
@@ -396,8 +393,7 @@ export class NcbiResponseHandler {
           'NCBI returned a prolog-only XML response (upstream backend failure).',
           requestContextService.createRequestContext({
             operation: 'NcbiEmptyResponse',
-            endpoint,
-            responseLength: responseText.length,
+            additionalContext: { endpoint, responseLength: responseText.length },
           }),
         );
         throw serviceUnavailable(
@@ -413,8 +409,10 @@ export class NcbiResponseHandler {
           'Invalid XML response from NCBI.',
           requestContextService.createRequestContext({
             operation: 'NcbiInvalidXml',
-            endpoint,
-            responseSnippet: responseText.substring(0, 500),
+            additionalContext: {
+              endpoint,
+              responseSnippet: responseText.substring(0, 500),
+            },
           }),
         );
         throw serializationError('Received invalid XML from NCBI.', {
@@ -449,9 +447,11 @@ export class NcbiResponseHandler {
           'Failed to parse validated XML response from NCBI.',
           requestContextService.createRequestContext({
             operation: 'NcbiXmlParseError',
-            endpoint,
-            parserError,
-            responseSnippet: responseText.substring(0, 500),
+            additionalContext: {
+              endpoint,
+              parserError,
+              responseSnippet: responseText.substring(0, 500),
+            },
           }),
         );
         throw serializationError(
@@ -478,14 +478,20 @@ export class NcbiResponseHandler {
       if (options?.returnRawXml) {
         logger.debug(
           'Returning raw XML string after validation.',
-          requestContextService.createRequestContext({ operation: 'NcbiRawXml', endpoint }),
+          requestContextService.createRequestContext({
+            operation: 'NcbiRawXml',
+            additionalContext: { endpoint },
+          }),
         );
         return responseText as T;
       }
 
       logger.debug(
         'Successfully parsed XML response.',
-        requestContextService.createRequestContext({ operation: 'NcbiParseXmlOk', endpoint }),
+        requestContextService.createRequestContext({
+          operation: 'NcbiParseXmlOk',
+          additionalContext: { endpoint },
+        }),
       );
       return parsedXml as T;
     }
@@ -495,8 +501,7 @@ export class NcbiResponseHandler {
         'Parsing JSON response from NCBI.',
         requestContextService.createRequestContext({
           operation: 'NcbiParseJson',
-          endpoint,
-          retmode,
+          additionalContext: { endpoint, retmode },
         }),
       );
 
@@ -522,8 +527,7 @@ export class NcbiResponseHandler {
           'NCBI API returned an error in JSON response.',
           requestContextService.createRequestContext({
             operation: 'NcbiJsonError',
-            endpoint,
-            error: errorMessage,
+            additionalContext: { endpoint, error: errorMessage },
           }),
         );
         if (NCBI_NOT_FOUND_PATTERNS.some((p) => p.test(errorMessage))) {
@@ -544,7 +548,10 @@ export class NcbiResponseHandler {
 
       logger.debug(
         'Successfully parsed JSON response.',
-        requestContextService.createRequestContext({ operation: 'NcbiParseJsonOk', endpoint }),
+        requestContextService.createRequestContext({
+          operation: 'NcbiParseJsonOk',
+          additionalContext: { endpoint },
+        }),
       );
       return parsed as T;
     }
@@ -553,8 +560,7 @@ export class NcbiResponseHandler {
       `Unhandled retmode "${retmode}". Returning raw response text.`,
       requestContextService.createRequestContext({
         operation: 'NcbiUnknownRetmode',
-        endpoint,
-        retmode,
+        additionalContext: { endpoint, retmode },
       }),
     );
     return responseText as T;

@@ -50,7 +50,7 @@ export class OpenAlexApiClient {
     const url = `${OPENALEX_API_BASE}/works/pmid:${encodeURIComponent(pmid)}?${params.toString()}`;
     const ctx = requestContextService.createRequestContext({
       operation: 'OpenAlexGetWorkByPmid',
-      pmid,
+      additionalContext: { pmid },
     });
 
     let response: Response;
@@ -133,7 +133,7 @@ export class OpenAlexApiClient {
     const url = `${OPENALEX_API_BASE}/works?${params.toString()}`;
     const ctx = requestContextService.createRequestContext({
       operation: 'OpenAlexGetCitedBy',
-      oaId: bareId,
+      additionalContext: { oaId: bareId },
     });
 
     let response: Response;
@@ -168,9 +168,11 @@ export class OpenAlexApiClient {
       'OpenAlex cited_by response',
       requestContextService.createRequestContext({
         operation: 'OpenAlexGetCitedByDone',
-        oaId: bareId,
-        totalCount: parsed.meta?.count,
-        resultCount: parsed.results?.length,
+        additionalContext: {
+          oaId: bareId,
+          totalCount: parsed.meta?.count,
+          resultCount: parsed.results?.length,
+        },
       }),
     );
 

@@ -104,9 +104,11 @@ export class EuropePmcRequestQueue {
         `Executing Europe PMC request via queue: ${waiter.label}`,
         requestContextService.createRequestContext({
           operation: 'EuropePmcQueueDispatch',
-          label: waiter.label,
-          inFlight: this.inFlight,
-          queueDepth: this.waiters.length,
+          additionalContext: {
+            label: waiter.label,
+            inFlight: this.inFlight,
+            queueDepth: this.waiters.length,
+          },
         }),
       );
 
@@ -117,8 +119,10 @@ export class EuropePmcRequestQueue {
             'Error processing Europe PMC request from queue.',
             requestContextService.createRequestContext({
               operation: 'EuropePmcQueueProcess',
-              label: waiter.label,
-              errorMessage: err instanceof Error ? err.message : String(err),
+              additionalContext: {
+                label: waiter.label,
+                errorMessage: err instanceof Error ? err.message : String(err),
+              },
             }),
           );
           waiter.reject(err);

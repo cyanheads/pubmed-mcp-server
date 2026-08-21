@@ -118,7 +118,7 @@ export class NcbiRequestQueue {
           `Delaying next NCBI dispatch by ${gap}ms to respect rate limit.`,
           requestContextService.createRequestContext({
             operation: 'NcbiQueueWait',
-            delayMs: gap,
+            additionalContext: { delayMs: gap },
           }),
         );
         this.nextDispatchTimer = setTimeout(() => {
@@ -143,9 +143,11 @@ export class NcbiRequestQueue {
         `Executing NCBI request via queue: ${waiter.endpoint}`,
         requestContextService.createRequestContext({
           operation: 'NcbiQueueDispatch',
-          endpoint: waiter.endpoint,
-          inFlight: this.inFlight,
-          queueDepth: this.waiters.length,
+          additionalContext: {
+            endpoint: waiter.endpoint,
+            inFlight: this.inFlight,
+            queueDepth: this.waiters.length,
+          },
         }),
       );
 
@@ -159,8 +161,10 @@ export class NcbiRequestQueue {
             'Error processing NCBI request from queue.',
             requestContextService.createRequestContext({
               operation: 'NcbiQueueProcess',
-              endpoint: waiter.endpoint,
-              errorMessage: err instanceof Error ? err.message : String(err),
+              additionalContext: {
+                endpoint: waiter.endpoint,
+                errorMessage: err instanceof Error ? err.message : String(err),
+              },
             }),
           );
           waiter.reject(err);

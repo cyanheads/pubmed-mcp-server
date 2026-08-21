@@ -6,7 +6,7 @@
  */
 
 import type { RequestContext } from '@cyanheads/mcp-ts-core/utils';
-import { dateParser, logger, requestContextService } from '@cyanheads/mcp-ts-core/utils';
+import { dateParser, logger, requestContextService, withExtra } from '@cyanheads/mcp-ts-core/utils';
 import type {
   ESummaryArticleId,
   ESummaryDocSumOldXml,
@@ -105,7 +105,7 @@ export async function standardizeESummaryDate(
     parentContext ||
     requestContextService.createRequestContext({
       operation: 'standardizeESummaryDateInternal',
-      inputDate: dateInputString,
+      additionalContext: { inputDate: dateInputString },
     });
   try {
     const parsedDate = await dateParser.parseDate(dateInputString, currentContext);
@@ -119,10 +119,7 @@ export async function standardizeESummaryDate(
   } catch (e) {
     logger.warning(
       `standardizeESummaryDate: dateParser.parseDate error for "${dateInputString}", returning undefined.`,
-      {
-        ...currentContext,
-        error: e instanceof Error ? e.message : String(e),
-      },
+      withExtra(currentContext, { error: e instanceof Error ? e.message : String(e) }),
     );
   }
   return;
@@ -177,7 +174,7 @@ function parseESummaryAuthorsFromDocumentSummary(
           `Unhandled author structure in parseESummaryAuthorsFromDocumentSummary. authInput: ${authInputString.substring(0, 100)}`,
           requestContextService.createRequestContext({
             operation: 'parseESummaryAuthorsFromDocumentSummary',
-            detail: 'Unhandled author structure',
+            additionalContext: { detail: 'Unhandled author structure' },
           }),
         );
         const keys = Object.keys(authorObj);
@@ -237,8 +234,10 @@ function parseESummaryAuthorsFromDocumentSummary(
         `Failed to parse Authors string as JSON: ${authorsProp.substring(0, 100)}`,
         requestContextService.createRequestContext({
           operation: 'parseESummaryAuthorsFromString',
-          input: authorsProp.substring(0, 100),
-          error: e instanceof Error ? e.message : String(e),
+          additionalContext: {
+            input: authorsProp.substring(0, 100),
+            error: e instanceof Error ? e.message : String(e),
+          },
         }),
       );
     }
@@ -402,10 +401,10 @@ export async function extractBriefSummaries(
     });
 
   if (eSummaryResult.ERROR) {
-    logger.warning('ESummary result contains an error', {
-      ...opContext,
-      errorDetails: eSummaryResult.ERROR,
-    });
+    logger.warning(
+      'ESummary result contains an error',
+      withExtra(opContext, { errorDetails: eSummaryResult.ERROR }),
+    );
     return [];
   }
 

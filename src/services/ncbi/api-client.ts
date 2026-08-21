@@ -42,7 +42,10 @@ export class NcbiApiClient {
     try {
       logger.debug(
         `NCBI HTTP request: ${usePost ? 'POST' : 'GET'} ${url}`,
-        requestContextService.createRequestContext({ operation: 'NcbiHttpRequest', endpoint }),
+        requestContextService.createRequestContext({
+          operation: 'NcbiHttpRequest',
+          additionalContext: { endpoint },
+        }),
       );
 
       const response = usePost
@@ -101,7 +104,10 @@ export class NcbiApiClient {
     try {
       logger.debug(
         `NCBI external request: GET ${fullUrl}`,
-        requestContextService.createRequestContext({ operation: 'NcbiExternalRequest', url }),
+        requestContextService.createRequestContext({
+          operation: 'NcbiExternalRequest',
+          additionalContext: { url },
+        }),
       );
       const response = await fetch(fullUrl, { signal });
 

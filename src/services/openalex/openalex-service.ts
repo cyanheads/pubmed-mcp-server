@@ -190,9 +190,7 @@ export class OpenAlexService {
             `OpenAlex ${label} failed. Retrying (${attempt + 1}/${this.maxRetries}) in ${retryDelay}ms.`,
             requestContextService.createRequestContext({
               operation: 'OpenAlexRetry',
-              label,
-              attempt: attempt + 1,
-              retryDelay,
+              additionalContext: { label, attempt: attempt + 1, retryDelay },
             }),
           );
           await abortableSleep(retryDelay, signal);
@@ -239,9 +237,11 @@ export function initOpenAlexService(): void {
     'OpenAlex service initialized.',
     requestContextService.createRequestContext({
       operation: 'OpenAlexInit',
-      hasEmail: !!config.adminEmail,
-      maxRetries: config.europepmcMaxRetries,
-      timeoutMs: config.europepmcTimeoutMs,
+      additionalContext: {
+        hasEmail: !!config.adminEmail,
+        maxRetries: config.europepmcMaxRetries,
+        timeoutMs: config.europepmcTimeoutMs,
+      },
     }),
   );
 }

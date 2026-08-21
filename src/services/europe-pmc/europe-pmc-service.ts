@@ -448,9 +448,7 @@ export class EuropePmcService {
             `Europe PMC ${label} failed. Retrying (${attempt + 1}/${this.maxRetries}) in ${retryDelay}ms.`,
             requestContextService.createRequestContext({
               operation: 'EuropePmcRetry',
-              label,
-              attempt: attempt + 1,
-              retryDelay,
+              additionalContext: { label, attempt: attempt + 1, retryDelay },
             }),
           );
           await abortableSleep(retryDelay, signal);
@@ -507,10 +505,12 @@ export function initEuropePmcService(): void {
     'Europe PMC service initialized.',
     requestContextService.createRequestContext({
       operation: 'EuropePmcInit',
-      requestDelayMs: config.europepmcRequestDelayMs,
-      maxRetries: config.europepmcMaxRetries,
-      timeoutMs: config.europepmcTimeoutMs,
-      hasEmail: !!config.europepmcEmail,
+      additionalContext: {
+        requestDelayMs: config.europepmcRequestDelayMs,
+        maxRetries: config.europepmcMaxRetries,
+        timeoutMs: config.europepmcTimeoutMs,
+        hasEmail: !!config.europepmcEmail,
+      },
     }),
   );
 }

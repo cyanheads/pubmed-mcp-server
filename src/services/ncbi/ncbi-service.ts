@@ -179,9 +179,11 @@ export class NcbiService {
       'ESpell result parsed.',
       requestContextService.createRequestContext({
         operation: 'NcbiESpell',
-        original,
-        corrected,
-        hasSuggestion: corrected.length > 0 && corrected !== original,
+        additionalContext: {
+          original,
+          corrected,
+          hasSuggestion: corrected.length > 0 && corrected !== original,
+        },
       }),
     );
 
@@ -434,9 +436,7 @@ export class NcbiService {
             `NCBI request to ${label} failed. Retrying (${attempt + 1}/${this.maxRetries}) in ${retryDelay}ms.`,
             requestContextService.createRequestContext({
               operation: 'NcbiRetry',
-              endpoint: label,
-              attempt: attempt + 1,
-              retryDelay,
+              additionalContext: { endpoint: label, attempt: attempt + 1, retryDelay },
             }),
           );
           await abortableSleep(retryDelay, signal);
@@ -535,11 +535,13 @@ export function initNcbiService(): void {
     'NCBI service initialized.',
     requestContextService.createRequestContext({
       operation: 'NcbiInit',
-      toolIdentifier: config.toolIdentifier,
-      hasApiKey: !!config.apiKey,
-      requestDelayMs: config.requestDelayMs,
-      maxConcurrent: config.maxConcurrent,
-      totalDeadlineMs: config.totalDeadlineMs,
+      additionalContext: {
+        toolIdentifier: config.toolIdentifier,
+        hasApiKey: !!config.apiKey,
+        requestDelayMs: config.requestDelayMs,
+        maxConcurrent: config.maxConcurrent,
+        totalDeadlineMs: config.totalDeadlineMs,
+      },
     }),
   );
 }

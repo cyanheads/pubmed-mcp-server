@@ -47,7 +47,7 @@ export class EuropePmcApiClient {
     const url = this.buildSearchUrl(params);
     const ctx = requestContextService.createRequestContext({
       operation: 'EuropePmcSearch',
-      query: params.query,
+      additionalContext: { query: params.query },
     });
 
     let response: Response;
@@ -83,7 +83,7 @@ export class EuropePmcApiClient {
     const url = `${EUROPEPMC_API_BASE}/${encodeURIComponent(epmcId)}/fullTextXML`;
     const ctx = requestContextService.createRequestContext({
       operation: 'EuropePmcFullTextXml',
-      epmcId,
+      additionalContext: { epmcId },
     });
 
     let response: Response;
@@ -117,7 +117,7 @@ export class EuropePmcApiClient {
         'Europe PMC returned an empty fullTextXML body.',
         requestContextService.createRequestContext({
           operation: 'EuropePmcFullTextXmlEmpty',
-          epmcId,
+          additionalContext: { epmcId },
         }),
       );
       return { kind: 'not-available', reason: 'EPMC returned an empty fullTextXML body' };
@@ -152,7 +152,10 @@ export class EuropePmcApiClient {
     pmid: string,
     signal?: AbortSignal,
   ): Promise<string> {
-    const ctx = requestContextService.createRequestContext({ operation, pmid });
+    const ctx = requestContextService.createRequestContext({
+      operation,
+      additionalContext: { pmid },
+    });
 
     let response: Response;
     try {
