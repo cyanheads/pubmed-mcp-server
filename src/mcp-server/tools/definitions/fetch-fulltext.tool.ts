@@ -830,6 +830,12 @@ export const fetchFulltextTool = tool('pubmed_fetch_fulltext', {
       .describe(
         'Optional guidance for a partial or empty body. A `sections`-filter miss names the requested terms and affected article id(s) and suggests retrying without `sections` or using broader headings. A metadata-only record names the id(s) the chain could retrieve as front matter only and points at `pubmed_fetch_articles` for the abstract. A budgeted response names the characters returned versus carried and points at `truncation`. Absent when none of those applies.',
       ),
+    truncated: z
+      .boolean()
+      .optional()
+      .describe(
+        'True when a character budget shortened at least one returned body. Absent when every returned article carries its full post-filter body. The per-article accounting is in `truncation`.',
+      ),
   },
 
   async handler(input, ctx) {
@@ -1364,7 +1370,10 @@ export const fetchFulltextTool = tool('pubmed_fetch_fulltext', {
     }
     const unrecoveredBodyless = [...bodylessInputIds].filter((id) => !recoveredIds.has(id));
     if (unrecoveredBodyless.length > 0) notices.push(buildBodylessNotice(unrecoveredBodyless));
-    if (truncation) notices.push(buildTruncationNotice(truncation));
+    if (truncation) {
+      notices.push(buildTruncationNotice(truncation));
+      ctx.enrich({ truncated: true });
+    }
     if (notices.length > 0) ctx.enrich.notice(notices.join(' '));
 
     return {
