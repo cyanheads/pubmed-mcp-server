@@ -2,6 +2,10 @@
 
 All notable changes to this project. Each entry links to its full per-version file in [changelog/](changelog/).
 
+## [2.10.3](changelog/2.10.x/2.10.3.md) — 2026-08-21
+
+Adopts mcp-ts-core 0.12.3 and the v2 MCP SDK packages; pubmed_fetch_fulltext gains a truncated enrichment flag.
+
 ## [2.10.2](changelog/2.10.x/2.10.2.md) — 2026-07-26
 
 Markup strip no longer eats statistical notation like P<0.001 in Europe PMC abstracts; pubmed_europepmc_fetch now resolves source: \"PMC\" refs for articles also indexed in PubMed; doi fields across the tool catalog disclose that casing differs by upstream.

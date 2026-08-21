@@ -4,7 +4,7 @@ description: >
   Testing patterns for MCP tool/resource handlers using `createMockContext` and Vitest. Covers mock context options, handler testing, McpError assertions, format testing, Vitest config setup, and test isolation conventions.
 metadata:
   author: cyanheads
-  version: "1.5"
+  version: "1.9"
   audience: external
   type: reference
 ---
@@ -13,7 +13,7 @@ metadata:
 
 Tests target handler behavior directly — call `handler(input, ctx)`, assert on the return value or thrown error. The framework's handler factory (try/catch, formatting, telemetry) is not involved. Use `createMockContext` from `@cyanheads/mcp-ts-core/testing` to construct the `ctx` argument.
 
-**Additional exports from `/testing`:** `createMockLogger()` returns a standalone `MockContextLogger` for unit-testing code that accepts a `ContextLogger` directly (services, utilities). `createInMemoryStorage(options?)` provides a real `StorageService` backed by `InMemoryProvider` for testing services that take a `StorageService` dependency.
+**Additional exports from `/testing`:** `createMockSession()` binds a mock handler context to an HTTP session; `createFetchMock()` provides a strict upstream HTTP fake; `runToolContract()` executes a definition through schema, handler, formatting, enrichment/content, and production-shaped error-envelope checks. `createMockLogger()` returns a standalone `MockContextLogger`, and `createInMemoryStorage(options?)` provides a real `StorageService` backed by `InMemoryProvider`.
 
 **Philosophy:** Test behavior, not implementation. Refactors should not break tests. Match the repo's existing test layout: fresh scaffolds use `tests/`, while colocated `src/**/*.test.ts` files are also supported. Integration tests at I/O boundaries over unit tests of internals.
 
@@ -21,7 +21,7 @@ Tests target handler behavior directly — call `handler(input, ctx)`, assert on
 
 ## `mcpTest` — fixture-based Vitest test
 
-`mcpTest` is a `test.extend`-based Vitest test that provides `ctx` and `storage` as **per-test fixtures** — fresh instances for every test, eliminating the `createMockContext()` boilerplate and enforcing the fresh-context-per-test convention automatically.
+`mcpTest` is a `test.extend`-based Vitest test that provides `ctx`, `session`, `fetchMock`, and `storage` as **per-test fixtures** — fresh instances for every test, eliminating boilerplate and enforcing isolation automatically. `fetchMock` is installed as `globalThis.fetch` only when requested by a test and restored afterward.
 
 ```ts
 import { mcpTest } from '@cyanheads/mcp-ts-core/testing/vitest';
@@ -36,6 +36,14 @@ mcpTest('uses storage fixture', async ({ ctx, storage }) => {
   const result = await svc.doWork(ctx);
   expect(result).toBeDefined();
 });
+
+mcpTest('stubs an upstream HTTP boundary', async ({ fetchMock }) => {
+  fetchMock.route({
+    match: 'https://api.example.test/items/42',
+    respond: Response.json({ id: '42' }),
+  });
+  await expect(loadItem('42')).resolves.toMatchObject({ id: '42' });
+});
 ```
 
 ### Fixtures
@@ -43,6 +51,8 @@ mcpTest('uses storage fixture', async ({ ctx, storage }) => {
 | Fixture | Type | Per-test? | Notes |
 |:--------|:-----|:----------|:------|
 | `ctx` | `Context` | Yes | Fresh `createMockContext()` each test |
+| `session` | `MockSession` | Yes | Fresh `{ sessionId, tenantId, ctx }` from `createMockSession()` |
+| `fetchMock` | `FetchMockHarness` | Yes | Strict fetch fake installed/restored around the requesting test |
 | `storage` | `StorageService` | Yes | Fresh `createInMemoryStorage()` each test |
 
 ### Extending with the function form
@@ -61,7 +71,58 @@ const tenantTest = mcpTest.extend({
 // const tenantTest = mcpTest.extend({ ctx: createMockContext({ tenantId: 'test-tenant' }) });
 ```
 
-`createMockContext` and `createInMemoryStorage` are re-exported from `@cyanheads/mcp-ts-core/testing/vitest` so overrides don't need a second import.
+The portable `/testing` helpers are re-exported from `@cyanheads/mcp-ts-core/testing/vitest` so fixture overrides don't need a second import.
+
+---
+
+## Upstream HTTP testing with `createFetchMock`
+
+Use the fetch harness at real outbound I/O boundaries. Stub the external service, not server-owned services or handlers.
+
+```ts
+import { createFetchMock } from '@cyanheads/mcp-ts-core/testing';
+
+const http = createFetchMock([
+  {
+    method: 'GET',
+    match: 'https://api.example.test/items/42',
+    respond: Response.json({ id: '42', name: 'Example' }),
+  },
+]);
+
+http.install();
+try {
+  await expect(loadItem('42')).resolves.toEqual({ id: '42', name: 'Example' });
+  expect(http.calls[0]?.request.url).toBe('https://api.example.test/items/42');
+} finally {
+  http.restore();
+}
+```
+
+Routes match in registration order. `match` accepts an exact URL, `RegExp`, or request predicate; `respond` accepts a clonable `Response` or response factory. Set `once: true` for one-shot behavior. Unmatched requests throw unless `onUnhandled` is provided.
+
+---
+
+## Tool conformance with `toolContractSuite`
+
+Point the reusable suite at a definition plus representative success and failure inputs. It checks input/output schemas, invokes the real handler, applies formatting/enrichment/content, and validates both public error surfaces.
+
+```ts
+import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
+import { toolContractSuite } from '@cyanheads/mcp-ts-core/testing/vitest';
+
+toolContractSuite(searchTool, {
+  success: [{ name: 'returns matches', input: { query: 'mcp' } }],
+  errors: [{
+    name: 'reports an empty query',
+    input: { query: '' },
+    code: JsonRpcErrorCode.InvalidParams,
+    reason: 'empty_query',
+  }],
+});
+```
+
+Use `runToolContract(definition, input, { context })` from `/testing` when a custom test runner or an imperative assertion is a better fit. It intentionally skips transport auth and telemetry; those belong in transport/integration tests.
 
 ---
 
@@ -70,11 +131,11 @@ const tenantTest = mcpTest.extend({
 ```ts
 import { createMockContext } from '@cyanheads/mcp-ts-core/testing';
 
-createMockContext()                                           // minimal — ctx.state operations throw without tenantId
-createMockContext({ tenantId: 'test-tenant' })               // enables ctx.state (tenant-scoped in-memory storage)
+createMockContext()                                           // working ctx.state on tenant 'default'
+createMockContext({ tenantId: 'test-tenant' })               // explicit tenant scope for ctx.state
 createMockContext({ errors: myTool.errors })                 // attaches typed ctx.fail keyed by the contract reasons
-createMockContext({ elicit: vi.fn().mockResolvedValue(...) }) // with elicitation
-createMockContext({ progress: true })                        // with task progress (ctx.progress populated)
+createMockContext({ inputResponses: { confirm: { action: 'accept', content: { ok: true } } } }) // second round of a multi-round-trip handler
+createMockContext({ requestState: 'opaque-state' })          // seeds ctx.inputs.state()
 createMockContext({ requestId: 'my-id' })                    // override request ID (default: 'test-request-id')
 createMockContext({ notifyResourceListChanged: () => {} })   // with resource-list change notifier
 createMockContext({ notifyResourceUpdated: (_uri) => {} })   // with resource update notifier
@@ -86,17 +147,17 @@ createMockContext({ uri: new URL('myscheme://item/123') })   // for resource han
 `MockContextOptions` interface:
 
 ```ts
-interface MockContextOptions {
+interface MockContextOptions<TErrors extends readonly ErrorContract[] | undefined> {
   auth?: AuthContext;
-  elicit?: (message: string, schema: z.ZodObject<z.ZodRawShape>) => Promise<ElicitResult>;
-  errors?: readonly ErrorContract[];
+  errors?: TErrors | undefined;
+  inputResponses?: InputResponses | Record<string, unknown>;
   notifyPromptListChanged?: () => void;
   notifyResourceListChanged?: () => void;
   notifyResourceUpdated?: (uri: string) => void;
   notifyToolListChanged?: () => void;
-  progress?: boolean;
-  sessionId?: string;
   requestId?: string;
+  requestState?: unknown;
+  sessionId?: string;
   signal?: AbortSignal;
   tenantId?: string;
   uri?: URL;
@@ -105,42 +166,87 @@ interface MockContextOptions {
 
 | Option | Effect |
 |:-------|:-------|
-| _(none)_ | Minimal context — `ctx.state` operations throw without `tenantId`; `ctx.elicit`/`ctx.progress` are `undefined` |
+| _(none)_ | Working `ctx.state` on tenant `'default'`; `ctx.inputs` is empty (first round) |
 | `auth` | Sets `ctx.auth` for scope-checking tests |
-| `elicit` | Assigns a function to `ctx.elicit` for testing elicitation calls |
-| `errors` | Attaches a typed `ctx.fail` against the contract — same wiring the production handler factory uses. Pass `myTool.errors` directly. |
+| `errors` | Attaches a typed `ctx.fail` against the contract — same wiring the production handler factory uses. Pass `myTool.errors` directly; the return type narrows to `HandlerContext<ReasonOf<…>>`, so the context is assignable to that definition's handler parameter. |
+| `inputResponses` | Seeds `ctx.inputs` with the responses a retried request would carry, keyed by the identifiers the handler's `ctx.requestInput(...)` assigned (see below) |
 | `notifyPromptListChanged` | Assigns `ctx.notifyPromptListChanged` for prompt-list change notification tests |
 | `notifyResourceListChanged` | Assigns `ctx.notifyResourceListChanged` for resource notification tests |
 | `notifyResourceUpdated` | Assigns `ctx.notifyResourceUpdated` for resource update notification tests |
 | `notifyToolListChanged` | Assigns `ctx.notifyToolListChanged` for tool-list change notification tests |
-| `sessionId` | Sets `ctx.sessionId` for handlers that branch on session ID |
-| `progress` | Populates `ctx.progress` with real state-tracking implementation (see below) |
 | `requestId` | Overrides `ctx.requestId` (default: `'test-request-id'`) |
+| `requestState` | Seeds `ctx.inputs.state()` — the opaque state a prior round attached |
+| `sessionId` | Sets `ctx.sessionId` for handlers that branch on session ID |
 | `signal` | Overrides `ctx.signal` — useful for cancellation testing |
-| `tenantId` | Sets `ctx.tenantId` and enables `ctx.state` operations with in-memory storage |
+| `tenantId` | Scopes `ctx.state` to a specific tenant. Defaults to `'default'` — the value stdio (and HTTP with `MCP_AUTH_MODE=none`) resolves |
 | `uri` | Sets `ctx.uri` for resource handler testing |
 
-### Mock progress
+### Mock state
 
-When `progress: true`, `ctx.progress` is a real state-tracking object — not `vi.fn()` spies. It maintains internal state accessible via inspection properties:
+`ctx.state` is a real `StorageService` over an `InMemoryProvider` — the production storage path, not a `Map`. A test therefore sees the same rules a deployed server enforces:
+
+- **Keys** match `^[a-zA-Z0-9_.\-/]+$` and may not contain `..`. Colons are rejected, so `cache:v1:abc` throws `McpError(ValidationError)` in the test exactly as it would in a deployment; use `cache/v1/abc`.
+- **TTL** is honored. An entry written with `{ ttl: 30 }` reads back as `null` once 30 seconds elapse — drive the clock with `vi.useFakeTimers()` to assert expiry.
+- **`getMany` / `setMany` / `deleteMany` / `list`** validate every key and prefix, and `list` paginates with the same opaque cursors.
+- **Cancellation** applies: once `ctx.signal` aborts, state operations reject.
 
 ```ts
-const ctx = createMockContext({ progress: true });
-// ctx.progress is typed as ContextProgress, but the mock exposes internal state:
-const progress = ctx.progress as ContextProgress & {
-  _total: number;
-  _completed: number;
-  _messages: string[];
-};
+const ctx = createMockContext();
 
-await ctx.progress!.setTotal(10);
-await ctx.progress!.increment(3);
-await ctx.progress!.update('step message');
-
-expect(progress._total).toBe(10);
-expect(progress._completed).toBe(3);
-expect(progress._messages).toContain('step message');
+await ctx.state.set('cache/v1/abc', { hits: 1 }, { ttl: 30 });
+await expect(ctx.state.get('cache/v1/abc')).resolves.toEqual({ hits: 1 });
+await expect(ctx.state.set('cache:v1:abc', {})).rejects.toThrow(McpError);
 ```
+
+Reach for `createInMemoryStorage()` when a service takes a `StorageService` directly — it builds the same pair.
+
+### Mock inputs
+
+`ctx.requestInput` is the real implementation: it throws an `InputRequiredSignal` the production handler factories convert into an `input_required` result. In a unit test the handler is called directly, so that signal surfaces as a thrown value — which is exactly how you assert the first round.
+
+```ts
+import { isInputRequiredSignal } from '@cyanheads/mcp-ts-core';
+
+it('asks for confirmation on the first round', async () => {
+  const ctx = createMockContext();
+  await expect(myTool.handler(myTool.input.parse({ path: '/tmp/x' }), ctx))
+    .rejects.toSatisfy(isInputRequiredSignal);
+});
+```
+
+To assert on *what* was requested, catch it and read `error.result` — the `input_required` result the handler factory would have returned:
+
+```ts
+async function requestedInput(input: ToolInput, options: MockContextOptions = {}) {
+  try {
+    await myTool.handler(input, createMockContext(options));
+  } catch (error) {
+    if (isInputRequiredSignal(error)) return error.result;
+    throw error;
+  }
+  throw new Error('Expected the handler to request input.');
+}
+```
+
+`inputResponses` drives the second round. `ctx.inputs.accepted(key, schema)` and `.view(key)` read it with the same helpers production uses, so a wrong response shape fails in the test:
+
+```ts
+it('proceeds once the user accepts', async () => {
+  const ctx = createMockContext({
+    inputResponses: { confirm: { action: 'accept', content: { confirm: true } } },
+  });
+  await expect(myTool.handler(input, ctx)).resolves.toMatchObject({ deleted: '/tmp/x' });
+});
+
+it('stops when the user declines', async () => {
+  const ctx = createMockContext({
+    inputResponses: { confirm: { action: 'decline' } },
+  });
+  await expect(myTool.handler(input, ctx)).rejects.toThrow(McpError);
+});
+```
+
+`ctx.inputs.dropped` is always `[]` on a mock context — the drop only happens in the SDK's wire decoding, so cover it in an integration test rather than a unit one.
 
 ### Mock logger
 
@@ -190,31 +296,6 @@ describe('myTool', () => {
 ```
 
 Parse input through `myTool.input.parse(...)` to validate against the Zod schema and produce the typed input the handler expects. Call `myTool.handler(input, ctx)` directly, not through the MCP SDK or any framework wrapper. Assert on the return value for happy paths; use `.rejects.toThrow()` for error paths. Test `format` separately if the tool defines one — it's a pure function and needs no `ctx`. Verify the rendered text includes the fields the LLM needs, and for projection-style tools, add a case with non-default field selections.
-
----
-
-## Testing with optional capabilities
-
-```ts
-it('uses elicitation when available', async () => {
-  const elicit = vi.fn().mockResolvedValue({
-    action: 'accept',
-    content: { format: 'json' },
-  });
-  const ctx = createMockContext({ elicit });
-  const input = myTool.input.parse({ query: 'hello' });
-  await myTool.handler(input, ctx);
-  expect(elicit).toHaveBeenCalledOnce();
-});
-
-it('handles missing elicitation gracefully', async () => {
-  // ctx.elicit is undefined — handler must check before calling
-  const ctx = createMockContext();
-  const input = myTool.input.parse({ query: 'hello' });
-  // Should not throw even when ctx.elicit is absent
-  await expect(myTool.handler(input, ctx)).resolves.toBeDefined();
-});
-```
 
 ---
 
@@ -335,7 +416,7 @@ describe('myTool with service', () => {
 
 - Re-init services with `initMyService()` (or equivalent) in `beforeEach` when tests share a module-level singleton.
 - Vitest runs test files in separate workers — parallel file execution is safe by default.
-- Use `createMockContext({ tenantId })` whenever the handler accesses `ctx.state` — omitting `tenantId` causes `ctx.state` to throw.
+- Pass `createMockContext({ tenantId })` when a test needs a specific tenant; omitting it scopes state to `'default'`, not to a broken state surface.
 
 ---
 
@@ -442,3 +523,5 @@ it('survives fuzz testing', async () => {
 | `adversarialArbitrary()` / `ADVERSARIAL_STRINGS` | Targeted injection sets (prototype pollution probes, control characters, oversized payloads). |
 
 `FuzzOptions`: `numRuns` (default 50), `numAdversarial` (default 30), `seed` (reproducibility), `timeout` (per-call ms, default 5000), `ctx` (`MockContextOptions` for stateful handlers).
+
+`report.leaks` looks for a stack frame or a server-side path in what a client can observe — the `code`, `message`, and `data` of the thrown `McpError`. Strings the input itself supplied are removed before that check, so naming the offending value in error data (`throw validationError(msg, { key })`) never registers as a leak: the client sent those bytes and learns nothing from seeing them again.
