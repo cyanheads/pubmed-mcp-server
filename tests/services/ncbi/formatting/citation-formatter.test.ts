@@ -360,9 +360,10 @@ describe('formatRis', () => {
   });
 
   it('falls back to e-ISSN when print ISSN is missing', () => {
+    const { issn: _issn, ...journalInfo } = sampleArticle.journalInfo!;
     const article: ParsedArticle = {
       ...sampleArticle,
-      journalInfo: { ...sampleArticle.journalInfo!, issn: undefined, eIssn: '1546-170X' },
+      journalInfo: { ...journalInfo, eIssn: '1546-170X' },
     };
     expect(formatRis(article)).toContain('SN  - 1546-170X');
   });
@@ -420,10 +421,8 @@ describe('formatVancouver', () => {
   });
 
   it('falls back to the full journal title when no ISO abbreviation is present', () => {
-    const article: ParsedArticle = {
-      ...sampleArticle,
-      journalInfo: { ...sampleArticle.journalInfo!, isoAbbreviation: undefined },
-    };
+    const { isoAbbreviation: _isoAbbreviation, ...journalInfo } = sampleArticle.journalInfo!;
+    const article: ParsedArticle = { ...sampleArticle, journalInfo };
     expect(formatVancouver(article)).toContain('Nature Medicine.');
   });
 
@@ -436,7 +435,7 @@ describe('formatVancouver', () => {
   });
 
   it('omits the DOI segment when no DOI is present', () => {
-    const article: ParsedArticle = { ...sampleArticle, doi: undefined };
+    const { doi: _doi, ...article } = sampleArticle;
     expect(formatVancouver(article)).not.toContain('doi:');
   });
 

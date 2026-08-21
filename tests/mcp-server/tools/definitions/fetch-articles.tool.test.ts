@@ -6,6 +6,8 @@
 import { createMockContext, getEnrichment } from '@cyanheads/mcp-ts-core/testing';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
+import { textBlocks } from '../../../_helpers.js';
+
 const mockEFetch = vi.fn();
 vi.mock('@/services/ncbi/ncbi-service.js', () => ({
   getNcbiService: () => ({ eFetch: mockEFetch }),
@@ -54,7 +56,7 @@ describe('fetchArticlesTool', () => {
 
   it('reports all PMIDs as unavailable when no articles are returned (issue #20)', async () => {
     mockEFetch.mockResolvedValue({ PubmedArticleSet: null });
-    const ctx = createMockContext();
+    const ctx = createMockContext({ errors: fetchArticlesTool.errors });
     const input = fetchArticlesTool.input.parse({ pmids: ['99999'] });
     const result = await fetchArticlesTool.handler(input, ctx);
 
@@ -116,7 +118,7 @@ describe('fetchArticlesTool', () => {
       },
     });
 
-    const ctx = createMockContext();
+    const ctx = createMockContext({ errors: fetchArticlesTool.errors });
     const input = fetchArticlesTool.input.parse({ pmids: ['12345'] });
     const result = await fetchArticlesTool.handler(input, ctx);
 
@@ -145,7 +147,7 @@ describe('fetchArticlesTool', () => {
       },
     });
 
-    const ctx = createMockContext();
+    const ctx = createMockContext({ errors: fetchArticlesTool.errors });
     const input = fetchArticlesTool.input.parse({ pmids: ['111', '222'] });
     const result = await fetchArticlesTool.handler(input, ctx);
 
@@ -197,7 +199,7 @@ describe('fetchArticlesTool', () => {
       },
     });
 
-    const ctx = createMockContext();
+    const ctx = createMockContext({ errors: fetchArticlesTool.errors });
     const input = fetchArticlesTool.input.parse({ pmids: ['24680'] });
     const result = await fetchArticlesTool.handler(input, ctx);
 
@@ -229,7 +231,7 @@ describe('fetchArticlesTool', () => {
       },
     });
 
-    const ctx = createMockContext();
+    const ctx = createMockContext({ errors: fetchArticlesTool.errors });
     const input = fetchArticlesTool.input.parse({ pmids });
     const result = await fetchArticlesTool.handler(input, ctx);
 
@@ -242,44 +244,46 @@ describe('fetchArticlesTool', () => {
   });
 
   it('formats output', () => {
-    const blocks = fetchArticlesTool.format!({
-      articles: [
-        {
-          pmid: '12345',
-          title: 'Test Article',
-          abstractText: 'Abstract here.',
-          affiliations: ['Example University'],
-          authors: [
-            { lastName: 'Smith', initials: 'J' },
-            { lastName: 'Jones', initials: 'A' },
-            { lastName: 'Brown', initials: 'S' },
-            { lastName: 'White', initials: 'P' },
-          ],
-          journalInfo: {
-            isoAbbreviation: 'Nat Rev',
-            volume: '12',
-            issue: '3',
-            pages: '45-52',
-            publicationDate: { year: '2024' },
-          },
-          publicationTypes: ['Review'],
-          doi: '10.1000/example',
-          pubmedUrl: 'https://pubmed.ncbi.nlm.nih.gov/12345/',
-          pmcUrl: 'https://www.ncbi.nlm.nih.gov/pmc/articles/PMC12345/',
-          keywords: ['asthma', 'airway'],
-          meshTerms: [
-            {
-              descriptorName: 'Asthma',
-              isMajorTopic: true,
-              qualifiers: [{ qualifierName: 'therapy', isMajorTopic: true }],
+    const blocks = textBlocks(
+      fetchArticlesTool.format!({
+        articles: [
+          {
+            pmid: '12345',
+            title: 'Test Article',
+            abstractText: 'Abstract here.',
+            affiliations: ['Example University'],
+            authors: [
+              { lastName: 'Smith', initials: 'J' },
+              { lastName: 'Jones', initials: 'A' },
+              { lastName: 'Brown', initials: 'S' },
+              { lastName: 'White', initials: 'P' },
+            ],
+            journalInfo: {
+              isoAbbreviation: 'Nat Rev',
+              volume: '12',
+              issue: '3',
+              pages: '45-52',
+              publicationDate: { year: '2024' },
             },
-          ],
-          grantList: [{ grantId: 'R01', agency: 'NIH', country: 'USA' }],
-        },
-      ],
-      totalReturned: 1,
-      unavailablePmids: ['99999'],
-    });
+            publicationTypes: ['Review'],
+            doi: '10.1000/example',
+            pubmedUrl: 'https://pubmed.ncbi.nlm.nih.gov/12345/',
+            pmcUrl: 'https://www.ncbi.nlm.nih.gov/pmc/articles/PMC12345/',
+            keywords: ['asthma', 'airway'],
+            meshTerms: [
+              {
+                descriptorName: 'Asthma',
+                isMajorTopic: true,
+                qualifiers: [{ qualifierName: 'therapy', isMajorTopic: true }],
+              },
+            ],
+            grantList: [{ grantId: 'R01', agency: 'NIH', country: 'USA' }],
+          },
+        ],
+        totalReturned: 1,
+        unavailablePmids: ['99999'],
+      }),
+    );
     expect(blocks[0]?.text).toContain('PubMed Articles');
     expect(blocks[0]?.text).toContain('Test Article');
     expect(blocks[0]?.text).toContain('Unavailable PMIDs');
@@ -338,10 +342,12 @@ describe('fetchArticlesTool', () => {
       grantList: [
         { grantId: 'R01 EY05922', acronym: 'EY', agency: 'NEI NIH HHS', country: 'United States' },
       ],
-    } as const;
+    };
 
     it('renders every author with full firstName, initials, affiliation indices, and ORCID — no et al. truncation', () => {
-      const blocks = fetchArticlesTool.format!({ articles: [richArticle], totalReturned: 1 });
+      const blocks = textBlocks(
+        fetchArticlesTool.format!({ articles: [richArticle], totalReturned: 1 }),
+      );
       const text = blocks[0]?.text ?? '';
 
       expect(text).toContain('**Authors (4):**');
@@ -353,7 +359,9 @@ describe('fetchArticlesTool', () => {
     });
 
     it('renders affiliations as a 0-based list matching the author affiliationIndices', () => {
-      const blocks = fetchArticlesTool.format!({ articles: [richArticle], totalReturned: 1 });
+      const blocks = textBlocks(
+        fetchArticlesTool.format!({ articles: [richArticle], totalReturned: 1 }),
+      );
       const text = blocks[0]?.text ?? '';
 
       expect(text).toContain('**Affiliations:**');
@@ -362,7 +370,9 @@ describe('fetchArticlesTool', () => {
     });
 
     it('renders the full publication date (year, month, day) when available', () => {
-      const blocks = fetchArticlesTool.format!({ articles: [richArticle], totalReturned: 1 });
+      const blocks = textBlocks(
+        fetchArticlesTool.format!({ articles: [richArticle], totalReturned: 1 }),
+      );
       expect(blocks[0]?.text).toContain('2023 Jun 22');
     });
 
@@ -374,12 +384,16 @@ describe('fetchArticlesTool', () => {
           publicationDate: { medlineDate: '2000 Spring' },
         },
       };
-      const blocks = fetchArticlesTool.format!({ articles: [seasonal], totalReturned: 1 });
+      const blocks = textBlocks(
+        fetchArticlesTool.format!({ articles: [seasonal], totalReturned: 1 }),
+      );
       expect(blocks[0]?.text).toContain('2000 Spring');
     });
 
     it('renders the electronic ISSN (preferring eIssn over issn)', () => {
-      const blocks = fetchArticlesTool.format!({ articles: [richArticle], totalReturned: 1 });
+      const blocks = textBlocks(
+        fetchArticlesTool.format!({ articles: [richArticle], totalReturned: 1 }),
+      );
       expect(blocks[0]?.text).toContain('eISSN 1472-4146');
     });
 
@@ -388,23 +402,31 @@ describe('fetchArticlesTool', () => {
         ...richArticle,
         journalInfo: { ...richArticle.journalInfo, eIssn: undefined },
       };
-      const blocks = fetchArticlesTool.format!({ articles: [printOnly], totalReturned: 1 });
+      const blocks = textBlocks(
+        fetchArticlesTool.format!({ articles: [printOnly], totalReturned: 1 }),
+      );
       expect(blocks[0]?.text).toContain('ISSN 0021-9746');
       expect(blocks[0]?.text).not.toContain('eISSN');
     });
 
     it('renders the raw PMCID alongside the PMC URL', () => {
-      const blocks = fetchArticlesTool.format!({ articles: [richArticle], totalReturned: 1 });
+      const blocks = textBlocks(
+        fetchArticlesTool.format!({ articles: [richArticle], totalReturned: 1 }),
+      );
       expect(blocks[0]?.text).toContain('**PMCID:** PMC10000');
     });
 
     it('renders articleDates with their dateType', () => {
-      const blocks = fetchArticlesTool.format!({ articles: [richArticle], totalReturned: 1 });
+      const blocks = textBlocks(
+        fetchArticlesTool.format!({ articles: [richArticle], totalReturned: 1 }),
+      );
       expect(blocks[0]?.text).toContain('**Article Dates:** Electronic 2023-02-22');
     });
 
     it('includes the grant acronym alongside the grant ID', () => {
-      const blocks = fetchArticlesTool.format!({ articles: [richArticle], totalReturned: 1 });
+      const blocks = textBlocks(
+        fetchArticlesTool.format!({ articles: [richArticle], totalReturned: 1 }),
+      );
       expect(blocks[0]?.text).toContain('R01 EY05922 (EY)');
       expect(blocks[0]?.text).toContain('NEI NIH HHS');
     });
@@ -418,7 +440,9 @@ describe('fetchArticlesTool', () => {
           initials: `F${i}`,
         })),
       };
-      const blocks = fetchArticlesTool.format!({ articles: [bigAuthorList], totalReturned: 1 });
+      const blocks = textBlocks(
+        fetchArticlesTool.format!({ articles: [bigAuthorList], totalReturned: 1 }),
+      );
       const text = blocks[0]?.text ?? '';
       expect(text).toContain('**Authors (10):**');
       for (let i = 0; i < 10; i++) {
@@ -450,10 +474,12 @@ describe('fetchArticlesTool', () => {
           },
         ],
       };
-      const blocks = fetchArticlesTool.format!({
-        articles: [articleWithMeshUis],
-        totalReturned: 1,
-      });
+      const blocks = textBlocks(
+        fetchArticlesTool.format!({
+          articles: [articleWithMeshUis],
+          totalReturned: 1,
+        }),
+      );
       const text = blocks[0]?.text ?? '';
       expect(text).toContain('- Breast Neoplasms [D001943] (major) (pathology [Q000473])');
       expect(text).toContain('- Humans [D006801]');
@@ -462,11 +488,13 @@ describe('fetchArticlesTool', () => {
 
   describe('format() empty result', () => {
     it('renders the empty state; the recovery notice is enrichment, not format output', () => {
-      const blocks = fetchArticlesTool.format!({
-        articles: [],
-        totalReturned: 0,
-        unavailablePmids: ['999999999'],
-      });
+      const blocks = textBlocks(
+        fetchArticlesTool.format!({
+          articles: [],
+          totalReturned: 0,
+          unavailablePmids: ['999999999'],
+        }),
+      );
       const text = blocks[0]?.text ?? '';
       expect(text).toContain('**Articles Returned:** 0');
       expect(text).toContain('**Unavailable PMIDs:** 999999999');

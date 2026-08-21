@@ -6,6 +6,8 @@
 import { createMockContext } from '@cyanheads/mcp-ts-core/testing';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
+import { textBlocks } from '../../../_helpers.js';
+
 const mockECitMatch = vi.fn();
 const mockESummary = vi.fn();
 vi.mock('@/services/ncbi/ncbi-service.js', () => ({
@@ -85,7 +87,7 @@ describe('lookupCitationTool', () => {
       },
     ]);
 
-    const ctx = createMockContext();
+    const ctx = createMockContext({ errors: lookupCitationTool.errors });
     const input = lookupCitationTool.input.parse({
       citations: [{ journal: 'proc natl acad sci u s a', year: '1993', authorName: 'mann bj' }],
     });
@@ -121,7 +123,7 @@ describe('lookupCitationTool', () => {
       },
     ]);
 
-    const ctx = createMockContext();
+    const ctx = createMockContext({ errors: lookupCitationTool.errors });
     const input = lookupCitationTool.input.parse({
       citations: [
         {
@@ -164,7 +166,7 @@ describe('lookupCitationTool', () => {
       },
     ]);
 
-    const ctx = createMockContext();
+    const ctx = createMockContext({ errors: lookupCitationTool.errors });
     const input = lookupCitationTool.input.parse({
       citations: [
         {
@@ -197,7 +199,7 @@ describe('lookupCitationTool', () => {
       },
     ]);
 
-    const ctx = createMockContext();
+    const ctx = createMockContext({ errors: lookupCitationTool.errors });
     const input = lookupCitationTool.input.parse({
       citations: [{ journal: 'Nature', year: '2020', authorName: 'omega z' }],
     });
@@ -213,7 +215,7 @@ describe('lookupCitationTool', () => {
       { pmid: '999', authors: 'Smithson JA, Jones BB', authorNames: ['Smithson JA', 'Jones BB'] },
     ]);
 
-    const ctx = createMockContext();
+    const ctx = createMockContext({ errors: lookupCitationTool.errors });
     const input = lookupCitationTool.input.parse({
       citations: [{ journal: 'Nature', year: '2020', authorName: 'smith j' }],
     });
@@ -229,7 +231,7 @@ describe('lookupCitationTool', () => {
       { pmid: '111', authors: 'Gerstein HC, Colhoun HM' },
     ]);
 
-    const ctx = createMockContext();
+    const ctx = createMockContext({ errors: lookupCitationTool.errors });
     const input = lookupCitationTool.input.parse({
       citations: [{ journal: 'Nature', year: '2020', volume: '1', firstPage: '1' }],
     });
@@ -245,7 +247,7 @@ describe('lookupCitationTool', () => {
       { key: '1', matched: false, pmid: null, status: 'not_found', detail: 'NOT_FOUND' },
     ]);
 
-    const ctx = createMockContext();
+    const ctx = createMockContext({ errors: lookupCitationTool.errors });
     const input = lookupCitationTool.input.parse({
       citations: [{ journal: 'unknown', year: '2000', authorName: 'smith j' }],
     });
@@ -265,7 +267,7 @@ describe('lookupCitationTool', () => {
       { pmid: '222', authors: 'Bob BB', authorNames: ['Bob BB'] },
     ]);
 
-    const ctx = createMockContext();
+    const ctx = createMockContext({ errors: lookupCitationTool.errors });
     const input = lookupCitationTool.input.parse({
       citations: [
         { journal: 'A', year: '2020', authorName: 'alice a' },
@@ -287,7 +289,7 @@ describe('lookupCitationTool', () => {
       { pmid: '12345', authors: 'Smith JA, Jones BB', pubDate: '2021-03-15' },
     ]);
 
-    const ctx = createMockContext();
+    const ctx = createMockContext({ errors: lookupCitationTool.errors });
     const input = lookupCitationTool.input.parse({
       citations: [{ journal: 'Nature', year: '2019', volume: '5', firstPage: '1' }],
     });
@@ -310,7 +312,7 @@ describe('lookupCitationTool', () => {
       { pmid: '12345', authors: 'Smith JA', authorNames: ['Smith JA'], pubDate: '2020-01-01' },
     ]);
 
-    const ctx = createMockContext();
+    const ctx = createMockContext({ errors: lookupCitationTool.errors });
     const input = lookupCitationTool.input.parse({
       citations: [{ journal: 'Nature', year: '2020', authorName: 'smith j' }],
     });
@@ -333,7 +335,7 @@ describe('lookupCitationTool', () => {
       },
     ]);
 
-    const ctx = createMockContext();
+    const ctx = createMockContext({ errors: lookupCitationTool.errors });
     const input = lookupCitationTool.input.parse({
       citations: [{ authorName: 'husain m', journal: 'lancet', volume: '394', year: '2019' }],
     });
@@ -356,7 +358,7 @@ describe('lookupCitationTool', () => {
       },
     ]);
 
-    const ctx = createMockContext();
+    const ctx = createMockContext({ errors: lookupCitationTool.errors });
     const input = lookupCitationTool.input.parse({
       citations: [{ journal: 'Nature', year: '2020', authorName: 'zhang f' }],
     });
@@ -372,7 +374,7 @@ describe('lookupCitationTool', () => {
       { key: '1', matched: false, pmid: null, status: 'not_found', detail: 'NOT_FOUND' },
     ]);
 
-    const ctx = createMockContext();
+    const ctx = createMockContext({ errors: lookupCitationTool.errors });
     const input = lookupCitationTool.input.parse({
       citations: [{ journal: 'unknown journal', year: '2000' }],
     });
@@ -398,7 +400,7 @@ describe('lookupCitationTool', () => {
       },
     ]);
 
-    const ctx = createMockContext();
+    const ctx = createMockContext({ errors: lookupCitationTool.errors });
     const input = lookupCitationTool.input.parse({
       citations: [{ journal: 'Nature', year: '2020' }],
     });
@@ -418,7 +420,7 @@ describe('lookupCitationTool', () => {
       { key: '2', matched: true, pmid: '222', status: 'matched' },
     ]);
 
-    const ctx = createMockContext();
+    const ctx = createMockContext({ errors: lookupCitationTool.errors });
     const input = lookupCitationTool.input.parse({
       citations: [
         { journal: 'Nature', year: '2020' },
@@ -437,7 +439,7 @@ describe('lookupCitationTool', () => {
       { key: 'ref-A', matched: true, pmid: '111', status: 'matched' },
     ]);
 
-    const ctx = createMockContext();
+    const ctx = createMockContext({ errors: lookupCitationTool.errors });
     const input = lookupCitationTool.input.parse({
       citations: [{ journal: 'Nature', year: '2020', key: 'ref-A' }],
     });
@@ -462,7 +464,7 @@ describe('lookupCitationTool', () => {
       { key: '3', matched: true, pmid: '333', status: 'matched' },
     ]);
 
-    const ctx = createMockContext();
+    const ctx = createMockContext({ errors: lookupCitationTool.errors });
     const input = lookupCitationTool.input.parse({
       citations: [
         { journal: 'A', year: '2020' },
@@ -486,7 +488,7 @@ describe('lookupCitationTool', () => {
       { key: 'no-match', matched: false, pmid: null, status: 'not_found' },
     ]);
 
-    const ctx = createMockContext();
+    const ctx = createMockContext({ errors: lookupCitationTool.errors });
     const input = lookupCitationTool.input.parse({
       citations: [
         { key: 'minimal', journal: 'Nature', year: '2099', volume: '999', firstPage: '1' },
@@ -513,7 +515,7 @@ describe('lookupCitationTool', () => {
   it('passes provided fields through to service', async () => {
     mockECitMatch.mockResolvedValue([{ key: '1', matched: true, pmid: '111', status: 'matched' }]);
 
-    const ctx = createMockContext();
+    const ctx = createMockContext({ errors: lookupCitationTool.errors });
     const input = lookupCitationTool.input.parse({
       citations: [{ journal: 'Nature', firstPage: '42', year: '2020', authorName: 'smith' }],
     });
@@ -529,12 +531,14 @@ describe('lookupCitationTool', () => {
   });
 
   it('formats matched citations with PMID', () => {
-    const blocks = lookupCitationTool.format!({
-      results: [{ key: 'ref-1', matched: true, pmid: '8400044', status: 'matched' }],
-      totalMatched: 1,
-      totalSubmitted: 1,
-      totalWarnings: 0,
-    });
+    const blocks = textBlocks(
+      lookupCitationTool.format!({
+        results: [{ key: 'ref-1', matched: true, pmid: '8400044', status: 'matched' }],
+        totalMatched: 1,
+        totalSubmitted: 1,
+        totalWarnings: 0,
+      }),
+    );
 
     expect(blocks[0]?.text).toContain('**Matched:** 1/1');
     expect(blocks[0]?.text).toContain('### ref-1');
@@ -546,26 +550,28 @@ describe('lookupCitationTool', () => {
   });
 
   it('formats matched citation with author mismatch warning', () => {
-    const blocks = lookupCitationTool.format!({
-      results: [
-        {
-          key: 'pioneer-6',
-          matched: true,
-          pmid: '31189511',
-          status: 'matched',
-          matchedFirstAuthor: 'Gerstein HC',
-          warnings: [
-            {
-              code: 'author_mismatch',
-              message: 'Queried author "husain m" not found in matched article authors.',
-            },
-          ],
-        },
-      ],
-      totalMatched: 1,
-      totalSubmitted: 1,
-      totalWarnings: 1,
-    });
+    const blocks = textBlocks(
+      lookupCitationTool.format!({
+        results: [
+          {
+            key: 'pioneer-6',
+            matched: true,
+            pmid: '31189511',
+            status: 'matched',
+            matchedFirstAuthor: 'Gerstein HC',
+            warnings: [
+              {
+                code: 'author_mismatch',
+                message: 'Queried author "husain m" not found in matched article authors.',
+              },
+            ],
+          },
+        ],
+        totalMatched: 1,
+        totalSubmitted: 1,
+        totalWarnings: 1,
+      }),
+    );
 
     expect(blocks[0]?.text).toContain('**Warnings:** 1');
     expect(blocks[0]?.text).toContain('**First Author:** Gerstein HC');
@@ -574,12 +580,14 @@ describe('lookupCitationTool', () => {
   });
 
   it('formats unmatched citations with recovery guidance', () => {
-    const blocks = lookupCitationTool.format!({
-      results: [{ key: 'ref-1', matched: false, status: 'not_found', detail: 'NOT_FOUND' }],
-      totalMatched: 0,
-      totalSubmitted: 1,
-      totalWarnings: 0,
-    });
+    const blocks = textBlocks(
+      lookupCitationTool.format!({
+        results: [{ key: 'ref-1', matched: false, status: 'not_found', detail: 'NOT_FOUND' }],
+        totalMatched: 0,
+        totalSubmitted: 1,
+        totalWarnings: 0,
+      }),
+    );
 
     expect(blocks[0]?.text).toContain('**Matched:** 0/1');
     expect(blocks[0]?.text).toContain('**Status:** No match');
@@ -587,19 +595,21 @@ describe('lookupCitationTool', () => {
   });
 
   it('formats ambiguous citations with disambiguation guidance', () => {
-    const blocks = lookupCitationTool.format!({
-      results: [
-        {
-          key: 'ref-1',
-          matched: false,
-          status: 'ambiguous',
-          detail: 'AMBIGUOUS multiple matches',
-        },
-      ],
-      totalMatched: 0,
-      totalSubmitted: 1,
-      totalWarnings: 0,
-    });
+    const blocks = textBlocks(
+      lookupCitationTool.format!({
+        results: [
+          {
+            key: 'ref-1',
+            matched: false,
+            status: 'ambiguous',
+            detail: 'AMBIGUOUS multiple matches',
+          },
+        ],
+        totalMatched: 0,
+        totalSubmitted: 1,
+        totalWarnings: 0,
+      }),
+    );
 
     expect(blocks[0]?.text).toContain('**Status:** Ambiguous');
     expect(blocks[0]?.text).toContain('AMBIGUOUS multiple matches');
@@ -609,43 +619,47 @@ describe('lookupCitationTool', () => {
   });
 
   it('formats ambiguous citations with candidatePmids list and fetch hint', () => {
-    const blocks = lookupCitationTool.format!({
-      results: [
-        {
-          key: 'ref-1',
-          matched: false,
-          status: 'ambiguous',
-          detail: 'AMBIGUOUS 33057196,32076266,32025019',
-          candidatePmids: ['33057196', '32076266', '32025019'],
-        },
-      ],
-      totalMatched: 0,
-      totalSubmitted: 1,
-      totalWarnings: 0,
-    });
+    const blocks = textBlocks(
+      lookupCitationTool.format!({
+        results: [
+          {
+            key: 'ref-1',
+            matched: false,
+            status: 'ambiguous',
+            detail: 'AMBIGUOUS 33057196,32076266,32025019',
+            candidatePmids: ['33057196', '32076266', '32025019'],
+          },
+        ],
+        totalMatched: 0,
+        totalSubmitted: 1,
+        totalWarnings: 0,
+      }),
+    );
 
     expect(blocks[0]?.text).toContain('**Candidate PMIDs:** 33057196, 32076266, 32025019');
     expect(blocks[0]?.text).toContain('pubmed_fetch_articles');
   });
 
   it('formats matched citation with combined author + year mismatch next-step', () => {
-    const blocks = lookupCitationTool.format!({
-      results: [
-        {
-          key: 'ref-1',
-          matched: true,
-          pmid: '123',
-          status: 'matched',
-          warnings: [
-            { code: 'author_mismatch', message: 'authors disagree' },
-            { code: 'year_mismatch', message: 'year disagree' },
-          ],
-        },
-      ],
-      totalMatched: 1,
-      totalSubmitted: 1,
-      totalWarnings: 1,
-    });
+    const blocks = textBlocks(
+      lookupCitationTool.format!({
+        results: [
+          {
+            key: 'ref-1',
+            matched: true,
+            pmid: '123',
+            status: 'matched',
+            warnings: [
+              { code: 'author_mismatch', message: 'authors disagree' },
+              { code: 'year_mismatch', message: 'year disagree' },
+            ],
+          },
+        ],
+        totalMatched: 1,
+        totalSubmitted: 1,
+        totalWarnings: 1,
+      }),
+    );
 
     expect(blocks[0]?.text).toContain('author_mismatch + year_mismatch detected');
   });

@@ -112,7 +112,7 @@ describe('formatApa — author edge cases', () => {
   });
 
   it('handles article with undefined authors', () => {
-    const article: ParsedArticle = { ...baseArticle, authors: undefined };
+    const { authors: _authors, ...article } = baseArticle;
     const citation = formatApa(article);
     expect(citation).toContain('(2024).');
   });
@@ -149,7 +149,7 @@ describe('formatApa — title edge cases', () => {
   });
 
   it('handles article with no title', () => {
-    const article: ParsedArticle = { ...baseArticle, title: undefined };
+    const { title: _title, ...article } = baseArticle;
     const citation = formatApa(article);
     // Still valid — just no title segment
     expect(citation).toContain('(2024).');
@@ -340,10 +340,8 @@ describe('formatRis — splitPages expansion', () => {
   });
 
   it('handles undefined pages gracefully — no SP/EP tags', () => {
-    const article = {
-      ...baseArticle,
-      journalInfo: { ...baseArticle.journalInfo!, pages: undefined },
-    };
+    const { pages: _pages, ...journalInfo } = baseArticle.journalInfo!;
+    const article: ParsedArticle = { ...baseArticle, journalInfo };
     const ris = formatRis(article);
     expect(ris).not.toContain('SP  -');
     expect(ris).not.toContain('EP  -');

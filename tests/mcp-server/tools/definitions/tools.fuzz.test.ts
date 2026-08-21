@@ -17,7 +17,7 @@
  * @module tests/mcp-server/tools/definitions/tools.fuzz.test
  */
 
-import { beforeEach, describe, expect, it } from 'vitest';
+import { beforeEach, describe, expect, it, vi } from 'vitest';
 import {
   createMockNcbiService,
   FUZZ_OPTIONS,

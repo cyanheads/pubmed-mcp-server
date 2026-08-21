@@ -6,6 +6,8 @@
 import { createMockContext, getEnrichment } from '@cyanheads/mcp-ts-core/testing';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
+import { textBlocks } from '../../../_helpers.js';
+
 const mockSearch = vi.fn();
 const mockGetEpmc = vi.fn();
 
@@ -64,7 +66,7 @@ describe('pubmedEuropepmcSearchTool', () => {
 
   it('passes default sources (MED, PMC, PPR) when none provided', async () => {
     mockSearch.mockResolvedValue({ hits: [], hitCount: 0, cursorMark: '*' });
-    const ctx = createMockContext();
+    const ctx = createMockContext({ errors: pubmedEuropepmcSearchTool.errors });
     const input = pubmedEuropepmcSearchTool.input.parse({ query: 'foo' });
     await pubmedEuropepmcSearchTool.handler(input, ctx);
     expect(mockSearch).toHaveBeenCalledWith(
@@ -74,7 +76,7 @@ describe('pubmedEuropepmcSearchTool', () => {
 
   it('passes through explicit sources', async () => {
     mockSearch.mockResolvedValue({ hits: [], hitCount: 0, cursorMark: '*' });
-    const ctx = createMockContext();
+    const ctx = createMockContext({ errors: pubmedEuropepmcSearchTool.errors });
     const input = pubmedEuropepmcSearchTool.input.parse({
       query: 'foo',
       sources: ['PPR', 'PAT'],
@@ -91,7 +93,7 @@ describe('pubmedEuropepmcSearchTool', () => {
       nextCursorMark: 'CURSOR_NEXT',
       query: 'foo',
     });
-    const ctx = createMockContext();
+    const ctx = createMockContext({ errors: pubmedEuropepmcSearchTool.errors });
     const input = pubmedEuropepmcSearchTool.input.parse({ query: 'foo' });
     const result = await pubmedEuropepmcSearchTool.handler(input, ctx);
     expect(result.cursorMark).toBe('*');
@@ -107,7 +109,7 @@ describe('pubmedEuropepmcSearchTool', () => {
       cursorMark: '*',
       query: 'foo',
     });
-    const ctx = createMockContext();
+    const ctx = createMockContext({ errors: pubmedEuropepmcSearchTool.errors });
     const input = pubmedEuropepmcSearchTool.input.parse({ query: 'preprint' });
     const result = await pubmedEuropepmcSearchTool.handler(input, ctx);
     expect(result.hits[0]?.isOpenAccess).toBe(true);
@@ -122,7 +124,7 @@ describe('pubmedEuropepmcSearchTool', () => {
       cursorMark: '*',
       query: 'foo',
     });
-    const ctx = createMockContext();
+    const ctx = createMockContext({ errors: pubmedEuropepmcSearchTool.errors });
     const result1 = await pubmedEuropepmcSearchTool.handler(
       pubmedEuropepmcSearchTool.input.parse({ query: 'foo' }),
       ctx,
@@ -149,7 +151,7 @@ describe('pubmedEuropepmcSearchTool', () => {
       });
       return pubmedEuropepmcSearchTool.handler(
         pubmedEuropepmcSearchTool.input.parse({ query: 'foo' }),
-        createMockContext(),
+        createMockContext({ errors: pubmedEuropepmcSearchTool.errors }),
       );
     };
 
@@ -159,7 +161,7 @@ describe('pubmedEuropepmcSearchTool', () => {
       expect(hit?.abstractTruncated).toBe(true);
       expect(hit?.abstractSnippet).toHaveLength(401);
 
-      const text = pubmedEuropepmcSearchTool.format?.(result)[0]?.text ?? '';
+      const text = textBlocks(pubmedEuropepmcSearchTool.format!(result))[0]?.text ?? '';
       expect(text).toContain('Abstract truncated at 400 characters');
       expect(text).toContain('pubmed_europepmc_fetch');
     });
@@ -169,7 +171,7 @@ describe('pubmedEuropepmcSearchTool', () => {
       expect(result.hits[0]?.abstractTruncated).toBe(false);
       expect(result.hits[0]?.abstractSnippet).toBe('short abstract');
 
-      const text = pubmedEuropepmcSearchTool.format?.(result)[0]?.text ?? '';
+      const text = textBlocks(pubmedEuropepmcSearchTool.format!(result))[0]?.text ?? '';
       expect(text).toContain('short abstract');
       expect(text).not.toContain('Abstract truncated');
     });
@@ -233,7 +235,7 @@ describe('pubmedEuropepmcSearchTool', () => {
       cursorMark: '*',
       query: 'foo',
     });
-    const ctx = createMockContext();
+    const ctx = createMockContext({ errors: pubmedEuropepmcSearchTool.errors });
     const result = await pubmedEuropepmcSearchTool.handler(
       pubmedEuropepmcSearchTool.input.parse({ query: 'foo' }),
       ctx,
@@ -252,7 +254,7 @@ describe('pubmedEuropepmcSearchTool', () => {
       cursorMark: '*',
       query: 'foo',
     });
-    const ctx = createMockContext();
+    const ctx = createMockContext({ errors: pubmedEuropepmcSearchTool.errors });
     const result = await pubmedEuropepmcSearchTool.handler(
       pubmedEuropepmcSearchTool.input.parse({ query: 'foo' }),
       ctx,
@@ -265,7 +267,7 @@ describe('pubmedEuropepmcSearchTool', () => {
 
     it('advises when P_PDATE_D sort is requested for a PPR-only result set', async () => {
       mockSearch.mockResolvedValue({ hits: [pprHit], hitCount: 5, cursorMark: '*', query: 'q' });
-      const ctx = createMockContext();
+      const ctx = createMockContext({ errors: pubmedEuropepmcSearchTool.errors });
       await pubmedEuropepmcSearchTool.handler(
         pubmedEuropepmcSearchTool.input.parse({
           query: 'q',
@@ -283,7 +285,7 @@ describe('pubmedEuropepmcSearchTool', () => {
 
     it('is case-insensitive on the sort field token', async () => {
       mockSearch.mockResolvedValue({ hits: [pprHit], hitCount: 5, cursorMark: '*', query: 'q' });
-      const ctx = createMockContext();
+      const ctx = createMockContext({ errors: pubmedEuropepmcSearchTool.errors });
       await pubmedEuropepmcSearchTool.handler(
         pubmedEuropepmcSearchTool.input.parse({
           query: 'q',
@@ -297,7 +299,7 @@ describe('pubmedEuropepmcSearchTool', () => {
 
     it('does NOT advise when the result set spans non-PPR sources', async () => {
       mockSearch.mockResolvedValue({ hits: [pprHit], hitCount: 5, cursorMark: '*', query: 'q' });
-      const ctx = createMockContext();
+      const ctx = createMockContext({ errors: pubmedEuropepmcSearchTool.errors });
       // Default sources (MED, PMC, PPR) — not PPR-only.
       await pubmedEuropepmcSearchTool.handler(
         pubmedEuropepmcSearchTool.input.parse({ query: 'q', sort: 'P_PDATE_D desc' }),
@@ -308,7 +310,7 @@ describe('pubmedEuropepmcSearchTool', () => {
 
     it('does NOT advise for PUB_YEAR sort on PPR-only (EPMC honors it)', async () => {
       mockSearch.mockResolvedValue({ hits: [pprHit], hitCount: 5, cursorMark: '*', query: 'q' });
-      const ctx = createMockContext();
+      const ctx = createMockContext({ errors: pubmedEuropepmcSearchTool.errors });
       await pubmedEuropepmcSearchTool.handler(
         pubmedEuropepmcSearchTool.input.parse({
           query: 'q',
@@ -322,7 +324,7 @@ describe('pubmedEuropepmcSearchTool', () => {
 
     it('does NOT advise for PPR-only without a sort', async () => {
       mockSearch.mockResolvedValue({ hits: [pprHit], hitCount: 5, cursorMark: '*', query: 'q' });
-      const ctx = createMockContext();
+      const ctx = createMockContext({ errors: pubmedEuropepmcSearchTool.errors });
       await pubmedEuropepmcSearchTool.handler(
         pubmedEuropepmcSearchTool.input.parse({ query: 'q', sources: ['PPR'] }),
         ctx,
@@ -332,7 +334,7 @@ describe('pubmedEuropepmcSearchTool', () => {
 
     it('empty-result notice takes precedence over the date-sort advisory', async () => {
       mockSearch.mockResolvedValue({ hits: [], hitCount: 0, cursorMark: '*', query: 'q' });
-      const ctx = createMockContext();
+      const ctx = createMockContext({ errors: pubmedEuropepmcSearchTool.errors });
       await pubmedEuropepmcSearchTool.handler(
         pubmedEuropepmcSearchTool.input.parse({
           query: 'q',
@@ -347,31 +349,33 @@ describe('pubmedEuropepmcSearchTool', () => {
 
   describe('format()', () => {
     it('renders hits with all key fields', () => {
-      const blocks = pubmedEuropepmcSearchTool.format!({
-        hits: [
-          {
-            source: 'MED',
-            epmcId: '42',
-            title: 'Title',
-            authors: 'Smith J, Jones K',
-            journal: 'Nature',
-            pubYear: '2024',
-            firstPublicationDate: '2024-03-15',
-            pmid: '42',
-            pmcId: 'PMC9',
-            doi: '10.1/x',
-            isOpenAccess: true,
-            hasFullTextXml: true,
-            citedByCount: 13,
-            abstractSnippet: 'Abstract goes here',
-            abstractTruncated: false,
-            epmcUrl: 'https://europepmc.org/article/MED/42',
-          },
-        ],
-        cursorMark: '*',
-        nextCursorMark: 'NEXT',
-        searchUrl: 'https://europepmc.org/search?query=cancer',
-      });
+      const blocks = textBlocks(
+        pubmedEuropepmcSearchTool.format!({
+          hits: [
+            {
+              source: 'MED',
+              epmcId: '42',
+              title: 'Title',
+              authors: 'Smith J, Jones K',
+              journal: 'Nature',
+              pubYear: '2024',
+              firstPublicationDate: '2024-03-15',
+              pmid: '42',
+              pmcId: 'PMC9',
+              doi: '10.1/x',
+              isOpenAccess: true,
+              hasFullTextXml: true,
+              citedByCount: 13,
+              abstractSnippet: 'Abstract goes here',
+              abstractTruncated: false,
+              epmcUrl: 'https://europepmc.org/article/MED/42',
+            },
+          ],
+          cursorMark: '*',
+          nextCursorMark: 'NEXT',
+          searchUrl: 'https://europepmc.org/search?query=cancer',
+        }),
+      );
       const text = blocks[0]?.text ?? '';
       expect(text).toContain('Europe PMC Search Results');
       expect(text).toContain('next page');
@@ -386,11 +390,13 @@ describe('pubmedEuropepmcSearchTool', () => {
     });
 
     it('marks the final page when no nextCursorMark', () => {
-      const blocks = pubmedEuropepmcSearchTool.format!({
-        hits: [],
-        cursorMark: 'CURSOR_X',
-        searchUrl: 'https://europepmc.org/search?query=x',
-      });
+      const blocks = textBlocks(
+        pubmedEuropepmcSearchTool.format!({
+          hits: [],
+          cursorMark: 'CURSOR_X',
+          searchUrl: 'https://europepmc.org/search?query=x',
+        }),
+      );
       const text = blocks[0]?.text ?? '';
       expect(text).toContain('final page');
     });

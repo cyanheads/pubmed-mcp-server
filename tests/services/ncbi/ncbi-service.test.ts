@@ -4,7 +4,7 @@
  */
 
 import { JsonRpcErrorCode, McpError } from '@cyanheads/mcp-ts-core/errors';
-import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, type MockInstance, vi } from 'vitest';
 import type { NcbiApiClient } from '@/services/ncbi/api-client.js';
 import { NcbiService } from '@/services/ncbi/ncbi-service.js';
 import type { NcbiRequestQueue } from '@/services/ncbi/request-queue.js';
@@ -1298,7 +1298,7 @@ describe('NcbiService signal wiring during backoff sleep', () => {
  */
 describe('NcbiService deadline timer cleanup', () => {
   let setTimeoutSpy: ReturnType<typeof vi.spyOn>;
-  let clearTimeoutSpy: ReturnType<typeof vi.spyOn>;
+  let clearTimeoutSpy: MockInstance<typeof globalThis.clearTimeout>;
   let timerId = 0;
 
   beforeEach(() => {
@@ -1344,7 +1344,7 @@ describe('NcbiService deadline timer cleanup', () => {
 
   /** Only the deadline timer in `runWithDeadline` sets a ≥50_000ms timer. */
   const deadlineClearCount = () =>
-    clearTimeoutSpy.mock.calls.filter(([id]) => typeof id === 'number' && id > 0).length;
+    clearTimeoutSpy.mock.calls.filter((call) => typeof call[0] === 'number' && call[0] > 0).length;
 
   it('clears deadline timer on successful request', async () => {
     const { service, mockApiClient, mockResponseHandler } = createService(0);

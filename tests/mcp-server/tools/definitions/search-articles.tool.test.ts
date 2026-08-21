@@ -6,9 +6,13 @@
 import { createMockContext, getEnrichment } from '@cyanheads/mcp-ts-core/testing';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
+import type { ParsedBriefSummary } from '@/services/ncbi/types.js';
+
+import { textBlocks } from '../../../_helpers.js';
+
 const mockESearch = vi.fn();
 const mockESummary = vi.fn();
-const mockExtractBriefSummaries = vi.fn(() => Promise.resolve([]));
+const mockExtractBriefSummaries = vi.fn((): Promise<ParsedBriefSummary[]> => Promise.resolve([]));
 vi.mock('@/services/ncbi/ncbi-service.js', () => ({
   getNcbiService: () => ({ eSearch: mockESearch, eSummary: mockESummary }),
 }));
@@ -105,7 +109,7 @@ describe('searchArticlesTool', () => {
         queryTranslation: 'cancer[All Fields]',
       });
 
-      const ctx = createMockContext();
+      const ctx = createMockContext({ errors: searchArticlesTool.errors });
       const input = searchArticlesTool.input.parse({
         query: 'cancer',
         dateRange: { minDate: '', maxDate: '' },
@@ -125,7 +129,7 @@ describe('searchArticlesTool', () => {
         queryTranslation: 'cancer[All Fields]',
       });
 
-      const ctx = createMockContext();
+      const ctx = createMockContext({ errors: searchArticlesTool.errors });
       const input = searchArticlesTool.input.parse({
         query: 'cancer',
         dateRange: { minDate: '', maxDate: '2024/01/01' },
@@ -148,7 +152,7 @@ describe('searchArticlesTool', () => {
       });
 
       it('discloses the dropped filter when only minDate is supplied', async () => {
-        const ctx = createMockContext();
+        const ctx = createMockContext({ errors: searchArticlesTool.errors });
         const input = searchArticlesTool.input.parse({
           query: 'crispr',
           dateRange: { minDate: '2024', maxDate: '' },
@@ -163,7 +167,7 @@ describe('searchArticlesTool', () => {
       });
 
       it('discloses the dropped filter when only maxDate is supplied', async () => {
-        const ctx = createMockContext();
+        const ctx = createMockContext({ errors: searchArticlesTool.errors });
         const input = searchArticlesTool.input.parse({
           query: 'crispr',
           dateRange: { minDate: '', maxDate: '2024' },
@@ -176,7 +180,7 @@ describe('searchArticlesTool', () => {
       });
 
       it('stays silent when both bounds are empty', async () => {
-        const ctx = createMockContext();
+        const ctx = createMockContext({ errors: searchArticlesTool.errors });
         const input = searchArticlesTool.input.parse({
           query: 'crispr',
           dateRange: { minDate: '', maxDate: '' },
@@ -187,7 +191,7 @@ describe('searchArticlesTool', () => {
       });
 
       it('stays silent when both bounds are supplied', async () => {
-        const ctx = createMockContext();
+        const ctx = createMockContext({ errors: searchArticlesTool.errors });
         const input = searchArticlesTool.input.parse({
           query: 'crispr',
           dateRange: { minDate: '2024', maxDate: '2026' },
@@ -207,7 +211,7 @@ describe('searchArticlesTool', () => {
         queryTranslation: 'cancer[All Fields]',
       });
 
-      const ctx = createMockContext();
+      const ctx = createMockContext({ errors: searchArticlesTool.errors });
       const input = searchArticlesTool.input.parse({ query: 'cancer' });
       await searchArticlesTool.handler(input, ctx);
 
@@ -226,7 +230,7 @@ describe('searchArticlesTool', () => {
         queryTranslation: 'cancer[All Fields]',
       });
 
-      const ctx = createMockContext();
+      const ctx = createMockContext({ errors: searchArticlesTool.errors });
       const input = searchArticlesTool.input.parse({
         query: 'cancer',
         dateRange: { minDate: '2020/01/01', maxDate: '2024/12/31' },
@@ -247,7 +251,7 @@ describe('searchArticlesTool', () => {
         queryTranslation: 'cancer[All Fields]',
       });
 
-      const ctx = createMockContext();
+      const ctx = createMockContext({ errors: searchArticlesTool.errors });
       const input = searchArticlesTool.input.parse({
         query: 'cancer',
         dateRange: { minDate: '2020-01-01', maxDate: '2024-12-31' },
@@ -269,7 +273,7 @@ describe('searchArticlesTool', () => {
       queryTranslation: 'cancer[All Fields]',
     });
 
-    const ctx = createMockContext();
+    const ctx = createMockContext({ errors: searchArticlesTool.errors });
     const input = searchArticlesTool.input.parse({ query: 'cancer' });
     const result = await searchArticlesTool.handler(input, ctx);
 
@@ -306,7 +310,7 @@ describe('searchArticlesTool', () => {
       },
     ]);
 
-    const ctx = createMockContext();
+    const ctx = createMockContext({ errors: searchArticlesTool.errors });
     const input = searchArticlesTool.input.parse({
       query: 'asthma',
       offset: 5,
@@ -401,7 +405,7 @@ describe('searchArticlesTool', () => {
     });
     mockESummary.mockResolvedValue({ eSummaryResult: {} });
 
-    const ctx = createMockContext();
+    const ctx = createMockContext({ errors: searchArticlesTool.errors });
     const input = searchArticlesTool.input.parse({
       query: 'asthma',
       maxResults: 2,
@@ -433,7 +437,7 @@ describe('searchArticlesTool', () => {
     });
     mockESummary.mockResolvedValue({ eSummaryResult: {} });
 
-    const ctx = createMockContext();
+    const ctx = createMockContext({ errors: searchArticlesTool.errors });
     const input = searchArticlesTool.input.parse({
       query: 'asthma',
       summaryCount: 2,
@@ -461,7 +465,7 @@ describe('searchArticlesTool', () => {
         queryTranslation: 'xyznothingmatches[All Fields]',
       });
 
-      const ctx = createMockContext();
+      const ctx = createMockContext({ errors: searchArticlesTool.errors });
       const input = searchArticlesTool.input.parse({ query: 'xyznothingmatches' });
       await searchArticlesTool.handler(input, ctx);
 
@@ -479,7 +483,7 @@ describe('searchArticlesTool', () => {
         queryTranslation: 'cancer[All Fields] AND ...',
       });
 
-      const ctx = createMockContext();
+      const ctx = createMockContext({ errors: searchArticlesTool.errors });
       const input = searchArticlesTool.input.parse({
         query: 'cancer',
         author: 'Smith J',
@@ -501,7 +505,7 @@ describe('searchArticlesTool', () => {
         queryTranslation: 'cancer[All Fields]',
       });
 
-      const ctx = createMockContext();
+      const ctx = createMockContext({ errors: searchArticlesTool.errors });
       const input = searchArticlesTool.input.parse({ query: 'cancer', offset: 200 });
       await searchArticlesTool.handler(input, ctx);
 
@@ -520,7 +524,7 @@ describe('searchArticlesTool', () => {
         queryTranslation: 'cancer[All Fields]',
       });
 
-      const ctx = createMockContext();
+      const ctx = createMockContext({ errors: searchArticlesTool.errors });
       const input = searchArticlesTool.input.parse({ query: 'cancer' });
       await searchArticlesTool.handler(input, ctx);
 
@@ -541,7 +545,7 @@ describe('searchArticlesTool', () => {
         errorList: { FieldNotFound: ['NoSuchField'] },
       });
 
-      const ctx = createMockContext();
+      const ctx = createMockContext({ errors: searchArticlesTool.errors });
       const input = searchArticlesTool.input.parse({ query: 'lecanemab[NoSuchField]' });
       await searchArticlesTool.handler(input, ctx);
 
@@ -560,7 +564,7 @@ describe('searchArticlesTool', () => {
         errorList: { FieldNotFound: ['Aithor', 'Jrnal'] },
       });
 
-      const ctx = createMockContext();
+      const ctx = createMockContext({ errors: searchArticlesTool.errors });
       const input = searchArticlesTool.input.parse({ query: 'smith[Aithor] AND x[Jrnal]' });
       await searchArticlesTool.handler(input, ctx);
 
@@ -581,7 +585,7 @@ describe('searchArticlesTool', () => {
         },
       });
 
-      const ctx = createMockContext();
+      const ctx = createMockContext({ errors: searchArticlesTool.errors });
       const input = searchArticlesTool.input.parse({
         query: 'lecanemab',
         meshTerms: ['Notarealmeshterm'],
@@ -605,7 +609,7 @@ describe('searchArticlesTool', () => {
         errorList: { PhraseNotFound: ['zzznomatch'] },
       });
 
-      const ctx = createMockContext();
+      const ctx = createMockContext({ errors: searchArticlesTool.errors });
       const input = searchArticlesTool.input.parse({ query: 'x zzznomatch' });
       await searchArticlesTool.handler(input, ctx);
 
@@ -622,7 +626,7 @@ describe('searchArticlesTool', () => {
         warningList: { OutputMessage: ['Restrictions achieved. start and count adjusted to 0, 1'] },
       });
 
-      const ctx = createMockContext();
+      const ctx = createMockContext({ errors: searchArticlesTool.errors });
       const input = searchArticlesTool.input.parse({ query: 'cancer' });
       await searchArticlesTool.handler(input, ctx);
 
@@ -641,7 +645,7 @@ describe('searchArticlesTool', () => {
         errorList: { FieldNotFound: ['NoSuchField'] },
       });
 
-      const ctx = createMockContext();
+      const ctx = createMockContext({ errors: searchArticlesTool.errors });
       const input = searchArticlesTool.input.parse({
         query: 'lecanemab[NoSuchField]',
         dateRange: { minDate: '2024', maxDate: '' },
@@ -662,7 +666,7 @@ describe('searchArticlesTool', () => {
         queryTranslation: 'zzz[All Fields]',
       });
 
-      const ctx = createMockContext();
+      const ctx = createMockContext({ errors: searchArticlesTool.errors });
       const input = searchArticlesTool.input.parse({
         query: 'zzz',
         dateRange: { minDate: '', maxDate: '2024' },
@@ -683,7 +687,7 @@ describe('searchArticlesTool', () => {
         queryTranslation: 'cancer[All Fields]',
       });
 
-      const ctx = createMockContext();
+      const ctx = createMockContext({ errors: searchArticlesTool.errors });
       const input = searchArticlesTool.input.parse({
         query: 'cancer',
         offset: 200,
@@ -706,7 +710,7 @@ describe('searchArticlesTool', () => {
         errorList: { FieldNotFound: ['Aithor'] },
       });
 
-      const ctx = createMockContext();
+      const ctx = createMockContext({ errors: searchArticlesTool.errors });
       const input = searchArticlesTool.input.parse({ query: 'smith[Aithor]', offset: 200 });
       await searchArticlesTool.handler(input, ctx);
 
@@ -726,7 +730,7 @@ describe('searchArticlesTool', () => {
         warningList: { QuotedPhraseNotFound: ['"Notarealmeshterm"[MeSH Terms]'] },
       });
 
-      const ctx = createMockContext();
+      const ctx = createMockContext({ errors: searchArticlesTool.errors });
       const input = searchArticlesTool.input.parse({
         query: 'smith[Aithor]',
         meshTerms: ['Notarealmeshterm'],
@@ -744,59 +748,67 @@ describe('searchArticlesTool', () => {
   });
 
   it('formats output', () => {
-    const blocks = searchArticlesTool.format!({
-      query: 'cancer',
-      offset: 0,
-      pmids: ['111', '222'],
-      summaries: [],
-      searchUrl: 'https://pubmed.ncbi.nlm.nih.gov/?term=cancer',
-    });
+    const blocks = textBlocks(
+      searchArticlesTool.format!({
+        query: 'cancer',
+        offset: 0,
+        pmids: ['111', '222'],
+        summaries: [],
+        searchUrl: 'https://pubmed.ncbi.nlm.nih.gov/?term=cancer',
+      }),
+    );
     expect(blocks[0]?.text).toContain('PubMed Search Results');
     expect(blocks[0]?.text).toContain('cancer');
   });
 
   describe('count-split note (issue #44)', () => {
     it('explains the asymmetry when summaries.length < pmids.length', () => {
-      const blocks = searchArticlesTool.format!({
-        query: 'glp-1',
-        offset: 0,
-        pmids: ['1', '2', '3', '4', '5', '6', '7', '8', '9', '10'],
-        summaries: [
-          { pmid: '1', title: 'A', pubmedUrl: 'https://pubmed.ncbi.nlm.nih.gov/1/' },
-          { pmid: '2', title: 'B', pubmedUrl: 'https://pubmed.ncbi.nlm.nih.gov/2/' },
-          { pmid: '3', title: 'C', pubmedUrl: 'https://pubmed.ncbi.nlm.nih.gov/3/' },
-          { pmid: '4', title: 'D', pubmedUrl: 'https://pubmed.ncbi.nlm.nih.gov/4/' },
-          { pmid: '5', title: 'E', pubmedUrl: 'https://pubmed.ncbi.nlm.nih.gov/5/' },
-        ],
-        searchUrl: 'https://pubmed.ncbi.nlm.nih.gov/?term=glp-1',
-      });
+      const blocks = textBlocks(
+        searchArticlesTool.format!({
+          query: 'glp-1',
+          offset: 0,
+          pmids: ['1', '2', '3', '4', '5', '6', '7', '8', '9', '10'],
+          summaries: [
+            { pmid: '1', title: 'A', pubmedUrl: 'https://pubmed.ncbi.nlm.nih.gov/1/' },
+            { pmid: '2', title: 'B', pubmedUrl: 'https://pubmed.ncbi.nlm.nih.gov/2/' },
+            { pmid: '3', title: 'C', pubmedUrl: 'https://pubmed.ncbi.nlm.nih.gov/3/' },
+            { pmid: '4', title: 'D', pubmedUrl: 'https://pubmed.ncbi.nlm.nih.gov/4/' },
+            { pmid: '5', title: 'E', pubmedUrl: 'https://pubmed.ncbi.nlm.nih.gov/5/' },
+          ],
+          searchUrl: 'https://pubmed.ncbi.nlm.nih.gov/?term=glp-1',
+        }),
+      );
       const text = blocks[0]?.text ?? '';
       expect(text).toContain('Summaries shown for top 5 of 10 PMIDs');
       expect(text).toContain('summaryCount');
     });
 
     it('omits the note when summaries.length === pmids.length', () => {
-      const blocks = searchArticlesTool.format!({
-        query: 'glp-1',
-        offset: 0,
-        pmids: ['1', '2'],
-        summaries: [
-          { pmid: '1', title: 'A', pubmedUrl: 'https://pubmed.ncbi.nlm.nih.gov/1/' },
-          { pmid: '2', title: 'B', pubmedUrl: 'https://pubmed.ncbi.nlm.nih.gov/2/' },
-        ],
-        searchUrl: 'https://pubmed.ncbi.nlm.nih.gov/?term=glp-1',
-      });
+      const blocks = textBlocks(
+        searchArticlesTool.format!({
+          query: 'glp-1',
+          offset: 0,
+          pmids: ['1', '2'],
+          summaries: [
+            { pmid: '1', title: 'A', pubmedUrl: 'https://pubmed.ncbi.nlm.nih.gov/1/' },
+            { pmid: '2', title: 'B', pubmedUrl: 'https://pubmed.ncbi.nlm.nih.gov/2/' },
+          ],
+          searchUrl: 'https://pubmed.ncbi.nlm.nih.gov/?term=glp-1',
+        }),
+      );
       expect(blocks[0]?.text).not.toContain('Summaries shown for top');
     });
 
     it('omits the note when summaries are empty', () => {
-      const blocks = searchArticlesTool.format!({
-        query: 'glp-1',
-        offset: 0,
-        pmids: ['1', '2'],
-        summaries: [],
-        searchUrl: 'https://pubmed.ncbi.nlm.nih.gov/?term=glp-1',
-      });
+      const blocks = textBlocks(
+        searchArticlesTool.format!({
+          query: 'glp-1',
+          offset: 0,
+          pmids: ['1', '2'],
+          summaries: [],
+          searchUrl: 'https://pubmed.ncbi.nlm.nih.gov/?term=glp-1',
+        }),
+      );
       expect(blocks[0]?.text).not.toContain('Summaries shown for top');
     });
 
@@ -811,13 +823,15 @@ describe('searchArticlesTool', () => {
         }));
 
       it('points at pubmed_fetch_articles when the cap is reached', () => {
-        const blocks = searchArticlesTool.format!({
-          query: 'glp-1',
-          offset: 0,
-          pmids: pmids(60),
-          summaries: summaries(50),
-          searchUrl: 'https://pubmed.ncbi.nlm.nih.gov/?term=glp-1',
-        });
+        const blocks = textBlocks(
+          searchArticlesTool.format!({
+            query: 'glp-1',
+            offset: 0,
+            pmids: pmids(60),
+            summaries: summaries(50),
+            searchUrl: 'https://pubmed.ncbi.nlm.nih.gov/?term=glp-1',
+          }),
+        );
         const text = blocks[0]?.text ?? '';
         expect(text).toContain('Summaries shown for top 50 of 60 PMIDs');
         expect(text).toContain('`summaryCount` is at its maximum (50)');
@@ -826,13 +840,15 @@ describe('searchArticlesTool', () => {
       });
 
       it('still advises raising summaryCount below the cap', () => {
-        const blocks = searchArticlesTool.format!({
-          query: 'glp-1',
-          offset: 0,
-          pmids: pmids(60),
-          summaries: summaries(49),
-          searchUrl: 'https://pubmed.ncbi.nlm.nih.gov/?term=glp-1',
-        });
+        const blocks = textBlocks(
+          searchArticlesTool.format!({
+            query: 'glp-1',
+            offset: 0,
+            pmids: pmids(60),
+            summaries: summaries(49),
+            searchUrl: 'https://pubmed.ncbi.nlm.nih.gov/?term=glp-1',
+          }),
+        );
         const text = blocks[0]?.text ?? '';
         expect(text).toContain('Increase `summaryCount` (max 50)');
         expect(text).not.toContain('pubmed_fetch_articles');
@@ -841,25 +857,27 @@ describe('searchArticlesTool', () => {
   });
 
   it('formats summaries with article metadata and links', () => {
-    const blocks = searchArticlesTool.format!({
-      query: 'asthma',
-      offset: 0,
-      pmids: ['111'],
-      summaries: [
-        {
-          pmid: '111',
-          title: 'Asthma Outcomes',
-          authors: 'Smith J',
-          source: 'Nature',
-          pubDate: '2024-01-01',
-          doi: '10.1000/example',
-          pmcId: 'PMC12345',
-          pubmedUrl: 'https://pubmed.ncbi.nlm.nih.gov/111/',
-          pmcUrl: 'https://www.ncbi.nlm.nih.gov/pmc/articles/PMC12345/',
-        },
-      ],
-      searchUrl: 'https://pubmed.ncbi.nlm.nih.gov/?term=asthma',
-    });
+    const blocks = textBlocks(
+      searchArticlesTool.format!({
+        query: 'asthma',
+        offset: 0,
+        pmids: ['111'],
+        summaries: [
+          {
+            pmid: '111',
+            title: 'Asthma Outcomes',
+            authors: 'Smith J',
+            source: 'Nature',
+            pubDate: '2024-01-01',
+            doi: '10.1000/example',
+            pmcId: 'PMC12345',
+            pubmedUrl: 'https://pubmed.ncbi.nlm.nih.gov/111/',
+            pmcUrl: 'https://www.ncbi.nlm.nih.gov/pmc/articles/PMC12345/',
+          },
+        ],
+        searchUrl: 'https://pubmed.ncbi.nlm.nih.gov/?term=asthma',
+      }),
+    );
 
     expect(blocks[0]?.text).toContain('### Summaries');
     expect(blocks[0]?.text).toContain('Asthma Outcomes');

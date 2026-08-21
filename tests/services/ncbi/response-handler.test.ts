@@ -245,10 +245,9 @@ describe('NcbiResponseHandler', () => {
     });
 
     it('wraps XML parser failures as serialization errors', () => {
-      const handler = createHandler() as NcbiResponseHandler & {
-        xmlParser: { parse: (input: string) => never };
-      };
-      handler.xmlParser = {
+      const handler = createHandler();
+      // `xmlParser` is private, so patch it through an unknown cast.
+      (handler as unknown as { xmlParser: { parse: (input: string) => never } }).xmlParser = {
         parse: () => {
           throw new Error('synthetic parser failure');
         },

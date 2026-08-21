@@ -6,6 +6,8 @@
 import { createMockContext } from '@cyanheads/mcp-ts-core/testing';
 import { describe, expect, it, vi } from 'vitest';
 
+import { textBlocks } from '../../../_helpers.js';
+
 const mockIdConvert = vi.fn();
 vi.mock('@/services/ncbi/ncbi-service.js', () => ({
   getNcbiService: () => ({ idConvert: mockIdConvert }),
@@ -53,7 +55,7 @@ describe('convertIdsTool', () => {
       },
     ]);
 
-    const ctx = createMockContext();
+    const ctx = createMockContext({ errors: convertIdsTool.errors });
     const input = convertIdsTool.input.parse({ ids: ['23193287'], idType: 'pmid' });
     const result = await convertIdsTool.handler(input, ctx);
 
@@ -80,7 +82,7 @@ describe('convertIdsTool', () => {
       { 'requested-id': '99999999', errmsg: 'Not a valid ID', status: 'error' },
     ]);
 
-    const ctx = createMockContext();
+    const ctx = createMockContext({ errors: convertIdsTool.errors });
     const input = convertIdsTool.input.parse({ ids: ['23193287', '99999999'], idType: 'pmid' });
     const result = await convertIdsTool.handler(input, ctx);
 
@@ -99,7 +101,7 @@ describe('convertIdsTool', () => {
         },
       ]);
 
-      const ctx = createMockContext();
+      const ctx = createMockContext({ errors: convertIdsTool.errors });
       const input = convertIdsTool.input.parse({ ids: ['37952131'], idType: 'pmid' });
       const result = await convertIdsTool.handler(input, ctx);
 
@@ -112,7 +114,7 @@ describe('convertIdsTool', () => {
         { 'requested-id': '99999999', errmsg: 'Some other error from NCBI' },
       ]);
 
-      const ctx = createMockContext();
+      const ctx = createMockContext({ errors: convertIdsTool.errors });
       const input = convertIdsTool.input.parse({ ids: ['99999999'], idType: 'pmid' });
       const result = await convertIdsTool.handler(input, ctx);
 
@@ -125,7 +127,7 @@ describe('convertIdsTool', () => {
       { 'requested-id': 'PMC3531190', pmcid: 'PMC3531190', pmid: '23193287' },
     ]);
 
-    const ctx = createMockContext();
+    const ctx = createMockContext({ errors: convertIdsTool.errors });
     const input = convertIdsTool.input.parse({ ids: ['PMC3531190'], idType: 'pmcid' });
     const result = await convertIdsTool.handler(input, ctx);
 
@@ -136,7 +138,7 @@ describe('convertIdsTool', () => {
   it('passes idType through to service', async () => {
     mockIdConvert.mockResolvedValue([]);
 
-    const ctx = createMockContext();
+    const ctx = createMockContext({ errors: convertIdsTool.errors });
     const input = convertIdsTool.input.parse({ ids: ['10.1093/nar/gks1195'], idType: 'doi' });
     await convertIdsTool.handler(input, ctx);
 
@@ -154,7 +156,7 @@ describe('convertIdsTool', () => {
       { 'requested-id': '333', pmid: '333', pmcid: 'PMC3' },
     ]);
 
-    const ctx = createMockContext();
+    const ctx = createMockContext({ errors: convertIdsTool.errors });
     const input = convertIdsTool.input.parse({ ids: ['111', '222', '333'], idType: 'pmid' });
     const result = await convertIdsTool.handler(input, ctx);
 
@@ -163,18 +165,20 @@ describe('convertIdsTool', () => {
   });
 
   it('formats successful conversions as markdown table', () => {
-    const blocks = convertIdsTool.format!({
-      records: [
-        {
-          requestedId: '23193287',
-          pmid: '23193287',
-          pmcid: 'PMC3531190',
-          doi: '10.1093/nar/gks1195',
-        },
-      ],
-      totalConverted: 1,
-      totalSubmitted: 1,
-    });
+    const blocks = textBlocks(
+      convertIdsTool.format!({
+        records: [
+          {
+            requestedId: '23193287',
+            pmid: '23193287',
+            pmcid: 'PMC3531190',
+            doi: '10.1093/nar/gks1195',
+          },
+        ],
+        totalConverted: 1,
+        totalSubmitted: 1,
+      }),
+    );
 
     expect(blocks[0]?.text).toContain('**Converted:** 1/1');
     expect(blocks[0]?.text).toContain('23193287');
@@ -183,11 +187,13 @@ describe('convertIdsTool', () => {
   });
 
   it('renders error records in the unified table', () => {
-    const blocks = convertIdsTool.format!({
-      records: [{ requestedId: '99999999', errmsg: 'Not a valid ID' }],
-      totalConverted: 0,
-      totalSubmitted: 1,
-    });
+    const blocks = textBlocks(
+      convertIdsTool.format!({
+        records: [{ requestedId: '99999999', errmsg: 'Not a valid ID' }],
+        totalConverted: 0,
+        totalSubmitted: 1,
+      }),
+    );
 
     const text = blocks[0]?.text ?? '';
     expect(text).toContain('**Converted:** 0/1');
@@ -196,19 +202,21 @@ describe('convertIdsTool', () => {
   });
 
   it('renders successes and failures in one table', () => {
-    const blocks = convertIdsTool.format!({
-      records: [
-        {
-          requestedId: '23193287',
-          pmid: '23193287',
-          pmcid: 'PMC3531190',
-          doi: '10.1093/nar/gks1195',
-        },
-        { requestedId: '99999999', errmsg: 'Not a valid ID' },
-      ],
-      totalConverted: 1,
-      totalSubmitted: 2,
-    });
+    const blocks = textBlocks(
+      convertIdsTool.format!({
+        records: [
+          {
+            requestedId: '23193287',
+            pmid: '23193287',
+            pmcid: 'PMC3531190',
+            doi: '10.1093/nar/gks1195',
+          },
+          { requestedId: '99999999', errmsg: 'Not a valid ID' },
+        ],
+        totalConverted: 1,
+        totalSubmitted: 2,
+      }),
+    );
 
     const text = blocks[0]?.text ?? '';
     expect(text).toContain('| 23193287 | 23193287 | PMC3531190 | 10.1093/nar/gks1195 | - |');
@@ -216,11 +224,13 @@ describe('convertIdsTool', () => {
   });
 
   it('formats dash for missing optional fields', () => {
-    const blocks = convertIdsTool.format!({
-      records: [{ requestedId: 'PMC3531190', pmcid: 'PMC3531190', pmid: '23193287' }],
-      totalConverted: 1,
-      totalSubmitted: 1,
-    });
+    const blocks = textBlocks(
+      convertIdsTool.format!({
+        records: [{ requestedId: 'PMC3531190', pmcid: 'PMC3531190', pmid: '23193287' }],
+        totalConverted: 1,
+        totalSubmitted: 1,
+      }),
+    );
 
     expect(blocks[0]?.text).toContain('- |');
   });

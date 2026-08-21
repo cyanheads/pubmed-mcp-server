@@ -6,6 +6,8 @@
 import { createMockContext, getEnrichment } from '@cyanheads/mcp-ts-core/testing';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
+import { textBlocks } from '../../../_helpers.js';
+
 const mockESearch = vi.fn();
 const mockESummary = vi.fn();
 vi.mock('@/services/ncbi/ncbi-service.js', () => ({
@@ -55,7 +57,7 @@ describe('lookupMeshTool', () => {
   it('returns empty results with a recovery notice when no MeSH IDs found', async () => {
     mockESearch.mockResolvedValue({ idList: [], count: 0 });
 
-    const ctx = createMockContext();
+    const ctx = createMockContext({ errors: lookupMeshTool.errors });
     const input = lookupMeshTool.input.parse({ query: 'xyznonexistent' });
     const result = await lookupMeshTool.handler(input, ctx);
     const enrichment = getEnrichment(ctx);
@@ -91,7 +93,7 @@ describe('lookupMeshTool', () => {
       },
     });
 
-    const ctx = createMockContext();
+    const ctx = createMockContext({ errors: lookupMeshTool.errors });
     const input = lookupMeshTool.input.parse({ query: 'Neoplasms' });
     const result = await lookupMeshTool.handler(input, ctx);
 
@@ -146,7 +148,7 @@ describe('lookupMeshTool', () => {
       },
     });
 
-    const ctx = createMockContext();
+    const ctx = createMockContext({ errors: lookupMeshTool.errors });
     const input = lookupMeshTool.input.parse({ query: 'Neoplasms', maxResults: 2 });
     const result = await lookupMeshTool.handler(input, ctx);
 
@@ -213,7 +215,7 @@ describe('lookupMeshTool', () => {
       },
     });
 
-    const ctx = createMockContext();
+    const ctx = createMockContext({ errors: lookupMeshTool.errors });
     const input = lookupMeshTool.input.parse({ query: 'metformin' });
     const result = await lookupMeshTool.handler(input, ctx);
 
@@ -240,7 +242,7 @@ describe('lookupMeshTool', () => {
       },
     });
 
-    const ctx = createMockContext();
+    const ctx = createMockContext({ errors: lookupMeshTool.errors });
     const input = lookupMeshTool.input.parse({
       query: 'Neoplasms[MH]',
       includeDetails: false,
@@ -263,7 +265,7 @@ describe('lookupMeshTool', () => {
     );
     mockESummary.mockResolvedValue({});
 
-    const ctx = createMockContext();
+    const ctx = createMockContext({ errors: lookupMeshTool.errors });
     const input = lookupMeshTool.input.parse({ query: 'rare descriptor' });
     const result = await lookupMeshTool.handler(input, ctx);
 
@@ -301,7 +303,7 @@ describe('lookupMeshTool', () => {
       },
     });
 
-    const ctx = createMockContext();
+    const ctx = createMockContext({ errors: lookupMeshTool.errors });
     const input = lookupMeshTool.input.parse({ query: 'mixed batch', includeDetails: false });
     const result = await lookupMeshTool.handler(input, ctx);
 
@@ -331,7 +333,7 @@ describe('lookupMeshTool', () => {
         summaryFor(params.id.split(',')),
       );
 
-      const ctx = createMockContext();
+      const ctx = createMockContext({ errors: lookupMeshTool.errors });
       const input = lookupMeshTool.input.parse({
         query: 'cancer',
         maxResults,
@@ -366,7 +368,7 @@ describe('lookupMeshTool', () => {
     it('returns the first page and points at the next offset', async () => {
       mockRanked('68000001');
 
-      const ctx = createMockContext();
+      const ctx = createMockContext({ errors: lookupMeshTool.errors });
       const input = lookupMeshTool.input.parse({
         query: 'cancer',
         maxResults: 2,
@@ -384,7 +386,7 @@ describe('lookupMeshTool', () => {
     it('returns the next distinct records on the second page and skips the [MH] pin', async () => {
       mockRanked('68000001');
 
-      const ctx = createMockContext();
+      const ctx = createMockContext({ errors: lookupMeshTool.errors });
       const input = lookupMeshTool.input.parse({
         query: 'cancer',
         maxResults: 2,
@@ -416,7 +418,7 @@ describe('lookupMeshTool', () => {
 
       const first = await lookupMeshTool.handler(
         lookupMeshTool.input.parse({ query: 'cancer', maxResults: 2, includeDetails: false }),
-        createMockContext(),
+        createMockContext({ errors: lookupMeshTool.errors }),
       );
       expect(first.results.map((r) => r.entrezUid)).toEqual(['68999999', '68000000']);
       expect(first.nextOffset).toBe(1);
@@ -428,7 +430,7 @@ describe('lookupMeshTool', () => {
           offset: first.nextOffset,
           includeDetails: false,
         }),
-        createMockContext(),
+        createMockContext({ errors: lookupMeshTool.errors }),
       );
       expect(second.results.map((r) => r.entrezUid)).toEqual(['68000001', '68000002']);
     });
@@ -436,7 +438,7 @@ describe('lookupMeshTool', () => {
     it('omits nextOffset on the final partial page', async () => {
       mockRanked(undefined);
 
-      const ctx = createMockContext();
+      const ctx = createMockContext({ errors: lookupMeshTool.errors });
       const input = lookupMeshTool.input.parse({
         query: 'cancer',
         maxResults: 4,
@@ -454,7 +456,7 @@ describe('lookupMeshTool', () => {
     it('reports an overshooting offset instead of claiming no matches', async () => {
       mockRanked(undefined);
 
-      const ctx = createMockContext();
+      const ctx = createMockContext({ errors: lookupMeshTool.errors });
       const input = lookupMeshTool.input.parse({
         query: 'cancer',
         maxResults: 5,
@@ -477,7 +479,7 @@ describe('lookupMeshTool', () => {
     it('flags a page the pinned exact match filled on its own', async () => {
       mockRanked('68999999');
 
-      const ctx = createMockContext();
+      const ctx = createMockContext({ errors: lookupMeshTool.errors });
       const input = lookupMeshTool.input.parse({
         query: 'cancer',
         maxResults: 1,
@@ -528,7 +530,7 @@ describe('lookupMeshTool', () => {
             offset,
             includeDetails: false,
           }),
-          createMockContext(),
+          createMockContext({ errors: lookupMeshTool.errors }),
         );
         pages.push(result.results.map((r) => r.entrezUid));
         offset = result.nextOffset;
@@ -582,7 +584,7 @@ describe('lookupMeshTool', () => {
       const pin = ranked[6];
       mockWalk(pin);
 
-      const ctx = createMockContext();
+      const ctx = createMockContext({ errors: lookupMeshTool.errors });
       const result = await lookupMeshTool.handler(
         lookupMeshTool.input.parse({
           query: 'cancer',
@@ -604,20 +606,22 @@ describe('lookupMeshTool', () => {
   });
 
   it('formats output with the offset and next-page hint', () => {
-    const blocks = lookupMeshTool.format!({
-      query: 'Neoplasms',
-      offset: 10,
-      nextOffset: 20,
-      results: [
-        {
-          entrezUid: '68009369',
-          meshId: 'D009369',
-          name: 'Neoplasms',
-          scopeNote: 'New abnormal growth of tissue.',
-          treeNumbers: ['C04'],
-        },
-      ],
-    });
+    const blocks = textBlocks(
+      lookupMeshTool.format!({
+        query: 'Neoplasms',
+        offset: 10,
+        nextOffset: 20,
+        results: [
+          {
+            entrezUid: '68009369',
+            meshId: 'D009369',
+            name: 'Neoplasms',
+            scopeNote: 'New abnormal growth of tissue.',
+            treeNumbers: ['C04'],
+          },
+        ],
+      }),
+    );
     expect(blocks[0]?.text).toContain('MeSH Lookup');
     expect(blocks[0]?.text).toContain('Neoplasms');
     expect(blocks[0]?.text).toContain('C04');
@@ -629,11 +633,13 @@ describe('lookupMeshTool', () => {
   });
 
   it('renders empty results; the recovery notice is enrichment, not format output', () => {
-    const blocks = lookupMeshTool.format!({
-      query: 'xyznonexistent',
-      offset: 0,
-      results: [],
-    });
+    const blocks = textBlocks(
+      lookupMeshTool.format!({
+        query: 'xyznonexistent',
+        offset: 0,
+        results: [],
+      }),
+    );
     expect(blocks[0]?.text).toContain('Found **0** result(s) at offset **0**.');
     expect(blocks[0]?.text).not.toContain('offset:');
   });

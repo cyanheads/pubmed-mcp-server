@@ -5,7 +5,7 @@
 
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
-const createApp = vi.fn(async () => undefined);
+const createApp = vi.fn(async (_config: Record<string, unknown>) => undefined);
 const initNcbiService = vi.fn();
 const initUnpaywallService = vi.fn();
 const initEuropePmcService = vi.fn();

@@ -10,6 +10,8 @@
 import { createMockContext, getEnrichment } from '@cyanheads/mcp-ts-core/testing';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
+import { textBlocks } from '../../../_helpers.js';
+
 const mockFetchRecords = vi.fn();
 const mockGetEpmc = vi.fn();
 
@@ -37,7 +39,7 @@ const patHit = {
 };
 
 const renderedText = (result: Parameters<NonNullable<typeof pubmedEuropepmcFetchTool.format>>[0]) =>
-  pubmedEuropepmcFetchTool.format?.(result)[0]?.text ?? '';
+  textBlocks(pubmedEuropepmcFetchTool.format!(result))[0]?.text ?? '';
 
 describe('pubmedEuropepmcFetchTool', () => {
   beforeEach(() => {
@@ -94,7 +96,7 @@ describe('pubmedEuropepmcFetchTool', () => {
 
   it('passes the requested refs straight through to the service', async () => {
     mockFetchRecords.mockResolvedValue([patHit]);
-    const ctx = createMockContext();
+    const ctx = createMockContext({ errors: pubmedEuropepmcFetchTool.errors });
     const input = pubmedEuropepmcFetchTool.input.parse({
       records: [{ source: 'PAT', epmcId: 'KR20120031038' }],
     });
@@ -109,7 +111,7 @@ describe('pubmedEuropepmcFetchTool', () => {
     mockFetchRecords.mockResolvedValue([
       { id: 'PPR1', source: 'PPR', isOpenAccess: 'Y', inPMC: 'N' },
     ]);
-    const ctx = createMockContext();
+    const ctx = createMockContext({ errors: pubmedEuropepmcFetchTool.errors });
     const result = await pubmedEuropepmcFetchTool.handler(
       pubmedEuropepmcFetchTool.input.parse({ records: [{ source: 'PPR', epmcId: 'PPR1' }] }),
       ctx,
@@ -127,7 +129,7 @@ describe('pubmedEuropepmcFetchTool', () => {
         abstractText: '<h4>Background: </h4> Emergency &amp; clini­cal triage &lt;LLMs&gt;',
       },
     ]);
-    const ctx = createMockContext();
+    const ctx = createMockContext({ errors: pubmedEuropepmcFetchTool.errors });
     const result = await pubmedEuropepmcFetchTool.handler(
       pubmedEuropepmcFetchTool.input.parse({ records: [{ source: 'PPR', epmcId: 'PPR2' }] }),
       ctx,
@@ -146,7 +148,7 @@ describe('pubmedEuropepmcFetchTool', () => {
           '<p>Change was -0.45 (95% CI, -0.67 to -0.23; P<0.001).</p><title>Conclusions</title><p>Treatment slowed decline.</p>',
       },
     ]);
-    const ctx = createMockContext();
+    const ctx = createMockContext({ errors: pubmedEuropepmcFetchTool.errors });
     const result = await pubmedEuropepmcFetchTool.handler(
       pubmedEuropepmcFetchTool.input.parse({ records: [{ source: 'PPR', epmcId: 'PPR3' }] }),
       ctx,
@@ -158,7 +160,7 @@ describe('pubmedEuropepmcFetchTool', () => {
 
   it('omits `abstract` when Europe PMC carries none', async () => {
     mockFetchRecords.mockResolvedValue([{ id: 'PMC13294766', source: 'PMC' }]);
-    const ctx = createMockContext();
+    const ctx = createMockContext({ errors: pubmedEuropepmcFetchTool.errors });
     const result = await pubmedEuropepmcFetchTool.handler(
       pubmedEuropepmcFetchTool.input.parse({
         records: [{ source: 'PMC', epmcId: 'PMC13294766' }],
@@ -176,7 +178,7 @@ describe('pubmedEuropepmcFetchTool', () => {
         patHit,
         { id: 'PPR1283828', source: 'PPR', abstractText: SHORT_ABSTRACT },
       ]);
-      const ctx = createMockContext();
+      const ctx = createMockContext({ errors: pubmedEuropepmcFetchTool.errors });
       const input = pubmedEuropepmcFetchTool.input.parse({
         records: [
           { source: 'PAT', epmcId: 'KR20120031038' },
@@ -207,7 +209,7 @@ describe('pubmedEuropepmcFetchTool', () => {
       mockFetchRecords.mockResolvedValue([
         { id: '34265844', source: 'MED', pmid: '34265844', pmcid: 'PMC8371605' },
       ]);
-      const ctx = createMockContext();
+      const ctx = createMockContext({ errors: pubmedEuropepmcFetchTool.errors });
       const result = await pubmedEuropepmcFetchTool.handler(
         pubmedEuropepmcFetchTool.input.parse({
           records: [{ source: 'PMC', epmcId: 'PMC8371605' }],
@@ -224,7 +226,7 @@ describe('pubmedEuropepmcFetchTool', () => {
 
     it('matches the response to the request case-insensitively', async () => {
       mockFetchRecords.mockResolvedValue([{ id: 'PPR1283828', source: 'PPR' }]);
-      const ctx = createMockContext();
+      const ctx = createMockContext({ errors: pubmedEuropepmcFetchTool.errors });
       const result = await pubmedEuropepmcFetchTool.handler(
         pubmedEuropepmcFetchTool.input.parse({
           records: [{ source: 'PPR', epmcId: 'ppr1283828' }],
@@ -238,7 +240,7 @@ describe('pubmedEuropepmcFetchTool', () => {
   describe('unresolved records', () => {
     it('reports a partially-missing batch on both surfaces and in a notice', async () => {
       mockFetchRecords.mockResolvedValue([patHit]);
-      const ctx = createMockContext();
+      const ctx = createMockContext({ errors: pubmedEuropepmcFetchTool.errors });
       const result = await pubmedEuropepmcFetchTool.handler(
         pubmedEuropepmcFetchTool.input.parse({
           records: [
@@ -257,7 +259,7 @@ describe('pubmedEuropepmcFetchTool', () => {
 
     it('notices an entirely unresolved batch without throwing', async () => {
       mockFetchRecords.mockResolvedValue([]);
-      const ctx = createMockContext();
+      const ctx = createMockContext({ errors: pubmedEuropepmcFetchTool.errors });
       const result = await pubmedEuropepmcFetchTool.handler(
         pubmedEuropepmcFetchTool.input.parse({
           records: [{ source: 'AGR', epmcId: 'IND000000000' }],
@@ -273,7 +275,7 @@ describe('pubmedEuropepmcFetchTool', () => {
 
     it('points an unresolved PMCID-shaped id at pubmed_fetch_fulltext (#94)', async () => {
       mockFetchRecords.mockResolvedValue([]);
-      const ctx = createMockContext();
+      const ctx = createMockContext({ errors: pubmedEuropepmcFetchTool.errors });
       const result = await pubmedEuropepmcFetchTool.handler(
         pubmedEuropepmcFetchTool.input.parse({
           records: [{ source: 'MED', epmcId: 'PMC8371605' }],
@@ -287,7 +289,7 @@ describe('pubmedEuropepmcFetchTool', () => {
 
     it('carries the pubmed_fetch_fulltext pointer on a partially-missing batch (#94)', async () => {
       mockFetchRecords.mockResolvedValue([patHit]);
-      const ctx = createMockContext();
+      const ctx = createMockContext({ errors: pubmedEuropepmcFetchTool.errors });
       await pubmedEuropepmcFetchTool.handler(
         pubmedEuropepmcFetchTool.input.parse({
           records: [
@@ -307,7 +309,7 @@ describe('pubmedEuropepmcFetchTool', () => {
       expect(LONG_ABSTRACT.length).toBeGreaterThan(400);
 
       // Search: bounded snippet, truncation flagged.
-      const searchCtx = createMockContext();
+      const searchCtx = createMockContext({ errors: pubmedEuropepmcSearchTool.errors });
       mockGetEpmc.mockReturnValue({
         fetchRecords: mockFetchRecords,
         search: vi
@@ -325,7 +327,7 @@ describe('pubmedEuropepmcFetchTool', () => {
 
       // Fetch by the same source + epmcId: complete abstract, both surfaces.
       mockFetchRecords.mockResolvedValue([patHit]);
-      const ctx = createMockContext();
+      const ctx = createMockContext({ errors: pubmedEuropepmcFetchTool.errors });
       const result = await pubmedEuropepmcFetchTool.handler(
         pubmedEuropepmcFetchTool.input.parse({
           records: [{ source: 'PAT', epmcId: hit?.epmcId ?? '' }],
@@ -341,7 +343,7 @@ describe('pubmedEuropepmcFetchTool', () => {
     });
 
     it('agrees with the search snippet on an abstract under the budget', async () => {
-      const searchCtx = createMockContext();
+      const searchCtx = createMockContext({ errors: pubmedEuropepmcSearchTool.errors });
       const shortHit = { id: 'PPR1283828', source: 'PPR', abstractText: SHORT_ABSTRACT };
       mockGetEpmc.mockReturnValue({
         fetchRecords: mockFetchRecords,
@@ -357,7 +359,7 @@ describe('pubmedEuropepmcFetchTool', () => {
       expect(searchResult.hits[0]?.abstractSnippet).toBe(SHORT_ABSTRACT);
 
       mockFetchRecords.mockResolvedValue([shortHit]);
-      const ctx = createMockContext();
+      const ctx = createMockContext({ errors: pubmedEuropepmcFetchTool.errors });
       const result = await pubmedEuropepmcFetchTool.handler(
         pubmedEuropepmcFetchTool.input.parse({
           records: [{ source: 'PPR', epmcId: 'PPR1283828' }],

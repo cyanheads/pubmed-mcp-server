@@ -34,8 +34,8 @@ describe('databaseInfoResource', () => {
       },
     });
 
-    const ctx = createMockContext();
-    const params = databaseInfoResource.params.parse({});
+    const ctx = createMockContext({ errors: databaseInfoResource.errors });
+    const params = databaseInfoResource.params!.parse({});
     const result = await databaseInfoResource.handler(params, ctx);
 
     expect(result.dbName).toBe('pubmed');
@@ -50,16 +50,27 @@ describe('databaseInfoResource', () => {
       eInfoResult: { DbInfo: { DbName: 'pubmed' } },
     });
 
-    const ctx = createMockContext();
-    const params = databaseInfoResource.params.parse({});
+    const ctx = createMockContext({ errors: databaseInfoResource.errors });
+    const params = databaseInfoResource.params!.parse({});
     const result = await databaseInfoResource.handler(params, ctx);
 
     expect(result.dbName).toBe('pubmed');
     expect(result.fields).toBeUndefined();
   });
 
-  it('lists available resources', () => {
-    const listing = databaseInfoResource.list!();
+  it('lists available resources', async () => {
+    /**
+     * `list` receives the SDK's `ServerContext`, not a handler `Context`, and
+     * may be async — a minimal literal is enough for a listing that ignores it.
+     */
+    const serverContext = {
+      mcpReq: {
+        id: 'test',
+        method: 'resources/list',
+        signal: new AbortController().signal,
+      },
+    } as unknown as Parameters<NonNullable<typeof databaseInfoResource.list>>[0];
+    const listing = await databaseInfoResource.list!(serverContext);
     expect(listing.resources).toHaveLength(1);
     expect(listing.resources[0]).toMatchObject({
       uri: 'pubmed://database/info',

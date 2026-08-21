@@ -6,6 +6,8 @@
 import { createMockContext } from '@cyanheads/mcp-ts-core/testing';
 import { describe, expect, it, vi } from 'vitest';
 
+import { textBlocks } from '../../../_helpers.js';
+
 const mockESpell = vi.fn();
 vi.mock('@/services/ncbi/ncbi-service.js', () => ({
   getNcbiService: () => ({ eSpell: mockESpell }),
@@ -29,7 +31,7 @@ describe('spellCheckTool', () => {
       corrected: 'asthma',
       hasSuggestion: true,
     });
-    const ctx = createMockContext();
+    const ctx = createMockContext({ errors: spellCheckTool.errors });
     const input = spellCheckTool.input.parse({ query: 'astma' });
     const result = await spellCheckTool.handler(input, ctx);
 
@@ -40,7 +42,7 @@ describe('spellCheckTool', () => {
 
   it('threads ctx.signal into the ESpell call so cancellation reaches NCBI (#89)', async () => {
     mockESpell.mockResolvedValue({ original: 'astma', corrected: 'asthma', hasSuggestion: true });
-    const ctx = createMockContext();
+    const ctx = createMockContext({ errors: spellCheckTool.errors });
     const input = spellCheckTool.input.parse({ query: 'astma' });
     await spellCheckTool.handler(input, ctx);
 
@@ -57,7 +59,7 @@ describe('spellCheckTool', () => {
       corrected: 'cancer',
       hasSuggestion: false,
     });
-    const ctx = createMockContext();
+    const ctx = createMockContext({ errors: spellCheckTool.errors });
     const input = spellCheckTool.input.parse({ query: 'cancer' });
     const result = await spellCheckTool.handler(input, ctx);
 
@@ -65,21 +67,25 @@ describe('spellCheckTool', () => {
   });
 
   it('formats result with suggestion', () => {
-    const blocks = spellCheckTool.format!({
-      original: 'astma',
-      corrected: 'asthma',
-      hasSuggestion: true,
-    });
+    const blocks = textBlocks(
+      spellCheckTool.format!({
+        original: 'astma',
+        corrected: 'asthma',
+        hasSuggestion: true,
+      }),
+    );
     expect(blocks[0]?.text).toContain('Suggestion');
     expect(blocks[0]?.text).toContain('asthma');
   });
 
   it('formats result without suggestion', () => {
-    const blocks = spellCheckTool.format!({
-      original: 'cancer',
-      corrected: 'cancer',
-      hasSuggestion: false,
-    });
+    const blocks = textBlocks(
+      spellCheckTool.format!({
+        original: 'cancer',
+        corrected: 'cancer',
+        hasSuggestion: false,
+      }),
+    );
     expect(blocks[0]?.text).toContain('No suggestion');
   });
 });

@@ -6,6 +6,8 @@
 import { createMockContext, getEnrichment } from '@cyanheads/mcp-ts-core/testing';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
+import { textBlocks } from '../../../_helpers.js';
+
 const mockEFetch = vi.fn();
 vi.mock('@/services/ncbi/ncbi-service.js', () => ({
   getNcbiService: () => ({ eFetch: mockEFetch }),
@@ -63,7 +65,7 @@ describe('formatCitationsTool', () => {
 
   it('returns structured empty result when no articles match (no throw)', async () => {
     mockEFetch.mockResolvedValue({ PubmedArticleSet: { PubmedArticle: [] } });
-    const ctx = createMockContext();
+    const ctx = createMockContext({ errors: formatCitationsTool.errors });
     const input = formatCitationsTool.input.parse({ pmids: ['99999'] });
 
     const result = await formatCitationsTool.handler(input, ctx);
@@ -111,7 +113,7 @@ describe('formatCitationsTool', () => {
       },
     });
 
-    const ctx = createMockContext();
+    const ctx = createMockContext({ errors: formatCitationsTool.errors });
     const input = formatCitationsTool.input.parse({
       pmids: ['12345'],
       format: ['apa', 'bibtex'],
@@ -165,7 +167,7 @@ describe('formatCitationsTool', () => {
       },
     });
 
-    const ctx = createMockContext();
+    const ctx = createMockContext({ errors: formatCitationsTool.errors });
     const input = formatCitationsTool.input.parse({ pmids: ['34265844'], format: 'vancouver' });
     const result = await formatCitationsTool.handler(input, ctx);
 
@@ -198,7 +200,7 @@ describe('formatCitationsTool', () => {
       },
     });
 
-    const ctx = createMockContext();
+    const ctx = createMockContext({ errors: formatCitationsTool.errors });
     const input = formatCitationsTool.input.parse({
       pmids: ['12345', '99999'],
       format: 'apa',
@@ -248,7 +250,7 @@ describe('formatCitationsTool', () => {
       },
     });
 
-    const ctx = createMockContext();
+    const ctx = createMockContext({ errors: formatCitationsTool.errors });
     const input = formatCitationsTool.input.parse({
       pmids: ['24680'],
       format: ['apa', 'ris'],
@@ -265,18 +267,20 @@ describe('formatCitationsTool', () => {
   });
 
   it('formats output', () => {
-    const blocks = formatCitationsTool.format!({
-      totalSubmitted: 2,
-      totalFormatted: 1,
-      unavailablePmids: ['99999'],
-      citations: [
-        {
-          pmid: '12345',
-          title: 'Test',
-          citations: { apa: 'Smith (2024). Test.' },
-        },
-      ],
-    });
+    const blocks = textBlocks(
+      formatCitationsTool.format!({
+        totalSubmitted: 2,
+        totalFormatted: 1,
+        unavailablePmids: ['99999'],
+        citations: [
+          {
+            pmid: '12345',
+            title: 'Test',
+            citations: { apa: 'Smith (2024). Test.' },
+          },
+        ],
+      }),
+    );
     expect(blocks[0]?.text).toContain('PubMed Citations');
     expect(blocks[0]?.text).toContain('**Formatted:** 1/2');
     expect(blocks[0]?.text).toContain('**Unavailable PMIDs:** 99999');
@@ -284,12 +288,14 @@ describe('formatCitationsTool', () => {
   });
 
   it('renders the empty state; the recovery notice is enrichment, not format output', () => {
-    const blocks = formatCitationsTool.format!({
-      totalSubmitted: 1,
-      totalFormatted: 0,
-      unavailablePmids: ['99999'],
-      citations: [],
-    });
+    const blocks = textBlocks(
+      formatCitationsTool.format!({
+        totalSubmitted: 1,
+        totalFormatted: 0,
+        unavailablePmids: ['99999'],
+        citations: [],
+      }),
+    );
 
     const text = blocks[0]?.text ?? '';
     expect(text).toContain('**Formatted:** 0/1');
@@ -299,19 +305,21 @@ describe('formatCitationsTool', () => {
   });
 
   it('formats BibTeX and RIS citations in fenced code blocks', () => {
-    const blocks = formatCitationsTool.format!({
-      totalSubmitted: 1,
-      totalFormatted: 1,
-      citations: [
-        {
-          pmid: '12345',
-          citations: {
-            bibtex: '@article{pmid12345}',
-            ris: 'TY  - JOUR',
+    const blocks = textBlocks(
+      formatCitationsTool.format!({
+        totalSubmitted: 1,
+        totalFormatted: 1,
+        citations: [
+          {
+            pmid: '12345',
+            citations: {
+              bibtex: '@article{pmid12345}',
+              ris: 'TY  - JOUR',
+            },
           },
-        },
-      ],
-    });
+        ],
+      }),
+    );
 
     const text = blocks[0]?.text ?? '';
     expect(text).toContain('```bibtex\n@article{pmid12345}\n```');

@@ -1,5 +1,5 @@
-import { defineConfig, mergeConfig } from 'vitest/config';
 import coreConfig from '@cyanheads/mcp-ts-core/vitest.config';
+import { defineConfig, mergeConfig } from 'vitest/config';
 
 export default mergeConfig(
   coreConfig,

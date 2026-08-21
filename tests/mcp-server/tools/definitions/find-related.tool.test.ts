@@ -8,9 +8,13 @@ import { JsonRpcErrorCode, McpError } from '@cyanheads/mcp-ts-core/errors';
 import { createMockContext, getEnrichment } from '@cyanheads/mcp-ts-core/testing';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
+import type { ParsedBriefSummary } from '@/services/ncbi/types.js';
+
+import { textBlocks } from '../../../_helpers.js';
+
 const mockELink = vi.fn();
 const mockESummary = vi.fn();
-const mockExtractBriefSummaries = vi.fn(() => Promise.resolve([]));
+const mockExtractBriefSummaries = vi.fn((): Promise<ParsedBriefSummary[]> => Promise.resolve([]));
 const mockEpmcCitations = vi.fn();
 const mockEpmcReferences = vi.fn();
 const mockOaSimilar = vi.fn();
@@ -99,7 +103,7 @@ describe('findRelatedTool', () => {
     mockESummary.mockResolvedValue({ eSummaryResult: {} });
     mockExtractBriefSummaries.mockResolvedValue([]);
 
-    const ctx = createMockContext();
+    const ctx = createMockContext({ errors: findRelatedTool.errors });
     const input = findRelatedTool.input.parse({ pmid: '12345', maxResults: 2, offset: 0 });
     const result = await findRelatedTool.handler(input, ctx);
 
@@ -114,13 +118,13 @@ describe('findRelatedTool', () => {
     mockExtractBriefSummaries.mockResolvedValue([]);
 
     // offset=0 run
-    const ctx0 = createMockContext();
+    const ctx0 = createMockContext({ errors: findRelatedTool.errors });
     const input0 = findRelatedTool.input.parse({ pmid: '12345', maxResults: 2, offset: 0 });
     const result0 = await findRelatedTool.handler(input0, ctx0);
 
     // offset=2 run
     mockELink.mockResolvedValue(eLinkResponse(pmids));
-    const ctx2 = createMockContext();
+    const ctx2 = createMockContext({ errors: findRelatedTool.errors });
     const input2 = findRelatedTool.input.parse({ pmid: '12345', maxResults: 2, offset: 2 });
     const result2 = await findRelatedTool.handler(input2, ctx2);
 
@@ -137,7 +141,7 @@ describe('findRelatedTool', () => {
     mockESummary.mockResolvedValue({ eSummaryResult: {} });
     mockExtractBriefSummaries.mockResolvedValue([]);
 
-    const ctx = createMockContext();
+    const ctx = createMockContext({ errors: findRelatedTool.errors });
     // offset=10, totalCount=3 → overshoot
     const input = findRelatedTool.input.parse({ pmid: '12345', maxResults: 10, offset: 10 });
     await findRelatedTool.handler(input, ctx);
@@ -151,19 +155,21 @@ describe('findRelatedTool', () => {
     mockESummary.mockResolvedValue({ eSummaryResult: {} });
     mockExtractBriefSummaries.mockResolvedValue([]);
 
-    const ctx = createMockContext();
+    const ctx = createMockContext({ errors: findRelatedTool.errors });
     const input = findRelatedTool.input.parse({ pmid: '12345', maxResults: 5, offset: 3 });
     const result = await findRelatedTool.handler(input, ctx);
     expect(result.offset).toBe(3);
   });
 
   it('format() header includes "Returned: N | Offset: Z"', () => {
-    const blocks = findRelatedTool.format!({
-      sourcePmid: '12345',
-      relationship: 'similar',
-      offset: 5,
-      articles: [{ pmid: '111', title: 'A', authors: 'B', source: 'C', pubDate: '2024' }],
-    });
+    const blocks = textBlocks(
+      findRelatedTool.format!({
+        sourcePmid: '12345',
+        relationship: 'similar',
+        offset: 5,
+        articles: [{ pmid: '111', title: 'A', authors: 'B', source: 'C', pubDate: '2024' }],
+      }),
+    );
     const text = blocks[0]?.text ?? '';
     expect(text).toContain('**Returned:** 1');
     expect(text).toContain('**Offset:** 5');
@@ -180,7 +186,7 @@ describe('findRelatedTool', () => {
       { pmid: '222', title: 'Art 2' },
     ]);
 
-    const ctx = createMockContext();
+    const ctx = createMockContext({ errors: findRelatedTool.errors });
     const input = findRelatedTool.input.parse({ pmid: '12345', relationship: 'cited_by' });
     const result = await findRelatedTool.handler(input, ctx);
 
@@ -199,7 +205,7 @@ describe('findRelatedTool', () => {
       { pmid: '444', title: 'EPMC Art 2' },
     ]);
 
-    const ctx = createMockContext();
+    const ctx = createMockContext({ errors: findRelatedTool.errors });
     const input = findRelatedTool.input.parse({ pmid: '12345', relationship: 'cited_by' });
     const result = await findRelatedTool.handler(input, ctx);
 
@@ -220,7 +226,7 @@ describe('findRelatedTool', () => {
       { pmid: '666', title: 'OA Art 2' },
     ]);
 
-    const ctx = createMockContext();
+    const ctx = createMockContext({ errors: findRelatedTool.errors });
     const input = findRelatedTool.input.parse({ pmid: '12345', relationship: 'similar' });
     const result = await findRelatedTool.handler(input, ctx);
 
@@ -242,7 +248,7 @@ describe('findRelatedTool', () => {
     mockESummary.mockResolvedValue({ eSummaryResult: {} });
     mockExtractBriefSummaries.mockResolvedValue([{ pmid: '777', title: 'OA Art' }]);
 
-    const ctx = createMockContext();
+    const ctx = createMockContext({ errors: findRelatedTool.errors });
     const input = findRelatedTool.input.parse({ pmid: '12345', relationship: 'cited_by' });
     const result = await findRelatedTool.handler(input, ctx);
 
@@ -257,7 +263,7 @@ describe('findRelatedTool', () => {
     mockESummary.mockResolvedValue({ eSummaryResult: {} });
     mockExtractBriefSummaries.mockResolvedValue([{ pmid: '777', title: 'OA Art' }]);
 
-    const ctx = createMockContext();
+    const ctx = createMockContext({ errors: findRelatedTool.errors });
     const input = findRelatedTool.input.parse({ pmid: '12345', relationship: 'cited_by' });
     const result = await findRelatedTool.handler(input, ctx);
 
@@ -273,7 +279,7 @@ describe('findRelatedTool', () => {
     mockELink.mockRejectedValue(new McpError(JsonRpcErrorCode.ServiceUnavailable, 'NCBI down'));
     mockOaSimilar.mockResolvedValue({ pmids: [], totalCount: 0 });
 
-    const ctx = createMockContext();
+    const ctx = createMockContext({ errors: findRelatedTool.errors });
     const input = findRelatedTool.input.parse({ pmid: '99999999', relationship: 'similar' });
     const result = await findRelatedTool.handler(input, ctx);
 
@@ -290,7 +296,7 @@ describe('findRelatedTool', () => {
     mockEpmcCitations.mockResolvedValue({ pmids: [], totalCount: 0 });
     mockOaCitedBy.mockResolvedValue({ pmids: [], totalCount: 0 });
 
-    const ctx = createMockContext();
+    const ctx = createMockContext({ errors: findRelatedTool.errors });
     const input = findRelatedTool.input.parse({ pmid: '99999999', relationship: 'cited_by' });
     const result = await findRelatedTool.handler(input, ctx);
 
@@ -306,7 +312,7 @@ describe('findRelatedTool', () => {
     );
     mockOaCitedBy.mockRejectedValue(new McpError(JsonRpcErrorCode.ServiceUnavailable, 'OA down'));
 
-    const ctx = createMockContext();
+    const ctx = createMockContext({ errors: findRelatedTool.errors });
     const input = findRelatedTool.input.parse({ pmid: '12345', relationship: 'cited_by' });
     const result = await findRelatedTool.handler(input, ctx);
 
@@ -323,7 +329,7 @@ describe('findRelatedTool', () => {
     mockEpmcCitations.mockResolvedValue({ pmids: ['333', '444'], totalCount: 50 });
     mockESummary.mockRejectedValue(new McpError(JsonRpcErrorCode.ServiceUnavailable, 'NCBI down'));
 
-    const ctx = createMockContext();
+    const ctx = createMockContext({ errors: findRelatedTool.errors });
     const input = findRelatedTool.input.parse({ pmid: '12345', relationship: 'cited_by' });
     const result = await findRelatedTool.handler(input, ctx);
 
@@ -343,7 +349,7 @@ describe('findRelatedTool', () => {
       { pmid: '12345', title: 'Existing article with no related items' },
     ]);
 
-    const ctx = createMockContext();
+    const ctx = createMockContext({ errors: findRelatedTool.errors });
     const input = findRelatedTool.input.parse({ pmid: '12345' });
     const result = await findRelatedTool.handler(input, ctx);
 
@@ -358,7 +364,7 @@ describe('findRelatedTool', () => {
       mockESummary.mockResolvedValue({ eSummaryResult: {} });
       mockExtractBriefSummaries.mockResolvedValue([]);
 
-      const ctx = createMockContext();
+      const ctx = createMockContext({ errors: findRelatedTool.errors });
       const input = findRelatedTool.input.parse({ pmid: '99999999999' });
       const result = await findRelatedTool.handler(input, ctx);
 
@@ -375,7 +381,7 @@ describe('findRelatedTool', () => {
         { pmid: '12345', title: 'Valid source with no related items' },
       ]);
 
-      const ctx = createMockContext();
+      const ctx = createMockContext({ errors: findRelatedTool.errors });
       const input = findRelatedTool.input.parse({ pmid: '12345' });
       await findRelatedTool.handler(input, ctx);
 
@@ -420,7 +426,7 @@ describe('findRelatedTool', () => {
       },
     ]);
 
-    const ctx = createMockContext();
+    const ctx = createMockContext({ errors: findRelatedTool.errors });
     const input = findRelatedTool.input.parse({ pmid: '12345', maxResults: 2 });
     const result = await findRelatedTool.handler(input, ctx);
 
@@ -473,7 +479,7 @@ describe('findRelatedTool', () => {
       { pmid: '222', title: 'Citing Article', authors: 'Taylor R' },
     ]);
 
-    const ctx = createMockContext();
+    const ctx = createMockContext({ errors: findRelatedTool.errors });
     const input = findRelatedTool.input.parse({ pmid: '12345', relationship: 'cited_by' });
     const result = await findRelatedTool.handler(input, ctx);
 
@@ -507,7 +513,7 @@ describe('findRelatedTool', () => {
     mockEpmcReferences.mockResolvedValue({ pmids: [], totalCount: 0 });
     mockOaReferences.mockResolvedValue({ pmids: [], totalCount: 0 });
 
-    const ctx = createMockContext();
+    const ctx = createMockContext({ errors: findRelatedTool.errors });
     const input = findRelatedTool.input.parse({ pmid: '12345', relationship: 'references' });
     await findRelatedTool.handler(input, ctx);
 
@@ -538,7 +544,7 @@ describe('findRelatedTool', () => {
         ]);
       mockEpmcReferences.mockResolvedValue({ pmids: ['888', '999'], totalCount: 149 });
 
-      const ctx = createMockContext();
+      const ctx = createMockContext({ errors: findRelatedTool.errors });
       const input = findRelatedTool.input.parse({ pmid: '37952131', relationship: 'references' });
       const result = await findRelatedTool.handler(input, ctx);
 
@@ -559,7 +565,7 @@ describe('findRelatedTool', () => {
       mockEpmcReferences.mockResolvedValue({ pmids: [], totalCount: 0 });
       mockOaReferences.mockResolvedValue({ pmids: ['890'], totalCount: 150 });
 
-      const ctx = createMockContext();
+      const ctx = createMockContext({ errors: findRelatedTool.errors });
       const input = findRelatedTool.input.parse({ pmid: '37952131', relationship: 'references' });
       const result = await findRelatedTool.handler(input, ctx);
 
@@ -577,7 +583,7 @@ describe('findRelatedTool', () => {
       mockEpmcReferences.mockResolvedValue({ pmids: [], totalCount: 0 });
       mockOaReferences.mockResolvedValue({ pmids: [], totalCount: 0 });
 
-      const ctx = createMockContext();
+      const ctx = createMockContext({ errors: findRelatedTool.errors });
       const input = findRelatedTool.input.parse({ pmid: '37952131', relationship: 'references' });
       await findRelatedTool.handler(input, ctx);
 
@@ -599,7 +605,7 @@ describe('findRelatedTool', () => {
       mockEpmcReferences.mockResolvedValue({ pmids: [], totalCount: 0 });
       mockOaReferences.mockResolvedValue({ pmids: [], totalCount: 0 });
 
-      const ctx = createMockContext();
+      const ctx = createMockContext({ errors: findRelatedTool.errors });
       const input = findRelatedTool.input.parse({ pmid: '12345', relationship: 'references' });
       await findRelatedTool.handler(input, ctx);
 
@@ -612,7 +618,7 @@ describe('findRelatedTool', () => {
       mockESummary.mockResolvedValue({ eSummaryResult: {} });
       mockExtractBriefSummaries.mockResolvedValue([{ pmid: '12345', title: 'Valid source' }]);
 
-      const ctx = createMockContext();
+      const ctx = createMockContext({ errors: findRelatedTool.errors });
       const input = findRelatedTool.input.parse({ pmid: '12345', relationship: 'similar' });
       await findRelatedTool.handler(input, ctx);
 
@@ -624,7 +630,7 @@ describe('findRelatedTool', () => {
       mockELink.mockResolvedValue({ eLinkResult: [{ LinkSet: {} }] });
       mockESummary.mockRejectedValue(new Error('NCBI down'));
 
-      const ctx = createMockContext();
+      const ctx = createMockContext({ errors: findRelatedTool.errors });
       const input = findRelatedTool.input.parse({ pmid: '12345', relationship: 'references' });
       await findRelatedTool.handler(input, ctx);
 
@@ -637,7 +643,7 @@ describe('findRelatedTool', () => {
       mockESummary.mockResolvedValue({ eSummaryResult: {} });
       mockExtractBriefSummaries.mockResolvedValue([]);
 
-      const ctx = createMockContext();
+      const ctx = createMockContext({ errors: findRelatedTool.errors });
       const input = findRelatedTool.input.parse({
         pmid: '99999999999',
         relationship: 'references',
@@ -651,12 +657,14 @@ describe('findRelatedTool', () => {
     });
 
     it('renders the empty state; the recovery notice is enrichment, not format output', () => {
-      const blocks = findRelatedTool.format!({
-        sourcePmid: '37952131',
-        relationship: 'references',
-        offset: 0,
-        articles: [],
-      });
+      const blocks = textBlocks(
+        findRelatedTool.format!({
+          sourcePmid: '37952131',
+          relationship: 'references',
+          offset: 0,
+          articles: [],
+        }),
+      );
       const text = blocks[0]?.text ?? '';
       expect(text).toContain('No related articles found.');
       expect(text).not.toContain('Reference lists require');
@@ -664,20 +672,22 @@ describe('findRelatedTool', () => {
   });
 
   it('formats output with articles', () => {
-    const blocks = findRelatedTool.format!({
-      sourcePmid: '12345',
-      relationship: 'similar',
-      offset: 0,
-      articles: [
-        {
-          pmid: '111',
-          title: 'Related Article',
-          authors: 'Smith J',
-          source: 'Nature',
-          pubDate: '2024',
-        },
-      ],
-    });
+    const blocks = textBlocks(
+      findRelatedTool.format!({
+        sourcePmid: '12345',
+        relationship: 'similar',
+        offset: 0,
+        articles: [
+          {
+            pmid: '111',
+            title: 'Related Article',
+            authors: 'Smith J',
+            source: 'Nature',
+            pubDate: '2024',
+          },
+        ],
+      }),
+    );
     expect(blocks[0]?.text).toContain('Related Articles');
     expect(blocks[0]?.text).toContain('12345');
     expect(blocks[0]?.text).toContain('Related Article');
@@ -686,12 +696,14 @@ describe('findRelatedTool', () => {
   });
 
   it('formats output with no articles', () => {
-    const blocks = findRelatedTool.format!({
-      sourcePmid: '12345',
-      relationship: 'cited_by',
-      offset: 0,
-      articles: [],
-    });
+    const blocks = textBlocks(
+      findRelatedTool.format!({
+        sourcePmid: '12345',
+        relationship: 'cited_by',
+        offset: 0,
+        articles: [],
+      }),
+    );
     expect(blocks[0]?.text).toContain('No related articles');
   });
 
@@ -701,7 +713,7 @@ describe('findRelatedTool', () => {
       mockESummary.mockResolvedValue({ eSummaryResult: {} });
       mockExtractBriefSummaries.mockResolvedValue([]);
 
-      const ctx = createMockContext();
+      const ctx = createMockContext({ errors: findRelatedTool.errors });
       const input = findRelatedTool.input.parse({ pmid: '99999999999', relationship });
       const result = await findRelatedTool.handler(input, ctx);
 
@@ -734,7 +746,7 @@ describe('findRelatedTool', () => {
         }),
       );
 
-      const ctx = createMockContext();
+      const ctx = createMockContext({ errors: findRelatedTool.errors });
       const input = findRelatedTool.input.parse({ pmid: '99999999999', relationship: 'similar' });
       await findRelatedTool.handler(input, ctx);
 
@@ -746,7 +758,7 @@ describe('findRelatedTool', () => {
       mockELink.mockResolvedValue({ eLinkResult: [{ LinkSet: {} }] });
       mockESummary.mockRejectedValue(new Error('connect ETIMEDOUT'));
 
-      const ctx = createMockContext();
+      const ctx = createMockContext({ errors: findRelatedTool.errors });
       const input = findRelatedTool.input.parse({ pmid: '12345', relationship: 'similar' });
       await findRelatedTool.handler(input, ctx);
 

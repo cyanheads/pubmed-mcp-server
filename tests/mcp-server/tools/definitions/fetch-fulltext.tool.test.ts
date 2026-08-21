@@ -6,6 +6,8 @@
 import { createMockContext, getEnrichment } from '@cyanheads/mcp-ts-core/testing';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
+import { textBlocks } from '../../../_helpers.js';
+
 const mockEFetch = vi.fn();
 const mockIdConvert = vi.fn();
 const mockParsePmcArticle = vi.fn();
@@ -196,7 +198,7 @@ describe('fetchFulltextTool', () => {
       });
       mockEFetch.mockResolvedValue([{ 'pmc-articleset': [{ article: [] }] }]);
 
-      const ctx = createMockContext();
+      const ctx = createMockContext({ errors: fetchFulltextTool.errors });
       const input = fetchFulltextTool.input.parse({ pmcids: ['PMC1234567'] });
       const result = await fetchFulltextTool.handler(input, ctx);
 
@@ -224,7 +226,7 @@ describe('fetchFulltextTool', () => {
       // gets stamped as pmc:service-error and downstream tiers still run.
       mockEFetch.mockResolvedValue([]);
 
-      const ctx = createMockContext();
+      const ctx = createMockContext({ errors: fetchFulltextTool.errors });
       const input = fetchFulltextTool.input.parse({ pmcids: ['PMC1'] });
       const result = await fetchFulltextTool.handler(input, ctx);
 
@@ -250,7 +252,7 @@ describe('fetchFulltextTool', () => {
     it('routes pmcids batch to fallback tiers when PMC EFetch throws', async () => {
       mockEFetch.mockRejectedValue(new Error('NCBI 503'));
 
-      const ctx = createMockContext();
+      const ctx = createMockContext({ errors: fetchFulltextTool.errors });
       const input = fetchFulltextTool.input.parse({ pmcids: ['PMC1', 'PMC2'] });
       const result = await fetchFulltextTool.handler(input, ctx);
 
@@ -282,7 +284,7 @@ describe('fetchFulltextTool', () => {
     it('reports unavailable PMC IDs when the chain finds nothing', async () => {
       mockEFetch.mockResolvedValue([{ 'pmc-articleset': [] }]);
 
-      const ctx = createMockContext();
+      const ctx = createMockContext({ errors: fetchFulltextTool.errors });
       const input = fetchFulltextTool.input.parse({ pmcids: ['PMC9999999'] });
       const result = await fetchFulltextTool.handler(input, ctx);
 
@@ -311,7 +313,7 @@ describe('fetchFulltextTool', () => {
       });
       mockEFetch.mockResolvedValue([{ 'pmc-articleset': [{ article: [] }] }]);
 
-      const ctx = createMockContext();
+      const ctx = createMockContext({ errors: fetchFulltextTool.errors });
       const input = fetchFulltextTool.input.parse({
         pmcids: ['PMC111', '222', '333', '444', '555', '666'],
       });
@@ -360,7 +362,7 @@ describe('fetchFulltextTool', () => {
       });
       mockEFetch.mockResolvedValue([{ 'pmc-articleset': [{ article: [] }] }]);
 
-      const ctx = createMockContext();
+      const ctx = createMockContext({ errors: fetchFulltextTool.errors });
       const input = fetchFulltextTool.input.parse({
         pmids: ['12345', '99999'],
         sections: ['intro'],
@@ -391,7 +393,7 @@ describe('fetchFulltextTool', () => {
 
     it('returns empty when no PMIDs resolve and all fallbacks are disabled', async () => {
       mockIdConvert.mockResolvedValue([{ 'requested-id': '99999', pmid: '99999' }]);
-      const ctx = createMockContext();
+      const ctx = createMockContext({ errors: fetchFulltextTool.errors });
       const input = fetchFulltextTool.input.parse({ pmids: ['99999'] });
       const result = await fetchFulltextTool.handler(input, ctx);
 
@@ -445,7 +447,7 @@ describe('fetchFulltextTool', () => {
         sections: [{ title: 'Background', text: 'Body' }],
       });
 
-      const ctx = createMockContext();
+      const ctx = createMockContext({ errors: fetchFulltextTool.errors });
       const input = fetchFulltextTool.input.parse({ pmids: ['42'] });
       const result = await fetchFulltextTool.handler(input, ctx);
 
@@ -479,7 +481,7 @@ describe('fetchFulltextTool', () => {
       });
       mockUnpaywallResolve.mockResolvedValue({ kind: 'no-oa', reason: 'no oa' });
 
-      const ctx = createMockContext();
+      const ctx = createMockContext({ errors: fetchFulltextTool.errors });
       const input = fetchFulltextTool.input.parse({ dois: ['10.21203/x'] });
       const result = await fetchFulltextTool.handler(input, ctx);
 
@@ -526,7 +528,7 @@ describe('fetchFulltextTool', () => {
       });
       mockEFetch.mockResolvedValue([{ 'pmc-articleset': [] }]);
 
-      const ctx = createMockContext();
+      const ctx = createMockContext({ errors: fetchFulltextTool.errors });
       const input = fetchFulltextTool.input.parse({ pmcids: ['PMC9999'] });
       const result = await fetchFulltextTool.handler(input, ctx);
 
@@ -563,7 +565,7 @@ describe('fetchFulltextTool', () => {
       });
       mockHtmlExtract.mockResolvedValue({ title: 'A paper', content: 'Body content' });
 
-      const ctx = createMockContext();
+      const ctx = createMockContext({ errors: fetchFulltextTool.errors });
       const input = fetchFulltextTool.input.parse({ pmids: ['42'] });
       const result = await fetchFulltextTool.handler(input, ctx);
 
@@ -597,7 +599,7 @@ describe('fetchFulltextTool', () => {
       });
       mockHtmlExtract.mockResolvedValue({ content: 'Body content' });
 
-      const ctx = createMockContext();
+      const ctx = createMockContext({ errors: fetchFulltextTool.errors });
       const input = fetchFulltextTool.input.parse({ pmids: ['42'] });
       const result = await fetchFulltextTool.handler(input, ctx);
 
@@ -638,7 +640,7 @@ describe('fetchFulltextTool', () => {
         sections: [{ title: 'Introduction', text: 'Body.' }],
       });
 
-      const ctx = createMockContext();
+      const ctx = createMockContext({ errors: fetchFulltextTool.errors });
       const input = fetchFulltextTool.input.parse({ pmids: ['42'] });
       const result = await fetchFulltextTool.handler(input, ctx);
 
@@ -675,7 +677,7 @@ describe('fetchFulltextTool', () => {
       });
       mockHtmlExtract.mockResolvedValue({ content: 'Body content' });
 
-      const ctx = createMockContext();
+      const ctx = createMockContext({ errors: fetchFulltextTool.errors });
       const input = fetchFulltextTool.input.parse({ pmids: ['42'] });
       const result = await fetchFulltextTool.handler(input, ctx);
 
@@ -704,7 +706,7 @@ describe('fetchFulltextTool', () => {
       mockIdConvert.mockResolvedValue([{ 'requested-id': '42', pmid: '42' }]);
       mockEFetchBy({ pubmedDois: {} });
 
-      const ctx = createMockContext();
+      const ctx = createMockContext({ errors: fetchFulltextTool.errors });
       const input = fetchFulltextTool.input.parse({ pmids: ['42'] });
       const result = await fetchFulltextTool.handler(input, ctx);
 
@@ -740,7 +742,7 @@ describe('fetchFulltextTool', () => {
       });
       mockHtmlExtract.mockResolvedValue({ title: 'A Paper', content: 'hi' });
 
-      const ctx = createMockContext();
+      const ctx = createMockContext({ errors: fetchFulltextTool.errors });
       const input = fetchFulltextTool.input.parse({ pmids: ['42'] });
       const result = await fetchFulltextTool.handler(input, ctx);
 
@@ -763,7 +765,7 @@ describe('fetchFulltextTool', () => {
         reason: 'No open-access copy indexed',
       });
 
-      const ctx = createMockContext();
+      const ctx = createMockContext({ errors: fetchFulltextTool.errors });
       const input = fetchFulltextTool.input.parse({ pmids: ['42'] });
       const result = await fetchFulltextTool.handler(input, ctx);
 
@@ -786,7 +788,7 @@ describe('fetchFulltextTool', () => {
       mockEFetchBy({ pubmedDois: { '42': '10.1000/example' } });
       mockUnpaywallResolve.mockRejectedValue(new Error('Unpaywall 503'));
 
-      const ctx = createMockContext();
+      const ctx = createMockContext({ errors: fetchFulltextTool.errors });
       const input = fetchFulltextTool.input.parse({ pmids: ['42'] });
       const result = await fetchFulltextTool.handler(input, ctx);
 
@@ -814,7 +816,7 @@ describe('fetchFulltextTool', () => {
       });
       mockUnpaywallFetchContent.mockRejectedValue(new Error('HTTP 503'));
 
-      const ctx = createMockContext();
+      const ctx = createMockContext({ errors: fetchFulltextTool.errors });
       const input = fetchFulltextTool.input.parse({ pmids: ['42'] });
       const result = await fetchFulltextTool.handler(input, ctx);
 
@@ -855,7 +857,7 @@ describe('fetchFulltextTool', () => {
         wordCount: 2,
       });
 
-      const ctx = createMockContext();
+      const ctx = createMockContext({ errors: fetchFulltextTool.errors });
       const input = fetchFulltextTool.input.parse({ pmids: ['42'] });
       const result = await fetchFulltextTool.handler(input, ctx);
 
@@ -897,7 +899,7 @@ describe('fetchFulltextTool', () => {
       });
       mockPdfExtractText.mockResolvedValue({ totalPages: 7, text: 'Paper text' });
 
-      const ctx = createMockContext();
+      const ctx = createMockContext({ errors: fetchFulltextTool.errors });
       const input = fetchFulltextTool.input.parse({ pmids: ['42'] });
       const result = await fetchFulltextTool.handler(input, ctx);
 
@@ -928,7 +930,7 @@ describe('fetchFulltextTool', () => {
       });
       mockHtmlExtract.mockResolvedValue({ content: '   ' });
 
-      const ctx = createMockContext();
+      const ctx = createMockContext({ errors: fetchFulltextTool.errors });
       const input = fetchFulltextTool.input.parse({ pmids: ['42'] });
       const result = await fetchFulltextTool.handler(input, ctx);
 
@@ -964,7 +966,7 @@ describe('fetchFulltextTool', () => {
       });
       mockPdfExtractText.mockResolvedValue({ totalPages: 3, text: '   ' });
 
-      const ctx = createMockContext();
+      const ctx = createMockContext({ errors: fetchFulltextTool.errors });
       const input = fetchFulltextTool.input.parse({ pmids: ['42'] });
       const result = await fetchFulltextTool.handler(input, ctx);
 
@@ -1000,7 +1002,7 @@ describe('fetchFulltextTool', () => {
       });
       mockHtmlExtract.mockRejectedValue(new Error('extractor crashed'));
 
-      const ctx = createMockContext();
+      const ctx = createMockContext({ errors: fetchFulltextTool.errors });
       const input = fetchFulltextTool.input.parse({ pmids: ['42'] });
       const result = await fetchFulltextTool.handler(input, ctx);
 
@@ -1045,7 +1047,7 @@ describe('fetchFulltextTool', () => {
       });
       mockHtmlExtract.mockResolvedValue({ title: 'Two', content: 'Two content' });
 
-      const ctx = createMockContext();
+      const ctx = createMockContext({ errors: fetchFulltextTool.errors });
       const input = fetchFulltextTool.input.parse({ pmids: ['1', '2'] });
       const result = await fetchFulltextTool.handler(input, ctx);
 
@@ -1076,7 +1078,7 @@ describe('fetchFulltextTool', () => {
       mockEpmcSearch.mockResolvedValue({ hits: [], hitCount: 0, cursorMark: '*' });
       mockUnpaywallResolve.mockResolvedValue({ kind: 'no-oa', reason: 'no oa' });
 
-      const ctx = createMockContext();
+      const ctx = createMockContext({ errors: fetchFulltextTool.errors });
       const input = fetchFulltextTool.input.parse({ dois: ['10.1000/test'] });
       await fetchFulltextTool.handler(input, ctx);
 
@@ -1088,7 +1090,7 @@ describe('fetchFulltextTool', () => {
         expect.objectContaining({ signal: expect.any(AbortSignal) }),
       );
       const pmcCalls = mockEFetch.mock.calls.filter(
-        ([params]: [{ db: string }]) => params.db === 'pmc',
+        (call) => (call[0] as { db: string }).db === 'pmc',
       );
       expect(pmcCalls).toHaveLength(0);
     });
@@ -1122,7 +1124,7 @@ describe('fetchFulltextTool', () => {
         doi: '10.1/x',
       });
 
-      const ctx = createMockContext();
+      const ctx = createMockContext({ errors: fetchFulltextTool.errors });
       const input = fetchFulltextTool.input.parse({ dois: ['10.1/x'] });
       const result = await fetchFulltextTool.handler(input, ctx);
 
@@ -1160,7 +1162,7 @@ describe('fetchFulltextTool', () => {
       });
       mockHtmlExtract.mockResolvedValue({ content: 'Body content', title: 'Paper' });
 
-      const ctx = createMockContext();
+      const ctx = createMockContext({ errors: fetchFulltextTool.errors });
       const input = fetchFulltextTool.input.parse({ dois: ['10.1000/test'] });
       const result = await fetchFulltextTool.handler(input, ctx);
 
@@ -1185,7 +1187,7 @@ describe('fetchFulltextTool', () => {
       mockEpmcSearch.mockResolvedValue({ hits: [], hitCount: 0, cursorMark: '*' });
       mockUnpaywallResolve.mockResolvedValue({ kind: 'no-oa', reason: 'no oa' });
 
-      const ctx = createMockContext();
+      const ctx = createMockContext({ errors: fetchFulltextTool.errors });
       const input = fetchFulltextTool.input.parse({ dois: ['10.1000/missing'] });
       const result = await fetchFulltextTool.handler(input, ctx);
 
@@ -1210,7 +1212,7 @@ describe('fetchFulltextTool', () => {
       mockIdConvert.mockResolvedValue([
         { 'requested-id': '10.1000/foo', errmsg: 'Identifier not found in PMC' },
       ]);
-      const ctx = createMockContext();
+      const ctx = createMockContext({ errors: fetchFulltextTool.errors });
       const input = fetchFulltextTool.input.parse({ dois: ['10.1000/foo'] });
       const result = await fetchFulltextTool.handler(input, ctx);
       expect(result.totalReturned).toBe(0);
@@ -1259,7 +1261,7 @@ describe('fetchFulltextTool', () => {
       });
       mockEFetch.mockResolvedValue([{ 'pmc-articleset': [{ article: [] }] }]);
 
-      const ctx = createMockContext();
+      const ctx = createMockContext({ errors: fetchFulltextTool.errors });
       const input = fetchFulltextTool.input.parse({ dois: ['10.1101/2025.09.12.675873'] });
       const result = await fetchFulltextTool.handler(input, ctx);
 
@@ -1301,7 +1303,7 @@ describe('fetchFulltextTool', () => {
       mockEpmcSearch.mockResolvedValue({ hits: [], hitCount: 0, cursorMark: '*' });
       mockUnpaywallResolve.mockResolvedValue({ kind: 'no-oa', reason: 'no oa' });
 
-      const ctx = createMockContext();
+      const ctx = createMockContext({ errors: fetchFulltextTool.errors });
       const input = fetchFulltextTool.input.parse({ dois: ['10.1/inpmc', '10.1/notinpmc'] });
       const result = await fetchFulltextTool.handler(input, ctx);
 
@@ -1348,7 +1350,7 @@ describe('fetchFulltextTool', () => {
       });
       mockHtmlExtract.mockResolvedValue({ content: 'Body content' });
 
-      const ctx = createMockContext();
+      const ctx = createMockContext({ errors: fetchFulltextTool.errors });
       const input = fetchFulltextTool.input.parse({ dois: ['10.1/x'] });
       const result = await fetchFulltextTool.handler(input, ctx);
 
@@ -1369,7 +1371,7 @@ describe('fetchFulltextTool', () => {
       mockEpmcSearch.mockResolvedValue({ hits: [], hitCount: 0, cursorMark: '*' });
       mockUnpaywallResolve.mockResolvedValue({ kind: 'no-oa', reason: 'no oa' });
 
-      const ctx = createMockContext();
+      const ctx = createMockContext({ errors: fetchFulltextTool.errors });
       const input = fetchFulltextTool.input.parse({ dois: ['10.1/ghost'] });
       const result = await fetchFulltextTool.handler(input, ctx);
 
@@ -1408,7 +1410,7 @@ describe('fetchFulltextTool', () => {
       });
       mockEFetch.mockResolvedValue([{ 'pmc-articleset': [{ article: [] }] }]);
 
-      const ctx = createMockContext();
+      const ctx = createMockContext({ errors: fetchFulltextTool.errors });
       const input = fetchFulltextTool.input.parse({
         pmcids: ['PMC3531190'],
         sections: ['DefinitelyNotARealSectionName'],
@@ -1443,7 +1445,7 @@ describe('fetchFulltextTool', () => {
       });
       mockEFetch.mockResolvedValue([{ 'pmc-articleset': [{ article: [] }] }]);
 
-      const ctx = createMockContext();
+      const ctx = createMockContext({ errors: fetchFulltextTool.errors });
       const input = fetchFulltextTool.input.parse({
         pmcids: ['PMC3531190'],
         sections: ['Introduction'],
@@ -1467,7 +1469,7 @@ describe('fetchFulltextTool', () => {
       });
       mockEFetch.mockResolvedValue([{ 'pmc-articleset': [{ article: [] }] }]);
 
-      const ctx = createMockContext();
+      const ctx = createMockContext({ errors: fetchFulltextTool.errors });
       const input = fetchFulltextTool.input.parse({ pmcids: ['PMC3531190'] });
       await fetchFulltextTool.handler(input, ctx);
 
@@ -1486,7 +1488,7 @@ describe('fetchFulltextTool', () => {
       });
       mockEFetch.mockResolvedValue([{ 'pmc-articleset': [{ article: [] }] }]);
 
-      const ctx = createMockContext();
+      const ctx = createMockContext({ errors: fetchFulltextTool.errors });
       const input = fetchFulltextTool.input.parse({
         pmcids: ['PMC3531190'],
         sections: ['Introduction'],
@@ -1527,7 +1529,7 @@ describe('fetchFulltextTool', () => {
         sections: [{ title: 'Background', text: 'Body' }],
       });
 
-      const ctx = createMockContext();
+      const ctx = createMockContext({ errors: fetchFulltextTool.errors });
       const input = fetchFulltextTool.input.parse({ pmids: ['42'], sections: ['NoSuchSection'] });
       const result = await fetchFulltextTool.handler(input, ctx);
 
@@ -1563,7 +1565,7 @@ describe('fetchFulltextTool', () => {
       mockEFetchBy({ pubmedDois: {} });
       mockEpmcSearch.mockResolvedValue({ hits: [], hitCount: 0, cursorMark: '*' });
 
-      const ctx = createMockContext();
+      const ctx = createMockContext({ errors: fetchFulltextTool.errors });
       const input = fetchFulltextTool.input.parse({ pmids: ['23193287'] });
       await fetchFulltextTool.handler(input, ctx);
 
@@ -1580,7 +1582,7 @@ describe('fetchFulltextTool', () => {
       mockEFetch.mockResolvedValue([{ 'pmc-articleset': [] }]);
       mockEpmcSearch.mockResolvedValue({ hits: [], hitCount: 0, cursorMark: '*' });
 
-      const ctx = createMockContext();
+      const ctx = createMockContext({ errors: fetchFulltextTool.errors });
       const input = fetchFulltextTool.input.parse({ pmcids: ['PMC3531190'] });
       await fetchFulltextTool.handler(input, ctx);
 
@@ -1600,7 +1602,7 @@ describe('fetchFulltextTool', () => {
       ]);
       mockEpmcSearch.mockResolvedValue({ hits: [], hitCount: 0, cursorMark: '*' });
 
-      const ctx = createMockContext();
+      const ctx = createMockContext({ errors: fetchFulltextTool.errors });
       const input = fetchFulltextTool.input.parse({ dois: ['10.1523/JNEUROSCI.3043-08.2008'] });
       await fetchFulltextTool.handler(input, ctx);
 
@@ -1670,7 +1672,7 @@ describe('fetchFulltextTool', () => {
       });
       mockPdfExtractText.mockResolvedValue({ totalPages: 12, text: 'Recovered body text' });
 
-      const ctx = createMockContext();
+      const ctx = createMockContext({ errors: fetchFulltextTool.errors });
       const input = fetchFulltextTool.input.parse({ pmcids: ['PMC2600426'] });
       const result = await fetchFulltextTool.handler(input, ctx);
 
@@ -1690,7 +1692,7 @@ describe('fetchFulltextTool', () => {
       // EPMC and Unpaywall are both unconfigured, so the chain ends at PMC.
       withBodylessPmcArticle('PMC2600426', '10.1523/JNEUROSCI.3043-08.2008');
 
-      const ctx = createMockContext();
+      const ctx = createMockContext({ errors: fetchFulltextTool.errors });
       const input = fetchFulltextTool.input.parse({ pmcids: ['PMC2600426'] });
       const result = await fetchFulltextTool.handler(input, ctx);
 
@@ -1745,7 +1747,7 @@ describe('fetchFulltextTool', () => {
         reason: 'No open-access copy indexed',
       });
 
-      const ctx = createMockContext();
+      const ctx = createMockContext({ errors: fetchFulltextTool.errors });
       const input = fetchFulltextTool.input.parse({ pmids: ['42'] });
       const result = await fetchFulltextTool.handler(input, ctx);
 
@@ -1804,7 +1806,7 @@ describe('fetchFulltextTool', () => {
       });
       mockHtmlExtract.mockResolvedValue({ content: 'Body content' });
 
-      const ctx = createMockContext();
+      const ctx = createMockContext({ errors: fetchFulltextTool.errors });
       const input = fetchFulltextTool.input.parse({ pmcids: ['PMC2600426'] });
       const result = await fetchFulltextTool.handler(input, ctx);
 
@@ -1842,7 +1844,7 @@ describe('fetchFulltextTool', () => {
       });
       mockPdfExtractText.mockResolvedValue({ totalPages: 12, text: 'Paper text' });
 
-      const ctx = createMockContext();
+      const ctx = createMockContext({ errors: fetchFulltextTool.errors });
       const input = fetchFulltextTool.input.parse({ pmcids: ['PMC2600426'] });
       const result = await fetchFulltextTool.handler(input, ctx);
 
@@ -1865,7 +1867,7 @@ describe('fetchFulltextTool', () => {
       mockEpmcSearch.mockResolvedValue({ hits: [], hitCount: 0, cursorMark: '*' });
       mockIdConvert.mockResolvedValue([{ 'requested-id': 'PMC999', pmcid: 'PMC999', pmid: '999' }]);
 
-      const ctx = createMockContext();
+      const ctx = createMockContext({ errors: fetchFulltextTool.errors });
       const input = fetchFulltextTool.input.parse({ pmcids: ['PMC999'] });
       const result = await fetchFulltextTool.handler(input, ctx);
 
@@ -1893,7 +1895,7 @@ describe('fetchFulltextTool', () => {
       mockEFetch.mockResolvedValue([{ 'pmc-articleset': [] }]);
       mockEpmcSearch.mockResolvedValue({ hits: [], hitCount: 0, cursorMark: '*' });
 
-      const ctx = createMockContext();
+      const ctx = createMockContext({ errors: fetchFulltextTool.errors });
       const input = fetchFulltextTool.input.parse({ pmcids: ['PMC999'] });
       const result = await fetchFulltextTool.handler(input, ctx);
 
@@ -1948,7 +1950,7 @@ describe('fetchFulltextTool', () => {
     it('keys a recovered article to the PMC ID it was requested under', async () => {
       mockPartiallyRecoveredBatch();
 
-      const ctx = createMockContext();
+      const ctx = createMockContext({ errors: fetchFulltextTool.errors });
       const input = fetchFulltextTool.input.parse({ pmcids: [RECOVERED, FAILED] });
       const result = await fetchFulltextTool.handler(input, ctx);
 
@@ -1972,10 +1974,10 @@ describe('fetchFulltextTool', () => {
     it('renders the requested PMC ID in content[] for structuredContent parity', async () => {
       mockPartiallyRecoveredBatch();
 
-      const ctx = createMockContext();
+      const ctx = createMockContext({ errors: fetchFulltextTool.errors });
       const input = fetchFulltextTool.input.parse({ pmcids: [RECOVERED, FAILED] });
       const result = await fetchFulltextTool.handler(input, ctx);
-      const text = fetchFulltextTool.format!(result)[0]?.text ?? '';
+      const text = textBlocks(fetchFulltextTool.format!(result))[0]?.text ?? '';
 
       expect(text).toContain(`**PMCID:** ${RECOVERED}`);
       expect(text).toContain(`[pmcid] ${FAILED}`);
@@ -1998,7 +2000,7 @@ describe('fetchFulltextTool', () => {
       });
       mockHtmlExtract.mockResolvedValue({ content: 'Body' });
 
-      const ctx = createMockContext();
+      const ctx = createMockContext({ errors: fetchFulltextTool.errors });
       const input = fetchFulltextTool.input.parse({ pmids: ['42'] });
       const result = await fetchFulltextTool.handler(input, ctx);
 
@@ -2049,19 +2051,20 @@ describe('fetchFulltextTool', () => {
     it('returns the full body and no truncation metadata when no budget is requested', async () => {
       stagePmcArticle([{ title: 'Introduction', text: 'A'.repeat(5000) }]);
 
-      const ctx = createMockContext();
+      const ctx = createMockContext({ errors: fetchFulltextTool.errors });
       const input = fetchFulltextTool.input.parse({ pmcids: ['PMC81'] });
       const result = await fetchFulltextTool.handler(input, ctx);
 
       expect(result.truncation).toBeUndefined();
       expect(pmcSections(result)[0]?.text).toHaveLength(5000);
       expect(getEnrichment(ctx).notice).toBeUndefined();
+      expect(getEnrichment(ctx).truncated).toBeUndefined();
     });
 
     it('leaves the response untouched when the body exactly meets the budget', async () => {
       stagePmcArticle([{ title: 'Introduction', text: 'A'.repeat(100) }]);
 
-      const ctx = createMockContext();
+      const ctx = createMockContext({ errors: fetchFulltextTool.errors });
       const input = fetchFulltextTool.input.parse({ pmcids: ['PMC81'], maxCharacters: 100 });
       const result = await fetchFulltextTool.handler(input, ctx);
 
@@ -2072,7 +2075,7 @@ describe('fetchFulltextTool', () => {
     it('truncates and reports counts when the body exceeds the budget by one character', async () => {
       stagePmcArticle([{ title: 'Introduction', text: 'A'.repeat(101) }]);
 
-      const ctx = createMockContext();
+      const ctx = createMockContext({ errors: fetchFulltextTool.errors });
       const input = fetchFulltextTool.input.parse({ pmcids: ['PMC81'], maxCharacters: 100 });
       const result = await fetchFulltextTool.handler(input, ctx);
 
@@ -2104,6 +2107,7 @@ describe('fetchFulltextTool', () => {
       const notice = getEnrichment(ctx).notice;
       expect(notice).toContain('100 of 101 body characters');
       expect(notice).toContain('truncate mode');
+      expect(getEnrichment(ctx).truncated).toBe(true);
     });
 
     it('drops sections past an exhausted budget and counts them as omitted', async () => {
@@ -2112,7 +2116,7 @@ describe('fetchFulltextTool', () => {
         { title: 'Methods', text: 'B'.repeat(300) },
       ]);
 
-      const ctx = createMockContext();
+      const ctx = createMockContext({ errors: fetchFulltextTool.errors });
       const input = fetchFulltextTool.input.parse({ pmcids: ['PMC81'], maxCharacters: 200 });
       const result = await fetchFulltextTool.handler(input, ctx);
 
@@ -2141,7 +2145,7 @@ describe('fetchFulltextTool', () => {
         { title: 'Methods', text: 'B'.repeat(500) },
       ]);
 
-      const ctx = createMockContext();
+      const ctx = createMockContext({ errors: fetchFulltextTool.errors });
       const input = fetchFulltextTool.input.parse({
         pmcids: ['PMC81'],
         maxCharacters: 600,
@@ -2167,7 +2171,7 @@ describe('fetchFulltextTool', () => {
         },
       ]);
 
-      const ctx = createMockContext();
+      const ctx = createMockContext({ errors: fetchFulltextTool.errors });
       const input = fetchFulltextTool.input.parse({
         pmcids: ['PMC81'],
         maxCharactersPerSection: 100,
@@ -2190,7 +2194,7 @@ describe('fetchFulltextTool', () => {
         { title: 'Results', text: 'C'.repeat(500) },
       ]);
 
-      const ctx = createMockContext();
+      const ctx = createMockContext({ errors: fetchFulltextTool.errors });
       const input = fetchFulltextTool.input.parse({
         pmcids: ['PMC81'],
         maxCharacters: 300,
@@ -2224,7 +2228,7 @@ describe('fetchFulltextTool', () => {
         { title: 'Results', text: 'C'.repeat(1000) },
       ]);
 
-      const ctx = createMockContext();
+      const ctx = createMockContext({ errors: fetchFulltextTool.errors });
       const input = fetchFulltextTool.input.parse({
         pmcids: ['PMC81'],
         maxCharacters: 900,
@@ -2245,7 +2249,7 @@ describe('fetchFulltextTool', () => {
         { title: 'Discussion', text: 'C'.repeat(500) },
       ]);
 
-      const ctx = createMockContext();
+      const ctx = createMockContext({ errors: fetchFulltextTool.errors });
       const input = fetchFulltextTool.input.parse({
         pmcids: ['PMC81'],
         sections: ['methods', 'discussion'],
@@ -2296,7 +2300,7 @@ describe('fetchFulltextTool', () => {
         ],
       });
 
-      const ctx = createMockContext();
+      const ctx = createMockContext({ errors: fetchFulltextTool.errors });
       const input = fetchFulltextTool.input.parse({ pmids: ['42'], maxCharacters: 200 });
       const result = await fetchFulltextTool.handler(input, ctx);
 
@@ -2337,7 +2341,7 @@ describe('fetchFulltextTool', () => {
     it('names only the budget the request set in the truncation notice', async () => {
       stagePmcArticle([{ title: 'Introduction', text: 'A'.repeat(500) }]);
 
-      const ctx = createMockContext();
+      const ctx = createMockContext({ errors: fetchFulltextTool.errors });
       const input = fetchFulltextTool.input.parse({
         pmcids: ['PMC81'],
         maxCharactersPerSection: 100,
@@ -2356,7 +2360,7 @@ describe('fetchFulltextTool', () => {
 
       const result = await fetchFulltextTool.handler(
         fetchFulltextTool.input.parse({ pmids: ['42'], maxCharacters: 250 }),
-        createMockContext(),
+        createMockContext({ errors: fetchFulltextTool.errors }),
       );
 
       const article = result.articles[0];
@@ -2372,7 +2376,7 @@ describe('fetchFulltextTool', () => {
 
       const result = await fetchFulltextTool.handler(
         fetchFulltextTool.input.parse({ pmids: ['42'], maxCharactersPerSection: 250 }),
-        createMockContext(),
+        createMockContext({ errors: fetchFulltextTool.errors }),
       );
 
       const article = result.articles[0];
@@ -2414,7 +2418,7 @@ describe('fetchFulltextTool', () => {
       });
       mockHtmlExtract.mockResolvedValue({ title: 'Two', content: 'Z'.repeat(7000) });
 
-      const ctx = createMockContext();
+      const ctx = createMockContext({ errors: fetchFulltextTool.errors });
       const input = fetchFulltextTool.input.parse({ pmids: ['1', '2'], maxCharacters: 200 });
       const result = await fetchFulltextTool.handler(input, ctx);
 
@@ -2437,7 +2441,7 @@ describe('fetchFulltextTool', () => {
 
       // content[] surface — the same accounting has to reach clients that never
       // read structuredContent.
-      const text = fetchFulltextTool.format!(result)[0]?.text ?? '';
+      const text = textBlocks(fetchFulltextTool.format!(result))[0]?.text ?? '';
       expect(text).toContain('**Truncated (truncate mode):** 400 of 25000 body characters');
       expect(text).toContain('Budget applied: maxCharacters 200');
       expect(text).toContain('- PMC100 (pmc): 200 of 18000 characters');
@@ -2459,7 +2463,7 @@ describe('fetchFulltextTool', () => {
           { title: 'Introduction', text: `${'A'.repeat(99)}${ASTRAL}${'B'.repeat(50)}` },
         ]);
 
-        const ctx = createMockContext();
+        const ctx = createMockContext({ errors: fetchFulltextTool.errors });
         const input = fetchFulltextTool.input.parse({ pmcids: ['PMC81'], maxCharacters: 100 });
         const result = await fetchFulltextTool.handler(input, ctx);
 
@@ -2484,7 +2488,7 @@ describe('fetchFulltextTool', () => {
 
         const result = await fetchFulltextTool.handler(
           fetchFulltextTool.input.parse({ pmcids: ['PMC81'], maxCharacters: 100 }),
-          createMockContext(),
+          createMockContext({ errors: fetchFulltextTool.errors }),
         );
 
         const text = pmcSections(result)[0]?.text ?? '';
@@ -2500,7 +2504,7 @@ describe('fetchFulltextTool', () => {
 
         const result = await fetchFulltextTool.handler(
           fetchFulltextTool.input.parse({ pmcids: ['PMC81'], maxCharacters: 100 }),
-          createMockContext(),
+          createMockContext({ errors: fetchFulltextTool.errors }),
         );
 
         const text = pmcSections(result)[0]?.text ?? '';
@@ -2526,7 +2530,7 @@ describe('fetchFulltextTool', () => {
             maxCharacters: 100,
             maxCharactersPerSection: 100,
           }),
-          createMockContext(),
+          createMockContext({ errors: fetchFulltextTool.errors }),
         );
 
         const section = pmcSections(result)[0];
@@ -2543,7 +2547,7 @@ describe('fetchFulltextTool', () => {
 
         const result = await fetchFulltextTool.handler(
           fetchFulltextTool.input.parse({ pmids: ['42'], maxCharacters: 250 }),
-          createMockContext(),
+          createMockContext({ errors: fetchFulltextTool.errors }),
         );
 
         const article = result.articles[0];
@@ -2561,60 +2565,61 @@ describe('fetchFulltextTool', () => {
 
   describe('format()', () => {
     it('formats a PMC article with full metadata', () => {
-      const blocks = fetchFulltextTool.format!({
-        articles: [
-          {
-            source: 'pmc',
-            viaSource: 'pmc',
-            pmcId: 'PMC1',
-            pmcUrl: 'https://www.ncbi.nlm.nih.gov/pmc/articles/PMC1/',
-            title: 'Article',
-            pmid: '12345',
-            pubmedUrl: 'https://pubmed.ncbi.nlm.nih.gov/12345/',
-            authors: [
-              { lastName: 'Smith', givenNames: 'Jane' },
-              { lastName: 'Jones', givenNames: 'Alex' },
-              { lastName: 'Brown', givenNames: 'Sam' },
-              { lastName: 'White', givenNames: 'Pat' },
-            ],
-            affiliations: ['Example University'],
-            journal: { title: 'Nature', volume: '12', issue: '3', pages: '45-52' },
-            articleType: 'Research Article',
-            publicationDate: { year: '2024', month: '01', day: '02' },
-            doi: '10.1000/example',
-            keywords: ['asthma', 'airway'],
-            abstract: 'Abstract text.',
-            sections: [
-              {
-                title: 'Introduction',
-                text: 'Body.',
-                subsections: [{ title: 'Background', text: 'Background text.' }],
-              },
-            ],
-            references: [{ label: '1', citation: 'Reference one' }],
-          },
-        ],
-        totalReturned: 1,
-        unavailable: [
-          {
-            id: '99999',
-            idType: 'pmid',
-            reason: 'no-oa',
-            detail: 'No open-access copy indexed',
-            triedTiers: [
-              { tier: 'pmc', outcome: 'miss' },
-              { tier: 'europepmc', outcome: 'no-fulltext' },
-              { tier: 'unpaywall', outcome: 'no-oa', detail: 'No open-access copy indexed' },
-            ],
-          },
-          {
-            id: 'PMC404',
-            idType: 'pmcid',
-            reason: 'not-found',
-            triedTiers: [{ tier: 'pmc', outcome: 'miss' }],
-          },
-        ],
-      });
+      const blocks = textBlocks(
+        fetchFulltextTool.format!({
+          articles: [
+            {
+              source: 'pmc',
+              viaSource: 'pmc',
+              pmcId: 'PMC1',
+              pmcUrl: 'https://www.ncbi.nlm.nih.gov/pmc/articles/PMC1/',
+              title: 'Article',
+              pmid: '12345',
+              pubmedUrl: 'https://pubmed.ncbi.nlm.nih.gov/12345/',
+              authors: [
+                { lastName: 'Smith', givenNames: 'Jane' },
+                { lastName: 'Jones', givenNames: 'Alex' },
+                { lastName: 'Brown', givenNames: 'Sam' },
+                { lastName: 'White', givenNames: 'Pat' },
+              ],
+              affiliations: ['Example University'],
+              journal: { title: 'Nature', volume: '12', issue: '3', pages: '45-52' },
+              articleType: 'Research Article',
+              publicationDate: { year: '2024', month: '01', day: '02' },
+              doi: '10.1000/example',
+              keywords: ['asthma', 'airway'],
+              abstract: 'Abstract text.',
+              sections: [
+                {
+                  title: 'Introduction',
+                  text: 'Body.',
+                  subsections: [{ title: 'Background', text: 'Background text.' }],
+                },
+              ],
+              references: [{ label: '1', citation: 'Reference one' }],
+            },
+          ],
+          totalReturned: 1,
+          unavailable: [
+            {
+              id: '99999',
+              idType: 'pmid',
+              reason: 'no-oa',
+              triedTiers: [
+                { tier: 'pmc', outcome: 'miss' },
+                { tier: 'europepmc', outcome: 'no-fulltext' },
+                { tier: 'unpaywall', outcome: 'no-oa', detail: 'No open-access copy indexed' },
+              ],
+            },
+            {
+              id: 'PMC404',
+              idType: 'pmcid',
+              reason: 'not-found',
+              triedTiers: [{ tier: 'pmc', outcome: 'miss' }],
+            },
+          ],
+        }),
+      );
 
       const text = blocks[0]?.text ?? '';
       expect(text).toContain('Full-Text Articles');
@@ -2634,20 +2639,22 @@ describe('fetchFulltextTool', () => {
     });
 
     it('labels EPMC-sourced PMC articles with the EPMC source name', () => {
-      const blocks = fetchFulltextTool.format!({
-        articles: [
-          {
-            source: 'pmc',
-            viaSource: 'europepmc',
-            epmcId: 'PPR42',
-            epmcSource: 'PPR',
-            title: 'Preprint',
-            sections: [],
-            doi: '10.21203/x',
-          },
-        ],
-        totalReturned: 1,
-      });
+      const blocks = textBlocks(
+        fetchFulltextTool.format!({
+          articles: [
+            {
+              source: 'pmc',
+              viaSource: 'europepmc',
+              epmcId: 'PPR42',
+              epmcSource: 'PPR',
+              title: 'Preprint',
+              sections: [],
+              doi: '10.21203/x',
+            },
+          ],
+          totalReturned: 1,
+        }),
+      );
 
       const text = blocks[0]?.text ?? '';
       expect(text).toContain('Europe PMC (structured JATS');
@@ -2656,24 +2663,26 @@ describe('fetchFulltextTool', () => {
     });
 
     it('renders unavailable DOIs in the unified unavailable section', () => {
-      const blocks = fetchFulltextTool.format!({
-        articles: [],
-        totalReturned: 0,
-        unavailable: [
-          {
-            id: '10.1000/foo',
-            idType: 'doi',
-            reason: 'no-oa',
-            triedTiers: [{ tier: 'unpaywall', outcome: 'no-oa' }],
-          },
-          {
-            id: '10.1000/bar',
-            idType: 'doi',
-            reason: 'no-oa',
-            triedTiers: [{ tier: 'unpaywall', outcome: 'no-oa' }],
-          },
-        ],
-      });
+      const blocks = textBlocks(
+        fetchFulltextTool.format!({
+          articles: [],
+          totalReturned: 0,
+          unavailable: [
+            {
+              id: '10.1000/foo',
+              idType: 'doi',
+              reason: 'no-oa',
+              triedTiers: [{ tier: 'unpaywall', outcome: 'no-oa' }],
+            },
+            {
+              id: '10.1000/bar',
+              idType: 'doi',
+              reason: 'no-oa',
+              triedTiers: [{ tier: 'unpaywall', outcome: 'no-oa' }],
+            },
+          ],
+        }),
+      );
       const text = blocks[0]?.text ?? '';
       expect(text).toContain('Unavailable (2)');
       expect(text).toContain('[doi] 10.1000/foo');
@@ -2682,26 +2691,28 @@ describe('fetchFulltextTool', () => {
     });
 
     it('formats an unpaywall article with viaSource=unpaywall', () => {
-      const blocks = fetchFulltextTool.format!({
-        articles: [
-          {
-            source: 'unpaywall',
-            viaSource: 'unpaywall',
-            contentFormat: 'html-markdown',
-            pmid: '42',
-            pubmedUrl: 'https://pubmed.ncbi.nlm.nih.gov/42/',
-            doi: '10.1000/example',
-            sourceUrl: 'https://repo.example.org/paper',
-            title: 'A Paper',
-            content: '# A Paper\n\nMain body',
-            wordCount: 1200,
-            license: 'cc-by',
-            hostType: 'repository',
-            version: 'acceptedVersion',
-          },
-        ],
-        totalReturned: 1,
-      });
+      const blocks = textBlocks(
+        fetchFulltextTool.format!({
+          articles: [
+            {
+              source: 'unpaywall',
+              viaSource: 'unpaywall',
+              contentFormat: 'html-markdown',
+              pmid: '42',
+              pubmedUrl: 'https://pubmed.ncbi.nlm.nih.gov/42/',
+              doi: '10.1000/example',
+              sourceUrl: 'https://repo.example.org/paper',
+              title: 'A Paper',
+              content: '# A Paper\n\nMain body',
+              wordCount: 1200,
+              license: 'cc-by',
+              hostType: 'repository',
+              version: 'acceptedVersion',
+            },
+          ],
+          totalReturned: 1,
+        }),
+      );
 
       const text = blocks[0]?.text ?? '';
       expect(text).toContain('A Paper');
@@ -2711,20 +2722,22 @@ describe('fetchFulltextTool', () => {
     });
 
     it('formats a doi-input unpaywall article (no pmid)', () => {
-      const blocks = fetchFulltextTool.format!({
-        articles: [
-          {
-            source: 'unpaywall',
-            viaSource: 'unpaywall',
-            contentFormat: 'pdf-text',
-            doi: '10.21203/x',
-            sourceUrl: 'https://repo.example.org/paper.pdf',
-            content: 'Paper text',
-            totalPages: 7,
-          },
-        ],
-        totalReturned: 1,
-      });
+      const blocks = textBlocks(
+        fetchFulltextTool.format!({
+          articles: [
+            {
+              source: 'unpaywall',
+              viaSource: 'unpaywall',
+              contentFormat: 'pdf-text',
+              doi: '10.21203/x',
+              sourceUrl: 'https://repo.example.org/paper.pdf',
+              content: 'Paper text',
+              totalPages: 7,
+            },
+          ],
+          totalReturned: 1,
+        }),
+      );
 
       const text = blocks[0]?.text ?? '';
       expect(text).toContain('DOI 10.21203/x');
@@ -2733,25 +2746,27 @@ describe('fetchFulltextTool', () => {
     });
 
     it('formats an unpaywall article (pdf-text) with page count', () => {
-      const blocks = fetchFulltextTool.format!({
-        articles: [
-          {
-            source: 'unpaywall',
-            viaSource: 'unpaywall',
-            contentFormat: 'pdf-text',
-            pmid: '42',
-            pubmedUrl: 'https://pubmed.ncbi.nlm.nih.gov/42/',
-            doi: '10.1000/example',
-            sourceUrl: 'https://arxiv.org/pdf/2401.0001.pdf',
-            content: 'Paper text',
-            totalPages: 7,
-            license: 'cc0',
-            hostType: 'repository',
-            version: 'submittedVersion',
-          },
-        ],
-        totalReturned: 1,
-      });
+      const blocks = textBlocks(
+        fetchFulltextTool.format!({
+          articles: [
+            {
+              source: 'unpaywall',
+              viaSource: 'unpaywall',
+              contentFormat: 'pdf-text',
+              pmid: '42',
+              pubmedUrl: 'https://pubmed.ncbi.nlm.nih.gov/42/',
+              doi: '10.1000/example',
+              sourceUrl: 'https://arxiv.org/pdf/2401.0001.pdf',
+              content: 'Paper text',
+              totalPages: 7,
+              license: 'cc0',
+              hostType: 'repository',
+              version: 'submittedVersion',
+            },
+          ],
+          totalReturned: 1,
+        }),
+      );
 
       const text = blocks[0]?.text ?? '';
       expect(text).toContain('Unpaywall (PDF → plain text)');
@@ -2762,18 +2777,20 @@ describe('fetchFulltextTool', () => {
 
     describe('empty-result recovery guidance (issue #33)', () => {
       it('emits a recovery blockquote when totalReturned is 0', () => {
-        const blocks = fetchFulltextTool.format!({
-          articles: [],
-          totalReturned: 0,
-          unavailable: [
-            {
-              id: '31295471',
-              idType: 'pmid',
-              reason: 'no-doi',
-              triedTiers: [{ tier: 'unpaywall', outcome: 'no-doi' }],
-            },
-          ],
-        });
+        const blocks = textBlocks(
+          fetchFulltextTool.format!({
+            articles: [],
+            totalReturned: 0,
+            unavailable: [
+              {
+                id: '31295471',
+                idType: 'pmid',
+                reason: 'no-doi',
+                triedTiers: [{ tier: 'unpaywall', outcome: 'no-doi' }],
+              },
+            ],
+          }),
+        );
 
         const text = blocks[0]?.text ?? '';
         expect(text).toContain('**Articles Returned:** 0');
@@ -2783,18 +2800,20 @@ describe('fetchFulltextTool', () => {
       });
 
       it('renders the unavailable list before the recovery blockquote', () => {
-        const blocks = fetchFulltextTool.format!({
-          articles: [],
-          totalReturned: 0,
-          unavailable: [
-            {
-              id: '31295471',
-              idType: 'pmid',
-              reason: 'no-doi',
-              triedTiers: [{ tier: 'unpaywall', outcome: 'no-doi' }],
-            },
-          ],
-        });
+        const blocks = textBlocks(
+          fetchFulltextTool.format!({
+            articles: [],
+            totalReturned: 0,
+            unavailable: [
+              {
+                id: '31295471',
+                idType: 'pmid',
+                reason: 'no-doi',
+                triedTiers: [{ tier: 'unpaywall', outcome: 'no-doi' }],
+              },
+            ],
+          }),
+        );
 
         const text = blocks[0]?.text ?? '';
         const unavailableIdx = text.indexOf('Unavailable (');
@@ -2804,23 +2823,25 @@ describe('fetchFulltextTool', () => {
       });
 
       it('does NOT emit the recovery blockquote when articles are present', () => {
-        const blocks = fetchFulltextTool.format!({
-          articles: [
-            {
-              source: 'pmc',
-              viaSource: 'pmc',
-              pmcId: 'PMC1',
-              pmcUrl: 'https://www.ncbi.nlm.nih.gov/pmc/articles/PMC1/',
-              title: 'Real Article',
-              authors: [],
-              affiliations: [],
-              keywords: [],
-              sections: [],
-              references: [],
-            },
-          ],
-          totalReturned: 1,
-        });
+        const blocks = textBlocks(
+          fetchFulltextTool.format!({
+            articles: [
+              {
+                source: 'pmc',
+                viaSource: 'pmc',
+                pmcId: 'PMC1',
+                pmcUrl: 'https://www.ncbi.nlm.nih.gov/pmc/articles/PMC1/',
+                title: 'Real Article',
+                authors: [],
+                affiliations: [],
+                keywords: [],
+                sections: [],
+                references: [],
+              },
+            ],
+            totalReturned: 1,
+          }),
+        );
 
         const text = blocks[0]?.text ?? '';
         expect(text).not.toContain('No full-text articles returned');
@@ -2855,7 +2876,9 @@ describe('fetchFulltextTool', () => {
     };
 
     it('renders every author with givenNames lastName — no et al. truncation', () => {
-      const blocks = fetchFulltextTool.format!({ articles: [baseArticle], totalReturned: 1 });
+      const blocks = textBlocks(
+        fetchFulltextTool.format!({ articles: [baseArticle], totalReturned: 1 }),
+      );
       const text = blocks[0]?.text ?? '';
 
       expect(text).toContain('**Authors (5):**');
@@ -2868,12 +2891,16 @@ describe('fetchFulltextTool', () => {
     });
 
     it('renders the journal ISSN alongside other journal fields', () => {
-      const blocks = fetchFulltextTool.format!({ articles: [baseArticle], totalReturned: 1 });
+      const blocks = textBlocks(
+        fetchFulltextTool.format!({ articles: [baseArticle], totalReturned: 1 }),
+      );
       expect(blocks[0]?.text).toContain('ISSN 1476-4687');
     });
 
     it('prefixes section and subsection headings with the JATS label when present', () => {
-      const blocks = fetchFulltextTool.format!({ articles: [baseArticle], totalReturned: 1 });
+      const blocks = textBlocks(
+        fetchFulltextTool.format!({ articles: [baseArticle], totalReturned: 1 }),
+      );
       const text = blocks[0]?.text ?? '';
 
       expect(text).toContain('#### 1 Introduction');

@@ -7,7 +7,9 @@
  */
 
 import { createMockContext } from '@cyanheads/mcp-ts-core/testing';
-import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+
+import { textBlocks } from '../../../_helpers.js';
 
 // ─── Mocks ────────────────────────────────────────────────────────────────────
 
@@ -103,7 +105,7 @@ describe('search-articles injection', () => {
       retstart: 0,
       queryTranslation: '1=1[All Fields]',
     });
-    const ctx = createMockContext();
+    const ctx = createMockContext({ errors: searchArticlesTool.errors });
     const sqlPayload = "cancer' OR '1'='1";
     const input = searchArticlesTool.input.parse({ query: sqlPayload });
     await searchArticlesTool.handler(input, ctx);
@@ -115,7 +117,7 @@ describe('search-articles injection', () => {
     // sanitization.sanitizeString({context:'text'}) removes HTML markup.
     // The eSearch term must NOT contain raw <script> tags.
     mockESearch.mockResolvedValue({ count: 0, idList: [], retmax: 20, retstart: 0 });
-    const ctx = createMockContext();
+    const ctx = createMockContext({ errors: searchArticlesTool.errors });
     const xssPayload = '<script>alert(1)</script>';
     const input = searchArticlesTool.input.parse({ query: xssPayload });
     await searchArticlesTool.handler(input, ctx);
@@ -205,7 +207,7 @@ describe('spell-check injection', () => {
 
   it('passes query value verbatim to eSpell (no secret injection into params)', async () => {
     mockESpell.mockResolvedValue({ original: 'test', corrected: 'test', hasSuggestion: false });
-    const ctx = createMockContext();
+    const ctx = createMockContext({ errors: spellCheckTool.errors });
     const input = spellCheckTool.input.parse({ query: 'test query' });
     await spellCheckTool.handler(input, ctx);
     const called = mockESpell.mock.calls[0]?.[0] as Record<string, unknown>;
@@ -323,7 +325,7 @@ describe('no secret leaks in tool outputs', () => {
       retstart: 0,
       queryTranslation: 'cancer[All Fields]',
     });
-    const ctx = createMockContext();
+    const ctx = createMockContext({ errors: searchArticlesTool.errors });
     const input = searchArticlesTool.input.parse({ query: 'cancer' });
     const result = await searchArticlesTool.handler(input, ctx);
     const serialized = JSON.stringify(result);
@@ -346,7 +348,7 @@ describe('no secret leaks in tool outputs', () => {
         ],
       },
     });
-    const ctx = createMockContext();
+    const ctx = createMockContext({ errors: fetchArticlesTool.errors });
     const input = fetchArticlesTool.input.parse({ pmids: ['12345'] });
     const result = await fetchArticlesTool.handler(input, ctx);
     const serialized = JSON.stringify(result);
@@ -359,7 +361,7 @@ describe('no secret leaks in tool outputs', () => {
       corrected: 'asthma',
       hasSuggestion: true,
     });
-    const ctx = createMockContext();
+    const ctx = createMockContext({ errors: spellCheckTool.errors });
     const input = spellCheckTool.input.parse({ query: 'astma' });
     const result = await spellCheckTool.handler(input, ctx);
     const serialized = JSON.stringify(result);
@@ -371,13 +373,15 @@ describe('no secret leaks in tool outputs', () => {
 
 describe('format() output sanitization', () => {
   it('search-articles format() does not expose internal file paths', () => {
-    const blocks = searchArticlesTool.format!({
-      query: 'cancer',
-      offset: 0,
-      pmids: ['12345'],
-      summaries: [],
-      searchUrl: 'https://pubmed.ncbi.nlm.nih.gov/?term=cancer',
-    });
+    const blocks = textBlocks(
+      searchArticlesTool.format!({
+        query: 'cancer',
+        offset: 0,
+        pmids: ['12345'],
+        summaries: [],
+        searchUrl: 'https://pubmed.ncbi.nlm.nih.gov/?term=cancer',
+      }),
+    );
     const text = blocks[0]?.text ?? '';
     // Output should not contain absolute filesystem paths
     expect(text).not.toMatch(/\/Users\//);
@@ -386,16 +390,18 @@ describe('format() output sanitization', () => {
   });
 
   it('fetch-articles format() does not expose stack traces or internal paths', () => {
-    const blocks = fetchArticlesTool.format!({
-      articles: [
-        {
-          pmid: '12345',
-          title: 'Test Article',
-          pubmedUrl: 'https://pubmed.ncbi.nlm.nih.gov/12345/',
-        },
-      ],
-      totalReturned: 1,
-    });
+    const blocks = textBlocks(
+      fetchArticlesTool.format!({
+        articles: [
+          {
+            pmid: '12345',
+            title: 'Test Article',
+            pubmedUrl: 'https://pubmed.ncbi.nlm.nih.gov/12345/',
+          },
+        ],
+        totalReturned: 1,
+      }),
+    );
     const text = blocks[0]?.text ?? '';
     expect(text).not.toMatch(/at Object\./);
     expect(text).not.toMatch(/Error:/);
@@ -403,25 +409,27 @@ describe('format() output sanitization', () => {
   });
 
   it('fetch-fulltext format() sanitizes upstream URLs in chain details', () => {
-    const blocks = fetchFulltextTool.format!({
-      articles: [],
-      totalReturned: 0,
-      unavailable: [
-        {
-          id: 'PMC9999',
-          idType: 'pmcid',
-          reason: 'service-error',
-          triedTiers: [
-            {
-              tier: 'pmc',
-              outcome: 'service-error',
-              detail:
-                'Fetch failed for https://eutils.ncbi.nlm.nih.gov/entrez/eutils/efetch.fcgi?db=pmc&id=9999&api_key=MYSECRET. Status: 500',
-            },
-          ],
-        },
-      ],
-    });
+    const blocks = textBlocks(
+      fetchFulltextTool.format!({
+        articles: [],
+        totalReturned: 0,
+        unavailable: [
+          {
+            id: 'PMC9999',
+            idType: 'pmcid',
+            reason: 'service-error',
+            triedTiers: [
+              {
+                tier: 'pmc',
+                outcome: 'service-error',
+                detail:
+                  'Fetch failed for https://eutils.ncbi.nlm.nih.gov/entrez/eutils/efetch.fcgi?db=pmc&id=9999&api_key=MYSECRET. Status: 500',
+              },
+            ],
+          },
+        ],
+      }),
+    );
     const text = blocks[0]?.text ?? '';
     // The sanitizeChainDetail helper should replace the URL with <upstream>
     expect(text).not.toContain('eutils.ncbi.nlm.nih.gov');
@@ -463,7 +471,7 @@ describe('empty result edge cases', () => {
       retstart: 0,
       queryTranslation: 'xyznonexistent[All Fields]',
     });
-    const ctx = createMockContext();
+    const ctx = createMockContext({ errors: searchArticlesTool.errors });
     const result = await searchArticlesTool.handler(
       searchArticlesTool.input.parse({ query: 'xyznonexistent' }),
       ctx,
@@ -476,7 +484,7 @@ describe('empty result edge cases', () => {
     mockEFetch.mockResolvedValue({
       PubmedArticleSet: { PubmedArticle: [] },
     });
-    const ctx = createMockContext();
+    const ctx = createMockContext({ errors: fetchArticlesTool.errors });
     const result = await fetchArticlesTool.handler(
       fetchArticlesTool.input.parse({ pmids: ['99999'] }),
       ctx,
