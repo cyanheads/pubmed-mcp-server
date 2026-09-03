@@ -1,6 +1,6 @@
 # pubmed-mcp-server - Directory Structure
 
-Generated on: 2026-08-21 22:23:20
+Generated on: 2026-09-03 00:23:48
 
 ```text
 pubmed-mcp-server/
@@ -199,7 +199,8 @@ pubmed-mcp-server/
 │   │   ├── unpaywall/
 │   │   │   ├── types.ts
 │   │   │   └── unpaywall-service.ts
-│   │   └── error-contracts.ts
+│   │   ├── error-contracts.ts
+│   │   └── retry-policy.ts
 │   └── index.ts
 ├── tests/
 │   ├── config/
@@ -251,7 +252,8 @@ pubmed-mcp-server/
 │   │   │   └── openalex-service.test.ts
 │   │   ├── unpaywall/
 │   │   │   └── unpaywall-service.test.ts
-│   │   └── error-contracts.test.ts
+│   │   ├── error-contracts.test.ts
+│   │   └── retry-policy.test.ts
 │   ├── tools/
 │   ├── _helpers.ts
 │   └── index.test.ts

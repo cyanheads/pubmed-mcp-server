@@ -121,11 +121,11 @@ describe('NcbiApiClient', () => {
     });
   });
 
-  it('reclassifies HTTP 500 as ServiceUnavailable so withRetry picks it up (issue #70)', async () => {
+  it('classifies HTTP 500 as ServiceUnavailable so withRetry picks it up (issue #70)', async () => {
     // NCBI's eutils proxy returns 500 for transient mesh-layer failures that are safe to
-    // retry. Routing getRequest/postRequest through plain fetch makes makeRequest's
-    // codeOverride (500 → ServiceUnavailable) reachable — it was dead behind
-    // fetchWithTimeout, which threw on non-2xx before the status could be inspected.
+    // retry. Routing getRequest/postRequest through plain fetch hands makeRequest the
+    // failing Response so httpErrorFromResponse can classify it — fetchWithTimeout throws
+    // on non-2xx before the response is reachable.
     const { JsonRpcErrorCode } = await import('@cyanheads/mcp-ts-core/errors');
     fetchSpy.mockResolvedValueOnce(new Response('WWW Error 500', { status: 500 }));
     const client = new NcbiApiClient(baseConfig);
@@ -136,14 +136,16 @@ describe('NcbiApiClient', () => {
     });
   });
 
-  it('does not reclassify HTTP 501 (keeps InternalError)', async () => {
-    // 501 Not Implemented is not a transient NCBI failure — leave as InternalError.
+  it('marks HTTP 501 non-retryable alongside ServiceUnavailable', async () => {
+    // 501 Not Implemented shares ServiceUnavailable's transient code, so the in-band
+    // `retryable: false` opt-out is what keeps it out of the retry loop.
     const { JsonRpcErrorCode } = await import('@cyanheads/mcp-ts-core/errors');
     fetchSpy.mockResolvedValueOnce(new Response('', { status: 501 }));
     const client = new NcbiApiClient(baseConfig);
 
     await expect(client.makeRequest('esearch', { db: 'pubmed' })).rejects.toMatchObject({
-      code: JsonRpcErrorCode.InternalError,
+      code: JsonRpcErrorCode.ServiceUnavailable,
+      data: { retryable: false },
     });
   });
 

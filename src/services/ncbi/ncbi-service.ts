@@ -17,6 +17,7 @@ import { logger, requestContextService } from '@cyanheads/mcp-ts-core/utils';
 
 import { getServerConfig } from '@/config/server-config.js';
 import { recoveryFor } from '@/services/error-contracts.js';
+import { isTransient } from '@/services/retry-policy.js';
 import { NcbiApiClient } from './api-client.js';
 import { NcbiRequestQueue } from './request-queue.js';
 import { NcbiResponseHandler } from './response-handler.js';
@@ -424,7 +425,7 @@ export class NcbiService {
           throw error;
         }
 
-        if (!NcbiService.RETRYABLE_CODES.has(error.code)) {
+        if (!isTransient(error, NcbiService.RETRYABLE_CODES)) {
           throw error;
         }
 

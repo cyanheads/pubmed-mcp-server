@@ -17,6 +17,7 @@ import { logger, requestContextService } from '@cyanheads/mcp-ts-core/utils';
 
 import { getServerConfig } from '@/config/server-config.js';
 import { recoveryFor } from '@/services/error-contracts.js';
+import { isTransient } from '@/services/retry-policy.js';
 import { OpenAlexApiClient } from './api-client.js';
 import type { OpenAlexWork } from './types.js';
 
@@ -180,7 +181,7 @@ export class OpenAlexService {
       } catch (error: unknown) {
         if (signal?.aborted) throw signal.reason;
         if (!(error instanceof McpError)) throw error;
-        if (!RETRYABLE_CODES.has(error.code)) throw error;
+        if (!isTransient(error, RETRYABLE_CODES)) throw error;
 
         if (attempt < this.maxRetries) {
           const baseDelay = Math.min(1000 * 2 ** attempt, MAX_BACKOFF_MS);

@@ -1,7 +1,7 @@
 /**
- * @fileoverview Regression for issue #70 — a transient NCBI eutils HTTP 500 must be
- * reclassified to ServiceUnavailable and retried end to end. Drives a real NcbiApiClient
- * + NcbiService against a stubbed global fetch so the reclassification (which a mocked
+ * @fileoverview Regression for issue #70 — a transient NCBI eutils HTTP 500 must
+ * classify as ServiceUnavailable and be retried end to end. Drives a real NcbiApiClient
+ * + NcbiService against a stubbed global fetch so the classification (which a mocked
  * `makeRequest` would bypass) is actually exercised.
  * @module tests/services/ncbi/transient-500-retry.test
  */
@@ -13,8 +13,7 @@ import { NcbiService } from '@/services/ncbi/ncbi-service.js';
 import type { NcbiRequestQueue } from '@/services/ncbi/request-queue.js';
 import { NcbiResponseHandler } from '@/services/ncbi/response-handler.js';
 
-// Keep httpErrorFromResponse real (it applies the 500→ServiceUnavailable codeOverride);
-// silence logging only.
+// Keep httpErrorFromResponse real (it is what classifies the status); silence logging only.
 vi.mock('@cyanheads/mcp-ts-core/utils', async () => {
   const actual = await vi.importActual<typeof import('@cyanheads/mcp-ts-core/utils')>(
     '@cyanheads/mcp-ts-core/utils',
@@ -74,14 +73,15 @@ describe('transient eutils HTTP 500 (issue #70)', () => {
     expect(fetchSpy).toHaveBeenCalledTimes(3);
   });
 
-  it('does not retry a 501 (stays InternalError)', async () => {
+  it('does not retry a 501 (ServiceUnavailable carrying the retryable opt-out)', async () => {
     fetchSpy = vi.spyOn(globalThis, 'fetch').mockResolvedValue(new Response('', { status: 501 }));
     const service = buildService(2);
 
     await expect(service.eSearch({ db: 'pubmed', term: 'cancer' })).rejects.toMatchObject({
-      code: JsonRpcErrorCode.InternalError,
+      code: JsonRpcErrorCode.ServiceUnavailable,
+      data: { retryable: false },
     });
-    // Non-transient → no retry.
+    // `data.retryable: false` outranks the transient code → no retry.
     expect(fetchSpy).toHaveBeenCalledTimes(1);
   });
 });

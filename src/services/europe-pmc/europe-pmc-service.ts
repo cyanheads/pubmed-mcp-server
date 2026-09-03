@@ -29,6 +29,7 @@ import { getServerConfig } from '@/config/server-config.js';
 import { recoveryFor } from '@/services/error-contracts.js';
 import type { JatsNode, JatsNodeList } from '@/services/ncbi/parsing/pmc-xml-helpers.js';
 import { ensureArray } from '@/services/ncbi/parsing/xml-helpers.js';
+import { isTransient } from '@/services/retry-policy.js';
 import { EuropePmcApiClient } from './api-client.js';
 import { EuropePmcRequestQueue } from './request-queue.js';
 import type {
@@ -438,7 +439,7 @@ export class EuropePmcService {
       } catch (error: unknown) {
         if (signal?.aborted) throw signal.reason;
         if (!(error instanceof McpError)) throw error;
-        if (!RETRYABLE_CODES.has(error.code)) throw error;
+        if (!isTransient(error, RETRYABLE_CODES)) throw error;
 
         if (attempt < this.maxRetries) {
           const baseDelay = Math.min(1000 * 2 ** attempt, MAX_BACKOFF_MS);

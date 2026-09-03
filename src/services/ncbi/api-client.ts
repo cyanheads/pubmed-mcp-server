@@ -5,7 +5,7 @@
  * @module src/services/ncbi/api-client
  */
 
-import { JsonRpcErrorCode, McpError, serviceUnavailable } from '@cyanheads/mcp-ts-core/errors';
+import { McpError, serviceUnavailable } from '@cyanheads/mcp-ts-core/errors';
 import { httpErrorFromResponse, logger, requestContextService } from '@cyanheads/mcp-ts-core/utils';
 
 import { recoveryFor } from '@/services/error-contracts.js';
@@ -53,13 +53,14 @@ export class NcbiApiClient {
         : await this.getRequest(url, finalParams, options?.signal);
 
       if (!response.ok) {
+        /**
+         * The framework classifies both 500 and 501 as ServiceUnavailable, so the
+         * transient mesh-layer 500s the eutils proxy returns reach the retry loop in
+         * NcbiService.withRetry. A 501 also carries `data.retryable: false`, which that
+         * gate honors to fail a Not Implemented response on the first attempt.
+         */
         throw await httpErrorFromResponse(response, {
           service: 'NCBI',
-          // NCBI's eutils proxy returns HTTP 500 for transient mesh-layer failures
-          // that are safe to retry. Reclassify as ServiceUnavailable so the retry
-          // loop in NcbiService.withRetry picks it up — 501 (Not Implemented) is
-          // left as InternalError since those are not transient.
-          codeOverride: (s) => (s === 500 ? JsonRpcErrorCode.ServiceUnavailable : undefined),
           data: { endpoint },
         });
       }
@@ -158,9 +159,8 @@ export class NcbiApiClient {
 
   /**
    * GET an eutils endpoint. Uses plain fetch (not fetchWithTimeout) so {@link makeRequest}
-   * can inspect the response status and apply its 500→ServiceUnavailable reclassification —
-   * fetchWithTimeout throws on any non-2xx before the status can be read, which left that
-   * override unreachable.
+   * holds the failing `Response` and can build the error from it — fetchWithTimeout throws
+   * on any non-2xx before the response is reachable.
    */
   private getRequest(
     url: string,
