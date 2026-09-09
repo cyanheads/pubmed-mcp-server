@@ -465,6 +465,46 @@ describe('format() output sanitization', () => {
     expect(text).toContain('<upstream>');
   });
 
+  it('fetch-fulltext format() sanitizes chain details on an entry with unqueried tiers', () => {
+    const blocks = textBlocks(
+      fetchFulltextTool.format!({
+        articles: [],
+        totalReturned: 0,
+        unavailable: [
+          {
+            id: '40058719',
+            idType: 'pmid',
+            reason: 'no-epmc-fulltext',
+            triedTiers: [
+              {
+                tier: 'europepmc',
+                outcome: 'no-fulltext',
+                detail:
+                  'No fullTextXML at https://www.ebi.ac.uk/europepmc/webservices/rest/search?email=ops@example.test',
+              },
+              {
+                tier: 'unpaywall',
+                outcome: 'not-attempted',
+                detail:
+                  'UNPAYWALL_EMAIL is not set; would have queried https://api.unpaywall.org/v2?email=ops@example.test',
+              },
+            ],
+            unqueriedTiers: ['unpaywall'],
+          },
+        ],
+      }),
+    );
+    const text = blocks[0]?.text ?? '';
+    expect(text).toContain('no-epmc-fulltext');
+    // The unqueried-tier line reads its label out of the same chain detail, so
+    // it has to go through the same sanitizer.
+    expect(text).toContain('Not queried: Unpaywall');
+    expect(text).not.toContain('ebi.ac.uk');
+    expect(text).not.toContain('api.unpaywall.org');
+    expect(text).not.toContain('ops@example.test');
+    expect(text).toContain('<upstream>');
+  });
+
   it('fetch-articles format() neutralizes Markdown markup in an upstream title', () => {
     const blocks = textBlocks(
       fetchArticlesTool.format!({
@@ -587,4 +627,39 @@ describe('empty result edge cases', () => {
     expect(result.articles).toEqual([]);
     expect(result.unavailablePmids).toEqual(['99999']);
   });
+});
+
+// ─── Input validation: whole-response character ceiling ──────────────────────
+
+describe('maxResponseCharacters bounds', () => {
+  const cases = [
+    [
+      'fetch-articles',
+      (v: unknown) => fetchArticlesTool.input.safeParse({ pmids: ['1'], maxResponseCharacters: v }),
+    ],
+    [
+      'fetch-fulltext',
+      (v: unknown) =>
+        fetchFulltextTool.input.safeParse({ pmcids: ['PMC1'], maxResponseCharacters: v }),
+    ],
+  ] as const;
+
+  for (const [name, parse] of cases) {
+    it(`${name} rejects a non-positive or fractional ceiling`, () => {
+      for (const value of [0, -1, -1_000_000, 1.5, Number.NaN, Number.POSITIVE_INFINITY]) {
+        expect(parse(value).success).toBe(false);
+      }
+    });
+
+    it(`${name} rejects a ceiling above the 1,000,000 cap`, () => {
+      expect(parse(1_000_001).success).toBe(false);
+      expect(parse(1_000_000).success).toBe(true);
+    });
+
+    it(`${name} rejects a non-numeric ceiling`, () => {
+      for (const value of ['1000', null, [], {}]) {
+        expect(parse(value).success).toBe(false);
+      }
+    });
+  }
 });

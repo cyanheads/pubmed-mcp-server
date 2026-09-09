@@ -245,6 +245,7 @@ describe('fetchFulltextTool', () => {
             { tier: 'europepmc', outcome: 'not-attempted', detail: 'EUROPEPMC_ENABLED=false' },
             { tier: 'unpaywall', outcome: 'not-attempted', detail: 'UNPAYWALL_EMAIL is not set' },
           ],
+          unqueriedTiers: ['europepmc', 'unpaywall'],
         },
       ]);
     });
@@ -267,6 +268,7 @@ describe('fetchFulltextTool', () => {
             { tier: 'europepmc', outcome: 'not-attempted', detail: 'EUROPEPMC_ENABLED=false' },
             { tier: 'unpaywall', outcome: 'not-attempted', detail: 'UNPAYWALL_EMAIL is not set' },
           ],
+          unqueriedTiers: ['europepmc', 'unpaywall'],
         },
         {
           id: 'PMC2',
@@ -277,6 +279,7 @@ describe('fetchFulltextTool', () => {
             { tier: 'europepmc', outcome: 'not-attempted', detail: 'EUROPEPMC_ENABLED=false' },
             { tier: 'unpaywall', outcome: 'not-attempted', detail: 'UNPAYWALL_EMAIL is not set' },
           ],
+          unqueriedTiers: ['europepmc', 'unpaywall'],
         },
       ]);
     });
@@ -290,6 +293,8 @@ describe('fetchFulltextTool', () => {
 
       expect(result.totalReturned).toBe(0);
       expect(result.articles).toEqual([]);
+      // PMC's miss is the only signal any tier reported, so it is the reason;
+      // `unqueriedTiers` carries the fact that the search was cut short (#110).
       expect(result.unavailable).toEqual([
         {
           id: 'PMC9999999',
@@ -300,6 +305,7 @@ describe('fetchFulltextTool', () => {
             { tier: 'europepmc', outcome: 'not-attempted', detail: 'EUROPEPMC_ENABLED=false' },
             { tier: 'unpaywall', outcome: 'not-attempted', detail: 'UNPAYWALL_EMAIL is not set' },
           ],
+          unqueriedTiers: ['europepmc', 'unpaywall'],
         },
       ]);
     });
@@ -333,13 +339,16 @@ describe('fetchFulltextTool', () => {
         { tier: 'europepmc', outcome: 'not-attempted', detail: 'EUROPEPMC_ENABLED=false' },
         { tier: 'unpaywall', outcome: 'not-attempted', detail: 'UNPAYWALL_EMAIL is not set' },
       ];
-      expect(result.unavailable).toEqual([
-        { id: 'PMC222', idType: 'pmcid', reason: 'not-found', triedTiers: expectedPmcMissChain },
-        { id: 'PMC333', idType: 'pmcid', reason: 'not-found', triedTiers: expectedPmcMissChain },
-        { id: 'PMC444', idType: 'pmcid', reason: 'not-found', triedTiers: expectedPmcMissChain },
-        { id: 'PMC555', idType: 'pmcid', reason: 'not-found', triedTiers: expectedPmcMissChain },
-        { id: 'PMC666', idType: 'pmcid', reason: 'not-found', triedTiers: expectedPmcMissChain },
-      ]);
+      const expectedUnqueried = ['europepmc', 'unpaywall'];
+      expect(result.unavailable).toEqual(
+        ['PMC222', 'PMC333', 'PMC444', 'PMC555', 'PMC666'].map((id) => ({
+          id,
+          idType: 'pmcid',
+          reason: 'not-found',
+          triedTiers: expectedPmcMissChain,
+          unqueriedTiers: expectedUnqueried,
+        })),
+      );
     });
   });
 
@@ -374,12 +383,16 @@ describe('fetchFulltextTool', () => {
         {
           id: '99999',
           idType: 'pmid',
-          reason: 'no-pmc-fallback-disabled',
+          // PubMed carries no DOI for this PMID, so Unpaywall could not have
+          // served it either way — a settled answer, not a skipped tier. Only
+          // Europe PMC was skipped for configuration.
+          reason: 'no-doi',
           triedTiers: [
             { tier: 'pmc', outcome: 'not-attempted', detail: 'PMID has no PMC counterpart' },
             { tier: 'europepmc', outcome: 'not-attempted', detail: 'EUROPEPMC_ENABLED=false' },
-            { tier: 'unpaywall', outcome: 'not-attempted', detail: 'UNPAYWALL_EMAIL is not set' },
+            { tier: 'unpaywall', outcome: 'no-doi' },
           ],
+          unqueriedTiers: ['europepmc'],
         },
       ]);
       const pmc = result.articles[0];
@@ -402,12 +415,16 @@ describe('fetchFulltextTool', () => {
         {
           id: '99999',
           idType: 'pmid',
-          reason: 'no-pmc-fallback-disabled',
+          // PubMed carries no DOI for this PMID, so Unpaywall could not have
+          // served it either way — a settled answer, not a skipped tier. Only
+          // Europe PMC was skipped for configuration.
+          reason: 'no-doi',
           triedTiers: [
             { tier: 'pmc', outcome: 'not-attempted', detail: 'PMID has no PMC counterpart' },
             { tier: 'europepmc', outcome: 'not-attempted', detail: 'EUROPEPMC_ENABLED=false' },
-            { tier: 'unpaywall', outcome: 'not-attempted', detail: 'UNPAYWALL_EMAIL is not set' },
+            { tier: 'unpaywall', outcome: 'no-doi' },
           ],
+          unqueriedTiers: ['europepmc'],
         },
       ]);
     });
@@ -694,6 +711,276 @@ describe('fetchFulltextTool', () => {
     });
   });
 
+  describe('unqueried tiers (issue #110)', () => {
+    function withEpmcMock() {
+      mockGetEpmcService.mockReturnValue({
+        search: mockEpmcSearch,
+        fullTextXml: mockEpmcFullTextXml,
+        parseFullTextXml: mockEpmcParseFullTextXml,
+      });
+    }
+
+    /** PMC misses, EPMC indexes the record but publishes no JATS, Unpaywall is unconfigured. */
+    async function runChainEndingUnconfigured() {
+      withEpmcMock();
+      mockGetUnpaywallService.mockReturnValue(undefined);
+      mockIdConvert.mockResolvedValue([
+        { 'requested-id': '40058719', pmid: '40058719', pmcid: 'PMC123', doi: '10.1/x' },
+      ]);
+      mockEFetchBy({ pmc: [{ 'pmc-articleset': [] }] });
+      mockEpmcSearch.mockResolvedValue({
+        hits: [{ id: '40058719', source: 'MED', pmid: '40058719', pmcid: 'PMC123', doi: '10.1/x' }],
+        hitCount: 1,
+        cursorMark: '*',
+      });
+      mockEpmcFullTextXml.mockResolvedValue({ kind: 'not-available', reason: 'no XML' });
+
+      const ctx = createMockContext({ errors: fetchFulltextTool.errors });
+      const input = fetchFulltextTool.input.parse({ pmids: ['40058719'] });
+      return fetchFulltextTool.handler(input, ctx);
+    }
+
+    it('keeps the specific content signal as the reason and names the skipped tier separately', async () => {
+      const result = await runChainEndingUnconfigured();
+
+      expect(result.totalReturned).toBe(0);
+      const entry = result.unavailable?.[0];
+      // The EPMC signal is the most specific thing any tier actually reported,
+      // so it stays the reason; the incompleteness rides alongside it.
+      expect(entry?.reason).toBe('no-epmc-fulltext');
+      expect(entry?.unqueriedTiers).toEqual(['unpaywall']);
+      expect(entry?.id).toBe('40058719');
+      expect(entry?.idType).toBe('pmid');
+      expect(entry?.triedTiers.map((t) => `${t.tier}:${t.outcome}`)).toEqual([
+        'pmc:miss',
+        'europepmc:no-fulltext',
+        'unpaywall:not-attempted',
+      ]);
+      expect(entry?.triedTiers[2]?.detail).toBe('UNPAYWALL_EMAIL is not set');
+    });
+
+    it('omits unqueriedTiers for a tier the id could not have used anyway', async () => {
+      // No DOI anywhere, so Unpaywall could not have served this id even if it
+      // were configured — a configuration note would send the caller nowhere.
+      // Nothing indexed the record either, so absence stays the reason.
+      withEpmcMock();
+      mockGetUnpaywallService.mockReturnValue(undefined);
+      mockIdConvert.mockResolvedValue([{ 'requested-id': '777', pmid: '777' }]);
+      mockEFetchBy({ pubmedDois: {} });
+      mockEpmcSearch.mockResolvedValue({ hits: [], hitCount: 0, cursorMark: '*' });
+
+      const ctx = createMockContext({ errors: fetchFulltextTool.errors });
+      const input = fetchFulltextTool.input.parse({ pmids: ['777'] });
+      const result = await fetchFulltextTool.handler(input, ctx);
+
+      const entry = result.unavailable?.[0];
+      expect(entry?.reason).toBe('not-found');
+      expect(entry?.unqueriedTiers).toBeUndefined();
+      expect(entry?.triedTiers.at(-1)).toEqual({ tier: 'unpaywall', outcome: 'no-doi' });
+    });
+
+    it('reports a nonexistent id as not-found while still flagging the skipped tier', async () => {
+      withEpmcMock();
+      mockGetUnpaywallService.mockReturnValue(undefined);
+      mockIdConvert.mockResolvedValue([
+        { 'requested-id': '40058719', pmid: '40058719', pmcid: 'PMC123', doi: '10.1/x' },
+      ]);
+      mockEFetchBy({ pmc: [{ 'pmc-articleset': [] }] });
+      mockEpmcSearch.mockResolvedValue({ hits: [], hitCount: 0, cursorMark: '*' });
+
+      const ctx = createMockContext({ errors: fetchFulltextTool.errors });
+      const input = fetchFulltextTool.input.parse({ pmids: ['40058719'] });
+      const result = await fetchFulltextTool.handler(input, ctx);
+
+      const entry = result.unavailable?.[0];
+      expect(entry?.reason).toBe('not-found');
+      expect(entry?.unqueriedTiers).toEqual(['unpaywall']);
+    });
+
+    it('reports a PMID no tier indexes as not-found, not no-doi (issue #110)', async () => {
+      // No DOI is known for the id, so Unpaywall answers no-doi — but the record
+      // absence Europe PMC reported is the specific signal, and nothing could
+      // have served the id, so no tier is listed as unqueried.
+      withEpmcMock();
+      mockGetUnpaywallService.mockReturnValue(undefined);
+      mockIdConvert.mockResolvedValue([{ 'requested-id': '99999999', pmid: '99999999' }]);
+      mockEFetchBy({ pmc: [{ 'pmc-articleset': [] }] });
+      mockEpmcSearch.mockResolvedValue({ hits: [], hitCount: 0, cursorMark: '*' });
+
+      const ctx = createMockContext({ errors: fetchFulltextTool.errors });
+      const input = fetchFulltextTool.input.parse({ pmids: ['99999999'] });
+      const result = await fetchFulltextTool.handler(input, ctx);
+
+      const entry = result.unavailable?.[0];
+      expect(entry?.triedTiers.at(-1)).toMatchObject({ tier: 'unpaywall', outcome: 'no-doi' });
+      expect(entry?.triedTiers.some((t) => t.tier === 'europepmc' && t.outcome === 'miss')).toBe(
+        true,
+      );
+      expect(entry?.reason).toBe('not-found');
+      expect(entry?.unqueriedTiers).toBeUndefined();
+    });
+
+    it('lists europepmc when EUROPEPMC_ENABLED=false skipped it', async () => {
+      mockGetEpmcService.mockReturnValue(undefined);
+      mockGetUnpaywallService.mockReturnValue(undefined);
+      mockIdConvert.mockResolvedValue([
+        { 'requested-id': '40058719', pmid: '40058719', pmcid: 'PMC123', doi: '10.1/x' },
+      ]);
+      mockEFetchBy({ pmc: [{ 'pmc-articleset': [] }] });
+
+      const ctx = createMockContext({ errors: fetchFulltextTool.errors });
+      const input = fetchFulltextTool.input.parse({ pmids: ['40058719'] });
+      const result = await fetchFulltextTool.handler(input, ctx);
+
+      const entry = result.unavailable?.[0];
+      expect(entry?.reason).toBe('not-found');
+      expect(entry?.unqueriedTiers).toEqual(['europepmc', 'unpaywall']);
+      expect(entry?.triedTiers.map((t) => `${t.tier}:${t.outcome}`)).toEqual([
+        'pmc:miss',
+        'europepmc:not-attempted',
+        'unpaywall:not-attempted',
+      ]);
+    });
+
+    it('renders the incomplete search on the content[] surface', async () => {
+      const result = await runChainEndingUnconfigured();
+
+      const text = textBlocks(fetchFulltextTool.format!(result))
+        .map((b) => b.text)
+        .join('\n');
+      expect(text).toContain('[pmid] 40058719 — no-epmc-fulltext');
+      expect(text).toContain('Not queried: Unpaywall (UNPAYWALL_EMAIL is not set)');
+      expect(text).toContain('chain: pmc:miss → europepmc:no-fulltext');
+      expect(text).toContain('unpaywall:not-attempted (UNPAYWALL_EMAIL is not set)');
+      expect(text).toMatch(/searches are incomplete/i);
+      expect(text).not.toContain('tier-unconfigured');
+    });
+
+    it('renders the explanation once no matter how many entries carry unqueried tiers', () => {
+      const entry = (id: string) => ({
+        id,
+        idType: 'pmid' as const,
+        reason: 'no-epmc-fulltext' as const,
+        triedTiers: [
+          { tier: 'europepmc' as const, outcome: 'no-fulltext' as const },
+          {
+            tier: 'unpaywall' as const,
+            outcome: 'not-attempted' as const,
+            detail: 'UNPAYWALL_EMAIL is not set',
+          },
+        ],
+        unqueriedTiers: ['unpaywall' as const],
+      });
+      const text =
+        textBlocks(
+          fetchFulltextTool.format!({
+            articles: [],
+            totalReturned: 0,
+            unavailable: [entry('1'), entry('2')],
+          }),
+        )[0]?.text ?? '';
+
+      expect(text.match(/Not queried: Unpaywall/g)).toHaveLength(2);
+      expect(text.match(/searches are incomplete/gi)).toHaveLength(1);
+    });
+
+    it('emits no unqueried-tier prose when every entry was searched completely', () => {
+      const text =
+        textBlocks(
+          fetchFulltextTool.format!({
+            articles: [],
+            totalReturned: 0,
+            unavailable: [
+              {
+                id: '1',
+                idType: 'pmid',
+                reason: 'no-oa',
+                triedTiers: [{ tier: 'unpaywall', outcome: 'no-oa' }],
+              },
+            ],
+          }),
+        )[0]?.text ?? '';
+
+      expect(text).not.toContain('Not queried');
+      expect(text).not.toMatch(/searches are incomplete/i);
+    });
+
+    it('keeps the reason when the chain ends on an attempted tier', async () => {
+      withEpmcMock();
+      mockGetUnpaywallService.mockReturnValue({
+        resolve: mockUnpaywallResolve,
+        fetchContent: mockUnpaywallFetchContent,
+      });
+      mockIdConvert.mockResolvedValue([
+        { 'requested-id': '40058719', pmid: '40058719', pmcid: 'PMC123', doi: '10.1/x' },
+      ]);
+      mockEFetchBy({ pmc: [{ 'pmc-articleset': [] }] });
+      mockEpmcSearch.mockResolvedValue({
+        hits: [{ id: '40058719', source: 'MED', pmid: '40058719', pmcid: 'PMC123', doi: '10.1/x' }],
+        hitCount: 1,
+        cursorMark: '*',
+      });
+      mockEpmcFullTextXml.mockResolvedValue({ kind: 'not-available', reason: 'no XML' });
+      mockUnpaywallResolve.mockResolvedValue({ kind: 'no-oa', reason: 'no oa' });
+
+      const ctx = createMockContext({ errors: fetchFulltextTool.errors });
+      const input = fetchFulltextTool.input.parse({ pmids: ['40058719'] });
+      const result = await fetchFulltextTool.handler(input, ctx);
+
+      expect(result.unavailable?.[0]?.reason).toBe('no-oa');
+      expect(result.unavailable?.[0]?.triedTiers.at(-1)).toEqual({
+        tier: 'unpaywall',
+        outcome: 'no-oa',
+        detail: 'no oa',
+      });
+    });
+
+    it('keeps an errored tier as the reason even when the chain ends unconfigured', async () => {
+      // A transient upstream failure is the actionable headline; the skipped
+      // tier is reported alongside it rather than displacing it.
+      withEpmcMock();
+      mockGetUnpaywallService.mockReturnValue(undefined);
+      mockIdConvert.mockResolvedValue([
+        { 'requested-id': '40058719', pmid: '40058719', pmcid: 'PMC123', doi: '10.1/x' },
+      ]);
+      mockEFetchBy({ pmc: [{ 'pmc-articleset': [] }] });
+      mockEpmcSearch.mockRejectedValue(new Error('EPMC 503'));
+
+      const ctx = createMockContext({ errors: fetchFulltextTool.errors });
+      const input = fetchFulltextTool.input.parse({ pmids: ['40058719'] });
+      const result = await fetchFulltextTool.handler(input, ctx);
+
+      const entry = result.unavailable?.[0];
+      expect(entry?.reason).toBe('service-error');
+      expect(entry?.unqueriedTiers).toEqual(['unpaywall']);
+      expect(entry?.triedTiers.map((t) => `${t.tier}:${t.outcome}`)).toEqual([
+        'pmc:miss',
+        'europepmc:service-error',
+        'unpaywall:not-attempted',
+      ]);
+    });
+
+    it('advertises unqueriedTiers as optional and no longer declares tier-unconfigured', () => {
+      const base = {
+        id: '40058719',
+        idType: 'pmid',
+        reason: 'no-epmc-fulltext',
+        triedTiers: [{ tier: 'unpaywall', outcome: 'not-attempted' }],
+      };
+      const parse = (entry: unknown) =>
+        fetchFulltextTool.output.safeParse({
+          articles: [],
+          totalReturned: 0,
+          unavailable: [entry],
+        });
+
+      expect(parse(base).success).toBe(true);
+      expect(parse({ ...base, unqueriedTiers: ['europepmc', 'unpaywall'] }).success).toBe(true);
+      expect(parse({ ...base, unqueriedTiers: ['pmc'] }).success).toBe(false);
+      expect(parse({ ...base, reason: 'tier-unconfigured' }).success).toBe(false);
+    });
+  });
+
   describe('Unpaywall fallback for pmids (regression)', () => {
     beforeEach(() => {
       mockGetUnpaywallService.mockReturnValue({
@@ -721,6 +1008,7 @@ describe('fetchFulltextTool', () => {
             { tier: 'europepmc', outcome: 'not-attempted', detail: 'EUROPEPMC_ENABLED=false' },
             { tier: 'unpaywall', outcome: 'no-doi' },
           ],
+          unqueriedTiers: ['europepmc'],
         },
       ]);
       expect(mockUnpaywallResolve).not.toHaveBeenCalled();
@@ -779,6 +1067,7 @@ describe('fetchFulltextTool', () => {
             { tier: 'europepmc', outcome: 'not-attempted', detail: 'EUROPEPMC_ENABLED=false' },
             { tier: 'unpaywall', outcome: 'no-oa', detail: 'No open-access copy indexed' },
           ],
+          unqueriedTiers: ['europepmc'],
         },
       ]);
     });
@@ -803,6 +1092,7 @@ describe('fetchFulltextTool', () => {
             { tier: 'europepmc', outcome: 'not-attempted', detail: 'EUROPEPMC_ENABLED=false' },
             { tier: 'unpaywall', outcome: 'service-error', detail: 'Unpaywall 503' },
           ],
+          unqueriedTiers: ['europepmc'],
         },
       ]);
     });
@@ -830,6 +1120,7 @@ describe('fetchFulltextTool', () => {
             { tier: 'europepmc', outcome: 'not-attempted', detail: 'EUROPEPMC_ENABLED=false' },
             { tier: 'unpaywall', outcome: 'fetch-failed', detail: 'HTTP 503' },
           ],
+          unqueriedTiers: ['europepmc'],
         },
       ]);
     });
@@ -948,6 +1239,7 @@ describe('fetchFulltextTool', () => {
               detail: expect.stringContaining('empty'),
             },
           ],
+          unqueriedTiers: ['europepmc'],
         },
       ]);
     });
@@ -984,6 +1276,7 @@ describe('fetchFulltextTool', () => {
               detail: expect.stringContaining('PDF extraction'),
             },
           ],
+          unqueriedTiers: ['europepmc'],
         },
       ]);
     });
@@ -1016,6 +1309,7 @@ describe('fetchFulltextTool', () => {
             { tier: 'europepmc', outcome: 'not-attempted', detail: 'EUROPEPMC_ENABLED=false' },
             { tier: 'unpaywall', outcome: 'parse-failed', detail: 'extractor crashed' },
           ],
+          unqueriedTiers: ['europepmc'],
         },
       ]);
     });
@@ -1226,6 +1520,8 @@ describe('fetchFulltextTool', () => {
             { tier: 'europepmc', outcome: 'not-attempted', detail: 'EUROPEPMC_ENABLED=false' },
             { tier: 'unpaywall', outcome: 'not-attempted', detail: 'UNPAYWALL_EMAIL is not set' },
           ],
+          // Both fallbacks could have served a DOI; neither was configured.
+          unqueriedTiers: ['europepmc', 'unpaywall'],
         },
       ]);
     });
@@ -1688,8 +1984,11 @@ describe('fetchFulltextTool', () => {
       expect(getEnrichment(ctx).notice).toBeUndefined();
     });
 
-    it('reports a bodyless PMC record as no-body with a recovery notice when nothing recovers it', async () => {
-      // EPMC and Unpaywall are both unconfigured, so the chain ends at PMC.
+    it('keeps the bodyless PMC record in triedTiers and the recovery notice when nothing recovers it', async () => {
+      // EPMC and Unpaywall are both unconfigured, so `reason` stays the content
+      // signal PMC reported, `triedTiers` keeps pmc:no-body, `unqueriedTiers`
+      // records the cut-short search, and the metadata-only recovery notice is
+      // unaffected (#86, #110).
       withBodylessPmcArticle('PMC2600426', '10.1523/JNEUROSCI.3043-08.2008');
 
       const ctx = createMockContext({ errors: fetchFulltextTool.errors });
@@ -1712,6 +2011,7 @@ describe('fetchFulltextTool', () => {
             { tier: 'europepmc', outcome: 'not-attempted', detail: 'EUROPEPMC_ENABLED=false' },
             { tier: 'unpaywall', outcome: 'not-attempted', detail: 'UNPAYWALL_EMAIL is not set' },
           ],
+          unqueriedTiers: ['europepmc', 'unpaywall'],
         },
       ]);
 
@@ -1861,7 +2161,7 @@ describe('fetchFulltextTool', () => {
       expect(result.articles[0]?.source).toBe('unpaywall');
     });
 
-    it('keeps no-doi for a PMCID that resolves to no DOI', async () => {
+    it('reports a PMCID no tier indexes as not-found without calling Unpaywall for a missing DOI', async () => {
       withEpmcAndUnpaywall();
       mockEFetch.mockResolvedValue([{ 'pmc-articleset': [] }]);
       mockEpmcSearch.mockResolvedValue({ hits: [], hitCount: 0, cursorMark: '*' });
@@ -1876,7 +2176,7 @@ describe('fetchFulltextTool', () => {
         {
           id: 'PMC999',
           idType: 'pmcid',
-          reason: 'no-doi',
+          reason: 'not-found',
           triedTiers: [
             { tier: 'pmc', outcome: 'miss' },
             { tier: 'europepmc', outcome: 'miss' },
@@ -2972,5 +3272,441 @@ describe('fetchFulltextTool format() heading escaping (issue #102)', () => {
   it('escapes the identifier fallback heading the same way when no title is present', () => {
     expect(renderPmc(undefined)).toContain('### PMC1');
     expect(renderUnpaywall(undefined)).toContain('### DOI 10.1000/example');
+  });
+});
+
+describe('fetchFulltextTool whole-response budget (issue #100)', () => {
+  beforeEach(() => {
+    mockEFetch.mockReset();
+    mockIdConvert.mockReset();
+    mockParsePmcArticle.mockReset();
+    mockUnpaywallResolve.mockReset();
+    mockUnpaywallFetchContent.mockReset();
+    mockGetUnpaywallService.mockReset();
+    mockEpmcSearch.mockReset();
+    mockEpmcFullTextXml.mockReset();
+    mockEpmcParseFullTextXml.mockReset();
+    mockGetUnpaywallService.mockReturnValue(undefined);
+    mockGetEpmcService.mockReturnValue(undefined);
+  });
+
+  interface StagedArticle {
+    abstract?: string;
+    pmcId: string;
+    references?: { citation: string }[];
+    sections: { title?: string; text: string }[];
+    title?: string;
+  }
+
+  /** Stage one PMC JATS article per entry, parsed in order. */
+  function stagePmc(articles: StagedArticle[]) {
+    mockEFetch.mockResolvedValue([{ 'pmc-articleset': articles.map(() => ({ article: [] })) }]);
+    for (const a of articles) {
+      mockParsePmcArticle.mockReturnValueOnce({
+        pmcId: a.pmcId,
+        pmcUrl: `https://www.ncbi.nlm.nih.gov/pmc/articles/${a.pmcId}/`,
+        title: a.title ?? `Article ${a.pmcId}`,
+        ...(a.abstract !== undefined && { abstract: a.abstract }),
+        sections: a.sections,
+        ...(a.references && { references: a.references }),
+      });
+    }
+  }
+
+  const run = async (
+    input: Record<string, unknown>,
+    ctx = createMockContext({ errors: fetchFulltextTool.errors }),
+  ) => ({
+    result: await fetchFulltextTool.handler(fetchFulltextTool.input.parse(input), ctx),
+    ctx,
+  });
+
+  /** Serialized size of each returned article record — the unit the budget spends. */
+  const sizesOf = (result: { articles: unknown[] }) =>
+    result.articles.map((a) => JSON.stringify(a).length);
+
+  it('returns a byte-identical response when no maxResponseCharacters is supplied', async () => {
+    stagePmc([
+      { pmcId: 'PMC1', abstract: 'Abs one.', sections: [{ title: 'Intro', text: 'Body one.' }] },
+    ]);
+
+    const { result, ctx } = await run({ pmcids: ['PMC1'] });
+    const text = textBlocks(fetchFulltextTool.format!(result))[0]?.text ?? '';
+
+    expect(JSON.stringify(result)).toBe(
+      '{"articles":[{"source":"pmc","viaSource":"pmc","pmcId":"PMC1","pmcUrl":"https://www.ncbi.nlm.nih.gov/pmc/articles/PMC1/","title":"Article PMC1","abstract":"Abs one.","sections":[{"title":"Intro","text":"Body one."}]}],"totalReturned":1}',
+    );
+    expect(text).toBe(
+      [
+        '## Full-Text Articles',
+        '**Articles Returned:** 1',
+        '',
+        '### Article PMC1',
+        '**Source:** PMC (structured JATS)',
+        '**PMCID:** PMC1',
+        '**PMC:** https://www.ncbi.nlm.nih.gov/pmc/articles/PMC1/',
+        '',
+        '#### Abstract',
+        'Abs one.',
+        '',
+        '#### Intro',
+        'Body one.',
+      ].join('\n'),
+    );
+    expect(result.deferred).toBeUndefined();
+    expect(getEnrichment(ctx).truncated).toBeUndefined();
+  });
+
+  it('returns every article when the batch exactly meets the ceiling, and defers one character over', async () => {
+    const staged: StagedArticle[] = [
+      { pmcId: 'PMC1', sections: [{ title: 'Intro', text: 'A'.repeat(200) }] },
+      { pmcId: 'PMC2', sections: [{ title: 'Intro', text: 'B'.repeat(200) }] },
+    ];
+    stagePmc(staged);
+    const sizes = sizesOf((await run({ pmcids: ['PMC1', 'PMC2'] })).result);
+    const total = sizes.reduce((n, s) => n + s, 0);
+
+    stagePmc(staged);
+    const atCeiling = (await run({ pmcids: ['PMC1', 'PMC2'], maxResponseCharacters: total }))
+      .result;
+    expect(atCeiling.totalReturned).toBe(2);
+    expect(atCeiling.deferred).toBeUndefined();
+
+    stagePmc(staged);
+    const { result, ctx } = await run({
+      pmcids: ['PMC1', 'PMC2'],
+      maxResponseCharacters: total - 1,
+    });
+    expect(result.totalReturned).toBe(1);
+    expect(result.deferred).toEqual({
+      maxResponseCharacters: total - 1,
+      returnedCharacters: sizes[0],
+      deferredCount: 1,
+      idType: 'pmcid',
+      ids: ['PMC2'],
+      nextDeferredCharacters: sizes[1],
+    });
+    expect(getEnrichment(ctx).truncated).toBe(true);
+  });
+
+  it('trips the whole-response ceiling even when no single body budget would', async () => {
+    const staged: StagedArticle[] = [
+      { pmcId: 'PMC1', sections: [{ title: 'Intro', text: 'A'.repeat(400) }] },
+      { pmcId: 'PMC2', sections: [{ title: 'Intro', text: 'B'.repeat(400) }] },
+      { pmcId: 'PMC3', sections: [{ title: 'Intro', text: 'C'.repeat(400) }] },
+    ];
+    stagePmc(staged);
+    const sizes = sizesOf((await run({ pmcids: ['PMC1', 'PMC2', 'PMC3'] })).result);
+
+    stagePmc(staged);
+    // Every body is well under maxCharacters, so the per-article budget never
+    // fires — the response-wide ceiling is what bounds the payload.
+    const { result } = await run({
+      pmcids: ['PMC1', 'PMC2', 'PMC3'],
+      maxCharacters: 1000,
+      maxResponseCharacters: (sizes[0] ?? 0) + (sizes[1] ?? 0),
+    });
+
+    expect(result.truncation).toBeUndefined();
+    expect(result.totalReturned).toBe(2);
+    expect(result.deferred?.ids).toEqual(['PMC3']);
+  });
+
+  it('counts abstract and reference citation text, not just body sections', async () => {
+    const staged: StagedArticle[] = [
+      { pmcId: 'PMC1', sections: [{ title: 'Intro', text: 'A'.repeat(50) }] },
+      {
+        pmcId: 'PMC2',
+        abstract: 'Q'.repeat(2000),
+        sections: [{ title: 'Intro', text: 'B'.repeat(10) }],
+        references: [{ citation: 'R'.repeat(2000) }],
+      },
+    ];
+    stagePmc(staged);
+    const sizes = sizesOf(
+      (await run({ pmcids: ['PMC1', 'PMC2'], includeReferences: true })).result,
+    );
+
+    // The second record is thousands of characters despite a 10-character body.
+    expect(sizes[1]).toBeGreaterThan(4000);
+
+    stagePmc(staged);
+    const { result } = await run({
+      pmcids: ['PMC1', 'PMC2'],
+      includeReferences: true,
+      // Room for many copies of PMC2's body, but not for its abstract and
+      // references — which the ledger counts.
+      maxResponseCharacters: (sizes[0] ?? 0) + 1000,
+    });
+
+    expect(result.totalReturned).toBe(1);
+    expect(result.deferred?.ids).toEqual(['PMC2']);
+    expect(JSON.stringify(result)).not.toContain('R'.repeat(50));
+  });
+
+  it('shares one ledger across a mixed PMC and Unpaywall batch', async () => {
+    mockIdConvert.mockResolvedValue([
+      { 'requested-id': '1', pmid: '1', pmcid: 'PMC100' },
+      { 'requested-id': '2', pmid: '2' },
+    ]);
+    const stageMixed = () => {
+      mockParsePmcArticle.mockReturnValue({
+        pmcId: 'PMC100',
+        pmcUrl: 'https://www.ncbi.nlm.nih.gov/pmc/articles/PMC100/',
+        pmid: '1',
+        title: 'PMC Hit',
+        sections: [{ title: 'Intro', text: 'A'.repeat(300) }],
+      });
+      mockEFetchBy({
+        pmc: [{ 'pmc-articleset': [{ article: [] }] }],
+        pubmedDois: { '2': '10.1000/two' },
+      });
+      mockGetUnpaywallService.mockReturnValue({
+        resolve: mockUnpaywallResolve,
+        fetchContent: mockUnpaywallFetchContent,
+      });
+      mockUnpaywallResolve.mockResolvedValue({
+        kind: 'found',
+        location: { url: 'https://repo.example.org/two' },
+      });
+      mockUnpaywallFetchContent.mockResolvedValue({
+        kind: 'html',
+        fetchedUrl: 'https://repo.example.org/two',
+        body: '<html><body>Two</body></html>',
+      });
+      mockHtmlExtract.mockResolvedValue({ title: 'Two', content: 'Z'.repeat(300) });
+    };
+
+    stageMixed();
+    const sizes = sizesOf((await run({ pmids: ['1', '2'] })).result);
+
+    stageMixed();
+    const { result, ctx } = await run({
+      pmids: ['1', '2'],
+      maxResponseCharacters: sizes[0],
+    });
+
+    // One budget, not one per source: the Unpaywall-served article is deferred
+    // by characters the PMC-served article already spent.
+    expect(result.articles.map((a) => a.source)).toEqual(['pmc']);
+    expect(result.deferred).toEqual({
+      maxResponseCharacters: sizes[0],
+      returnedCharacters: sizes[0],
+      deferredCount: 1,
+      idType: 'pmid',
+      ids: ['2'],
+      nextDeferredCharacters: sizes[1],
+    });
+    expect(result.unavailable).toBeUndefined();
+    expect(getEnrichment(ctx).notice).toContain('2');
+  });
+
+  it('reports deferred PMC-served articles under the PMIDs the caller requested', async () => {
+    mockIdConvert.mockResolvedValue([
+      { 'requested-id': '1', pmid: '1', pmcid: 'PMC10' },
+      { 'requested-id': '2', pmid: '2', pmcid: 'PMC20' },
+    ]);
+    const staged: StagedArticle[] = [
+      { pmcId: 'PMC10', sections: [{ title: 'Intro', text: 'A'.repeat(200) }] },
+      { pmcId: 'PMC20', sections: [{ title: 'Intro', text: 'B'.repeat(200) }] },
+    ];
+    stagePmc(staged);
+    const sizes = sizesOf((await run({ pmids: ['1', '2'] })).result);
+
+    mockParsePmcArticle.mockReset();
+    stagePmc(staged);
+    const { result } = await run({ pmids: ['1', '2'], maxResponseCharacters: sizes[0] });
+
+    // The article carries PMC20; the caller asked by PMID and can only resume
+    // with one.
+    expect(result.deferred?.idType).toBe('pmid');
+    expect(result.deferred?.ids).toEqual(['2']);
+  });
+
+  it('reports deferred DOIs in the form the caller supplied', async () => {
+    mockIdConvert.mockResolvedValue([
+      { 'requested-id': '10.1000/one' },
+      { 'requested-id': '10.1000/two' },
+    ]);
+    const stageDois = () => {
+      mockGetUnpaywallService.mockReturnValue({
+        resolve: mockUnpaywallResolve,
+        fetchContent: mockUnpaywallFetchContent,
+      });
+      mockUnpaywallResolve.mockResolvedValue({
+        kind: 'found',
+        location: { url: 'https://repo.example.org/paper' },
+      });
+      mockUnpaywallFetchContent.mockResolvedValue({
+        kind: 'html',
+        fetchedUrl: 'https://repo.example.org/paper',
+        body: '<html><body>Paper</body></html>',
+      });
+      mockHtmlExtract.mockResolvedValue({ title: 'Paper', content: 'Y'.repeat(300) });
+    };
+
+    stageDois();
+    const sizes = sizesOf((await run({ dois: ['10.1000/one', '10.1000/two'] })).result);
+
+    stageDois();
+    const { result } = await run({
+      dois: ['10.1000/one', '10.1000/two'],
+      maxResponseCharacters: sizes[0],
+    });
+
+    expect(result.totalReturned).toBe(1);
+    expect(result.deferred?.idType).toBe('doi');
+    expect(result.deferred?.ids).toEqual(['10.1000/two']);
+  });
+
+  it('resumes exactly where the previous call stopped when re-called with the deferred ids', async () => {
+    const staged: StagedArticle[] = [
+      { pmcId: 'PMC1', sections: [{ title: 'Intro', text: 'A'.repeat(200) }] },
+      { pmcId: 'PMC2', sections: [{ title: 'Intro', text: 'B'.repeat(200) }] },
+    ];
+    stagePmc(staged);
+    const sizes = sizesOf((await run({ pmcids: ['PMC1', 'PMC2'] })).result);
+
+    stagePmc(staged);
+    const first = (await run({ pmcids: ['PMC1', 'PMC2'], maxResponseCharacters: sizes[0] })).result;
+    const deferredIds = first.deferred?.ids ?? [];
+    expect(deferredIds).toEqual(['PMC2']);
+
+    mockParsePmcArticle.mockReset();
+    stagePmc(staged.filter((a) => deferredIds.includes(a.pmcId)));
+    const second = (await run({ pmcids: deferredIds })).result;
+
+    const seen = [...first.articles, ...second.articles].map((a) =>
+      a.source === 'pmc' ? a.pmcId : a.doi,
+    );
+    expect(seen).toEqual(['PMC1', 'PMC2']);
+    expect(second.deferred).toBeUndefined();
+  });
+
+  it('composes with a sections filter that selects past the end of an article', async () => {
+    const staged: StagedArticle[] = [
+      {
+        pmcId: 'PMC1',
+        sections: [
+          { title: 'Intro', text: 'A'.repeat(200) },
+          { title: 'Methods', text: 'M'.repeat(200) },
+        ],
+      },
+      { pmcId: 'PMC2', sections: [{ title: 'Intro', text: 'B'.repeat(200) }] },
+    ];
+    // `maxSections` past the end and a `sections` filter that keeps one heading:
+    // the budget measures the records as filtered, not as fetched.
+    stagePmc(staged);
+    const filtered = { pmcids: ['PMC1', 'PMC2'], sections: ['intro'], maxSections: 50 };
+    const sizes = sizesOf((await run(filtered)).result);
+
+    stagePmc(staged);
+    const { result } = await run({ ...filtered, maxResponseCharacters: sizes[0] });
+
+    const kept = result.articles[0];
+    expect(kept?.source).toBe('pmc');
+    if (kept?.source === 'pmc') expect(kept.sections.map((s) => s.title)).toEqual(['Intro']);
+    expect(JSON.stringify(result.articles)).not.toContain('M'.repeat(200));
+    expect(result.deferred?.ids).toEqual(['PMC2']);
+    expect(result.deferred?.returnedCharacters).toBe(sizes[0]);
+  });
+
+  it('returns zero articles with the full deferred list when the ceiling is under the first article', async () => {
+    const staged: StagedArticle[] = [
+      { pmcId: 'PMC1', sections: [{ title: 'Intro', text: 'A'.repeat(400) }] },
+      { pmcId: 'PMC2', sections: [{ title: 'Intro', text: 'B'.repeat(200) }] },
+    ];
+    stagePmc(staged);
+    const sizes = sizesOf((await run({ pmcids: ['PMC1', 'PMC2'] })).result);
+    // PMC2 is the smaller record, but the cut is a prefix cut: a ceiling that
+    // clears PMC2 alone still returns nothing, so the number the caller needs
+    // is PMC1's — the article the response stopped at.
+    expect(sizes[1]).toBeLessThan(sizes[0] ?? 0);
+
+    stagePmc(staged);
+    const { result, ctx } = await run({ pmcids: ['PMC1', 'PMC2'], maxResponseCharacters: 1 });
+
+    expect(result.articles).toEqual([]);
+    expect(result.totalReturned).toBe(0);
+    expect(result.deferred).toEqual({
+      maxResponseCharacters: 1,
+      returnedCharacters: 0,
+      deferredCount: 2,
+      idType: 'pmcid',
+      ids: ['PMC1', 'PMC2'],
+      nextDeferredCharacters: sizes[0],
+    });
+    const notice = getEnrichment(ctx).notice ?? '';
+    expect(notice).toContain(String(sizes[0]));
+    expect(notice).toContain('maxResponseCharacters');
+
+    // The empty-result blockquote claims nothing was retrievable — wrong here.
+    const text = textBlocks(fetchFulltextTool.format!(result))[0]?.text ?? '';
+    expect(text).not.toContain('No full-text articles returned');
+    expect(text).toContain('PMC1, PMC2');
+  });
+
+  it('drops the per-article body accounting for articles it defers', async () => {
+    const staged: StagedArticle[] = [
+      { pmcId: 'PMC1', sections: [{ title: 'Intro', text: 'A'.repeat(900) }] },
+      {
+        pmcId: 'PMC2',
+        sections: [
+          { title: 'Intro', text: 'B'.repeat(900) },
+          { title: 'Methods', text: 'C'.repeat(900) },
+        ],
+      },
+    ];
+    stagePmc(staged);
+    const sizes = sizesOf((await run({ pmcids: ['PMC1', 'PMC2'], maxCharacters: 100 })).result);
+
+    stagePmc(staged);
+    const { result } = await run({
+      pmcids: ['PMC1', 'PMC2'],
+      maxCharacters: 100,
+      maxResponseCharacters: sizes[0],
+    });
+
+    // PMC2 never reaches the caller, so neither does its truncation accounting
+    // or the section its body budget dropped.
+    expect(result.truncation?.articles.map((a) => a.id)).toEqual(['PMC1']);
+    expect(result.truncation?.originalCharacters).toBe(900);
+    expect(result.truncation?.returnedCharacters).toBe(100);
+    expect(result.truncation?.omittedSections).toBe(0);
+    expect(result.deferred?.ids).toEqual(['PMC2']);
+  });
+
+  it('renders the same deferral state in content[] that structuredContent carries', async () => {
+    const staged: StagedArticle[] = [
+      { pmcId: 'PMC1', sections: [{ title: 'Intro', text: 'A'.repeat(200) }] },
+      { pmcId: 'PMC2', sections: [{ title: 'Intro', text: 'B'.repeat(200) }] },
+    ];
+    stagePmc(staged);
+    const sizes = sizesOf((await run({ pmcids: ['PMC1', 'PMC2'] })).result);
+
+    stagePmc(staged);
+    const { result } = await run({ pmcids: ['PMC1', 'PMC2'], maxResponseCharacters: sizes[0] });
+    const text = textBlocks(fetchFulltextTool.format!(result))[0]?.text ?? '';
+
+    expect(text).toContain('**Articles Returned:** 1');
+    expect(text).toContain(`${result.deferred?.deferredCount} article(s)`);
+    expect(text).toContain(String(result.deferred?.returnedCharacters));
+    expect(text).toContain(String(result.deferred?.maxResponseCharacters));
+    expect(text).toContain(String(result.deferred?.nextDeferredCharacters));
+    expect(text).toContain('pmcid');
+    expect(text).toContain('PMC2');
+    expect(text).not.toContain('B'.repeat(200));
+  });
+
+  it('rejects a zero, negative, or fractional maxResponseCharacters', () => {
+    for (const value of [0, -1, 1.5]) {
+      expect(
+        fetchFulltextTool.input.safeParse({ pmcids: ['PMC1'], maxResponseCharacters: value })
+          .success,
+      ).toBe(false);
+    }
+    expect(
+      fetchFulltextTool.input.safeParse({ pmcids: ['PMC1'], maxResponseCharacters: 1 }).success,
+    ).toBe(true);
   });
 });

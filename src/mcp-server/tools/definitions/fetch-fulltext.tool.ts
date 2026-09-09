@@ -50,6 +50,7 @@ import {
   getUnpaywallService,
   type UnpaywallService,
 } from '@/services/unpaywall/unpaywall-service.js';
+import { fitWholeItems } from './_budget.js';
 import { conceptMeta, EDAM_DATA_RETRIEVAL, SCHEMA_SCHOLARLY_ARTICLE } from './_concepts.js';
 import { pmidStringSchema } from './_schemas.js';
 import { escapeMarkdownInline, sliceCodeUnits } from './_text.js';
@@ -323,6 +324,9 @@ const ArticleSchema = z
     'Full-text article; shape depends on `source` (pmc = structured JATS, unpaywall = best-effort)',
   );
 
+/** A returned article of either shape — the unit the whole-response budget defers. */
+type FulltextArticle = z.infer<typeof ArticleSchema>;
+
 const UnavailableReasonSchema = z
   .enum([
     'not-found',
@@ -336,8 +340,12 @@ const UnavailableReasonSchema = z
     'service-error',
   ])
   .describe(
-    'Why no full text was returned. not-found: upstream returned no record for this ID. no-pmc-fallback-disabled: every tier was skipped (`triedTiers` is all `not-attempted`) — typically because EPMC (`EUROPEPMC_ENABLED`) and Unpaywall (`UNPAYWALL_EMAIL`) are not configured. no-epmc-fulltext: EPMC indexed the record but publishes no fullTextXML. no-body: the record was retrieved but carries front matter and abstract only, with no body sections — use `pubmed_fetch_articles` for the metadata. no-doi: no DOI to query Unpaywall. no-oa: Unpaywall has no OA copy. fetch-failed: download failed. parse-failed: extraction empty. service-error: upstream server failure (threw, timed out, or returned malformed data).',
+    'Why no full text was returned — the most specific signal any tier that answered reported. not-found: upstream returned no record for this ID. no-pmc-fallback-disabled: every tier was skipped (`triedTiers` is all `not-attempted`) — typically because EPMC (`EUROPEPMC_ENABLED`) and Unpaywall (`UNPAYWALL_EMAIL`) are not configured. no-epmc-fulltext: EPMC indexed the record but publishes no fullTextXML. no-body: the record was retrieved but carries front matter and abstract only, with no body sections — use `pubmed_fetch_articles` for the metadata. no-doi: no DOI to query Unpaywall. no-oa: Unpaywall has no OA copy. fetch-failed: download failed. parse-failed: extraction empty. service-error: upstream server failure (threw, timed out, or returned malformed data). A reason never means the chain ran to completion — read `unqueriedTiers` for that.',
   );
+
+const UnqueriedTierSchema = z
+  .enum(['europepmc', 'unpaywall'])
+  .describe('A fallback tier this deployment has not configured');
 
 const TierOutcomeSchema = z
   .enum([
@@ -374,6 +382,12 @@ const UnavailableSchema = z
       .array(TriedTierSchema)
       .describe(
         'Per-tier outcomes the chain produced for this id, in execution order. Covers `pmc`, `europepmc`, and `unpaywall` — the same tiers the tool description references. Tiers that the chain skipped appear as `outcome: not-attempted` with a `detail` explaining why.',
+      ),
+    unqueriedTiers: z
+      .array(UnqueriedTierSchema)
+      .optional()
+      .describe(
+        'Tiers the chain skipped because this deployment has not configured them, and that could have served this id — the search was incomplete, and a deployment with these tiers configured may still resolve the id. `triedTiers` carries which environment variable each one is waiting on. Absent when every tier that could have served the id was actually queried; a tier skipped because it was inapplicable to this id (no DOI for Unpaywall) is never listed.',
       ),
   })
   .describe('One identifier that could not be returned, with the full chain it traversed');
@@ -449,6 +463,37 @@ const TruncationSchema = z
   })
   .describe(
     'Character accounting for full text the budget shortened. Present only when a budget actually removed characters — its absence means every returned article carries its full post-filter body.',
+  );
+
+const DeferredSchema = z
+  .object({
+    maxResponseCharacters: z
+      .number()
+      .describe('The `maxResponseCharacters` ceiling this response was budgeted against'),
+    returnedCharacters: z
+      .number()
+      .describe('Serialized characters the returned article records account for'),
+    deferredCount: z
+      .number()
+      .describe('Articles the chain resolved but withheld to stay under the ceiling'),
+    idType: z
+      .enum(['pmid', 'pmcid', 'doi'])
+      .describe(
+        'Which input branch the deferred ids belong to — re-submit them as `pmids`, `pmcids`, or `dois` respectively. Matches the `idType` on `unavailable` entries.',
+      ),
+    ids: z
+      .array(z.string())
+      .describe(
+        'Identifiers of the deferred articles, in response order, keyed as they were requested (PMC IDs in `PMC<digits>` form). Re-call `pubmed_fetch_fulltext` with these under the `idType` branch and the same other inputs. Never contains an id from `unavailable`.',
+      ),
+    nextDeferredCharacters: z
+      .number()
+      .describe(
+        'Serialized size of the next deferred article — the first entry in `ids`, where the response stopped. Raise `maxResponseCharacters` to at least this to make progress; a smaller article further down `ids` cannot be reached until this one fits.',
+      ),
+  })
+  .describe(
+    'Continuation state for articles the whole-response budget withheld. Present only when `maxResponseCharacters` deferred at least one article.',
   );
 
 // ─── Character budget ────────────────────────────────────────────────────────
@@ -664,6 +709,36 @@ function buildTruncationNotice(truncation: z.infer<typeof TruncationSchema>): st
   return `Full text was shortened to fit the requested character budget: ${truncation.returnedCharacters} of ${truncation.originalCharacters} body characters returned across ${subject} in ${truncation.mode} mode.${omitted} See \`truncation\` for per-article and per-section counts, and raise ${knobs.join(' or ')} or narrow \`sections\` to retrieve more.`;
 }
 
+/**
+ * Compose the recovery notice for articles the whole-response budget withheld.
+ * Names what was spent, which identifiers are still retrievable, and the ceiling
+ * the next call has to clear — so a caller reading only `content[]` can resume
+ * without inspecting `deferred`. (#100)
+ */
+function buildDeferralNotice(deferred: z.infer<typeof DeferredSchema>): string {
+  const spent =
+    deferred.returnedCharacters === 0
+      ? `No article fits the requested maxResponseCharacters of ${deferred.maxResponseCharacters}, so none were returned.`
+      : `Response character budget reached: ${deferred.returnedCharacters} of ${deferred.maxResponseCharacters} characters returned.`;
+  return `${spent} ${deferred.deferredCount} resolved article(s) were deferred whole: ${deferred.ids.join(', ')}. Re-call pubmed_fetch_fulltext with those ids under \`${deferred.idType}s\` to retrieve them, or raise maxResponseCharacters to at least ${deferred.nextDeferredCharacters} — the size of the next deferred article.`;
+}
+
+/**
+ * Body sections an article's per-article budget dropped, derived from that
+ * article's own accounting by the rule {@link applyPmcBudget} counts by:
+ * `outline` mode keeps every heading, so it drops none. Used to take a deferred
+ * article's contribution back out of the response-level roll-up. (#100)
+ */
+function countOmittedSections(
+  entry: z.infer<typeof TruncatedArticleSchema>,
+  mode: 'truncate' | 'outline',
+): number {
+  if (mode !== 'truncate') return 0;
+  return (entry.sections ?? []).filter(
+    (s) => s.originalCharacters > 0 && s.returnedCharacters === 0,
+  ).length;
+}
+
 // ─── Tool Definition ─────────────────────────────────────────────────────────
 
 /**
@@ -705,8 +780,10 @@ export function buildFulltextDescription(tiers: {
           ? '; DOIs with no PMC copy recover via Unpaywall open access'
           : '';
   const input = `Provide exactly one of \`pmcids\` (PMC IDs directly), \`pmids\` (PubMed IDs, auto-resolved), or \`dois\` (DOIs, auto-resolved to PMC via the ID Converter${doiTail}).`;
+  const budget =
+    'Two independent character controls: `maxCharacters` caps body text per article, `maxResponseCharacters` caps the whole response and defers articles past the ceiling whole, listing them in `deferred.ids` for a follow-up call.';
 
-  return `${base} ${fallback} ${input}`;
+  return `${base} ${fallback} ${input} ${budget}`;
 }
 
 const serverConfig = getServerConfig();
@@ -784,7 +861,7 @@ export const fetchFulltextTool = tool('pubmed_fetch_fulltext', {
         .max(1_000_000)
         .optional()
         .describe(
-          'Per-article budget for body text, in characters. Counts `source=pmc` section and subsection text, or the `source=unpaywall` `content` body; titles, abstracts, identifiers, and references are never counted or shortened. Applied after `sections`, `maxSections`, and `includeReferences`, so semantic filtering is unaffected. The response-wide ceiling is this value times the number of articles returned. Omit for the full body.',
+          'Per-article budget for body text, in characters. Counts `source=pmc` section and subsection text, or the `source=unpaywall` `content` body; titles, abstracts, identifiers, and references are never counted or shortened. Applied after `sections`, `maxSections`, and `includeReferences`, so semantic filtering is unaffected. This knob alone bounds only bodies: the response-wide ceiling it implies is this value times the number of articles returned, plus every uncounted field. Use `maxResponseCharacters` for a true whole-response ceiling. Omit for the full body.',
         ),
       maxCharactersPerSection: z
         .number()
@@ -794,6 +871,15 @@ export const fetchFulltextTool = tool('pubmed_fetch_fulltext', {
         .optional()
         .describe(
           'Budget for a single top-level body section, in characters, counting the section text plus its subsections. Combine with `maxCharacters` to cap both one section and the article; the tighter of the two wins. Applies to `source=pmc` results only.',
+        ),
+      maxResponseCharacters: z
+        .number()
+        .int()
+        .min(1)
+        .max(1_000_000)
+        .optional()
+        .describe(
+          'Opt-in ceiling for the whole response, in characters — the true response-wide counterpart to the per-article `maxCharacters`. Each article is measured as the JSON record it is returned as, after every filter and the per-article body budget: title, abstract, body sections, references, identifiers, license and source metadata — every field it carries. One ledger covers all tiers, so PMC-, Europe PMC-, and Unpaywall-served articles spend the same budget. Articles are kept in response order until the next one would cross the ceiling; that article and the rest are deferred whole (never partially populated) and listed in `deferred.ids`. Response envelope fields — counts, `unavailable`, `truncation`, `deferred` itself — are not counted. Omit to return every resolved article.',
         ),
       overflowMode: z
         .enum(['truncate', 'outline'])
@@ -808,33 +894,39 @@ export const fetchFulltextTool = tool('pubmed_fetch_fulltext', {
 
   output: z.object({
     articles: z.array(ArticleSchema).describe('Full-text articles'),
-    totalReturned: z.number().describe('Number of articles returned'),
+    totalReturned: z
+      .number()
+      .describe(
+        'Number of articles in this response. Under a `maxResponseCharacters` budget this counts the kept articles only; `deferred.deferredCount` covers the rest.',
+      ),
     unavailable: z
       .array(UnavailableSchema)
       .optional()
       .describe(
-        'Per-identifier explanations for any requested PMIDs, PMCIDs, or DOIs with no returnable full text. `idType` discriminates which branch the id came from.',
+        'Per-identifier explanations for any requested PMIDs, PMCIDs, or DOIs with no returnable full text. `idType` discriminates which branch the id came from. Distinct from `deferred`: nothing here is retrievable by re-calling, and an id never appears in both.',
       ),
     truncation: TruncationSchema.optional(),
+    deferred: DeferredSchema.optional(),
   }),
 
-  // Recovery guidance for three cases — a `sections` filter that removed every
+  // Recovery guidance for four cases — a `sections` filter that removed every
   // body section (#80), a record the chain could only retrieve as front matter
-  // (#86), and a body the character budget shortened (#81). Agent-facing context
-  // surfaced via ctx.enrich.notice() to structuredContent and content[]; absent
-  // when none applies.
+  // (#86), a body the per-article character budget shortened (#81), and articles
+  // the whole-response budget withheld (#100). Agent-facing context surfaced via
+  // ctx.enrich.notice() to structuredContent and content[]; absent when none
+  // applies.
   enrichment: {
     notice: z
       .string()
       .optional()
       .describe(
-        'Optional guidance for a partial or empty body. A `sections`-filter miss names the requested terms and affected article id(s) and suggests retrying without `sections` or using broader headings. A metadata-only record names the id(s) the chain could retrieve as front matter only and points at `pubmed_fetch_articles` for the abstract. A budgeted response names the characters returned versus carried and points at `truncation`. Absent when none of those applies.',
+        'Optional guidance for a partial or empty body. A `sections`-filter miss names the requested terms and affected article id(s) and suggests retrying without `sections` or using broader headings. A metadata-only record names the id(s) the chain could retrieve as front matter only and points at `pubmed_fetch_articles` for the abstract. A budgeted response names the characters returned versus carried and points at `truncation`. A response-wide budget that deferred articles names the ids to re-request. Absent when none of those applies.',
       ),
     truncated: z
       .boolean()
       .optional()
       .describe(
-        'True when a character budget shortened at least one returned body. Absent when every returned article carries its full post-filter body. The per-article accounting is in `truncation`.',
+        'True when a character budget shortened at least one returned body, or withheld a whole article. Absent when every resolved article is present with its full post-filter body. The per-article body accounting is in `truncation`; the withheld ids are in `deferred`.',
       ),
   },
 
@@ -853,6 +945,17 @@ export const fetchFulltextTool = tool('pubmed_fetch_fulltext', {
     // for, so we can skip them when building `unavailable[]`.
     const chainByInput = new Map<string, z.infer<typeof TriedTierSchema>[]>();
     const recoveredIds = new Set<string>();
+    // Per-input-id set of tiers this deployment has not configured AND that
+    // could have served that id — the `unqueriedTiers` array on unavailable
+    // entries. Insertion order is chain order, so the array reads in the order
+    // the tiers would have run. A tier skipped as inapplicable is never marked;
+    // that is a settled answer, not an incomplete search. (#110)
+    const unqueriedByInput = new Map<string, Set<z.infer<typeof UnqueriedTierSchema>>>();
+    const markUnqueried = (inputId: string, tier: z.infer<typeof UnqueriedTierSchema>) => {
+      const tiers = unqueriedByInput.get(inputId) ?? new Set<z.infer<typeof UnqueriedTierSchema>>();
+      tiers.add(tier);
+      unqueriedByInput.set(inputId, tiers);
+    };
     // Back-map from a converter-resolved prefixed PMCID to the input id that
     // seeded it — a PMID for `pmids` input, a DOI for `dois` input — so the PMC
     // and EPMC stages attribute recoveries and misses to the original input id.
@@ -873,6 +976,11 @@ export const fetchFulltextTool = tool('pubmed_fetch_fulltext', {
     // requested or nothing exceeded it (#81).
     const truncatedArticles: z.infer<typeof TruncatedArticleSchema>[] = [];
     let omittedSections = 0;
+    // The input id each returned article was requested under, so the
+    // whole-response budget can hand deferred articles back as identifiers the
+    // caller can re-submit rather than whatever id the article happens to
+    // carry — a `pmids` request recovers articles keyed by PMCID. (#100)
+    const inputIdByArticle = new Map<FulltextArticle, string>();
 
     const budget: BudgetOptions = {
       overflowMode: input.overflowMode,
@@ -1042,7 +1150,15 @@ export const fetchFulltextTool = tool('pubmed_fetch_fulltext', {
               ...budgeted.truncation,
             });
           }
-          parsed.push({ source: 'pmc' as const, viaSource: 'pmc' as const, ...budgeted.article });
+          const article = {
+            source: 'pmc' as const,
+            viaSource: 'pmc' as const,
+            ...budgeted.article,
+          };
+          parsed.push(article);
+          if (article.pmcId) {
+            inputIdByArticle.set(article, pmcidToInputId.get(article.pmcId) ?? article.pmcId);
+          }
         }
         pmcArticles = parsed;
 
@@ -1106,11 +1222,15 @@ export const fetchFulltextTool = tool('pubmed_fetch_fulltext', {
           sectionFilterMisses: [],
           truncatedArticles: [],
           omittedSections: 0,
+          articleInputIds: new Map<z.infer<typeof PmcArticleSchema>, string>(),
         };
 
     pmcArticles = pmcArticles.concat(epmcOutcomes.articles);
     truncatedArticles.push(...epmcOutcomes.truncatedArticles);
     omittedSections += epmcOutcomes.omittedSections;
+    for (const [article, candidateId] of epmcOutcomes.articleInputIds) {
+      inputIdByArticle.set(article, pmcidToInputId.get(candidateId) ?? candidateId);
+    }
 
     // Fold EPMC outcomes into each id's chain. EPMC-served articles count as
     // recovered, so their ids are added to `recoveredIds` here.
@@ -1120,12 +1240,18 @@ export const fetchFulltextTool = tool('pubmed_fetch_fulltext', {
         outcome: 'not-attempted' as const,
         detail: 'EUROPEPMC_ENABLED=false',
       };
-      for (const c of pmidFallbackCandidates) chainByInput.get(c.pmid)?.push(epmcDisabledEntry);
+      // EPMC searches by PMID, PMCID, and DOI alike, so it could have served
+      // every candidate that reached this stage — no applicability test.
+      const skipEpmc = (inputId: string) => {
+        chainByInput.get(inputId)?.push(epmcDisabledEntry);
+        markUnqueried(inputId, 'europepmc');
+      };
+      for (const c of pmidFallbackCandidates) skipEpmc(c.pmid);
       for (const c of pmcidFallbackCandidates) {
         const prefixed = withPmcPrefix(c.pmcid);
-        chainByInput.get(pmcidToInputId.get(prefixed) ?? prefixed)?.push(epmcDisabledEntry);
+        skipEpmc(pmcidToInputId.get(prefixed) ?? prefixed);
       }
-      for (const c of doiCandidates) chainByInput.get(c.doi)?.push(epmcDisabledEntry);
+      for (const c of doiCandidates) skipEpmc(c.doi);
     } else {
       const foldEpmcOutcome = (inputId: string, outcome: EpmcCandidateOutcome) => {
         if (outcome.kind === 'hit') {
@@ -1157,13 +1283,19 @@ export const fetchFulltextTool = tool('pubmed_fetch_fulltext', {
     // Converter, which returns DOIs for PMC-indexed records. (#88)
     if (pmcidFallbackCandidates.length > 0) {
       if (!unpaywall) {
+        // The PMCID → DOI lookup below only runs when Unpaywall is configured,
+        // so a candidate arrives here with a DOI only if the EPMC stage handed
+        // one over. An absent DOI therefore means "never looked up", not "this
+        // record has none" — the tier stays a genuine unknown and is marked.
         for (const c of pmcidFallbackCandidates) {
           const prefixed = withPmcPrefix(c.pmcid);
-          chainByInput.get(pmcidToInputId.get(prefixed) ?? prefixed)?.push({
+          const inputId = pmcidToInputId.get(prefixed) ?? prefixed;
+          chainByInput.get(inputId)?.push({
             tier: 'unpaywall',
             outcome: 'not-attempted',
             detail: 'UNPAYWALL_EMAIL is not set',
           });
+          markUnqueried(inputId, 'unpaywall');
         }
       } else {
         const needDoi = pmcidFallbackCandidates
@@ -1213,6 +1345,7 @@ export const fetchFulltextTool = tool('pubmed_fetch_fulltext', {
           const inputId = pmcidToInputId.get(pmcId) ?? pmcId;
           if ('article' in result) {
             fallbackArticles.push(result.article);
+            inputIdByArticle.set(result.article, inputId);
             if (result.truncation) truncatedArticles.push(result.truncation);
             recoveredIds.add(inputId);
           } else {
@@ -1249,12 +1382,20 @@ export const fetchFulltextTool = tool('pubmed_fetch_fulltext', {
       }
 
       if (!unpaywall) {
+        // `fetchPubmedDois` has already run, so the DOI state is settled here.
+        // A candidate with no DOI could not have reached Unpaywall configured
+        // or not — that is `no-doi`, a real answer, not an incomplete search.
         for (const c of pmidFallbackCandidates) {
+          if (!c.doi) {
+            chainByInput.get(c.pmid)?.push({ tier: 'unpaywall', outcome: 'no-doi' });
+            continue;
+          }
           chainByInput.get(c.pmid)?.push({
             tier: 'unpaywall',
             outcome: 'not-attempted',
             detail: 'UNPAYWALL_EMAIL is not set',
           });
+          markUnqueried(c.pmid, 'unpaywall');
         }
       } else {
         const outcomes = await Promise.all(
@@ -1272,6 +1413,7 @@ export const fetchFulltextTool = tool('pubmed_fetch_fulltext', {
         for (const { candidate, result } of outcomes) {
           if ('article' in result) {
             fallbackArticles.push(result.article);
+            inputIdByArticle.set(result.article, candidate.pmid);
             if (result.truncation) truncatedArticles.push(result.truncation);
             recoveredIds.add(candidate.pmid);
           } else {
@@ -1288,12 +1430,15 @@ export const fetchFulltextTool = tool('pubmed_fetch_fulltext', {
 
     if (doiCandidates.length > 0) {
       if (!unpaywall) {
+        // Every candidate on this branch is a DOI, so Unpaywall applies to all
+        // of them.
         for (const c of doiCandidates) {
           chainByInput.get(c.doi)?.push({
             tier: 'unpaywall',
             outcome: 'not-attempted',
             detail: 'UNPAYWALL_EMAIL is not set',
           });
+          markUnqueried(c.doi, 'unpaywall');
         }
       } else {
         // `resolveUnpaywall` catches its own failures so this Promise.all
@@ -1307,6 +1452,7 @@ export const fetchFulltextTool = tool('pubmed_fetch_fulltext', {
         for (const { doi, result } of outcomes) {
           if ('article' in result) {
             fallbackArticles.push(result.article);
+            inputIdByArticle.set(result.article, doi);
             if (result.truncation) truncatedArticles.push(result.truncation);
             recoveredIds.add(doi);
           } else {
@@ -1325,15 +1471,51 @@ export const fetchFulltextTool = tool('pubmed_fetch_fulltext', {
     const unavailable: z.infer<typeof UnavailableSchema>[] = [];
     for (const [id, chain] of chainByInput) {
       if (recoveredIds.has(id)) continue;
+      const unqueried = unqueriedByInput.get(id);
       unavailable.push({
         id,
         idType,
         reason: reasonFromChain(chain),
         triedTiers: chain,
+        ...(unqueried?.size && { unqueriedTiers: [...unqueried] }),
       });
     }
 
-    const articles = [...pmcArticles, ...fallbackArticles];
+    // Whole-response budget: fill with complete records in response order and
+    // hand the rest back as identifiers the caller can re-submit. One ledger for
+    // every tier — a PMC-served article and an Unpaywall-served one spend the
+    // same characters. Without `maxResponseCharacters` nothing is measured and
+    // the response is exactly what it was before the budget existed. (#100)
+    const resolved: FulltextArticle[] = [...pmcArticles, ...fallbackArticles];
+    const ceiling = input.maxResponseCharacters;
+    const fit = ceiling === undefined ? undefined : fitWholeItems(resolved, ceiling);
+    const articles = fit?.kept ?? resolved;
+    const nextDeferredCharacters = fit?.nextDeferredCharacters;
+    const deferred =
+      ceiling !== undefined && nextDeferredCharacters !== undefined && fit
+        ? {
+            maxResponseCharacters: ceiling,
+            returnedCharacters: fit.keptCharacters,
+            deferredCount: fit.deferred.length,
+            idType,
+            // Every recovery site records the input id; `articleDisplayId` is
+            // the total-function fallback, not an expected path.
+            ids: fit.deferred.map((a) => inputIdByArticle.get(a) ?? articleDisplayId(a)),
+            nextDeferredCharacters,
+          }
+        : undefined;
+
+    // A deferred article takes its body accounting out of the response with it —
+    // those counts describe text the caller never received.
+    if (fit) {
+      for (const article of fit.deferred) {
+        const id = articleDisplayId(article);
+        const index = truncatedArticles.findIndex((t) => t.id === id);
+        if (index === -1) continue;
+        const [dropped] = truncatedArticles.splice(index, 1);
+        if (dropped) omittedSections -= countOmittedSections(dropped, input.overflowMode);
+      }
+    }
 
     ctx.log.info('pubmed_fetch_fulltext completed', {
       requested: (input.pmids ?? input.pmcids ?? input.dois)?.length ?? 0,
@@ -1342,6 +1524,7 @@ export const fetchFulltextTool = tool('pubmed_fetch_fulltext', {
       epmcHits: pmcArticles.filter((a) => a.viaSource === 'europepmc').length,
       unpaywallHits: fallbackArticles.length,
       unavailable: unavailable.length,
+      ...(deferred && { deferred: deferred.deferredCount }),
     });
 
     // Rolled up only when the budget actually removed characters, so an
@@ -1374,6 +1557,10 @@ export const fetchFulltextTool = tool('pubmed_fetch_fulltext', {
       notices.push(buildTruncationNotice(truncation));
       ctx.enrich({ truncated: true });
     }
+    if (deferred) {
+      notices.push(buildDeferralNotice(deferred));
+      ctx.enrich({ truncated: true });
+    }
     if (notices.length > 0) ctx.enrich.notice(notices.join(' '));
 
     return {
@@ -1381,6 +1568,7 @@ export const fetchFulltextTool = tool('pubmed_fetch_fulltext', {
       totalReturned: articles.length,
       ...(unavailable.length > 0 && { unavailable }),
       ...(truncation && { truncation }),
+      ...(deferred && { deferred }),
     };
   },
 
@@ -1389,8 +1577,13 @@ export const fetchFulltextTool = tool('pubmed_fetch_fulltext', {
 
     if (result.unavailable?.length) {
       lines.push(`\n**Unavailable (${result.unavailable.length}):**`);
+      let anyUnqueried = false;
       for (const u of result.unavailable) {
         lines.push(`- [${u.idType}] ${u.id} — ${u.reason}`);
+        if (u.unqueriedTiers?.length) {
+          anyUnqueried = true;
+          lines.push(`  Not queried: ${formatUnqueriedTiers(u.unqueriedTiers, u.triedTiers)}`);
+        }
         const chain = u.triedTiers
           .map((t) => {
             const detail = t.detail ? sanitizeChainDetail(t.detail) : undefined;
@@ -1399,9 +1592,26 @@ export const fetchFulltextTool = tool('pubmed_fetch_fulltext', {
           .join(' → ');
         if (chain) lines.push(`  chain: ${chain}`);
       }
+      // One explanation for the whole list — repeating it per entry buries the
+      // ids it qualifies.
+      if (anyUnqueried) {
+        lines.push(
+          `\n> Tiers marked "Not queried" were skipped because this deployment has not configured them, so those searches are incomplete — a deployment with those tiers configured may still resolve the affected ids.`,
+        );
+      }
     }
 
-    if (result.totalReturned === 0) {
+    if (result.deferred) {
+      const d = result.deferred;
+      lines.push(
+        `\n**Deferred by the response budget:** ${d.deferredCount} article(s) — ${d.returnedCharacters} of ${d.maxResponseCharacters} budgeted characters returned; next deferred article ${d.nextDeferredCharacters} characters`,
+        `Re-call \`pubmed_fetch_fulltext\` with these ${d.idType} ids as \`${d.idType}s\`: ${d.ids.join(', ')}`,
+      );
+    }
+
+    // An empty response under a budget is a deferral, not an absence — the
+    // articles resolved and the ids above retrieve them.
+    if (result.totalReturned === 0 && !result.deferred) {
       lines.push(
         `\n> No full-text articles returned. Articles must be open-access and indexed in PMC, Europe PMC, or recoverable via Unpaywall to retrieve full text. For metadata and abstracts only, use \`pubmed_fetch_articles\`.`,
       );
@@ -1469,6 +1679,8 @@ type EpmcCandidateOutcome =
   | { kind: 'service-error'; detail: string };
 
 interface EpmcStageOutput {
+  /** Candidate id (pmid, prefixed PMCID, or doi) each EPMC-served article came from. */
+  articleInputIds: Map<z.infer<typeof PmcArticleSchema>, string>;
   articles: z.infer<typeof PmcArticleSchema>[];
   /** Per-doi outcome (keyed by doi string). */
   doiOutcomes: Map<string, EpmcCandidateOutcome>;
@@ -1574,6 +1786,7 @@ async function runEpmcStage(
   ]);
 
   const articles: z.infer<typeof PmcArticleSchema>[] = [];
+  const articleInputIds = new Map<z.infer<typeof PmcArticleSchema>, string>();
   const remainingPmid: PmidCandidate[] = [];
   const remainingPmcid: PmcidCandidate[] = [];
   const remainingDoi: DoiCandidate[] = [];
@@ -1584,13 +1797,17 @@ async function runEpmcStage(
   const truncatedArticles: z.infer<typeof TruncatedArticleSchema>[] = [];
   let omittedSections = 0;
 
-  const collectHit = (run: {
-    article: z.infer<typeof PmcArticleSchema>;
-    sectionFilterMiss?: boolean;
-    truncation?: z.infer<typeof TruncatedArticleSchema>;
-    omittedSections?: number;
-  }) => {
+  const collectHit = (
+    candidateId: string,
+    run: {
+      article: z.infer<typeof PmcArticleSchema>;
+      sectionFilterMiss?: boolean;
+      truncation?: z.infer<typeof TruncatedArticleSchema>;
+      omittedSections?: number;
+    },
+  ) => {
     articles.push(run.article);
+    articleInputIds.set(run.article, candidateId);
     if (run.sectionFilterMiss) sectionFilterMisses.push(articleDisplayId(run.article));
     if (run.truncation) truncatedArticles.push(run.truncation);
     omittedSections += run.omittedSections ?? 0;
@@ -1598,22 +1815,23 @@ async function runEpmcStage(
 
   for (const run of pmidResults) {
     pmidOutcomes.set(run.c.pmid, run.outcome);
-    if (run.article) collectHit({ ...run, article: run.article });
+    if (run.article) collectHit(run.c.pmid, { ...run, article: run.article });
     else remainingPmid.push(run.c);
   }
   for (const run of pmcidResults) {
     pmcidOutcomes.set(run.c.normalized, run.outcome);
-    if (run.article) collectHit({ ...run, article: run.article });
+    if (run.article) collectHit(run.c.normalized, { ...run, article: run.article });
     else remainingPmcid.push(run.doi && !run.c.c.doi ? { ...run.c.c, doi: run.doi } : run.c.c);
   }
   for (const run of doiResults) {
     doiOutcomes.set(run.c.doi, run.outcome);
-    if (run.article) collectHit({ ...run, article: run.article });
+    if (run.article) collectHit(run.c.doi, { ...run, article: run.article });
     else remainingDoi.push(run.c);
   }
 
   return {
     articles,
+    articleInputIds,
     remainingPmid,
     remainingPmcid,
     remainingDoi,
@@ -1993,11 +2211,15 @@ function unpaywallReasonToTierOutcome(
 }
 
 /**
- * Derive the terminal `reason` shown on the unavailable entry from its chain.
- * Skips `not-attempted` entries when summarizing — those record config state,
- * not content state, so they make a misleading `reason` when an earlier tier
- * produced a real signal (`pmc:miss`, `unpaywall:no-oa`, etc.). Only when every
- * tier was skipped does `reason` fall back to `no-pmc-fallback-disabled`.
+ * Derive the `reason` shown on the unavailable entry from its chain: the most
+ * specific content signal the last tier that actually answered reported.
+ *
+ * Skipped tiers are deliberately not folded in here. A configuration note in
+ * place of the content signal would erase the one specific thing the chain
+ * learned; the incompleteness is reported alongside it, on `unqueriedTiers`,
+ * where it adds to the answer instead of replacing it. A chain where no tier
+ * was attempted at all has no signal to report and stays
+ * `no-pmc-fallback-disabled`.
  */
 function reasonFromChain(
   chain: z.infer<typeof TriedTierSchema>[],
@@ -2007,6 +2229,15 @@ function reasonFromChain(
     if (t.outcome !== 'not-attempted') lastSignal = t;
   }
   if (!lastSignal) return 'no-pmc-fallback-disabled';
+
+  // Unpaywall answering `no-doi` for an id the content tiers never found adds
+  // nothing: record absence is the specific signal, so it stays `not-found`.
+  if (lastSignal.tier === 'unpaywall' && lastSignal.outcome === 'no-doi') {
+    const lastContentSignal = chain.findLast(
+      (t) => t.tier !== 'unpaywall' && t.outcome !== 'not-attempted',
+    );
+    if (lastContentSignal?.outcome === 'miss') return 'not-found';
+  }
 
   const key = `${lastSignal.tier}:${lastSignal.outcome}` as const;
   switch (key) {
@@ -2036,6 +2267,31 @@ function reasonFromChain(
 }
 
 // ─── format() helpers ────────────────────────────────────────────────────────
+
+/** Human-readable tier names for the unqueried-tier line. */
+const UNQUERIED_TIER_LABELS: Record<z.infer<typeof UnqueriedTierSchema>, string> = {
+  europepmc: 'Europe PMC',
+  unpaywall: 'Unpaywall',
+};
+
+/**
+ * Name each unqueried tier with the reason its chain entry gave for skipping it,
+ * so a `content[]` reader learns which setting is missing without decoding the
+ * chain line. The detail goes through the same sanitizer the chain does — it is
+ * the same upstream string. (#110)
+ */
+function formatUnqueriedTiers(
+  tiers: z.infer<typeof UnqueriedTierSchema>[],
+  chain: z.infer<typeof TriedTierSchema>[],
+): string {
+  return tiers
+    .map((tier) => {
+      const detail = chain.find((t) => t.tier === tier && t.outcome === 'not-attempted')?.detail;
+      const label = UNQUERIED_TIER_LABELS[tier];
+      return detail ? `${label} (${sanitizeChainDetail(detail)})` : label;
+    })
+    .join(', ');
+}
 
 /**
  * Render the response-level character accounting. Every field is rendered

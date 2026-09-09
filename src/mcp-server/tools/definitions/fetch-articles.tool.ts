@@ -11,6 +11,7 @@ import { getNcbiService } from '@/services/ncbi/ncbi-service.js';
 import { parseFullArticle } from '@/services/ncbi/parsing/article-parser.js';
 import { ensureArray } from '@/services/ncbi/parsing/xml-helpers.js';
 import type { XmlPubmedArticle } from '@/services/ncbi/types.js';
+import { fitWholeItems } from './_budget.js';
 import {
   conceptMeta,
   EDAM_DATA_RETRIEVAL,
@@ -116,9 +117,35 @@ const FetchedArticleSchema = z
   })
   .describe('Parsed PubMed article');
 
+const DeferredSchema = z
+  .object({
+    maxResponseCharacters: z
+      .number()
+      .describe('The `maxResponseCharacters` ceiling this response was budgeted against'),
+    returnedCharacters: z
+      .number()
+      .describe('Serialized characters the returned article records account for'),
+    deferredCount: z
+      .number()
+      .describe('Articles that resolved but were withheld to stay under the ceiling'),
+    ids: z
+      .array(z.string())
+      .describe(
+        'PMIDs of the deferred articles, in response order. Re-call `pubmed_fetch_articles` with these as `pmids` and the same other inputs to retrieve them. Never contains a PMID from `unavailablePmids`.',
+      ),
+    nextDeferredCharacters: z
+      .number()
+      .describe(
+        'Serialized size of the next deferred article — the first entry in `ids`, where the response stopped. Raise `maxResponseCharacters` to at least this to make progress; a smaller article further down `ids` cannot be reached until this one fits.',
+      ),
+  })
+  .describe(
+    'Continuation state for articles the whole-response budget withheld. Present only when `maxResponseCharacters` deferred at least one article.',
+  );
+
 export const fetchArticlesTool = tool('pubmed_fetch_articles', {
   description:
-    'Fetch full article metadata by PubMed IDs. Returns detailed article information including abstract, authors, journal, MeSH terms.',
+    'Fetch full article metadata by PubMed IDs. Returns detailed article information including abstract, authors, journal, MeSH terms. Set `maxResponseCharacters` to bound the whole response: articles past the ceiling are deferred whole and listed in `deferred.ids` for a follow-up call.',
   annotations: { readOnlyHint: true, openWorldHint: true },
   _meta: conceptMeta([SCHEMA_SCHOLARLY_ARTICLE, EDAM_DATA_RETRIEVAL, EDAM_PUBMED_ID]),
   sourceUrl:
@@ -139,25 +166,48 @@ export const fetchArticlesTool = tool('pubmed_fetch_articles', {
     pmids: z.array(pmidStringSchema).min(1).max(200).describe('PubMed IDs to fetch'),
     includeMesh: z.boolean().default(true).describe('Include MeSH terms'),
     includeGrants: z.boolean().default(false).describe('Include grant information'),
+    maxResponseCharacters: z
+      .number()
+      .int()
+      .min(1)
+      .max(1_000_000)
+      .optional()
+      .describe(
+        'Opt-in ceiling for the whole response, in characters. Each article is measured as the JSON record it is returned as — title, abstract, authors, journal, MeSH terms, grants, identifiers, every field it carries. Articles are kept in response order until the next one would cross the ceiling; that article and the rest are deferred whole (never partially populated) and listed in `deferred.ids`. Response envelope fields — counts, `unavailablePmids`, `deferred` itself — are not counted. Omit to return every resolved article.',
+      ),
   }),
 
   output: z.object({
     articles: z.array(FetchedArticleSchema).describe('Parsed articles'),
-    totalReturned: z.number().describe('Number of articles returned'),
+    totalReturned: z
+      .number()
+      .describe(
+        'Number of articles in this response. Under a `maxResponseCharacters` budget this counts the kept articles only; `deferred.deferredCount` covers the rest.',
+      ),
     unavailablePmids: z
       .array(z.string())
       .optional()
-      .describe('PMIDs that returned no article data'),
+      .describe(
+        'PMIDs that returned no article data. Reported in full regardless of where a `maxResponseCharacters` cutoff lands — these are misses, not deferrals, and re-requesting them returns nothing.',
+      ),
+    deferred: DeferredSchema.optional(),
   }),
 
-  // Recovery guidance when no articles are returned — agent-facing context, surfaced via
-  // ctx.enrich.notice() to both structuredContent and content[]; absent on success.
+  // Recovery guidance for two cases — no articles returned at all, and articles
+  // the whole-response budget deferred (#99). Agent-facing context surfaced via
+  // ctx.enrich to both structuredContent and content[]; absent on a plain success.
   enrichment: {
     notice: z
       .string()
       .optional()
       .describe(
-        'Optional guidance when no articles were returned — points to discovery tools. Absent on successful fetches.',
+        'Optional guidance when no articles were returned — points to discovery tools — or when `maxResponseCharacters` deferred articles, naming how to retrieve them. Absent on successful unbudgeted fetches.',
+      ),
+    truncated: z
+      .boolean()
+      .optional()
+      .describe(
+        'True when `maxResponseCharacters` withheld at least one resolved article. Absent when the response carries every article that resolved. The continuation state is in `deferred`.',
       ),
   },
 
@@ -198,19 +248,50 @@ export const fetchArticlesTool = tool('pubmed_fetch_articles', {
     const returnedPmids = new Set(articles.map((a) => a.pmid).filter(Boolean));
     const unavailable = input.pmids.filter((id) => !returnedPmids.has(id));
 
+    // Whole-response budget: fill with complete records in response order and
+    // hand the remainder back as PMIDs the caller can re-submit. Without
+    // `maxResponseCharacters` nothing is measured and the response is exactly
+    // what it was before the budget existed. (#99)
+    const ceiling = input.maxResponseCharacters;
+    const fit = ceiling === undefined ? undefined : fitWholeItems(articles, ceiling);
+    const returned = fit?.kept ?? articles;
+    const nextDeferredCharacters = fit?.nextDeferredCharacters;
+    // A record whose PMID never parsed is already reported in `unavailablePmids`
+    // and is not something a caller can re-request, so it is not deferrable —
+    // the count is the list's length so the two can never disagree.
+    const deferredIds = (fit?.deferred ?? []).map((a) => a.pmid).filter((id) => id.length > 0);
+    const deferred =
+      ceiling !== undefined && fit && nextDeferredCharacters !== undefined
+        ? {
+            maxResponseCharacters: ceiling,
+            returnedCharacters: fit.keptCharacters,
+            deferredCount: deferredIds.length,
+            ids: deferredIds,
+            nextDeferredCharacters,
+          }
+        : undefined;
+
     ctx.log.info('pubmed_fetch completed', {
       requested: input.pmids.length,
-      returned: articles.length,
+      returned: returned.length,
+      ...(deferred && { deferred: deferred.deferredCount }),
     });
+    // Keyed on what resolved, not on what the budget kept: a batch emptied by a
+    // small ceiling is a budget outcome, not a batch of invalid PMIDs.
     if (articles.length === 0) {
       ctx.enrich.notice(
         'No articles were returned. These PMIDs may be invalid, unpublished, or withdrawn. Try pubmed_search_articles to discover valid PMIDs.',
       );
     }
+    if (deferred) {
+      ctx.enrich({ truncated: true });
+      ctx.enrich.notice(buildDeferralNotice(deferred));
+    }
     return {
-      articles,
-      totalReturned: articles.length,
+      articles: returned,
+      totalReturned: returned.length,
       ...(unavailable.length > 0 && { unavailablePmids: unavailable }),
+      ...(deferred && { deferred }),
     };
   },
 
@@ -218,6 +299,13 @@ export const fetchArticlesTool = tool('pubmed_fetch_articles', {
     const lines = [`## PubMed Articles`, `**Articles Returned:** ${result.totalReturned}`];
     if (result.unavailablePmids?.length) {
       lines.push(`**Unavailable PMIDs:** ${result.unavailablePmids.join(', ')}`);
+    }
+    if (result.deferred) {
+      const d = result.deferred;
+      lines.push(
+        `**Deferred by the response budget:** ${d.deferredCount} article(s) — ${d.returnedCharacters} of ${d.maxResponseCharacters} budgeted characters returned; next deferred article ${d.nextDeferredCharacters} characters`,
+        `Re-call \`pubmed_fetch_articles\` with these PMIDs: ${d.ids.join(', ')}`,
+      );
     }
     for (const a of result.articles) {
       // Render-time only — `structuredContent.articles[].title` keeps the
@@ -300,6 +388,20 @@ export const fetchArticlesTool = tool('pubmed_fetch_articles', {
     return [{ type: 'text', text: lines.join('\n') }];
   },
 });
+
+/**
+ * Compose the recovery notice for a response the whole-response budget bounded.
+ * Names what was spent, which PMIDs are still retrievable, and the ceiling the
+ * next call has to clear — so a caller reading only `content[]` can resume
+ * without inspecting `deferred`. (#99)
+ */
+function buildDeferralNotice(deferred: z.infer<typeof DeferredSchema>): string {
+  const spent =
+    deferred.returnedCharacters === 0
+      ? `No article fits the requested maxResponseCharacters of ${deferred.maxResponseCharacters}, so none were returned.`
+      : `Response character budget reached: ${deferred.returnedCharacters} of ${deferred.maxResponseCharacters} characters returned.`;
+  return `${spent} ${deferred.deferredCount} resolved article(s) were deferred whole: ${deferred.ids.join(', ')}. Re-call pubmed_fetch_articles with those PMIDs to retrieve them, or raise maxResponseCharacters to at least ${deferred.nextDeferredCharacters} — the size of the next deferred article.`;
+}
 
 type FormattedAuthor = {
   collectiveName?: string | undefined;

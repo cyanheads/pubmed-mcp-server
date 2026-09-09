@@ -540,3 +540,328 @@ describe('fetchArticlesTool format() heading escaping (issue #102)', () => {
     expect(text).toContain('### 42');
   });
 });
+
+describe('fetchArticlesTool whole-response budget (issue #99)', () => {
+  beforeEach(() => {
+    mockEFetch.mockReset();
+  });
+
+  interface ArticleSpec {
+    abstract: string;
+    mesh?: boolean;
+    pmid: string;
+  }
+
+  /** Stage one PubmedArticleSet entry per spec, sized by its abstract. */
+  function stageArticles(specs: ArticleSpec[]) {
+    mockEFetch.mockResolvedValue({
+      PubmedArticleSet: {
+        PubmedArticle: specs.map((spec) => ({
+          MedlineCitation: {
+            PMID: { '#text': spec.pmid },
+            Article: {
+              ArticleTitle: { '#text': `Article ${spec.pmid}` },
+              Abstract: { AbstractText: { '#text': spec.abstract } },
+              Journal: { Title: { '#text': 'J Budget' } },
+              PublicationTypeList: { PublicationType: { '#text': 'Journal Article' } },
+            },
+            ...(spec.mesh && {
+              MeshHeadingList: {
+                MeshHeading: [
+                  {
+                    DescriptorName: {
+                      '#text': `Topic ${spec.pmid}`,
+                      '@_UI': `D${spec.pmid}`,
+                      '@_MajorTopicYN': 'Y',
+                    },
+                    QualifierName: {
+                      '#text': `therapy ${spec.pmid}`,
+                      '@_UI': `Q${spec.pmid}`,
+                      '@_MajorTopicYN': 'N',
+                    },
+                  },
+                ],
+              },
+            }),
+          },
+        })),
+      },
+    });
+  }
+
+  const run = async (
+    pmids: string[],
+    extra: Record<string, unknown> = {},
+    ctx = createMockContext({ errors: fetchArticlesTool.errors }),
+  ) => {
+    const input = fetchArticlesTool.input.parse({ pmids, ...extra });
+    return { result: await fetchArticlesTool.handler(input, ctx), ctx };
+  };
+
+  /** Serialized size of each article record, the unit the budget spends. */
+  const sizesOf = (result: { articles: unknown[] }) =>
+    result.articles.map((a) => JSON.stringify(a).length);
+
+  it('returns a byte-identical response when no maxResponseCharacters is supplied', async () => {
+    stageArticles([
+      { pmid: '111', abstract: 'A'.repeat(40), mesh: true },
+      { pmid: '222', abstract: 'B'.repeat(40) },
+    ]);
+
+    const { result, ctx } = await run(['111', '222', '333']);
+    const text = textBlocks(fetchArticlesTool.format!(result))[0]?.text ?? '';
+
+    expect(JSON.stringify(result)).toBe(
+      '{"articles":[{"pmid":"111","title":"Article 111","abstractText":"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA","authors":[],"journalInfo":{"title":"J Budget","isoAbbreviation":"","volume":"","issue":"","pages":"","publicationDate":{}},"publicationTypes":["Journal Article"],"meshTerms":[{"descriptorName":"Topic 111","descriptorUi":"D111","qualifiers":[{"qualifierName":"therapy 111","qualifierUi":"Q111","isMajorTopic":false}],"isMajorTopic":true}],"pubmedUrl":"https://pubmed.ncbi.nlm.nih.gov/111/"},{"pmid":"222","title":"Article 222","abstractText":"BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB","authors":[],"journalInfo":{"title":"J Budget","isoAbbreviation":"","volume":"","issue":"","pages":"","publicationDate":{}},"publicationTypes":["Journal Article"],"pubmedUrl":"https://pubmed.ncbi.nlm.nih.gov/222/"}],"totalReturned":2,"unavailablePmids":["333"]}',
+    );
+    expect(text).toBe(
+      [
+        '## PubMed Articles',
+        '**Articles Returned:** 2',
+        '**Unavailable PMIDs:** 333',
+        '',
+        '### Article 111',
+        '',
+        '**Journal:** J Budget',
+        '**Type:** Journal Article',
+        '**PMID:** 111',
+        '**PubMed:** https://pubmed.ncbi.nlm.nih.gov/111/',
+        '',
+        '#### Abstract',
+        'A'.repeat(40),
+        '',
+        '#### MeSH Terms',
+        '- Topic 111 [D111] (major) (therapy 111 [Q111])',
+        '',
+        '### Article 222',
+        '',
+        '**Journal:** J Budget',
+        '**Type:** Journal Article',
+        '**PMID:** 222',
+        '**PubMed:** https://pubmed.ncbi.nlm.nih.gov/222/',
+        '',
+        '#### Abstract',
+        'B'.repeat(40),
+      ].join('\n'),
+    );
+    expect(getEnrichment(ctx).truncated).toBeUndefined();
+  });
+
+  it('returns every article when the batch fits the budget', async () => {
+    stageArticles([
+      { pmid: '111', abstract: 'A'.repeat(40) },
+      { pmid: '222', abstract: 'B'.repeat(40) },
+    ]);
+    const baseline = (await run(['111', '222'])).result;
+    const total = sizesOf(baseline).reduce((n, s) => n + s, 0);
+
+    stageArticles([
+      { pmid: '111', abstract: 'A'.repeat(40) },
+      { pmid: '222', abstract: 'B'.repeat(40) },
+    ]);
+    const { result, ctx } = await run(['111', '222'], { maxResponseCharacters: total + 1 });
+
+    expect(result.totalReturned).toBe(2);
+    expect(result.deferred).toBeUndefined();
+    expect(getEnrichment(ctx).truncated).toBeUndefined();
+  });
+
+  it('returns every article when the batch exactly meets the budget', async () => {
+    const specs = [
+      { pmid: '111', abstract: 'A'.repeat(40) },
+      { pmid: '222', abstract: 'B'.repeat(40) },
+    ];
+    stageArticles(specs);
+    const total = sizesOf((await run(['111', '222'])).result).reduce((n, s) => n + s, 0);
+
+    stageArticles(specs);
+    const { result } = await run(['111', '222'], { maxResponseCharacters: total });
+
+    expect(result.totalReturned).toBe(2);
+    expect(result.deferred).toBeUndefined();
+  });
+
+  it('defers the last whole article when the batch exceeds the budget by one character', async () => {
+    const specs = [
+      { pmid: '111', abstract: 'A'.repeat(40), mesh: true },
+      { pmid: '222', abstract: 'B'.repeat(40), mesh: true },
+    ];
+    stageArticles(specs);
+    const sizes = sizesOf((await run(['111', '222'])).result);
+    const total = sizes.reduce((n, s) => n + s, 0);
+
+    stageArticles(specs);
+    const { result, ctx } = await run(['111', '222'], { maxResponseCharacters: total - 1 });
+
+    expect(result.totalReturned).toBe(1);
+    expect(result.articles.map((a) => a.pmid)).toEqual(['111']);
+    expect(result.deferred).toEqual({
+      maxResponseCharacters: total - 1,
+      returnedCharacters: sizes[0],
+      deferredCount: 1,
+      ids: ['222'],
+      nextDeferredCharacters: sizes[1],
+    });
+    // Depth: the kept article keeps its nested MeSH qualifiers, and nothing of
+    // the deferred article's nested data reaches the response.
+    expect(result.articles[0]?.meshTerms?.[0]?.qualifiers?.[0]?.qualifierName).toBe('therapy 111');
+    expect(JSON.stringify(result.articles)).not.toContain('therapy 222');
+    expect(getEnrichment(ctx).truncated).toBe(true);
+    expect(getEnrichment(ctx).notice).toContain('222');
+  });
+
+  it('keeps unavailable PMIDs out of the deferred list and reports them in full', async () => {
+    const specs = [
+      { pmid: '111', abstract: 'A'.repeat(40) },
+      { pmid: '222', abstract: 'B'.repeat(40) },
+    ];
+    stageArticles(specs);
+    const sizes = sizesOf((await run(['111', '222'])).result);
+
+    stageArticles(specs);
+    const { result } = await run(['111', '222', '333', '444'], {
+      maxResponseCharacters: sizes[0],
+    });
+
+    expect(result.unavailablePmids).toEqual(['333', '444']);
+    expect(result.deferred?.ids).toEqual(['222']);
+  });
+
+  it('resumes exactly where the previous call stopped when re-called with the deferred PMIDs', async () => {
+    const specs = [
+      { pmid: '111', abstract: 'A'.repeat(40) },
+      { pmid: '222', abstract: 'B'.repeat(60) },
+      { pmid: '333', abstract: 'C'.repeat(80) },
+    ];
+    stageArticles(specs);
+    const sizes = sizesOf((await run(['111', '222', '333'])).result);
+
+    stageArticles(specs);
+    const first = (
+      await run(['111', '222', '333'], { maxResponseCharacters: (sizes[0] ?? 0) + (sizes[1] ?? 0) })
+    ).result;
+    expect(first.articles.map((a) => a.pmid)).toEqual(['111', '222']);
+    expect(first.deferred?.ids).toEqual(['333']);
+
+    stageArticles(specs.filter((s) => first.deferred?.ids.includes(s.pmid)));
+    const second = (await run(first.deferred?.ids ?? [])).result;
+
+    expect(second.articles.map((a) => a.pmid)).toEqual(['333']);
+    expect(second.deferred).toBeUndefined();
+    const seen = [...first.articles, ...second.articles].map((a) => a.pmid);
+    expect(seen).toEqual(['111', '222', '333']);
+    expect(new Set(seen).size).toBe(seen.length);
+  });
+
+  it('returns zero articles with the full deferred list when the budget is under the first article', async () => {
+    const specs = [
+      { pmid: '111', abstract: 'A'.repeat(400) },
+      { pmid: '222', abstract: 'B'.repeat(40) },
+    ];
+    stageArticles(specs);
+    const sizes = sizesOf((await run(['111', '222'])).result);
+    // 222 is the smaller record, but the cut is a prefix cut: a ceiling that
+    // clears 222 alone still returns nothing, so the number the caller needs is
+    // 111's — the article the response stopped at.
+    expect(sizes[1]).toBeLessThan(sizes[0] ?? 0);
+
+    stageArticles(specs);
+    const { result, ctx } = await run(['111', '222'], { maxResponseCharacters: 1 });
+
+    expect(result.articles).toEqual([]);
+    expect(result.totalReturned).toBe(0);
+    expect(result.deferred).toEqual({
+      maxResponseCharacters: 1,
+      returnedCharacters: 0,
+      deferredCount: 2,
+      ids: ['111', '222'],
+      nextDeferredCharacters: sizes[0],
+    });
+    const notice = getEnrichment(ctx).notice ?? '';
+    expect(notice).toContain(String(sizes[0]));
+    expect(notice).toContain('maxResponseCharacters');
+    // The empty-result guidance is about invalid PMIDs — it must not fire here.
+    expect(notice).not.toMatch(/may be invalid/i);
+    expect(getEnrichment(ctx).truncated).toBe(true);
+  });
+
+  it('renders the same deferral state in content[] that structuredContent carries', async () => {
+    const specs = [
+      { pmid: '111', abstract: 'A'.repeat(40) },
+      { pmid: '222', abstract: 'B'.repeat(40) },
+    ];
+    stageArticles(specs);
+    const sizes = sizesOf((await run(['111', '222'])).result);
+
+    stageArticles(specs);
+    const { result } = await run(['111', '222'], { maxResponseCharacters: sizes[0] });
+    const text = textBlocks(fetchArticlesTool.format!(result))[0]?.text ?? '';
+
+    expect(text).toContain('**Articles Returned:** 1');
+    expect(text).toContain(`${result.deferred?.deferredCount} article(s)`);
+    expect(text).toContain(String(result.deferred?.returnedCharacters));
+    expect(text).toContain(String(result.deferred?.maxResponseCharacters));
+    expect(text).toContain(String(result.deferred?.nextDeferredCharacters));
+    expect(text).toContain('222');
+    expect(text).not.toContain('B'.repeat(40));
+  });
+
+  it('never lists a record with no PMID as deferrable, and counts what it lists', async () => {
+    // A record NCBI returned without a parseable PMID is already reported in
+    // `unavailablePmids`; it is not something a caller can re-request, so it
+    // must not reach `deferred.ids` — and `deferredCount` must match the list
+    // it ships rather than the raw number of withheld records.
+    const staged = () =>
+      mockEFetch.mockResolvedValue({
+        PubmedArticleSet: {
+          PubmedArticle: [
+            {
+              MedlineCitation: {
+                PMID: { '#text': '111' },
+                Article: { ArticleTitle: { '#text': 'Article 111' } },
+              },
+            },
+            // No PMID node at all — `parseFullArticle` falls back to ''.
+            { MedlineCitation: { Article: { ArticleTitle: { '#text': 'Nameless' } } } },
+          ],
+        },
+      });
+
+    staged();
+    const sizes = sizesOf((await run(['111', '222'])).result);
+
+    staged();
+    const { result } = await run(['111', '222'], { maxResponseCharacters: sizes[0] });
+
+    expect(result.totalReturned).toBe(1);
+    expect(result.unavailablePmids).toEqual(['222']);
+    expect(result.deferred?.ids).toEqual([]);
+    expect(result.deferred?.deferredCount).toBe(0);
+    expect(result.deferred?.deferredCount).toBe(result.deferred?.ids.length);
+
+    const text = textBlocks(fetchArticlesTool.format!(result))[0]?.text ?? '';
+    expect(text).toContain('**Deferred by the response budget:** 0 article(s)');
+  });
+
+  it('reports no deferral when the budget is set but nothing resolved', async () => {
+    mockEFetch.mockResolvedValue({ PubmedArticleSet: null });
+
+    const { result, ctx } = await run(['99999'], { maxResponseCharacters: 10 });
+
+    expect(result.articles).toEqual([]);
+    expect(result.deferred).toBeUndefined();
+    expect(getEnrichment(ctx).notice).toMatch(/no articles were returned/i);
+    expect(getEnrichment(ctx).truncated).toBeUndefined();
+  });
+
+  it('rejects a zero, negative, or fractional maxResponseCharacters', () => {
+    for (const value of [0, -1, 1.5]) {
+      expect(
+        fetchArticlesTool.input.safeParse({ pmids: ['111'], maxResponseCharacters: value }).success,
+      ).toBe(false);
+    }
+    expect(
+      fetchArticlesTool.input.safeParse({ pmids: ['111'], maxResponseCharacters: 1 }).success,
+    ).toBe(true);
+  });
+});
