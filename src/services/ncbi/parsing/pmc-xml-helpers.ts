@@ -78,6 +78,17 @@ function concatText(input: JatsNode | JatsNodeList): string {
 }
 
 /**
+ * Extract all text from a node or sibling list in document order with the
+ * source spacing intact — no whitespace collapsing, no trimming. Use it when
+ * the caller assembles several fragments itself and needs to collapse once over
+ * the joined result; {@link textContent} is the normalizing form for everything
+ * else.
+ */
+export function rawTextContent(input: JatsNode | JatsNodeList | undefined): string {
+  return input ? concatText(input) : '';
+}
+
+/**
  * Extract all text from a node or sibling list in document order, collapsing
  * runs of whitespace to a single space and trimming the result. Use this for
  * mixed-content elements (`<p>`, `<title>`, `<abstract>`, …) where inline

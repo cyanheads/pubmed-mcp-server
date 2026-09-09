@@ -108,6 +108,36 @@ describe('extractBodySections', () => {
     expect(sections[0]?.subsections?.[0]?.title).toBe('Subresult');
   });
 
+  it('recurses through three or more levels of nested sections (issue #112)', () => {
+    // PMC9575052's shape: body/sec[RESULTS]/sec[Case reports]/sec[Patient N],
+    // extended one level further to pin that the parser has no depth cap.
+    const body = el('body', [
+      el('sec', [
+        el('title', [t('RESULTS')]),
+        el('p', [t('Results overview.')]),
+        el('sec', [
+          el('title', [t('Case reports of surgical patients')]),
+          el('sec', [el('title', [t('Patient 4')]), el('p', [t('Patient 4 narrative.')])]),
+          el('sec', [
+            el('title', [t('Patient 11')]),
+            el('p', [t('Patient 11 narrative.')]),
+            el('sec', [el('title', [t('Follow-up')]), el('p', [t('Follow-up narrative.')])]),
+          ]),
+        ]),
+      ]),
+    ]);
+
+    const sections = extractBodySections(body);
+    const caseReports = sections[0]?.subsections?.[0];
+    expect(caseReports?.title).toBe('Case reports of surgical patients');
+    expect(caseReports?.text).toBe('');
+    expect(caseReports?.subsections?.map((s) => s.title)).toEqual(['Patient 4', 'Patient 11']);
+    expect(caseReports?.subsections?.[1]?.subsections?.[0]).toEqual({
+      title: 'Follow-up',
+      text: 'Follow-up narrative.',
+    });
+  });
+
   it('flushes direct paragraphs before and after structured sections', () => {
     const body = el('body', [
       el('p', [t('Opening paragraph.')]),
@@ -286,6 +316,146 @@ describe('extractReferences', () => {
     // Acceptance invariants from the issue:
     expect(refs[0]?.citation).not.toMatch(/e\+\d+/); // no scientific-notation page
     expect(refs[0]?.citation).not.toContain('DomanJ.L.'); // authors not run together
+  });
+
+  /** Wrap `children` as the sole `<mixed-citation>` of a single `<ref>`. */
+  function mixedRef(children: JatsNode[], id = 'R1'): JatsNode {
+    return el('back', [
+      el('ref-list', [el('ref', [el('mixed-citation', children)], { '@_id': id })]),
+    ]);
+  }
+
+  it('separates and labels two adjacent zero-gap pub-ids (regression #115)', () => {
+    // PMC11391094 ref C37: `doi:<pub-id doi/><pub-id pmid/>` — the literal
+    // `doi:` prefix must not be double-labeled, and the PMID must not fuse onto
+    // the DOI.
+    const refs = extractReferences(
+      mixedRef(
+        [
+          el('source', [t('Clin Exp Allergy')]),
+          t(' 2020; 50: 1267–1269. doi:'),
+          el('pub-id', [t('10.1111/cea.13720')], { '@_pub-id-type': 'doi' }),
+          el('pub-id', [t('32762056')], { '@_pub-id-type': 'pmid' }),
+          t('\n'),
+        ],
+        'C37',
+      ),
+    );
+
+    expect(refs[0]?.citation).toBe(
+      'Clin Exp Allergy 2020; 50: 1267–1269. doi:10.1111/cea.13720 PMID 32762056',
+    );
+    expect(refs[0]?.citation).not.toContain('1372032762056');
+  });
+
+  it('separates and labels three adjacent zero-gap pub-ids (regression #115)', () => {
+    // PMC8371605 ref CR1: DOI + PMCID + PMID run together with zero-length gaps.
+    const refs = extractReferences(
+      mixedRef(
+        [
+          t('Thompson, M. C. Advances in methods. '),
+          el('italic', [t('F1000Res')], { '@_toggle': 'yes' }),
+          t('. '),
+          el('bold', [t('9')]),
+          t(', 667 (2020).'),
+          el('pub-id', [t('10.12688/f1000research.25097.1')], { '@_pub-id-type': 'doi' }),
+          el('pub-id', [t('PMC7333361')], { '@_pub-id-type': 'pmcid' }),
+          el('pub-id', [t('32676184')], { '@_pub-id-type': 'pmid' }),
+        ],
+        'CR1',
+      ),
+    );
+
+    expect(refs[0]?.citation).toBe(
+      'Thompson, M. C. Advances in methods. F1000Res. 9, 667 (2020). DOI 10.12688/f1000research.25097.1 PMCID PMC7333361 PMID 32676184',
+    );
+    expect(refs[0]?.citation).not.toContain('25097.1PMC733336132676184');
+  });
+
+  it('separates an inserted label from the prose it follows (regression #115)', () => {
+    // Cochrane style: the DOI carries a literal `[DOI: ` prefix and the PMID
+    // follows the closing bracket with no gap. The prefixed id keeps its own
+    // spacing byte-for-byte; the label this renderer inserts gets separated from
+    // the `]` so it does not read as one token.
+    const refs = extractReferences(
+      mixedRef([
+        el('source', [t('Journal of Pediatrics')]),
+        el('year', [t('2011')]),
+        t(':'),
+        el('fpage', [t('119')]),
+        t('. [DOI: '),
+        el('pub-id', [t('10.1016/j.jpeds.2010.07.021')], { '@_pub-id-type': 'doi' }),
+        t(']'),
+        el('pub-id', [t('20850761')], { '@_pub-id-type': 'pmid' }),
+      ]),
+    );
+
+    expect(refs[0]?.citation).toBe(
+      'Journal of Pediatrics 2011:119. [DOI: 10.1016/j.jpeds.2010.07.021] PMID 20850761',
+    );
+  });
+
+  it('collapses a whitespace-only gap between pub-ids to one space (regression #115)', () => {
+    const refs = extractReferences(
+      mixedRef([
+        t('Ref. '),
+        el('pub-id', [t('31235882')], { '@_pub-id-type': 'pmid' }),
+        t('\n'),
+        el('pub-id', [t('10.1038/s41592-019-0437-4')], { '@_pub-id-type': 'doi' }),
+      ]),
+    );
+
+    expect(refs[0]?.citation).toBe('Ref. PMID 31235882 DOI 10.1038/s41592-019-0437-4');
+  });
+
+  it('spaces a zero-gap italic title against a bold volume (regression #123)', () => {
+    // PMC8371605 ref CR7: `<italic>Nat. Methods</italic><bold>16</bold>, …`.
+    const refs = extractReferences(
+      mixedRef(
+        [
+          t('Steinegger, M. Protein-level assembly. '),
+          el('italic', [t('Nat. Methods')], { '@_toggle': 'yes' }),
+          el('bold', [t('16')]),
+          t(', 603–606 (2019).'),
+          el('pub-id', [t('31235882')], { '@_pub-id-type': 'pmid' }),
+        ],
+        'CR7',
+      ),
+    );
+
+    expect(refs[0]?.citation).toBe(
+      'Steinegger, M. Protein-level assembly. Nat. Methods 16, 603–606 (2019). PMID 31235882',
+    );
+    expect(refs[0]?.citation).not.toContain('Nat. Methods16');
+  });
+
+  it('leaves punctuated and text-adjacent transitions unchanged (regression #115)', () => {
+    // Elements already separated by punctuation must render byte-identical, and
+    // a zero-gap text→element transition (a footnote-style marker) must not gain
+    // a space.
+    const refs = extractReferences(
+      mixedRef([
+        el('string-name', [el('surname', [t('Lommatzsch')]), t(' '), el('given-names', [t('M')])]),
+        t(', '),
+        el('etal', [t('et al.')]),
+        t(' '),
+        el('article-title', [t('Benralizumab reduces basophils')]),
+        t('. '),
+        el('source', [t('Clin Exp Allergy')]),
+        t('; '),
+        el('volume', [t('50')]),
+        t(': '),
+        el('fpage', [t('1267')]),
+        t('–'),
+        el('lpage', [t('1269')]),
+        t('.'),
+        el('sup', [t('a')]),
+      ]),
+    );
+
+    expect(refs[0]?.citation).toBe(
+      'Lommatzsch M, et al. Benralizumab reduces basophils. Clin Exp Allergy; 50: 1267–1269.a',
+    );
   });
 
   it('renders element-citation collab + etal author forms (regression #69)', () => {

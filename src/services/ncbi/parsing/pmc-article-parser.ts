@@ -20,9 +20,12 @@ import {
   childrenOf,
   findAll,
   findOne,
+  isTextNode,
   type JatsNode,
+  rawTextContent,
   tagNameOf,
   textContent,
+  textOf,
 } from './pmc-xml-helpers.js';
 
 // ─── Article IDs ────────────────────────────────────────────────────────────
@@ -307,11 +310,81 @@ function renderElementCitation(node: JatsNode): string {
 }
 
 /**
+ * True when the citation text emitted so far already ends with a literal prefix
+ * naming this `pub-id-type` (`doi:`, `PMID `, `pmcid.`), so prepending the label
+ * would read `doi:DOI 10.1111/…`. (#115)
+ */
+function hasLiteralIdPrefix(rendered: string, pubIdType: string): boolean {
+  const tail = rendered.trimEnd().replace(/[:.]$/, '').trimEnd();
+  return tail.toLowerCase().endsWith(pubIdType.toLowerCase());
+}
+
+/**
+ * Render a `<mixed-citation>` as a readable string.
+ *
+ * Mixed citations carry their punctuation in the text nodes between elements,
+ * so a flat `textContent()` reads correctly almost everywhere. Two adjacencies
+ * defeat it, both with zero characters between the elements: consecutive typed
+ * `<pub-id>`s fuse into one unreadable token (#115), and an inline title runs
+ * straight into the volume that follows it (#123). Walk the direct children so
+ * those two cases can be repaired without touching `textContent`, which
+ * abstracts, titles, and body paragraphs share and where zero-gap adjacency is
+ * often intentional.
+ *
+ * Typed `<pub-id>`s are labeled (unless literal prefix text already names the
+ * type), and a single space separates two adjacent elements that carry nothing
+ * between them. A label is text this renderer inserts rather than source
+ * content, so it is separated from whatever precedes it as well — publisher
+ * styles routinely close the prose on punctuation (`… (2020).`, `…021]`) and a
+ * label butted against that reads as one token. Source transitions that already
+ * carry punctuation or whitespace are emitted unchanged; the trailing whitespace
+ * collapse keeps a whitespace-only gap at one space.
+ */
+function renderMixedCitation(node: JatsNode): string {
+  let rendered = '';
+  let prevWasElement = false;
+
+  for (const child of childrenOf(node)) {
+    if (isTextNode(child)) {
+      const raw = textOf(child);
+      if (raw) {
+        rendered += raw;
+        prevWasElement = false;
+      }
+      continue;
+    }
+
+    let part: string;
+    let labeled = false;
+    if (tagNameOf(child) === 'pub-id') {
+      const value = textContent(child);
+      if (!value) continue;
+      const type = attrOf(child, 'pub-id-type') ?? '';
+      const label = PUB_ID_LABELS[type];
+      if (label && !hasLiteralIdPrefix(rendered, type)) {
+        labeled = true;
+        part = `${label} ${value}`;
+      } else {
+        part = value;
+      }
+    } else {
+      part = rawTextContent(child);
+    }
+
+    if (prevWasElement || labeled) rendered += ' ';
+    rendered += part;
+    prevWasElement = true;
+  }
+
+  return rendered.replace(/\s+/g, ' ').trim();
+}
+
+/**
  * Extract references from a `<back>` node. Prefers `<mixed-citation>` over
  * `<element-citation>`, descending into `<citation-alternatives>` when a ref
- * carries both forms there rather than as direct children of `<ref>`. Mixed
- * citations are read verbatim; structured element citations are rendered
- * field-by-field with separators (see `renderElementCitation`).
+ * carries both forms there rather than as direct children of `<ref>`. Both
+ * forms are rendered child-by-child so adjacent elements stay separable (see
+ * `renderMixedCitation` and `renderElementCitation`).
  */
 export function extractReferences(back: JatsNode | undefined): ParsedPmcReference[] {
   if (!back) return [];
@@ -328,12 +401,9 @@ export function extractReferences(back: JatsNode | undefined): ParsedPmcReferenc
     const mixedCitation = findOne(container, 'mixed-citation');
     const elementCitation = findOne(container, 'element-citation');
 
-    // <mixed-citation> carries punctuation in the text nodes between its
-    // elements, so textContent() reads correctly. <element-citation> children
-    // have no separators — render the structured fields explicitly. (#69)
     let citation = '';
     if (mixedCitation) {
-      citation = textContent(mixedCitation);
+      citation = renderMixedCitation(mixedCitation);
     } else if (elementCitation) {
       citation = renderElementCitation(elementCitation);
     }
