@@ -1,6 +1,6 @@
 {
   "name": "@cyanheads/pubmed-mcp-server",
-  "version": "2.10.7",
+  "version": "2.10.8",
   "mcpName": "io.github.cyanheads/pubmed-mcp-server",
   "description": "Search PubMed/Europe PMC, fetch articles and full text (PMC/EPMC/Unpaywall), citations, MeSH terms via MCP. STDIO or Streamable HTTP.",
   "type": "module",
@@ -81,7 +81,7 @@
     "access": "public"
   },
   "dependencies": {
-    "@cyanheads/mcp-ts-core": "^0.12.7",
+    "@cyanheads/mcp-ts-core": "^0.12.8",
     "defuddle": "^0.19.3",
     "fast-xml-parser": "^5.11.1",
     "linkedom": "^0.18.13",
