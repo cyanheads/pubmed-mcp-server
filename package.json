@@ -1,6 +1,6 @@
 {
   "name": "@cyanheads/pubmed-mcp-server",
-  "version": "2.10.5",
+  "version": "2.10.6",
   "mcpName": "io.github.cyanheads/pubmed-mcp-server",
   "description": "Search PubMed/Europe PMC, fetch articles and full text (PMC/EPMC/Unpaywall), citations, MeSH terms via MCP. STDIO or Streamable HTTP.",
   "type": "module",
@@ -81,7 +81,7 @@
     "access": "public"
   },
   "dependencies": {
-    "@cyanheads/mcp-ts-core": "^0.12.5",
+    "@cyanheads/mcp-ts-core": "^0.12.7",
     "defuddle": "^0.19.3",
     "fast-xml-parser": "^5.11.1",
     "linkedom": "^0.18.13",
@@ -91,17 +91,17 @@
     "zod": "^4.5.4"
   },
   "devDependencies": {
-    "@biomejs/biome": "^2.5.11",
+    "@biomejs/biome": "^2.5.12",
     "@socketsecurity/bun-security-scanner": "^1.1.2",
-    "@types/node": "^26.4.0",
+    "@types/node": "^26.4.1",
     "@types/sanitize-html": "^2.16.1",
-    "@vitest/coverage-istanbul": "^4.1.11",
+    "@vitest/coverage-istanbul": "^5.0.0",
     "depcheck": "^1.4.7",
     "fast-check": "^4.9.0",
-    "ignore": "^7.0.7",
-    "tsc-alias": "^1.9.2",
+    "ignore": "^7.0.8",
+    "tsc-alias": "^1.9.4",
     "typescript": "^7.0.2",
-    "vitest": "^4.1.11"
+    "vitest": "^5.0.0"
   },
   "overrides": {
     "@hono/node-server": "^2.0.11",
