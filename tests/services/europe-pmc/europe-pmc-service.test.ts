@@ -507,7 +507,10 @@ describe('EuropePmcService.citations', () => {
     const result = await service.citations('31295471', 10, 1);
 
     expect(result.pmids).toEqual(['10001', '10002']);
-    expect(result.totalCount).toBe(3);
+    // The page covered the whole result set, so the total is the PMID-addressable
+    // count, not the raw hitCount that also counts the dropped PPR row (#101).
+    expect(result.totalCount).toBe(2);
+    expect(result.droppedNoPmid).toBe(1);
   });
 
   it('drops records with no PMID (non-MED sources)', async () => {
@@ -525,7 +528,49 @@ describe('EuropePmcService.citations', () => {
     const service = makeService();
     const result = await service.citations('12345', 10, 1);
     expect(result.pmids).toEqual([]);
-    expect(result.totalCount).toBe(2);
+    // Whole set fetched, every row dropped → nothing is PMID-addressable (#101).
+    expect(result.totalCount).toBe(0);
+    expect(result.droppedNoPmid).toBe(2);
+  });
+
+  it('keeps Europe PMC hitCount as the total when the page is a slice of a larger set (#101)', async () => {
+    mockFetchWithTimeout.mockResolvedValue(
+      jsonResponse({
+        hitCount: 940,
+        citationList: {
+          citation: [
+            { id: '10001', source: 'MED' },
+            { id: 'PPR9', source: 'PPR' },
+          ],
+        },
+      }),
+    );
+    const service = makeService();
+    const result = await service.citations('12345', 2, 1);
+    expect(result.pmids).toEqual(['10001']);
+    expect(result.totalCount).toBe(940);
+    expect(result.droppedNoPmid).toBe(1);
+  });
+
+  it('throws a typed input error when Europe PMC rejects the request via errMsg (#101)', async () => {
+    // Reachable once pageSize can reach Europe PMC's 1000-row ceiling: 1001 is
+    // rejected with a structured errMsg envelope under HTTP 200.
+    mockFetchWithTimeout.mockResolvedValue(
+      jsonResponse({
+        errCode: 20,
+        errMsg: 'pageSize must be between 1 and 1000',
+      }),
+    );
+    const service = makeService();
+    await expect(service.citations('12345', 1001, 1)).rejects.toMatchObject({
+      code: JsonRpcErrorCode.ValidationError,
+      data: {
+        reason: 'europepmc_invalid_input',
+        epmcErrCode: 20,
+        epmcErrMsg: 'pageSize must be between 1 and 1000',
+        recovery: { hint: expect.stringContaining('pageSize must be between 1 and 1000') },
+      },
+    });
   });
 
   it('returns empty result for sparse/empty payload', async () => {
@@ -604,7 +649,19 @@ describe('EuropePmcService.references', () => {
     const service = makeService();
     const result = await service.references('12345', 10, 1);
     expect(result.pmids).toEqual(['30001', '30003']);
-    expect(result.totalCount).toBe(3);
+    // Whole set fetched: the total counts only the PMID-addressable rows (#101).
+    expect(result.totalCount).toBe(2);
+    expect(result.droppedNoPmid).toBe(1);
+  });
+
+  it('surfaces an errMsg envelope from the references endpoint as an input error (#101)', async () => {
+    mockFetchWithTimeout.mockResolvedValue(
+      jsonResponse({ errCode: 20, errMsg: 'pageSize must be between 1 and 1000' }),
+    );
+    const service = makeService();
+    await expect(service.references('12345', 1001, 1)).rejects.toMatchObject({
+      data: { reason: 'europepmc_invalid_input' },
+    });
   });
 
   it('handles sparse/empty payload', async () => {

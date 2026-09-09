@@ -157,6 +157,10 @@ export interface EuropePmcRelatedRecord {
 /** Top-level shape of a Europe PMC citations/references JSON response. */
 export interface EuropePmcLinksResponse {
   citationList?: { citation?: EuropePmcRelatedRecord[] | EuropePmcRelatedRecord };
+  /** Structured error code on input rejection (e.g. `pageSize` above 1000). */
+  errCode?: number | string;
+  /** Structured error message on input rejection, returned under HTTP 200. */
+  errMsg?: string;
   hitCount?: number;
   nextPageUrl?: string;
   referenceList?: { reference?: EuropePmcRelatedRecord[] | EuropePmcRelatedRecord };
@@ -164,6 +168,17 @@ export interface EuropePmcLinksResponse {
 
 /** Normalized result from citations() or references(). */
 export interface EuropePmcRelatedResult {
+  /** Rows in the fetched page dropped because they carry no PubMed PMID. */
+  droppedNoPmid: number;
+  /** Europe PMC's own total across the whole result set, every upstream record counted. */
+  hitCount: number;
+  /** PubMed PMIDs from the fetched page, in the order Europe PMC returned them. */
   pmids: string[];
+  /**
+   * Total before windowing. When the fetched page covered the whole upstream
+   * result set this is the PMID-addressable count (`pmids.length`); otherwise
+   * it is Europe PMC's `hitCount`, which counts every upstream record —
+   * including the non-`MED` rows that carry no PubMed PMID.
+   */
   totalCount: number;
 }

@@ -284,7 +284,8 @@ export class EuropePmcService {
   /**
    * Fetch articles that cite the given PubMed article from Europe PMC.
    * Endpoint: GET /MED/{pmid}/citations?page=N&pageSize=N&format=json
-   * Returns only records with a PMID; others are silently dropped.
+   * Returns only records with a PMID; the rest are dropped and counted in
+   * `droppedNoPmid`.
    *
    * @param pmid  Source PubMed ID
    * @param pageSize  Number of records to request per page (max 1000 per EPMC)
@@ -309,10 +310,11 @@ export class EuropePmcService {
   /**
    * Fetch articles referenced by the given PubMed article from Europe PMC.
    * Endpoint: GET /MED/{pmid}/references?page=N&pageSize=N&format=json
-   * Returns only records with a PMID; others are silently dropped.
+   * Returns only records with a PMID; the rest are dropped and counted in
+   * `droppedNoPmid`.
    *
    * @param pmid  Source PubMed ID
-   * @param pageSize  Number of records to request per page
+   * @param pageSize  Number of records to request per page (max 1000 per EPMC)
    * @param page  1-based page number
    * @param signal  Optional AbortSignal
    */
@@ -333,7 +335,9 @@ export class EuropePmcService {
 
   /**
    * Shared logic for citations() and references(): fetch, parse, extract PMIDs.
-   * Drops records with no PMID — never mints fake IDs.
+   * Drops records with no PMID — never mints fake IDs — and reports how many
+   * rows that cost, so callers can disclose the gap between Europe PMC's
+   * upstream row count and the PubMed-addressable set they actually get back.
    */
   private async fetchRelatedLinks(
     fetch: () => Promise<string>,
@@ -363,6 +367,22 @@ export class EuropePmcService {
       );
     }
 
+    /**
+     * EPMC surfaces structured input errors via `errMsg` under HTTP 200 — a
+     * `pageSize` above its 1000-row ceiling lands here. Route to ValidationError
+     * (non-retryable) so the caller fixes the request instead of reading the
+     * rejection as an empty result set.
+     */
+    const errMsg = typeof parsed.errMsg === 'string' ? parsed.errMsg : undefined;
+    if (errMsg) {
+      throw validationError(`Europe PMC rejected the ${kind} request: ${errMsg}`, {
+        reason: 'europepmc_invalid_input',
+        epmcErrCode: parsed.errCode,
+        epmcErrMsg: errMsg,
+        recovery: { hint: `Europe PMC reported: "${errMsg}". Fix the input and retry.` },
+      });
+    }
+
     const records = extractRecords(parsed);
     const pmids: string[] = [];
     for (const rec of records) {
@@ -374,9 +394,18 @@ export class EuropePmcService {
       if (p && /^\d+$/.test(p)) pmids.push(p);
     }
 
+    // `hitCount` counts every upstream record, PMID-bearing or not, so it
+    // overstates what callers can address whenever a row was dropped. When this
+    // page held the whole result set the addressable count is exact; past that
+    // only EPMC's own total is available.
+    const hitCount = parsed.hitCount ?? records.length;
+    const coversWholeSet = records.length >= hitCount;
+
     return {
       pmids,
-      totalCount: parsed.hitCount ?? records.length,
+      hitCount,
+      totalCount: coversWholeSet ? pmids.length : hitCount,
+      droppedNoPmid: records.length - pmids.length,
     };
   }
 
