@@ -2,6 +2,10 @@
 
 All notable changes to this project. Each entry links to its full per-version file in [changelog/](changelog/).
 
+## [2.10.7](changelog/2.10.x/2.10.7.md) — 2026-09-09
+
+pubmed_fetch_articles and pubmed_fetch_fulltext gain an opt-in maxResponseCharacters whole-response budget with deferred-article continuation; fetch_fulltext reports unqueriedTiers when a search skipped an unconfigured tier; format_citations names accepted format values on an invalid input.
+
 ## [2.10.6](changelog/2.10.x/2.10.6.md) — 2026-09-08
 
 Five bug fixes: pubmed_find_related no longer returns false-empty Europe PMC pages or a fake empty success when every provider fails, Europe PMC title/author/journal markup is stripped and Markdown-escaped, an all-numeric spell_check query round-trips as text, and Unpaywall HTML is no longer parsed as a PDF. Adopts mcp-ts-core 0.12.7.

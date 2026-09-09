@@ -1,6 +1,6 @@
 # pubmed-mcp-server - Directory Structure
 
-Generated on: 2026-09-03 00:23:48
+Generated on: 2026-09-09 08:51:06
 
 ```text
 pubmed-mcp-server/
@@ -157,6 +157,7 @@ pubmed-mcp-server/
 │   │   │       └── database-info.resource.ts
 │   │   └── tools/
 │   │       └── definitions/
+│   │           ├── _budget.ts
 │   │           ├── _concepts.ts
 │   │           ├── _schemas.ts
 │   │           ├── _text.ts
@@ -214,6 +215,7 @@ pubmed-mcp-server/
 │   │   │       └── database-info.resource.test.ts
 │   │   └── tools/
 │   │       └── definitions/
+│   │           ├── _budget.test.ts
 │   │           ├── _fuzz-helpers.ts
 │   │           ├── _text.test.ts
 │   │           ├── convert-ids.tool.test.ts

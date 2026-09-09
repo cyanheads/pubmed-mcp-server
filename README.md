@@ -9,7 +9,7 @@
 
 
 
-[![Version](https://img.shields.io/badge/Version-2.10.6-blue.svg?style=flat-square)](./CHANGELOG.md) [![License](https://img.shields.io/badge/License-Apache%202.0-orange.svg?style=flat-square)](./LICENSE) [![Docker](https://img.shields.io/badge/Docker-ghcr.io-2496ED?style=flat-square&logo=docker&logoColor=white)](https://github.com/users/cyanheads/packages/container/package/pubmed-mcp-server) [![MCP SDK](https://img.shields.io/badge/MCP%20SDK-^2.0.0-green.svg?style=flat-square)](https://modelcontextprotocol.io/) [![npm](https://img.shields.io/npm/v/@cyanheads/pubmed-mcp-server?style=flat-square&logo=npm&logoColor=white)](https://www.npmjs.com/package/@cyanheads/pubmed-mcp-server) [![TypeScript](https://img.shields.io/badge/TypeScript-^7.0.2-3178C6.svg?style=flat-square)](https://www.typescriptlang.org/) [![Bun](https://img.shields.io/badge/Bun-v1.4.0-blueviolet.svg?style=flat-square)](https://bun.sh/)
+[![Version](https://img.shields.io/badge/Version-2.10.7-blue.svg?style=flat-square)](./CHANGELOG.md) [![License](https://img.shields.io/badge/License-Apache%202.0-orange.svg?style=flat-square)](./LICENSE) [![Docker](https://img.shields.io/badge/Docker-ghcr.io-2496ED?style=flat-square&logo=docker&logoColor=white)](https://github.com/users/cyanheads/packages/container/package/pubmed-mcp-server) [![MCP SDK](https://img.shields.io/badge/MCP%20SDK-^2.0.0-green.svg?style=flat-square)](https://modelcontextprotocol.io/) [![npm](https://img.shields.io/npm/v/@cyanheads/pubmed-mcp-server?style=flat-square&logo=npm&logoColor=white)](https://www.npmjs.com/package/@cyanheads/pubmed-mcp-server) [![TypeScript](https://img.shields.io/badge/TypeScript-^7.0.2-3178C6.svg?style=flat-square)](https://www.typescriptlang.org/) [![Bun](https://img.shields.io/badge/Bun-v1.4.0-blueviolet.svg?style=flat-square)](https://bun.sh/)
 
 </div>
 
@@ -72,6 +72,7 @@ Fetch full article metadata by PubMed IDs.
 - Direct links to PubMed and PubMed Central (when available)
 - Optional MeSH terms, grant information, and publication types
 - Handles PubMed's inconsistent XML (structured abstracts, missing fields, varying date formats)
+- Opt-in whole-response ceiling: `maxResponseCharacters` keeps complete article records in response order until the next one would cross it, then defers the rest whole and lists their PMIDs in `deferred.ids`. Re-call with those PMIDs to resume exactly where the response stopped — no article is split, skipped, or duplicated. Each article is measured as the JSON record it is returned as, so a ceiling under the first article returns zero articles, the full deferred list, and the size to clear
 
 ---
 
@@ -84,10 +85,12 @@ Fetch full-text articles via a three-stage chain: NCBI PMC EFetch → Europe PMC
 - Europe PMC layer (enabled by default; disable with `EUROPEPMC_ENABLED=false`) recovers PMC-counterpart records that NCBI PMC EFetch missed, and resolves DOI input to PMC counterparts when one exists. EPMC's `fullTextXML` is PMC-keyed, so preprints (PPR), patents (PAT), and Agricola (AGR) are reachable via `pubmed_europepmc_search` for metadata but have no full text via this chain.
 - Unpaywall layer (enabled by setting `UNPAYWALL_EMAIL`) resolves DOIs to legal OA copies; extracts HTML landing pages to Markdown via Defuddle or PDFs to text via unpdf
 - Discriminated output contract — `source: "pmc"` (structured sections, regardless of whether it came from PMC or EPMC) or `source: "unpaywall"` (best-effort body + `contentFormat`: `html-markdown` or `pdf-text`)
-- Structured unavailable reasons (`not-found`, `no-pmc-fallback-disabled`, `no-epmc-fulltext`, `no-doi`, `no-oa`, `fetch-failed`, `parse-failed`, `service-error`) so callers can retry or explain to users without parsing text
+- Structured unavailable reasons (`not-found`, `no-pmc-fallback-disabled`, `no-epmc-fulltext`, `no-body`, `no-doi`, `no-oa`, `fetch-failed`, `parse-failed`, `service-error`) so callers can retry or explain to users without parsing text
+- An `unavailable` entry also carries `unqueriedTiers` when the chain skipped a tier this deployment has not configured and that tier could have served the id — the search was incomplete, and a deployment with those tiers configured may still resolve it
 - Each `unavailable` entry carries `idType` (`pmid` / `pmcid` / `doi`) and `triedTiers` — per-tier outcomes (`not-attempted`, `miss`, `no-fulltext`, `service-error`, …) in execution order, so callers can see which stage failed and why
 - Section filtering by title (case-insensitive match, e.g. `["methods", "results"]`) and configurable max sections apply to PMC output
 - Character budgets keep context size predictable: `maxCharacters` caps body text per article (PMC sections and subsections, or the Unpaywall body), `maxCharactersPerSection` caps a single PMC section, and `overflowMode` picks between `truncate` (fill sections in document order) and `outline` (split the budget evenly so every heading survives with an excerpt). Budgets run after the semantic filters, and a `truncation` object reports per-article and per-section character counts whenever anything was shortened
+- `maxResponseCharacters` bounds the whole response instead of each body: every field of a returned record counts (abstract, references, metadata, body), one ledger across PMC-, Europe PMC-, and Unpaywall-served articles. Articles past the ceiling are deferred whole, with their ids — in the branch they were requested under — in `deferred.ids` for a follow-up call
 - Up to 10 articles per request
 
 ---
