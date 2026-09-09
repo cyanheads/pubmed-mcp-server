@@ -66,6 +66,27 @@ describe('spellCheckTool', () => {
     expect(result.hasSuggestion).toBe(false);
   });
 
+  it.each(['33306283', '007', '1e5'])(
+    'passes output validation for the numeric-looking query %s on both surfaces (#108)',
+    async (query) => {
+      // The reported symptom was an output-validation failure after a
+      // successful upstream round-trip: the XML parser handed eSpell a number
+      // and the string output schema rejected it. Parse the handler's return
+      // through the declared schema so the tool surface is covered too, not
+      // only the service.
+      mockESpell.mockResolvedValue({ original: query, corrected: query, hasSuggestion: false });
+      const ctx = createMockContext({ errors: spellCheckTool.errors });
+      const result = await spellCheckTool.handler(spellCheckTool.input.parse({ query }), ctx);
+
+      expect(spellCheckTool.output.parse(result)).toEqual({
+        original: query,
+        corrected: query,
+        hasSuggestion: false,
+      });
+      expect(textBlocks(spellCheckTool.format!(result))[0]?.text).toContain(`"${query}"`);
+    },
+  );
+
   it('formats result with suggestion', () => {
     const blocks = textBlocks(
       spellCheckTool.format!({

@@ -86,6 +86,92 @@ describe('NcbiResponseHandler', () => {
       expect(serialized).not.toMatch(/e\+\d+/);
     });
 
+    describe('verbatim parser path (regression #108)', () => {
+      /** The exact ESpell body NCBI returns for an all-numeric term. */
+      const espellXml = (query: string, corrected = '') =>
+        `<?xml version="1.0"?><eSpellResult><Database>pubmed</Database><Query>${query}</Query>${
+          corrected ? `<CorrectedQuery>${corrected}</CorrectedQuery>` : '<CorrectedQuery/>'
+        }<SpelledQuery/><ERROR/></eSpellResult>`;
+
+      const parseEspell = (xml: string) =>
+        createHandler().parseAndHandleResponse<{
+          eSpellResult: { Query?: unknown; CorrectedQuery?: unknown };
+        }>(xml, 'espell', { retmode: 'xml', useVerbatimParser: true });
+
+      it('characterizes the default parser: an all-numeric ESpell term is coerced to a number', () => {
+        // The bug, pinned. `parseTagValue: true` turns <Query>33306283</Query>
+        // into a number before eSpell reads it, so the tool's string output
+        // schema rejects the result after a successful round-trip.
+        const result = createHandler().parseAndHandleResponse<{
+          eSpellResult: { Query?: unknown };
+        }>(espellXml('33306283'), 'espell', { retmode: 'xml' });
+
+        expect(result.eSpellResult.Query).toBe(33306283);
+      });
+
+      it('keeps an all-numeric term a string', () => {
+        expect(parseEspell(espellXml('33306283')).eSpellResult.Query).toBe('33306283');
+      });
+
+      it('round-trips a leading-zero term byte-identically', () => {
+        // String() at the read site cannot recover this: 007 → 7 → "7".
+        expect(parseEspell(espellXml('007')).eSpellResult.Query).toBe('007');
+      });
+
+      it('round-trips an exponential-literal term byte-identically', () => {
+        // Same: 1e5 → 100000 → "100000".
+        expect(parseEspell(espellXml('1e5')).eSpellResult.Query).toBe('1e5');
+      });
+
+      it('keeps a genuine correction readable and leaves alphabetic terms alone', () => {
+        const result = parseEspell(espellXml('cancr', 'cancer'));
+        expect(result.eSpellResult.Query).toBe('cancr');
+        expect(result.eSpellResult.CorrectedQuery).toBe('cancer');
+      });
+
+      it('reads an empty <CorrectedQuery/> as an empty string, not a missing key', () => {
+        const result = parseEspell(espellXml('33306283'));
+        expect(result.eSpellResult.CorrectedQuery).toBe('');
+      });
+
+      it('keeps the flat named-key shape the ordered parser would destroy', () => {
+        // #69's parser also sets `preserveOrder: true` and hands back a
+        // document-ordered node array, so it is not a drop-in for eSpell's
+        // `response.eSpellResult.Query` property access.
+        const flat = parseEspell(espellXml('33306283'));
+        expect(Array.isArray(flat)).toBe(false);
+        expect(flat.eSpellResult).toBeTypeOf('object');
+
+        const ordered = createHandler().parseAndHandleResponse<unknown>(
+          espellXml('33306283'),
+          'espell',
+          { retmode: 'xml', useOrderedParser: true },
+        );
+        expect(Array.isArray(ordered)).toBe(true);
+      });
+
+      it('leaves the default parser coercing — the opt-in is scoped, not global', () => {
+        const handler = createHandler();
+        const result = handler.parseAndHandleResponse<Record<string, unknown>>(
+          '<?xml version="1.0"?><eSearchResult><Count>42</Count></eSearchResult>',
+          'esearch',
+          { retmode: 'xml' },
+        );
+        expect((result.eSearchResult as Record<string, unknown>).Count).toBe(42);
+      });
+
+      it('still surfaces an NCBI error structure through the named-key error paths', () => {
+        const handler = createHandler();
+        expect(() =>
+          handler.parseAndHandleResponse(
+            '<?xml version="1.0"?><eSearchResult><ERROR>Empty id list</ERROR></eSearchResult>',
+            'espell',
+            { retmode: 'xml', useVerbatimParser: true },
+          ),
+        ).toThrow(McpError);
+      });
+    });
+
     it('throws on invalid XML', () => {
       const handler = createHandler();
       expect(() =>

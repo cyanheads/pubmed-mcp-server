@@ -17,7 +17,7 @@ import { logger, requestContextService } from '@cyanheads/mcp-ts-core/utils';
  * matures.
  */
 // biome-ignore lint/suspicious/noDeprecatedImports: staying on in-tree XMLValidator — see block comment above
-import { XMLParser as FastXmlParser, XMLValidator } from 'fast-xml-parser';
+import { XMLParser as FastXmlParser, type X2jOptions, XMLValidator } from 'fast-xml-parser';
 
 import { recoveryFor } from '@/services/error-contracts.js';
 import type { NcbiRequestOptions } from './types.js';
@@ -257,16 +257,30 @@ export class NcbiResponseHandler {
    * `htmlEntities`), so page-range en-dashes still resolve. (#69)
    */
   private readonly orderedXmlParser: FastXmlParser;
+  /**
+   * Flat, named-key parser with `parseTagValue: false`. Same shape as
+   * `xmlParser` — `response.eSpellResult.Query` still resolves — but tag text
+   * arrives verbatim. Used where a response echoes an arbitrary caller-supplied
+   * token: ESpell's `<Query>` is the only such field today, and coercion there
+   * destroys the text before application code runs (`007` → `7`, `1e5` →
+   * `100000`), which no read-site `String()` can undo. `orderedXmlParser` is
+   * not a substitute — it also sets `preserveOrder`, returning a node array
+   * rather than the property access the ESpell read depends on. (#108)
+   */
+  private readonly verbatimXmlParser: FastXmlParser;
 
   constructor() {
-    this.xmlParser = new FastXmlParser({
+    // The two flat, named-key parsers differ only in `parseTagValue`.
+    const flatOptions = {
       ignoreAttributes: false,
       attributeNamePrefix: '@_',
-      parseTagValue: true,
       processEntities: NCBI_PROCESS_ENTITIES_OPTIONS,
       htmlEntities: true,
       isArray: (_name, jpath) => NCBI_ARRAY_JPATHS.has(jpath as string),
-    });
+    } satisfies X2jOptions;
+
+    this.xmlParser = new FastXmlParser({ ...flatOptions, parseTagValue: true });
+    this.verbatimXmlParser = new FastXmlParser({ ...flatOptions, parseTagValue: false });
     this.orderedXmlParser = new FastXmlParser({
       preserveOrder: true,
       ignoreAttributes: false,
@@ -433,7 +447,13 @@ export class NcbiResponseHandler {
         this.throwNcbiError(errorParsed, endpoint);
       }
 
-      const parser = useOrdered ? this.orderedXmlParser : this.xmlParser;
+      // Ordered wins when both are set: it is the JATS mixed-content path, and
+      // it already parses tag values verbatim.
+      const parser = useOrdered
+        ? this.orderedXmlParser
+        : options?.useVerbatimParser
+          ? this.verbatimXmlParser
+          : this.xmlParser;
       // Pre-flatten <sup>/<sub>/<inf>/<i>/<b>/<u>/<sc> on the regular parser
       // path. The ordered parser walks mixed content correctly via
       // preserveOrder; the regular parser does not.

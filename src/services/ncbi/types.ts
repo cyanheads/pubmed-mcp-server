@@ -46,6 +46,17 @@ export interface NcbiRequestOptions {
   useOrderedParser?: boolean;
   /** Force HTTP POST (for large payloads). */
   usePost?: boolean;
+  /**
+   * Parse XML with `parseTagValue: false` while keeping the flat, named-key
+   * object shape (`response.eSpellResult.Query`). Required wherever a response
+   * echoes an arbitrary caller-supplied token that must survive verbatim: the
+   * coercing default turns `007` into `7` and `1e5` into `100000` before any
+   * application code runs, so a read-site `String()` cannot recover the text.
+   * Distinct from `useOrderedParser`, which also sets `preserveOrder` and hands
+   * back a document-ordered node array. Ignored when `useOrderedParser` is set.
+   * (#108)
+   */
+  useVerbatimParser?: boolean;
 }
 
 /**
@@ -532,7 +543,12 @@ export interface ESpellResult {
   original: string;
 }
 
-/** Raw parsed XML container for eSpellResult. */
+/**
+ * Raw parsed XML container for eSpellResult. `Query` and `CorrectedQuery` are
+ * strings at runtime as well as in this declaration: the ESpell request opts
+ * into `useVerbatimParser`, so the coercing default parser never sees the
+ * echoed term. (#108)
+ */
 export interface ESpellResponseContainer {
   eSpellResult: {
     Query?: string;

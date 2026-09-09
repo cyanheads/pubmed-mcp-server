@@ -175,6 +175,77 @@ describe('NcbiService', () => {
       expect(result.corrected).toBe('cancer');
       expect(result.hasSuggestion).toBe(false);
     });
+
+    it('asks the response handler for the verbatim parser (#108)', async () => {
+      const { service, mockApiClient, mockResponseHandler } = createMockService();
+      (mockApiClient.makeRequest as ReturnType<typeof vi.fn>).mockResolvedValue('<xml/>');
+      (mockResponseHandler.parseAndHandleResponse as ReturnType<typeof vi.fn>).mockReturnValue({
+        eSpellResult: { Query: '33306283', CorrectedQuery: '' },
+      });
+
+      await service.eSpell({ db: 'pubmed', term: '33306283' });
+
+      expect(mockResponseHandler.parseAndHandleResponse).toHaveBeenCalledWith(
+        '<xml/>',
+        'espell',
+        expect.objectContaining({ retmode: 'xml', useVerbatimParser: true }),
+      );
+    });
+
+    it('returns an all-numeric term as a string on both fields (#108)', async () => {
+      const { service, mockApiClient, mockResponseHandler } = createMockService();
+      (mockApiClient.makeRequest as ReturnType<typeof vi.fn>).mockResolvedValue('<xml/>');
+      (mockResponseHandler.parseAndHandleResponse as ReturnType<typeof vi.fn>).mockReturnValue({
+        eSpellResult: { Query: '33306283', CorrectedQuery: '' },
+      });
+
+      const result = await service.eSpell({ db: 'pubmed', term: '33306283' });
+      expect(result).toEqual({
+        original: '33306283',
+        corrected: '33306283',
+        hasSuggestion: false,
+      });
+      expect(typeof result.original).toBe('string');
+      expect(typeof result.corrected).toBe('string');
+    });
+
+    it.each([
+      ['007', 'leading zero'],
+      ['1e5', 'exponential literal'],
+    ])('round-trips %s (%s) byte-identically (#108)', async (term) => {
+      const { service, mockApiClient, mockResponseHandler } = createMockService();
+      (mockApiClient.makeRequest as ReturnType<typeof vi.fn>).mockResolvedValue('<xml/>');
+      (mockResponseHandler.parseAndHandleResponse as ReturnType<typeof vi.fn>).mockReturnValue({
+        eSpellResult: { Query: term, CorrectedQuery: '' },
+      });
+
+      const result = await service.eSpell({ db: 'pubmed', term });
+      expect(result.original).toBe(term);
+      expect(result.corrected).toBe(term);
+      expect(result.hasSuggestion).toBe(false);
+    });
+
+    it('still reports a genuine misspelling as a suggestion (#108 regression)', async () => {
+      const { service, mockApiClient, mockResponseHandler } = createMockService();
+      (mockApiClient.makeRequest as ReturnType<typeof vi.fn>).mockResolvedValue('<xml/>');
+      (mockResponseHandler.parseAndHandleResponse as ReturnType<typeof vi.fn>).mockReturnValue({
+        eSpellResult: { Query: 'cancr', CorrectedQuery: 'cancer' },
+      });
+
+      const result = await service.eSpell({ db: 'pubmed', term: 'cancr' });
+      expect(result).toEqual({ original: 'cancr', corrected: 'cancer', hasSuggestion: true });
+    });
+
+    it('falls back to the requested term when ESpell omits <Query>', async () => {
+      const { service, mockApiClient, mockResponseHandler } = createMockService();
+      (mockApiClient.makeRequest as ReturnType<typeof vi.fn>).mockResolvedValue('<xml/>');
+      (mockResponseHandler.parseAndHandleResponse as ReturnType<typeof vi.fn>).mockReturnValue({
+        eSpellResult: {},
+      });
+
+      const result = await service.eSpell({ db: 'pubmed', term: '007' });
+      expect(result).toEqual({ original: '007', corrected: '007', hasSuggestion: false });
+    });
   });
 
   describe('eSummary', () => {

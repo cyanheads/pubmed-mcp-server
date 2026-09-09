@@ -169,6 +169,10 @@ export class NcbiService {
   async eSpell(params: NcbiRequestParams, options?: NcbiCallOptions): Promise<ESpellResult> {
     const response = await this.performRequest<ESpellResponseContainer>('espell', params, {
       retmode: 'xml',
+      // ESpell echoes the caller's term back in <Query>. The coercing default
+      // parser would turn an all-numeric one into a number — and `007` / `1e5`
+      // into different text entirely — before this method runs. (#108)
+      useVerbatimParser: true,
       ...(options?.signal && { signal: options.signal }),
     });
 
