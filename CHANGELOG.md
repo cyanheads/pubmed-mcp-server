@@ -2,6 +2,10 @@
 
 All notable changes to this project. Each entry links to its full per-version file in [changelog/](changelog/).
 
+## [2.10.8](changelog/2.10.x/2.10.8.md) — 2026-09-09
+
+ECitMatch reconciliation now keys on per-request wire tokens so duplicate caller keys no longer misassign results; pubmed_fetch_fulltext folds JATS sections nested three or more levels deep into the deepest surviving subsection's text; mixed-citation references separate zero-gap adjacent pub-ids and title/volume pairs.
+
 ## [2.10.7](changelog/2.10.x/2.10.7.md) — 2026-09-09
 
 pubmed_fetch_articles and pubmed_fetch_fulltext gain an opt-in maxResponseCharacters whole-response budget with deferred-article continuation; fetch_fulltext reports unqueriedTiers when a search skipped an unconfigured tier; format_citations names accepted format values on an invalid input.

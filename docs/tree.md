@@ -1,6 +1,6 @@
 # pubmed-mcp-server - Directory Structure
 
-Generated on: 2026-09-09 08:51:06
+Generated on: 2026-09-09 12:09:36
 
 ```text
 pubmed-mcp-server/
@@ -130,6 +130,8 @@ pubmed-mcp-server/
 │   │   │   └── server-json.md
 │   │   └── SKILL.md
 │   ├── release-and-publish/
+│   │   └── SKILL.md
+│   ├── release-pr-review/
 │   │   └── SKILL.md
 │   ├── report-issue-framework/
 │   │   └── SKILL.md
