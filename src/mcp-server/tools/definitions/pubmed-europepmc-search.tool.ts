@@ -28,7 +28,7 @@ import {
   EDAM_PUBMED_ID,
   SCHEMA_SEARCH_ACTION,
 } from './_concepts.js';
-import { sliceCodeUnits } from './_text.js';
+import { escapeMarkdownInline, sliceCodeUnits } from './_text.js';
 
 const SourceEnum = z.enum(['MED', 'PMC', 'PPR', 'PAT', 'AGR']);
 
@@ -115,9 +115,24 @@ export const pubmedEuropepmcSearchTool = tool('pubmed_europepmc_search', {
               .describe(
                 "Europe PMC's internal record id. Pass it with this hit's `source` to `pubmed_europepmc_fetch` for the complete record. Europe PMC's `fullTextXML` is keyed on `pmcId`, not on this id, so records without a PMC counterpart have no full text to fetch.",
               ),
-            title: z.string().optional().describe('Article title'),
-            authors: z.string().optional().describe('Formatted author string'),
-            journal: z.string().optional().describe('Journal title'),
+            title: z
+              .string()
+              .optional()
+              .describe(
+                'Article title as display-ready plain text — JATS/HTML markup stripped and HTML entities decoded.',
+              ),
+            authors: z
+              .string()
+              .optional()
+              .describe(
+                'Formatted author string as display-ready plain text — JATS/HTML markup stripped and HTML entities decoded.',
+              ),
+            journal: z
+              .string()
+              .optional()
+              .describe(
+                'Journal title as display-ready plain text — JATS/HTML markup stripped and HTML entities decoded.',
+              ),
             pubYear: z.string().optional().describe('Publication year'),
             firstPublicationDate: z
               .string()
@@ -221,12 +236,19 @@ export const pubmedEuropepmcSearchTool = tool('pubmed_europepmc_search', {
       // spent on text and soft hyphens don't corrupt downstream token matching. (#74)
       const abstract = h.abstractText ? toDisplayText(h.abstractText) : '';
       const truncated = abstract.length > ABSTRACT_SNIPPET_LIMIT;
+      // Title, authors, and journal arrive on the same footing as the abstract —
+      // raw JSON strings no XML parser has touched — so they take the same
+      // single-pass normalization. Title is the confirmed live vector:
+      // preprints carry italicized species and gene names. (#102)
+      const title = h.title ? toDisplayText(h.title) : '';
+      const authors = h.authorString ? toDisplayText(h.authorString) : '';
+      const journal = h.journalTitle ? toDisplayText(h.journalTitle) : '';
       return {
         source: h.source as 'MED' | 'PMC' | 'PPR' | 'PAT' | 'AGR',
         epmcId: h.id,
-        ...(h.title && { title: h.title }),
-        ...(h.authorString && { authors: h.authorString }),
-        ...(h.journalTitle && { journal: h.journalTitle }),
+        ...(title && { title }),
+        ...(authors && { authors }),
+        ...(journal && { journal }),
         ...(h.pubYear && { pubYear: h.pubYear }),
         ...(h.firstPublicationDate && { firstPublicationDate: h.firstPublicationDate }),
         ...(h.pmid && { pmid: h.pmid }),
@@ -293,10 +315,12 @@ export const pubmedEuropepmcSearchTool = tool('pubmed_europepmc_search', {
     if (result.hits.length > 0) {
       lines.push('\n### Hits');
       for (const h of result.hits) {
-        lines.push(`\n#### ${h.title ?? h.epmcId}`);
+        // Escaping is render-time only — the structuredContent values above stay
+        // plain text; only these interpolations are neutralized. (#102)
+        lines.push(`\n#### ${escapeMarkdownInline(h.title ?? h.epmcId)}`);
         lines.push(`**Source:** ${h.source} | **EPMC ID:** ${h.epmcId}`);
-        if (h.authors) lines.push(`**Authors:** ${h.authors}`);
-        if (h.journal) lines.push(`**Journal:** ${h.journal}`);
+        if (h.authors) lines.push(`**Authors:** ${escapeMarkdownInline(h.authors)}`);
+        if (h.journal) lines.push(`**Journal:** ${escapeMarkdownInline(h.journal)}`);
         if (h.firstPublicationDate) lines.push(`**Published:** ${h.firstPublicationDate}`);
         if (h.pubYear) lines.push(`**Year:** ${h.pubYear}`);
         if (h.pmid) lines.push(`**PMID:** ${h.pmid}`);

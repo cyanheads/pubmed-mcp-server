@@ -24,6 +24,7 @@ import {
   EDAM_DATA_RETRIEVAL,
   SCHEMA_SCHOLARLY_ARTICLE,
 } from './_concepts.js';
+import { escapeMarkdownInline } from './_text.js';
 
 const SourceEnum = z.enum(EUROPEPMC_ALL_SOURCES);
 
@@ -59,9 +60,24 @@ const FetchedRecordSchema = z
   .object({
     source: SourceEnum.describe('Europe PMC source the record was resolved from'),
     epmcId: z.string().describe("Europe PMC's internal record id"),
-    title: z.string().optional().describe('Record title'),
-    authors: z.string().optional().describe('Formatted author string'),
-    journal: z.string().optional().describe('Journal title'),
+    title: z
+      .string()
+      .optional()
+      .describe(
+        'Record title as display-ready plain text — JATS/HTML markup stripped and HTML entities decoded.',
+      ),
+    authors: z
+      .string()
+      .optional()
+      .describe(
+        'Formatted author string as display-ready plain text — JATS/HTML markup stripped and HTML entities decoded.',
+      ),
+    journal: z
+      .string()
+      .optional()
+      .describe(
+        'Journal title as display-ready plain text — JATS/HTML markup stripped and HTML entities decoded.',
+      ),
     pubYear: z.string().optional().describe('Publication year'),
     firstPublicationDate: z.string().optional().describe('First publication date (ISO YYYY-MM-DD)'),
     pmid: z.string().optional().describe('PMID when present in PubMed'),
@@ -158,16 +174,23 @@ export const pubmedEuropepmcFetchTool = tool('pubmed_europepmc_fetch', {
     const hits = await epmc.fetchRecords(input.records, ctx.signal);
 
     const records = hits.map((h) => {
-      // EPMC returns abstractText as a raw JSON string carrying JATS/HTML markup,
-      // un-decoded entities, and soft hyphens (no XML parser runs on it). The
-      // cleanup mirrors pubmed_europepmc_search; only the truncation is dropped.
+      // EPMC returns these as raw JSON strings carrying JATS/HTML markup,
+      // un-decoded entities, and soft hyphens (no XML parser runs on them).
+      // Title is the confirmed live vector — preprints carry italicized species
+      // and gene names — but authors and journal are free-text upstream fields
+      // on the same footing, so all three take the single-pass normalization
+      // the abstract already gets. (#102) The cleanup mirrors
+      // pubmed_europepmc_search; only the truncation is dropped.
       const abstract = h.abstractText ? toDisplayText(h.abstractText) : '';
+      const title = h.title ? toDisplayText(h.title) : '';
+      const authors = h.authorString ? toDisplayText(h.authorString) : '';
+      const journal = h.journalTitle ? toDisplayText(h.journalTitle) : '';
       return {
         source: h.source as (typeof EUROPEPMC_ALL_SOURCES)[number],
         epmcId: h.id,
-        ...(h.title && { title: h.title }),
-        ...(h.authorString && { authors: h.authorString }),
-        ...(h.journalTitle && { journal: h.journalTitle }),
+        ...(title && { title }),
+        ...(authors && { authors }),
+        ...(journal && { journal }),
         ...(h.pubYear && { pubYear: h.pubYear }),
         ...(h.firstPublicationDate && { firstPublicationDate: h.firstPublicationDate }),
         ...(h.pmid && { pmid: h.pmid }),
@@ -237,10 +260,12 @@ export const pubmedEuropepmcFetchTool = tool('pubmed_europepmc_fetch', {
     }
 
     for (const r of result.records) {
-      lines.push(`\n### ${r.title ?? r.epmcId}`);
+      // Escaping is render-time only — the structuredContent values above stay
+      // plain text; only these interpolations are neutralized. (#102)
+      lines.push(`\n### ${escapeMarkdownInline(r.title ?? r.epmcId)}`);
       lines.push(`**Source:** ${r.source} | **EPMC ID:** ${r.epmcId}`);
-      if (r.authors) lines.push(`**Authors:** ${r.authors}`);
-      if (r.journal) lines.push(`**Journal:** ${r.journal}`);
+      if (r.authors) lines.push(`**Authors:** ${escapeMarkdownInline(r.authors)}`);
+      if (r.journal) lines.push(`**Journal:** ${escapeMarkdownInline(r.journal)}`);
       if (r.firstPublicationDate) lines.push(`**Published:** ${r.firstPublicationDate}`);
       if (r.pubYear) lines.push(`**Year:** ${r.pubYear}`);
       if (r.pmid) lines.push(`**PMID:** ${r.pmid}`);

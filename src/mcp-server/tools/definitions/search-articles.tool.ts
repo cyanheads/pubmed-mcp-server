@@ -16,6 +16,7 @@ import {
   EDAM_PUBMED_ID,
   SCHEMA_SEARCH_ACTION,
 } from './_concepts.js';
+import { escapeMarkdownInline } from './_text.js';
 
 /**
  * Accepts empty strings (treated as "no filter" by the handler) or dates in
@@ -486,7 +487,9 @@ export const searchArticlesTool = tool('pubmed_search_articles', {
       }
       lines.push('\n### Summaries');
       for (const s of result.summaries) {
-        lines.push(`\n#### ${s.title ?? s.pmid}`);
+        // Render-time only — `structuredContent.summaries[].title` keeps the
+        // plain-text value the eSummary parser produced. (#102)
+        lines.push(`\n#### ${escapeMarkdownInline(s.title ?? s.pmid)}`);
         lines.push(`**PMID:** ${s.pmid}`);
         if (s.authors) lines.push(`**Authors:** ${s.authors}`);
         if (s.source) lines.push(`**Source:** ${s.source}`);

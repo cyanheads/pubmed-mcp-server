@@ -247,6 +247,127 @@ describe('pubmedEuropepmcSearchTool', () => {
     expect(snippet).toBe('Background: Emergency & clinical triage <LLMs>');
   });
 
+  describe('title / authors / journal normalization (#102)', () => {
+    const searchOne = async (hit: Record<string, unknown>) => {
+      mockSearch.mockResolvedValue({
+        hits: [{ id: 'PPR1226893', source: 'PPR', ...hit }],
+        hitCount: 1,
+        cursorMark: '*',
+        query: 'foo',
+      });
+      const ctx = createMockContext({ errors: pubmedEuropepmcSearchTool.errors });
+      return pubmedEuropepmcSearchTool.handler(
+        pubmedEuropepmcSearchTool.input.parse({ query: 'foo' }),
+        ctx,
+      );
+    };
+
+    it('strips JATS/HTML markup from the title, the live PPR vector', async () => {
+      const result = await searchOne({
+        title: '<i>PIP2;1</i>  aquaporin promotes early stomatal closure in grapevine leaves',
+      });
+      expect(result.hits[0]?.title).toBe(
+        'PIP2;1 aquaporin promotes early stomatal closure in grapevine leaves',
+      );
+    });
+
+    it('normalizes authors and journal the same way', async () => {
+      const result = await searchOne({
+        authorString: 'Smith J, Jones K &amp; Lee  M.',
+        journalTitle: 'Journal of <i>Plant</i> Physi­ology',
+      });
+      expect(result.hits[0]?.authors).toBe('Smith J, Jones K & Lee M.');
+      expect(result.hits[0]?.journal).toBe('Journal of Plant Physiology');
+    });
+
+    it('decodes entities once, never twice', async () => {
+      const result = await searchOne({ title: 'Assay of &amp;lt;i&amp;gt; markers' });
+      expect(result.hits[0]?.title).toBe('Assay of &lt;i&gt; markers');
+    });
+
+    it('leaves a statistical comparison in the title intact', async () => {
+      const result = await searchOne({ title: 'Decline slowed where P<0.001 and IL-6 > baseline' });
+      expect(result.hits[0]?.title).toBe('Decline slowed where P<0.001 and IL-6 > baseline');
+    });
+
+    it('omits the fields entirely when Europe PMC carries none', async () => {
+      const result = await searchOne({});
+      expect(result.hits[0]?.title).toBeUndefined();
+      expect(result.hits[0]?.authors).toBeUndefined();
+      expect(result.hits[0]?.journal).toBeUndefined();
+    });
+
+    it('documents the normalization in the output schema descriptions', () => {
+      const shape = pubmedEuropepmcSearchTool.output.shape.hits.element.shape;
+      for (const field of ['title', 'authors', 'journal'] as const) {
+        expect(shape[field].description).toMatch(/markup stripped/i);
+      }
+    });
+  });
+
+  describe('Markdown escaping in content[] (#102)', () => {
+    const render = (hit: Record<string, unknown>) =>
+      textBlocks(
+        pubmedEuropepmcSearchTool.format!({
+          hits: [
+            {
+              source: 'PPR',
+              epmcId: 'PPR1',
+              epmcUrl: 'https://europepmc.org/article/PPR/PPR1',
+              ...hit,
+            },
+          ],
+          cursorMark: '*',
+          searchUrl: 'https://europepmc.org/search?query=x',
+        }),
+      )[0]?.text ?? '';
+
+    it('renders a hostile title without adding a heading or a link', () => {
+      const text = render({
+        title: '# Injected\n[Retracted](https://evil.test) *emphasis* <i>PIP2;1</i>',
+      });
+
+      const headings = text.split('\n').filter((line) => line.startsWith('#'));
+      expect(headings).toEqual([
+        '## Europe PMC Search Results',
+        '### Hits',
+        '#### # Injected \\[Retracted\\](https://evil.test) \\*emphasis\\* \\<i>PIP2;1\\</i>',
+      ]);
+    });
+
+    it('escapes the Authors and Journal label lines too', () => {
+      const text = render({
+        authors: 'Smith J, [Anon](https://evil.test), Jones K',
+        journal: 'Journal of *Plant* <i>Physiology</i>',
+      });
+      expect(text).toContain('**Authors:** Smith J, \\[Anon\\](https://evil.test), Jones K');
+      expect(text).toContain('**Journal:** Journal of \\*Plant\\* \\<i>Physiology\\</i>');
+    });
+
+    it('leaves a legible title untouched', () => {
+      const title = 'TP53_mutant tumours at 5*g where P<0.001 in ~250 patients';
+      expect(render({ title })).toContain(`#### ${title}`);
+    });
+
+    it('never writes the escaped form back into structuredContent', async () => {
+      mockSearch.mockResolvedValue({
+        hits: [{ id: 'PPR1', source: 'PPR', title: '[Retracted] *Nature* study' }],
+        hitCount: 1,
+        cursorMark: '*',
+        query: 'foo',
+      });
+      const ctx = createMockContext({ errors: pubmedEuropepmcSearchTool.errors });
+      const result = await pubmedEuropepmcSearchTool.handler(
+        pubmedEuropepmcSearchTool.input.parse({ query: 'foo' }),
+        ctx,
+      );
+
+      expect(result.hits[0]?.title).toBe('[Retracted] *Nature* study');
+      const text = textBlocks(pubmedEuropepmcSearchTool.format!(result))[0]?.text ?? '';
+      expect(text).toContain('#### \\[Retracted\\] \\*Nature\\* study');
+    });
+  });
+
   it('emits an epmcUrl per hit', async () => {
     mockSearch.mockResolvedValue({
       hits: [{ id: 'PPR9', source: 'PPR' }],

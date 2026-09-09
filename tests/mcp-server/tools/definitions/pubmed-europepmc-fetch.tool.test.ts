@@ -158,6 +158,137 @@ describe('pubmedEuropepmcFetchTool', () => {
     );
   });
 
+  describe('title / authors / journal normalization (#102)', () => {
+    const fetchOne = async (hit: Record<string, unknown>) => {
+      mockFetchRecords.mockResolvedValue([{ id: 'PPR1226893', source: 'PPR', ...hit }]);
+      const ctx = createMockContext({ errors: pubmedEuropepmcFetchTool.errors });
+      return pubmedEuropepmcFetchTool.handler(
+        pubmedEuropepmcFetchTool.input.parse({
+          records: [{ source: 'PPR', epmcId: 'PPR1226893' }],
+        }),
+        ctx,
+      );
+    };
+
+    it('strips JATS/HTML markup from the title, the live PPR vector', async () => {
+      const result = await fetchOne({
+        title: '<i>PIP2;1</i>  aquaporin promotes early stomatal closure in grapevine leaves',
+      });
+      expect(result.records[0]?.title).toBe(
+        'PIP2;1 aquaporin promotes early stomatal closure in grapevine leaves',
+      );
+    });
+
+    it('normalizes authors and journal the same way', async () => {
+      const result = await fetchOne({
+        authorString: 'Smith J, Jones K &amp; Lee  M.',
+        journalTitle: 'Journal of <i>Plant</i> Physi­ology',
+      });
+      expect(result.records[0]?.authors).toBe('Smith J, Jones K & Lee M.');
+      expect(result.records[0]?.journal).toBe('Journal of Plant Physiology');
+    });
+
+    it('decodes entities once, never twice', async () => {
+      // A double-encoded upstream value collapses one level and stops there —
+      // a second pass would turn `&lt;` into a structural `<`.
+      const result = await fetchOne({ title: 'Assay of &amp;lt;i&amp;gt; markers' });
+      expect(result.records[0]?.title).toBe('Assay of &lt;i&gt; markers');
+    });
+
+    it('leaves a statistical comparison in the title intact', async () => {
+      const result = await fetchOne({
+        title: 'Decline slowed where P<0.001 and IL-6 > baseline',
+      });
+      expect(result.records[0]?.title).toBe('Decline slowed where P<0.001 and IL-6 > baseline');
+    });
+
+    it('omits the fields entirely when Europe PMC carries none', async () => {
+      const result = await fetchOne({});
+      expect(result.records[0]?.title).toBeUndefined();
+      expect(result.records[0]?.authors).toBeUndefined();
+      expect(result.records[0]?.journal).toBeUndefined();
+    });
+
+    it('drops a title that normalizes to nothing rather than emitting an empty string', async () => {
+      const result = await fetchOne({ title: '<i></i>' });
+      expect(result.records[0]?.title).toBeUndefined();
+    });
+
+    it('documents the normalization in the output schema descriptions', () => {
+      const shape = pubmedEuropepmcFetchTool.output.shape.records.element.shape;
+      for (const field of ['title', 'authors', 'journal'] as const) {
+        expect(shape[field].description).toMatch(/markup stripped/i);
+      }
+    });
+  });
+
+  describe('Markdown escaping in content[] (#102)', () => {
+    const HOSTILE_TITLE = '# Injected\n[Retracted](https://evil.test) *emphasis* <i>PIP2;1</i>';
+
+    it('renders a hostile title without adding a heading or a link', () => {
+      const text = renderedText({
+        records: [
+          {
+            source: 'PPR',
+            epmcId: 'PPR1',
+            title: HOSTILE_TITLE,
+            epmcUrl: 'https://europepmc.org/article/PPR/PPR1',
+          },
+        ],
+      });
+
+      // The injected `# Injected` stays inside the record's own heading line
+      // instead of becoming a second one: the line break is neutralized, and a
+      // `#` that is no longer at the start of a line cannot open a heading.
+      const headings = text.split('\n').filter((line) => line.startsWith('#'));
+      expect(headings).toEqual([
+        '## Europe PMC Records',
+        '### # Injected \\[Retracted\\](https://evil.test) \\*emphasis\\* \\<i>PIP2;1\\</i>',
+      ]);
+    });
+
+    it('escapes the Authors and Journal label lines too', () => {
+      const text = renderedText({
+        records: [
+          {
+            source: 'PPR',
+            epmcId: 'PPR1',
+            authors: 'Smith J, [Anon](https://evil.test), Jones K',
+            journal: 'Journal of *Plant* <i>Physiology</i>',
+            epmcUrl: 'https://europepmc.org/article/PPR/PPR1',
+          },
+        ],
+      });
+      expect(text).toContain('**Authors:** Smith J, \\[Anon\\](https://evil.test), Jones K');
+      expect(text).toContain('**Journal:** Journal of \\*Plant\\* \\<i>Physiology\\</i>');
+    });
+
+    it('leaves a legible title untouched on both surfaces', () => {
+      const title = 'TP53_mutant tumours at 5*g where P<0.001 in ~250 patients';
+      const record = {
+        source: 'PPR' as const,
+        epmcId: 'PPR1',
+        title,
+        epmcUrl: 'https://europepmc.org/article/PPR/PPR1',
+      };
+      expect(renderedText({ records: [record] })).toContain(`### ${title}`);
+    });
+
+    it('never writes the escaped form back into structuredContent', async () => {
+      mockFetchRecords.mockResolvedValue([
+        { id: 'PPR1', source: 'PPR', title: '[Retracted] *Nature* study' },
+      ]);
+      const ctx = createMockContext({ errors: pubmedEuropepmcFetchTool.errors });
+      const result = await pubmedEuropepmcFetchTool.handler(
+        pubmedEuropepmcFetchTool.input.parse({ records: [{ source: 'PPR', epmcId: 'PPR1' }] }),
+        ctx,
+      );
+
+      expect(result.records[0]?.title).toBe('[Retracted] *Nature* study');
+      expect(renderedText(result)).toContain('### \\[Retracted\\] \\*Nature\\* study');
+    });
+  });
+
   it('omits `abstract` when Europe PMC carries none', async () => {
     mockFetchRecords.mockResolvedValue([{ id: 'PMC13294766', source: 'PMC' }]);
     const ctx = createMockContext({ errors: pubmedEuropepmcFetchTool.errors });

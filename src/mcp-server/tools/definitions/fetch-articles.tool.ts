@@ -18,6 +18,7 @@ import {
   SCHEMA_SCHOLARLY_ARTICLE,
 } from './_concepts.js';
 import { pmidStringSchema } from './_schemas.js';
+import { escapeMarkdownInline } from './_text.js';
 
 const AuthorSchema = z
   .object({
@@ -219,7 +220,9 @@ export const fetchArticlesTool = tool('pubmed_fetch_articles', {
       lines.push(`**Unavailable PMIDs:** ${result.unavailablePmids.join(', ')}`);
     }
     for (const a of result.articles) {
-      lines.push(`\n### ${a.title ?? a.pmid ?? 'Unknown'}`);
+      // Render-time only — `structuredContent.articles[].title` keeps the
+      // plain-text value the NCBI parser produced. (#102)
+      lines.push(`\n### ${escapeMarkdownInline(a.title ?? a.pmid ?? 'Unknown')}`);
 
       if (a.authors?.length) {
         lines.push(`\n**Authors (${a.authors.length}):**`);

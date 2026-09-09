@@ -2909,3 +2909,68 @@ describe('fetchFulltextTool', () => {
     });
   });
 });
+
+describe('fetchFulltextTool format() heading escaping (issue #102)', () => {
+  const HOSTILE_TITLE = '# Injected\n[Retracted](https://evil.test) *emphasis* <i>PIP2;1</i>';
+  const ESCAPED_TITLE =
+    '# Injected \\[Retracted\\](https://evil.test) \\*emphasis\\* \\<i>PIP2;1\\</i>';
+  const LEGIBLE_TITLE = 'TP53_mutant tumours at 5*g where P<0.001 in ~250 patients';
+
+  const renderPmc = (title?: string) =>
+    textBlocks(
+      fetchFulltextTool.format!({
+        articles: [
+          {
+            source: 'pmc',
+            viaSource: 'pmc',
+            pmcId: 'PMC1',
+            ...(title !== undefined && { title }),
+            sections: [],
+          },
+        ],
+        totalReturned: 1,
+      }),
+    )[0]?.text ?? '';
+
+  const renderUnpaywall = (title?: string) =>
+    textBlocks(
+      fetchFulltextTool.format!({
+        articles: [
+          {
+            source: 'unpaywall',
+            viaSource: 'unpaywall',
+            contentFormat: 'html-markdown',
+            doi: '10.1000/example',
+            sourceUrl: 'https://repo.example.org/paper',
+            content: 'Body text.',
+            ...(title !== undefined && { title }),
+          },
+        ],
+        totalReturned: 1,
+      }),
+    )[0]?.text ?? '';
+
+  it('renders a hostile PMC title without adding a heading or a link', () => {
+    const headings = renderPmc(HOSTILE_TITLE)
+      .split('\n')
+      .filter((line) => line.startsWith('#'));
+    expect(headings).toEqual(['## Full-Text Articles', `### ${ESCAPED_TITLE}`]);
+  });
+
+  it('renders a hostile Unpaywall title without adding a heading or a link', () => {
+    const headings = renderUnpaywall(HOSTILE_TITLE)
+      .split('\n')
+      .filter((line) => line.startsWith('#'));
+    expect(headings).toEqual(['## Full-Text Articles', `### ${ESCAPED_TITLE}`, '#### Full Text']);
+  });
+
+  it('leaves a legible title untouched on both article shapes', () => {
+    expect(renderPmc(LEGIBLE_TITLE)).toContain(`### ${LEGIBLE_TITLE}`);
+    expect(renderUnpaywall(LEGIBLE_TITLE)).toContain(`### ${LEGIBLE_TITLE}`);
+  });
+
+  it('escapes the identifier fallback heading the same way when no title is present', () => {
+    expect(renderPmc(undefined)).toContain('### PMC1');
+    expect(renderUnpaywall(undefined)).toContain('### DOI 10.1000/example');
+  });
+});

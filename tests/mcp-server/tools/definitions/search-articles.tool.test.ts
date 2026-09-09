@@ -892,3 +892,41 @@ describe('searchArticlesTool', () => {
     );
   });
 });
+
+describe('searchArticlesTool format() heading escaping (issue #102)', () => {
+  const render = (title?: string) =>
+    textBlocks(
+      searchArticlesTool.format!({
+        query: 'cancer',
+        offset: 0,
+        pmids: ['42'],
+        summaries: [
+          {
+            pmid: '42',
+            ...(title !== undefined && { title }),
+            pubmedUrl: 'https://pubmed.ncbi.nlm.nih.gov/42/',
+          },
+        ],
+        searchUrl: 'https://pubmed.ncbi.nlm.nih.gov/?term=cancer',
+      }),
+    )[0]?.text ?? '';
+
+  it('renders a hostile title without adding a heading or a link', () => {
+    const text = render('# Injected\n[Retracted](https://evil.test) *emphasis* <i>PIP2;1</i>');
+    const headings = text.split('\n').filter((line) => line.startsWith('#'));
+    expect(headings).toEqual([
+      '## PubMed Search Results',
+      '### Summaries',
+      '#### # Injected \\[Retracted\\](https://evil.test) \\*emphasis\\* \\<i>PIP2;1\\</i>',
+    ]);
+  });
+
+  it('leaves a legible title untouched', () => {
+    const title = 'TP53_mutant tumours at 5*g where P<0.001 in ~250 patients';
+    expect(render(title)).toContain(`#### ${title}`);
+  });
+
+  it('escapes the PMID fallback heading the same way when no title is present', () => {
+    expect(render(undefined)).toContain('#### 42');
+  });
+});

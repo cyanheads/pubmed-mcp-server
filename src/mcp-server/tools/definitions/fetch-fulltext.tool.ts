@@ -52,7 +52,7 @@ import {
 } from '@/services/unpaywall/unpaywall-service.js';
 import { conceptMeta, EDAM_DATA_RETRIEVAL, SCHEMA_SCHOLARLY_ARTICLE } from './_concepts.js';
 import { pmidStringSchema } from './_schemas.js';
-import { sliceCodeUnits } from './_text.js';
+import { escapeMarkdownInline, sliceCodeUnits } from './_text.js';
 
 function normalizePmcId(id: string): string {
   return id.replace(/^PMC/i, '');
@@ -2077,7 +2077,9 @@ function formatPmcArticle(
   lines: string[],
   truncation?: z.infer<typeof TruncatedArticleSchema>,
 ): void {
-  lines.push(`### ${a.title ?? a.pmcId}`);
+  // Render-time only — `structuredContent.articles[].title` keeps the
+  // plain-text value the JATS parser produced. (#102)
+  lines.push(`### ${escapeMarkdownInline(a.title ?? articleDisplayId(a))}`);
   const sourceLabel =
     a.viaSource === 'europepmc'
       ? `Europe PMC (structured JATS${a.epmcSource ? `, source: ${a.epmcSource}` : ''})`
@@ -2150,7 +2152,7 @@ function formatUnpaywallArticle(
     a.contentFormat === 'html-markdown'
       ? 'Unpaywall (HTML → Markdown, best-effort)'
       : 'Unpaywall (PDF → plain text)';
-  lines.push(`### ${heading}`);
+  lines.push(`### ${escapeMarkdownInline(heading)}`);
   lines.push(`**Source:** ${formatLabel}`);
   if (a.pmcId) lines.push(`**PMCID:** ${a.pmcId}`);
   if (a.pmid) lines.push(`**PMID:** ${a.pmid}`);

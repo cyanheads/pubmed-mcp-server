@@ -503,3 +503,40 @@ describe('fetchArticlesTool', () => {
     });
   });
 });
+
+describe('fetchArticlesTool format() heading escaping (issue #102)', () => {
+  const HOSTILE_TITLE = '# Injected\n[Retracted](https://evil.test) *emphasis* <i>PIP2;1</i>';
+
+  const render = (title: string) =>
+    textBlocks(
+      fetchArticlesTool.format!({
+        articles: [{ pmid: '42', title, pubmedUrl: 'https://pubmed.ncbi.nlm.nih.gov/42/' }],
+        totalReturned: 1,
+      }),
+    )[0]?.text ?? '';
+
+  it('renders a hostile title without adding a heading or a link', () => {
+    const text = render(HOSTILE_TITLE);
+    const headings = text.split('\n').filter((line) => line.startsWith('#'));
+    expect(headings).toEqual([
+      '## PubMed Articles',
+      '### # Injected \\[Retracted\\](https://evil.test) \\*emphasis\\* \\<i>PIP2;1\\</i>',
+    ]);
+  });
+
+  it('leaves a legible title untouched', () => {
+    const title = 'TP53_mutant tumours at 5*g where P<0.001 in ~250 patients';
+    expect(render(title)).toContain(`### ${title}`);
+  });
+
+  it('escapes the PMID fallback heading the same way when no title is present', () => {
+    const text =
+      textBlocks(
+        fetchArticlesTool.format!({
+          articles: [{ pmid: '42', pubmedUrl: 'https://pubmed.ncbi.nlm.nih.gov/42/' }],
+          totalReturned: 1,
+        }),
+      )[0]?.text ?? '';
+    expect(text).toContain('### 42');
+  });
+});

@@ -6,6 +6,7 @@
  * @module tests/mcp-server/tools/definitions/security.test
  */
 
+import { JsonRpcErrorCode, McpError } from '@cyanheads/mcp-ts-core/errors';
 import { createMockContext } from '@cyanheads/mcp-ts-core/testing';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
@@ -355,6 +356,33 @@ describe('no secret leaks in tool outputs', () => {
     expect(serialized).not.toContain(SECRET_KEY);
   });
 
+  it('find-related all-providers-failed error does not contain the NCBI API key', async () => {
+    // Every eligible provider fails: NCBI throws, Europe PMC is turned off, and
+    // OpenAlex is unconfigured. The thrown error carries the whole attempt chain
+    // — provider messages included — so it is a leak surface like any output.
+    mockELink.mockRejectedValue(
+      new McpError(JsonRpcErrorCode.ServiceUnavailable, 'NCBI request failed', {
+        reason: 'ncbi_unreachable',
+      }),
+    );
+
+    const ctx = createMockContext({ errors: findRelatedTool.errors });
+    const input = findRelatedTool.input.parse({ pmid: '12345', relationship: 'cited_by' });
+    let thrown: unknown;
+    try {
+      await findRelatedTool.handler(input, ctx);
+    } catch (err) {
+      thrown = err;
+    }
+
+    expect(thrown).toBeInstanceOf(McpError);
+    const error = thrown as McpError;
+    expect((error.data as { reason?: string } | undefined)?.reason).toBe('all_providers_failed');
+    const serialized = `${error.message} ${JSON.stringify(error.data)}`;
+    expect(serialized).not.toContain(SECRET_KEY);
+    expect(serialized).not.toMatch(/\/Users\//);
+  });
+
   it('spell-check output does not contain the NCBI API key', async () => {
     mockESpell.mockResolvedValue({
       original: 'astma',
@@ -435,6 +463,73 @@ describe('format() output sanitization', () => {
     expect(text).not.toContain('eutils.ncbi.nlm.nih.gov');
     expect(text).not.toContain('api_key=MYSECRET');
     expect(text).toContain('<upstream>');
+  });
+
+  it('fetch-articles format() neutralizes Markdown markup in an upstream title', () => {
+    const blocks = textBlocks(
+      fetchArticlesTool.format!({
+        articles: [
+          {
+            pmid: '12345',
+            title: '# Injected\n[Click me](https://evil.test) <img src=x>',
+            pubmedUrl: 'https://pubmed.ncbi.nlm.nih.gov/12345/',
+          },
+        ],
+        totalReturned: 1,
+      }),
+    );
+    const text = blocks[0]?.text ?? '';
+    // No injected heading line, no clickable link, no raw HTML element.
+    expect(text.split('\n').filter((line) => line.startsWith('#'))).toEqual([
+      '## PubMed Articles',
+      '### # Injected \\[Click me\\](https://evil.test) \\<img src=x>',
+    ]);
+  });
+
+  it('search-articles format() neutralizes Markdown markup in an upstream summary title', () => {
+    const blocks = textBlocks(
+      searchArticlesTool.format!({
+        query: 'cancer',
+        offset: 0,
+        pmids: ['12345'],
+        summaries: [
+          {
+            pmid: '12345',
+            title: '# Injected\n[Click me](https://evil.test)',
+            pubmedUrl: 'https://pubmed.ncbi.nlm.nih.gov/12345/',
+          },
+        ],
+        searchUrl: 'https://pubmed.ncbi.nlm.nih.gov/?term=cancer',
+      }),
+    );
+    const text = blocks[0]?.text ?? '';
+    expect(text.split('\n').filter((line) => line.startsWith('#'))).toEqual([
+      '## PubMed Search Results',
+      '### Summaries',
+      '#### # Injected \\[Click me\\](https://evil.test)',
+    ]);
+  });
+
+  it('fetch-fulltext format() neutralizes Markdown markup in an upstream title', () => {
+    const blocks = textBlocks(
+      fetchFulltextTool.format!({
+        articles: [
+          {
+            source: 'pmc',
+            viaSource: 'pmc',
+            pmcId: 'PMC1',
+            title: '# Injected\n[Click me](https://evil.test)',
+            sections: [],
+          },
+        ],
+        totalReturned: 1,
+      }),
+    );
+    const text = blocks[0]?.text ?? '';
+    expect(text.split('\n').filter((line) => line.startsWith('#'))).toEqual([
+      '## Full-Text Articles',
+      '### # Injected \\[Click me\\](https://evil.test)',
+    ]);
   });
 });
 
