@@ -19,6 +19,17 @@ import { pmidStringSchema } from './_schemas.js';
 
 const CitationStyleEnum = z.enum(['apa', 'mla', 'bibtex', 'ris', 'vancouver']);
 
+/**
+ * A union rejects a bad `format` with Zod's top-level `Invalid input`, which
+ * buries the accepted values inside the per-branch issue tree — a client that
+ * reads only `content[]` never sees them. Stating them on the union itself
+ * reproduces what a plain enum field renders (`pubmed_convert_ids.idType`),
+ * derived from the enum so the two can't drift.
+ */
+const CITATION_STYLE_ERROR = `Invalid option: expected one of ${CitationStyleEnum.options
+  .map((style) => `"${style}"`)
+  .join('|')}, or a non-empty array of those values`;
+
 export const formatCitationsTool = tool('pubmed_format_citations', {
   description:
     'Get formatted citations for PubMed articles in one or more formats (apa, mla, bibtex, ris, vancouver). Pass a single format as a string or multiple as an array.',
@@ -32,17 +43,20 @@ export const formatCitationsTool = tool('pubmed_format_citations', {
   input: z.object({
     pmids: z.array(pmidStringSchema).min(1).max(50).describe('PubMed IDs to cite'),
     format: z
-      .union([
-        CitationStyleEnum.describe(
-          'Single citation style. One of: apa, mla, bibtex, ris, vancouver.',
-        ),
-        z
-          .array(CitationStyleEnum)
-          .min(1)
-          .describe(
-            'Multiple citation styles to generate. Each entry: apa, mla, bibtex, ris, or vancouver.',
+      .union(
+        [
+          CitationStyleEnum.describe(
+            'Single citation style. One of: apa, mla, bibtex, ris, vancouver.',
           ),
-      ])
+          z
+            .array(CitationStyleEnum)
+            .min(1)
+            .describe(
+              'Multiple citation styles to generate. Each entry: apa, mla, bibtex, ris, or vancouver.',
+            ),
+        ],
+        { error: CITATION_STYLE_ERROR },
+      )
       .default('apa')
       .describe(
         'Citation format(s) to generate — single style as a string or multiple as an array. Allowed values: apa, mla, bibtex, ris, vancouver.',

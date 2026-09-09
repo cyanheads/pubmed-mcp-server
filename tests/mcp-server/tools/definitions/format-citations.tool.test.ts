@@ -3,10 +3,14 @@
  * @module tests/mcp-server/tools/definitions/format-citations.tool.test
  */
 
-import { createMockContext, getEnrichment } from '@cyanheads/mcp-ts-core/testing';
+import type { ContentBlock } from '@cyanheads/mcp-ts-core';
+import { createMockContext, getEnrichment, runToolContract } from '@cyanheads/mcp-ts-core/testing';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { toJSONSchema } from 'zod/v4/core';
 
 import { textBlocks } from '../../../_helpers.js';
+
+const CITATION_STYLES = ['apa', 'mla', 'bibtex', 'ris', 'vancouver'] as const;
 
 const mockEFetch = vi.fn();
 vi.mock('@/services/ncbi/ncbi-service.js', () => ({
@@ -48,6 +52,118 @@ describe('formatCitationsTool', () => {
     expect(() =>
       formatCitationsTool.input.parse({ pmids: ['12345'], format: 'chicago' }),
     ).toThrow();
+  });
+
+  it('names every accepted format in content[] when the value is invalid (issue #109)', async () => {
+    const result = await runToolContract(formatCitationsTool, {
+      pmids: ['23193287'],
+      format: 'chicago',
+    } as never);
+
+    expect(result.isError).toBe(true);
+    const text = textBlocks(result.content as ContentBlock[])
+      .map((b) => b.text)
+      .join('\n');
+    for (const style of CITATION_STYLES) expect(text).toContain(`"${style}"`);
+    // The union collapse hid the accepted values behind a bare "Invalid input".
+    expect(text).not.toMatch(/Invalid input at format/);
+    expect(text).toContain('Invalid option: expected one of');
+  });
+
+  it('keeps the min-items message for an empty array (issue #109)', async () => {
+    // The array branch is type-compatible, so Zod reports that branch's own
+    // length failure rather than the union error — a value list would add
+    // nothing to "needs at least one entry".
+    const result = await runToolContract(formatCitationsTool, {
+      pmids: ['23193287'],
+      format: [],
+    } as never);
+
+    expect(result.isError).toBe(true);
+    const text = textBlocks(result.content as ContentBlock[])
+      .map((b) => b.text)
+      .join('\n');
+    expect(text).toContain('at format');
+    expect(text).toMatch(/>=\s*1 items/);
+  });
+
+  it('keeps the structured issue path on format for an invalid value (issue #109)', async () => {
+    const result = await runToolContract(formatCitationsTool, {
+      pmids: ['23193287'],
+      format: 'chicago',
+    } as never);
+
+    const issues = (
+      result.structuredContent as {
+        error?: { data?: { issues?: { path?: unknown[]; message?: string }[] } };
+      }
+    )?.error?.data?.issues;
+    expect(issues?.[0]?.path).toEqual(['format']);
+    expect(issues?.[0]?.message).toContain('vancouver');
+  });
+
+  it('advertises the same inputSchema for format — bare string or array (issue #109)', () => {
+    const emitted = toJSONSchema(formatCitationsTool.input as never, {
+      target: 'draft-7',
+      io: 'input',
+    }) as { properties?: Record<string, Record<string, unknown>> };
+    const format = emitted.properties?.format;
+
+    expect(format?.default).toBe('apa');
+    const branches = format?.anyOf as { type?: string; items?: { enum?: string[] } }[] | undefined;
+    expect(branches).toHaveLength(2);
+    expect(branches?.[0]).toMatchObject({ type: 'string', enum: [...CITATION_STYLES] });
+    expect(branches?.[1]).toMatchObject({
+      type: 'array',
+      minItems: 1,
+      items: { type: 'string', enum: [...CITATION_STYLES] },
+    });
+  });
+
+  it('serves a bare string and a one-element array identically end to end (issue #109)', async () => {
+    const payload = {
+      PubmedArticleSet: {
+        PubmedArticle: [
+          {
+            MedlineCitation: {
+              PMID: { '#text': '12345' },
+              Article: {
+                ArticleTitle: { '#text': 'Test Article' },
+                Journal: {
+                  Title: { '#text': 'Nature' },
+                  JournalIssue: {
+                    Volume: { '#text': '600' },
+                    PubDate: { Year: { '#text': '2024' } },
+                  },
+                },
+                PublicationTypeList: { PublicationType: { '#text': 'Journal Article' } },
+              },
+            },
+          },
+        ],
+      },
+    };
+
+    mockEFetch.mockResolvedValue(payload);
+    const bare = await runToolContract(formatCitationsTool, { pmids: ['12345'], format: 'mla' });
+    mockEFetch.mockResolvedValue(payload);
+    const wrapped = await runToolContract(formatCitationsTool, {
+      pmids: ['12345'],
+      format: ['mla'],
+    });
+
+    expect(bare.isError).toBeFalsy();
+    expect(bare.structuredContent).toEqual(wrapped.structuredContent);
+    expect(bare.content).toEqual(wrapped.content);
+    expect(
+      (bare.structuredContent as { citations?: { citations?: Record<string, string> }[] })
+        ?.citations?.[0]?.citations,
+    ).toHaveProperty('mla');
+    expect(
+      textBlocks(bare.content as ContentBlock[])
+        .map((b) => b.text)
+        .join('\n'),
+    ).toContain('### MLA');
   });
 
   it('rejects non-numeric PMIDs', () => {
