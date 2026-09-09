@@ -2,6 +2,10 @@
 
 All notable changes to this project. Each entry links to its full per-version file in [changelog/](changelog/).
 
+## [2.10.6](changelog/2.10.x/2.10.6.md) — 2026-09-08
+
+Five bug fixes: pubmed_find_related no longer returns false-empty Europe PMC pages or a fake empty success when every provider fails, Europe PMC title/author/journal markup is stripped and Markdown-escaped, an all-numeric spell_check query round-trips as text, and Unpaywall HTML is no longer parsed as a PDF. Adopts mcp-ts-core 0.12.7.
+
 ## [2.10.5](changelog/2.10.x/2.10.5.md) — 2026-09-02 · 🛡️ Security
 
 Adopts mcp-ts-core 0.12.5: no HTTP status classifies as InternalError anymore (500/501 join the rest of 5xx as ServiceUnavailable), and an SSRF DNS-guard bypass on Bun 1.4 Linux is closed. The NCBI, OpenAlex, and Europe PMC retry loops now honor the framework's retryable:false opt-out so a 501 fails on the first attempt instead of retrying.
