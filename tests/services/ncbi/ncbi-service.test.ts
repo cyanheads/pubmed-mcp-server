@@ -510,6 +510,93 @@ describe('NcbiService.eCitMatch', () => {
     expect(results[2]?.key).toBe('ref3');
     expect(results[2]?.status).toBe('not_found');
   });
+
+  /**
+   * Stand in for ecitmatch.cgi: echo every submitted bdata line back verbatim
+   * with the outcome appended after the trailing pipe, resolving the PMID from
+   * the journal field. Verified against the live endpoint — it emits one line
+   * per submitted citation, in submission order, echoing whatever key the
+   * request carried, so the response follows the bdata the service builds.
+   */
+  function mockEcitmatchEcho(
+    mockApiClient: NcbiApiClient,
+    mockResponseHandler: NcbiResponseHandler,
+    pmidByJournal: Record<string, string>,
+  ) {
+    (mockApiClient.makeRequest as ReturnType<typeof vi.fn>).mockImplementation(
+      async (_endpoint: string, params: { bdata?: string }) => params.bdata ?? '',
+    );
+    (mockResponseHandler.parseAndHandleResponse as ReturnType<typeof vi.fn>).mockImplementation(
+      (bdata: string) =>
+        bdata
+          .split('\r')
+          .map((line) => `${line}${pmidByJournal[line.split('|')[0] ?? ''] ?? 'NOT_FOUND'}`)
+          .join('\n'),
+    );
+  }
+
+  it('correlates colliding caller keys to their own upstream rows (issue #113)', async () => {
+    const { service, mockApiClient, mockResponseHandler } = createMockService();
+    mockEcitmatchEcho(mockApiClient, mockResponseHandler, {
+      'Eur Respir J': '39060015',
+      'N Engl J Med': '38407394',
+    });
+
+    // Both citations carry key "2" — one explicit, one the positional value the
+    // tool auto-assigns to the second citation.
+    const results = await service.eCitMatch([
+      { journal: 'Eur Respir J', year: '2024', volume: '64', authorName: 'Gauvreau GM', key: '2' },
+      {
+        journal: 'N Engl J Med',
+        year: '2024',
+        volume: '390',
+        firstPage: '889',
+        authorName: 'Wood RA',
+        key: '2',
+      },
+    ]);
+
+    expect(results).toHaveLength(2);
+    expect(results[0]).toEqual({ key: '2', matched: true, pmid: '39060015', status: 'matched' });
+    expect(results[1]).toEqual({ key: '2', matched: true, pmid: '38407394', status: 'matched' });
+  });
+
+  it('submits unique wire keys when caller keys repeat (issue #113)', async () => {
+    const { service, mockApiClient, mockResponseHandler } = createMockService();
+    mockEcitmatchEcho(mockApiClient, mockResponseHandler, {});
+
+    await service.eCitMatch([
+      { journal: 'nature', key: 'dup' },
+      { journal: 'science', key: 'dup' },
+      { journal: 'lancet', key: 'dup' },
+    ]);
+
+    const bdata = String(
+      (mockApiClient.makeRequest as ReturnType<typeof vi.fn>).mock.calls[0]?.[1]?.bdata,
+    );
+    const wireKeys = bdata.split('\r').map((line) => line.split('|')[5]);
+    expect(new Set(wireKeys).size).toBe(3);
+  });
+
+  it('keeps a dropped row as not_found under colliding keys (issue #113)', async () => {
+    const { service, mockApiClient, mockResponseHandler } = createMockService();
+    // Upstream classifies only the second citation and omits the first.
+    (mockApiClient.makeRequest as ReturnType<typeof vi.fn>).mockImplementation(
+      async (_endpoint: string, params: { bdata?: string }) => params.bdata ?? '',
+    );
+    (mockResponseHandler.parseAndHandleResponse as ReturnType<typeof vi.fn>).mockImplementation(
+      (bdata: string) => `${bdata.split('\r')[1] ?? ''}38407394\n`,
+    );
+
+    const results = await service.eCitMatch([
+      { journal: 'Eur Respir J', year: '2024', key: 'dup' },
+      { journal: 'N Engl J Med', year: '2024', key: 'dup' },
+    ]);
+
+    expect(results).toHaveLength(2);
+    expect(results[0]).toEqual({ key: 'dup', matched: false, pmid: null, status: 'not_found' });
+    expect(results[1]).toEqual({ key: 'dup', matched: true, pmid: '38407394', status: 'matched' });
+  });
 });
 
 describe('NcbiService.idConvert', () => {

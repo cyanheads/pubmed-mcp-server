@@ -134,14 +134,11 @@ export const lookupCitationTool = tool('pubmed_lookup_citation', {
     }));
 
     const ncbi = getNcbiService();
+    // One result per submitted citation, in submission order — so verification
+    // context is read from `citations[i]`, never looked up by `key`. That label
+    // is caller-supplied and may repeat, and keying on it hands one citation's
+    // queried author and year to another. (#113)
     const results = await ncbi.eCitMatch(citations, { signal: ctx.signal });
-
-    const queriedAuthorByKey = new Map<string, string>();
-    const queriedYearByKey = new Map<string, string>();
-    for (const c of citations) {
-      if (c.authorName) queriedAuthorByKey.set(c.key, c.authorName);
-      if (c.year) queriedYearByKey.set(c.key, c.year);
-    }
 
     const matchedPmids = Array.from(
       new Set(results.filter((r) => r.matched && r.pmid).map((r) => r.pmid as string)),
@@ -182,7 +179,9 @@ export const lookupCitationTool = tool('pubmed_lookup_citation', {
       warnings?: Warning[];
     };
 
-    const mapped: MappedResult[] = results.map((r) => {
+    const mapped: MappedResult[] = results.map((r, i) => {
+      const queried = citations[i]?.authorName;
+      const queriedYear = citations[i]?.year;
       const base: MappedResult = {
         key: r.key,
         matched: r.matched,
@@ -204,7 +203,6 @@ export const lookupCitationTool = tool('pubmed_lookup_citation', {
         const firstAuthor = authors.split(', ')[0]?.trim();
         if (firstAuthor && firstAuthor !== 'et al.') base.matchedFirstAuthor = firstAuthor;
 
-        const queried = queriedAuthorByKey.get(r.key);
         // Verified against the full roster, not `authors` — that display string
         // collapses to three names plus "et al.", so matching on it flags a
         // genuine fourth-or-later author as a mismatch. (#87)
@@ -226,7 +224,6 @@ export const lookupCitationTool = tool('pubmed_lookup_citation', {
         }
       }
 
-      const queriedYear = queriedYearByKey.get(r.key);
       if (queriedYear && pubDate) {
         const matchedYear = pubDate.slice(0, 4);
         if (/^\d{4}$/.test(matchedYear) && matchedYear !== queriedYear.trim()) {

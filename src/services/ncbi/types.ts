@@ -632,7 +632,11 @@ export interface ECitMatchCitation {
   firstPage?: string | undefined;
   /** Journal title or ISO abbreviation */
   journal?: string | undefined;
-  /** Arbitrary key for tracking this citation in results */
+  /**
+   * Arbitrary label echoed onto this citation's result. Not a correlation key:
+   * it may repeat across citations, so `eCitMatch` submits a separate
+   * per-request token and matches upstream rows on that instead.
+   */
   key: string;
   /** Volume number */
   volume?: string | undefined;
@@ -649,7 +653,7 @@ export interface ECitMatchResult {
   candidatePmids?: string[];
   /** Raw non-match detail returned by ECitMatch when present */
   detail?: string;
-  /** The tracking key from the input citation */
+  /** The label from the input citation this result describes, echoed verbatim */
   key: string;
   /** Whether a PMID was found */
   matched: boolean;

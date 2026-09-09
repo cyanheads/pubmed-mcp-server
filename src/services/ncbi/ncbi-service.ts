@@ -75,6 +75,21 @@ function normalizeDiagnosticList(
   return normalized;
 }
 
+/**
+ * The tracking token each citation is submitted to ECitMatch under — echoed
+ * back verbatim on that citation's response row, and unique within the request.
+ *
+ * `ECitMatchCitation.key` is a caller-supplied label and may repeat, so
+ * reconciling response rows on it collapses two citations onto one row and
+ * hands the second citation's PMID to the first (#113). Distinct caller keys
+ * are used as-is, so a well-formed request is submitted exactly as before; any
+ * repeat switches the whole request to positional tokens.
+ */
+function wireKeysFor(citations: ECitMatchCitation[]): string[] {
+  const keys = citations.map((c) => c.key);
+  return new Set(keys).size === keys.length ? keys : citations.map((_, i) => String(i + 1));
+}
+
 /** Sentinel reason used when the service-level deadline expires. */
 class NcbiDeadlineExceeded extends Error {
   constructor(deadlineMs: number) {
@@ -209,15 +224,21 @@ export class NcbiService {
   /**
    * Look up PMIDs from partial citation strings via NCBI ECitMatch.
    * Each citation can include journal, year, volume, first page, and author name.
+   *
+   * Results come back one per submitted citation, in submission order, carrying
+   * the caller's `key`. Correlation runs on the wire key (see
+   * {@link wireKeysFor}), never on `key` itself — that label is caller-supplied
+   * and may repeat. (#113)
    */
   async eCitMatch(
     citations: ECitMatchCitation[],
     options?: NcbiCallOptions,
   ): Promise<ECitMatchResult[]> {
+    const wireKeys = wireKeysFor(citations);
     const bdata = citations
       .map(
-        (c) =>
-          `${c.journal ?? ''}|${c.year ?? ''}|${c.volume ?? ''}|${c.firstPage ?? ''}|${c.authorName ?? ''}|${c.key}|`,
+        (c, i) =>
+          `${c.journal ?? ''}|${c.year ?? ''}|${c.volume ?? ''}|${c.firstPage ?? ''}|${c.authorName ?? ''}|${wireKeys[i]}|`,
       )
       .join('\r');
 
@@ -266,19 +287,19 @@ export class NcbiService {
         };
       });
 
-    // ECitMatch omits lines for citations it cannot classify. Reconcile against
-    // the submitted citations so every input gets a result row — callers can rely
-    // on results.length === citations.length and correlate by key.
-    const parsedByKey = new Map(parsed.map((r) => [r.key, r]));
-    return citations.map(
-      (c): ECitMatchResult =>
-        parsedByKey.get(c.key) ?? {
-          key: c.key,
-          matched: false,
-          pmid: null,
-          status: 'not_found' as const,
-        },
-    );
+    // ECitMatch omits lines for citations it cannot classify. Reconcile on the
+    // wire key each citation was submitted under — unique within the request, so
+    // one row can never stand in for a second citation — then restore the
+    // caller's label on the way out. Every input gets a result row, so callers
+    // can rely on results.length === citations.length and on results[i]
+    // describing citations[i]. (#54, #113)
+    const parsedByWireKey = new Map(parsed.map((r) => [r.key, r]));
+    return citations.map((c, i): ECitMatchResult => {
+      const row = parsedByWireKey.get(wireKeys[i] ?? '');
+      return row
+        ? { ...row, key: c.key }
+        : { key: c.key, matched: false, pmid: null, status: 'not_found' as const };
+    });
   }
 
   /**

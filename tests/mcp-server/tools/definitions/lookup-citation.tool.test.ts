@@ -434,6 +434,135 @@ describe('lookupCitationTool', () => {
     expect(call[1]?.key).toBe('2');
   });
 
+  describe('colliding citation keys (issue #113)', () => {
+    /**
+     * The reproduction payload from the issue: an explicit key "2" on the first
+     * citation collides with the positional key auto-assigned to the second.
+     * `eCitMatch` returns one row per submitted citation in submission order,
+     * each carrying the caller's (repeated) label.
+     */
+    const collidingInput = {
+      citations: [
+        {
+          journal: 'Eur Respir J',
+          year: '2024',
+          volume: '64',
+          authorName: 'Gauvreau GM',
+          key: '2',
+        },
+        {
+          journal: 'N Engl J Med',
+          year: '2024',
+          volume: '390',
+          firstPage: '889',
+          authorName: 'Wood RA',
+        },
+      ],
+    };
+
+    function mockCollidingMatch() {
+      mockECitMatch.mockResolvedValue([
+        { key: '2', matched: true, pmid: '39060015', status: 'matched' },
+        { key: '2', matched: true, pmid: '38407394', status: 'matched' },
+      ]);
+    }
+
+    it('keeps each result on its own PMID and verifies its own queried author', async () => {
+      mockCollidingMatch();
+      mockExtractBriefSummaries.mockResolvedValue([
+        {
+          pmid: '39060015',
+          authors: 'Gauvreau GM, Davis BE',
+          authorNames: ['Gauvreau GM', 'Davis BE'],
+          pubDate: '2024 Jul 11',
+        },
+        {
+          pmid: '38407394',
+          authors: 'Wood RA, Togias A',
+          authorNames: ['Wood RA', 'Togias A'],
+          pubDate: '2024 Mar 07',
+        },
+      ]);
+
+      const ctx = createMockContext({ errors: lookupCitationTool.errors });
+      const result = await lookupCitationTool.handler(
+        lookupCitationTool.input.parse(collidingInput),
+        ctx,
+      );
+
+      expect(result.results.map((r) => r.pmid)).toEqual(['39060015', '38407394']);
+      expect(result.results.map((r) => r.matchedFirstAuthor)).toEqual(['Gauvreau GM', 'Wood RA']);
+      expect(result.results.map((r) => r.warnings)).toEqual([undefined, undefined]);
+      expect(result.totalMatched).toBe(2);
+      expect(result.totalWarnings).toBe(0);
+
+      const text = textBlocks(lookupCitationTool.format!(result))[0]?.text ?? '';
+      expect(text).toContain('39060015');
+      expect(text).toContain('38407394');
+    });
+
+    it('attributes an author_mismatch warning to the citation that queried it', async () => {
+      mockCollidingMatch();
+      // The first citation's queried author is absent from its matched article;
+      // the second citation's author is present in its own.
+      mockExtractBriefSummaries.mockResolvedValue([
+        {
+          pmid: '39060015',
+          authors: 'Lommatzsch M, Marchewski H',
+          authorNames: ['Lommatzsch M', 'Marchewski H'],
+          pubDate: '2024 Jul 11',
+        },
+        {
+          pmid: '38407394',
+          authors: 'Wood RA, Togias A',
+          authorNames: ['Wood RA', 'Togias A'],
+          pubDate: '2024 Mar 07',
+        },
+      ]);
+
+      const ctx = createMockContext({ errors: lookupCitationTool.errors });
+      const result = await lookupCitationTool.handler(
+        lookupCitationTool.input.parse(collidingInput),
+        ctx,
+      );
+
+      expect(result.results[0]?.warnings?.map((w) => w.code)).toEqual(['author_mismatch']);
+      expect(result.results[0]?.warnings?.[0]?.message).toContain('Gauvreau GM');
+      expect(result.results[1]?.warnings).toBeUndefined();
+      expect(result.totalWarnings).toBe(1);
+
+      const text = textBlocks(lookupCitationTool.format!(result))[0]?.text ?? '';
+      expect(text).toContain('Gauvreau GM');
+    });
+
+    it('attributes a year_mismatch warning to the citation that queried it', async () => {
+      mockECitMatch.mockResolvedValue([
+        { key: 'dup', matched: true, pmid: '111', status: 'matched' },
+        { key: 'dup', matched: true, pmid: '222', status: 'matched' },
+      ]);
+      mockExtractBriefSummaries.mockResolvedValue([
+        { pmid: '111', authors: 'Alpha A', authorNames: ['Alpha A'], pubDate: '1999 Jan' },
+        { pmid: '222', authors: 'Beta B', authorNames: ['Beta B'], pubDate: '2021 Feb' },
+      ]);
+
+      const ctx = createMockContext({ errors: lookupCitationTool.errors });
+      const result = await lookupCitationTool.handler(
+        lookupCitationTool.input.parse({
+          citations: [
+            { journal: 'Nature', year: '1999', authorName: 'Alpha A', key: 'dup' },
+            { journal: 'Science', year: '2020', authorName: 'Beta B', key: 'dup' },
+          ],
+        }),
+        ctx,
+      );
+
+      expect(result.results[0]?.warnings).toBeUndefined();
+      expect(result.results[1]?.warnings?.map((w) => w.code)).toEqual(['year_mismatch']);
+      expect(result.results[1]?.warnings?.[0]?.message).toContain('"2020"');
+      expect(result.totalWarnings).toBe(1);
+    });
+  });
+
   it('preserves user-provided keys', async () => {
     mockECitMatch.mockResolvedValue([
       { key: 'ref-A', matched: true, pmid: '111', status: 'matched' },
