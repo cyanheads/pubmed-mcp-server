@@ -79,6 +79,47 @@ interface PmcFilterOptions {
   sections?: string[] | undefined;
 }
 
+/** One body section at any nesting level, as the parser produces it. */
+type ParsedSection = ParsedPmcArticle['sections'][number];
+
+/**
+ * Render a section subtree as text blocks, in document order: each section's
+ * heading on its own line above its text. Used for the levels past
+ * {@link MAX_SECTION_DEPTH}, which have no node of their own to live in. (#112)
+ */
+function flattenSectionText(section: ParsedSection): string[] {
+  const heading = section.title ? formatHeading(section.label, section.title) : undefined;
+  const block = [heading, section.text].filter(Boolean).join('\n');
+  return [...(block ? [block] : []), ...(section.subsections ?? []).flatMap(flattenSectionText)];
+}
+
+/**
+ * Clamp a section tree to the depth the output schema declares. A section at the
+ * deepest level absorbs its descendants into its own text instead of carrying
+ * them as subsections the schema would strip on validation — silently, from both
+ * `structuredContent` and `content[]`. Shallower trees pass through untouched.
+ * (#112)
+ */
+function clampSectionDepth(sections: ParsedSection[], depth = 1): ParsedSection[] {
+  return sections.map((section) => {
+    const subsections = section.subsections;
+    if (!subsections?.length) return section;
+    if (depth < MAX_SECTION_DEPTH) {
+      return { ...section, subsections: clampSectionDepth(subsections, depth + 1) };
+    }
+    const { subsections: _dropped, ...rest } = section;
+    const tail = subsections.flatMap(flattenSectionText);
+    return { ...rest, text: [section.text, ...tail].filter(Boolean).join('\n\n') };
+  });
+}
+
+/**
+ * Apply the requested section/reference filters, then clamp the section tree to
+ * the depth the output schema carries. Both run here so every path producing a
+ * `pmc` article — PMC EFetch and the Europe PMC stage — shares one shape, and
+ * the budget helpers downstream count the text that will actually survive
+ * validation. (#112)
+ */
 function applyPmcFilters(article: ParsedPmcArticle, filters: PmcFilterOptions): ParsedPmcArticle {
   let out = article;
   if (filters.sections?.length) {
@@ -91,7 +132,7 @@ function applyPmcFilters(article: ParsedPmcArticle, filters: PmcFilterOptions): 
     const { references: _, ...rest } = out;
     out = rest as ParsedPmcArticle;
   }
-  return out;
+  return { ...out, sections: clampSectionDepth(out.sections) };
 }
 
 /**
@@ -167,11 +208,33 @@ function buildBodylessNotice(affectedIds: string[]): string {
 
 // ─── Schemas ─────────────────────────────────────────────────────────────────
 
+/**
+ * How many `<sec>` levels the output schema carries as structured nodes. JATS
+ * nesting is unbounded and the parser recurses without a cap, so the schema is
+ * what decides how deep a section survives output validation — anything past it
+ * used to be dropped silently from both output surfaces (#112). Sections deeper
+ * than this are now flattened into the deepest surviving node's text instead, so
+ * no body content is lost at any depth.
+ *
+ * Two is the ceiling the tool's own contract can verify, not a guess at how deep
+ * real records nest: `format-parity`'s sentinel walker stops after 8 schema hops,
+ * and `articles[]` → the article union → `sections[]` → `subsections[]` already
+ * spends them all. A third `subsections` level puts its own elements out of the
+ * walker's reach, so `format()` parity for that subtree would ship unverified.
+ * Levels are inlined rather than expressed with `z.lazy()` regardless — a
+ * self-referential schema emits `$defs`/`$ref`, which Gemini rejects.
+ */
+const MAX_SECTION_DEPTH = 2;
+
 const SubsectionSchema = z
   .object({
     title: z.string().optional().describe('Subsection heading'),
     label: z.string().optional().describe('Subsection label'),
-    text: z.string().describe('Subsection body text'),
+    text: z
+      .string()
+      .describe(
+        'Subsection body text. Sections nested deeper than this level are folded in here in document order, each heading rendered on its own line above its text.',
+      ),
   })
   .describe('Article subsection');
 
@@ -514,11 +577,34 @@ function budgetRequested(budget: BudgetOptions): boolean {
   return budget.maxCharacters !== undefined || budget.maxCharactersPerSection !== undefined;
 }
 
-/** Body characters a top-level section carries — its own text plus its subsections'. */
-function sectionCharacters(section: ParsedPmcArticle['sections'][number]): number {
-  return (
-    section.text.length + (section.subsections?.reduce((n, sub) => n + sub.text.length, 0) ?? 0)
-  );
+/** Every text field in a section subtree, in document order, own text first. */
+function sectionTextFields(section: ParsedSection): string[] {
+  return [section.text, ...(section.subsections ?? []).flatMap(sectionTextFields)];
+}
+
+/**
+ * Body characters a section carries — its own text plus every nested
+ * subsection's. Measured off {@link sectionTextFields} rather than its own walk,
+ * so the count the budget reports as `originalCharacters` is always taken over
+ * exactly the fields {@link fitFields} shortens.
+ */
+function sectionCharacters(section: ParsedSection): number {
+  return sectionTextFields(section).reduce((n, text) => n + text.length, 0);
+}
+
+/**
+ * Rebuild a section subtree from `fitted`, consuming one entry per node in the
+ * same document order {@link sectionTextFields} produced them. `cursor` walks
+ * the flat list across the whole subtree.
+ */
+function withFittedTexts(
+  section: ParsedSection,
+  fitted: string[],
+  cursor: { i: number },
+): ParsedSection {
+  const text = fitted[cursor.i++] ?? '';
+  const subsections = section.subsections?.map((sub) => withFittedTexts(sub, fitted, cursor));
+  return { ...section, text, ...(subsections && { subsections }) };
 }
 
 /**
@@ -632,10 +718,7 @@ function applyPmcBudget<T extends { sections: ParsedPmcArticle['sections'] }>(
 
   article.sections.forEach((section, i) => {
     const original = sizes[i] ?? 0;
-    const fitted = fitFields(
-      [section.text, ...(section.subsections?.map((sub) => sub.text) ?? [])],
-      allowances[i] ?? 0,
-    );
+    const fitted = fitFields(sectionTextFields(section), allowances[i] ?? 0);
     const returned = fitted.reduce((sum, text) => sum + text.length, 0);
     returnedCharacters += returned;
     sectionReports.push({
@@ -649,13 +732,7 @@ function applyPmcBudget<T extends { sections: ParsedPmcArticle['sections'] }>(
       omittedSections += 1;
       return;
     }
-    kept.push({
-      ...section,
-      text: fitted[0] ?? '',
-      ...(section.subsections && {
-        subsections: section.subsections.map((sub, j) => ({ ...sub, text: fitted[j + 1] ?? '' })),
-      }),
-    });
+    kept.push(withFittedTexts(section, fitted, { i: 0 }));
   });
 
   if (returnedCharacters === originalCharacters && omittedSections === 0) {
@@ -2377,16 +2454,7 @@ function formatPmcArticle(
   if (truncation) lines.push(truncationNote(truncation));
   if (a.abstract) lines.push(`\n#### Abstract\n${a.abstract}`);
 
-  for (const sec of a.sections) {
-    if (sec.title) lines.push(`\n#### ${formatHeading(sec.label, sec.title)}`);
-    if (sec.text) lines.push(sec.text);
-    if (sec.subsections?.length) {
-      for (const sub of sec.subsections) {
-        if (sub.title) lines.push(`\n##### ${formatHeading(sub.label, sub.title)}`);
-        if (sub.text) lines.push(sub.text);
-      }
-    }
-  }
+  for (const sec of a.sections) formatSection(sec, lines, 4);
 
   if (a.references?.length) {
     lines.push(`\n#### References (${a.references.length})`);
@@ -2443,6 +2511,34 @@ function formatPmcAuthor(au: FormattedPmcAuthor): string {
 
 function formatHeading(label: string | undefined, title: string): string {
   return label ? `${label} ${title}` : title;
+}
+
+/**
+ * A body section at any nesting level. The schema inlines one type per level so
+ * the emitted JSON Schema stays `$ref`-free, and every one of those types is a
+ * subset of this shape, so the renderer takes it for all of them.
+ */
+interface RenderableSection {
+  label?: string | undefined;
+  subsections?: RenderableSection[] | undefined;
+  text: string;
+  title?: string | undefined;
+}
+
+/**
+ * Render one body section and everything nested under it, one markdown heading
+ * level per nesting level. Walks the full depth the output schema carries, so
+ * `content[]` shows every section `structuredContent` does. Headings stop
+ * deepening at `######`, the deepest markdown supports. (#112)
+ */
+function formatSection(section: RenderableSection, lines: string[], depth: number): void {
+  if (section.title) {
+    lines.push(
+      `\n${'#'.repeat(Math.min(depth, 6))} ${formatHeading(section.label, section.title)}`,
+    );
+  }
+  if (section.text) lines.push(section.text);
+  for (const sub of section.subsections ?? []) formatSection(sub, lines, depth + 1);
 }
 
 /**

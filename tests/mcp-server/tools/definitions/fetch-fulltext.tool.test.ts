@@ -3,10 +3,18 @@
  * @module tests/mcp-server/tools/definitions/fetch-fulltext.tool.test
  */
 
-import { createMockContext, getEnrichment } from '@cyanheads/mcp-ts-core/testing';
+import { createMockContext, getEnrichment, runToolContract } from '@cyanheads/mcp-ts-core/testing';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { textBlocks } from '../../../_helpers.js';
+
+/** Reader-side view of a body section at any nesting level. */
+interface DeepSection {
+  label?: string;
+  subsections?: DeepSection[];
+  text: string;
+  title?: string;
+}
 
 const mockEFetch = vi.fn();
 const mockIdConvert = vi.fn();
@@ -3708,5 +3716,184 @@ describe('fetchFulltextTool whole-response budget (issue #100)', () => {
     expect(
       fetchFulltextTool.input.safeParse({ pmcids: ['PMC1'], maxResponseCharacters: 1 }).success,
     ).toBe(true);
+  });
+});
+
+describe('fetchFulltextTool deep section nesting (issue #112)', () => {
+  beforeEach(() => {
+    mockEFetch.mockReset();
+    mockIdConvert.mockReset();
+    mockParsePmcArticle.mockReset();
+    mockGetUnpaywallService.mockReset();
+    mockGetEpmcService.mockReset();
+    mockGetUnpaywallService.mockReturnValue(undefined);
+    mockGetEpmcService.mockReturnValue(undefined);
+  });
+
+  /** The flattened tail the case-reports subsection absorbs from depth 3 down. */
+  const FLATTENED_TAIL = [
+    'Patient 4\nPatient 4 narrative.',
+    'Patient 11\nPatient 11 narrative.',
+    'Follow-up\nFollow-up narrative.',
+    'Imaging\nImaging narrative.',
+    'MRI\nMRI narrative.',
+    '1.1 Sequence\nSequence narrative.',
+  ].join('\n\n');
+
+  /**
+   * PMC9575052's shape — a Results section whose case reports nest three deep —
+   * with the chain under Patient 11 continued to seven levels so the fold-in
+   * covers more than the first level past the schema.
+   */
+  function stageDeepArticle() {
+    mockParsePmcArticle.mockReturnValue({
+      pmcId: 'PMC9575052',
+      pmcUrl: 'https://www.ncbi.nlm.nih.gov/pmc/articles/PMC9575052/',
+      title: 'Deeply Nested Article',
+      sections: [
+        {
+          title: 'RESULTS',
+          text: 'Results overview.',
+          subsections: [
+            {
+              title: 'Case reports of surgical patients',
+              text: '',
+              subsections: [
+                { title: 'Patient 4', text: 'Patient 4 narrative.' },
+                {
+                  title: 'Patient 11',
+                  text: 'Patient 11 narrative.',
+                  subsections: [
+                    {
+                      title: 'Follow-up',
+                      text: 'Follow-up narrative.',
+                      subsections: [
+                        {
+                          title: 'Imaging',
+                          text: 'Imaging narrative.',
+                          subsections: [
+                            {
+                              title: 'MRI',
+                              text: 'MRI narrative.',
+                              subsections: [
+                                { label: '1.1', title: 'Sequence', text: 'Sequence narrative.' },
+                              ],
+                            },
+                          ],
+                        },
+                      ],
+                    },
+                  ],
+                },
+              ],
+            },
+          ],
+        },
+      ],
+    });
+    mockEFetch.mockResolvedValue([{ 'pmc-articleset': [{ article: [] }] }]);
+  }
+
+  /** Total body characters a section subtree carries. */
+  function sumText(sections: DeepSection[] | undefined): number {
+    return (sections ?? []).reduce((n, s) => n + s.text.length + sumText(s.subsections), 0);
+  }
+
+  it('folds sections past the schema depth into the deepest surviving text', async () => {
+    stageDeepArticle();
+
+    const call = await runToolContract(fetchFulltextTool, { pmcids: ['PMC9575052'] });
+    const structured = call.structuredContent as { articles: { sections: DeepSection[] }[] };
+
+    const caseReports = structured.articles[0]?.sections[0]?.subsections?.[0];
+    expect(caseReports?.title).toBe('Case reports of surgical patients');
+    expect(caseReports?.subsections).toBeUndefined();
+    // Previously this node validated with `text: ''` and every nested narrative
+    // was stripped by output validation.
+    expect(caseReports?.text).toBe(FLATTENED_TAIL);
+  });
+
+  it('renders every surviving level and the folded tail in content[]', async () => {
+    stageDeepArticle();
+
+    const call = await runToolContract(fetchFulltextTool, { pmcids: ['PMC9575052'] });
+    const text = (call.content as { type: string; text?: string }[])
+      .map((b) => b.text ?? '')
+      .join('\n');
+
+    expect(text).toContain('#### RESULTS');
+    expect(text).toContain('##### Case reports of surgical patients');
+    for (const narrative of [
+      'Patient 4 narrative.',
+      'Patient 11 narrative.',
+      'Follow-up narrative.',
+      'Imaging narrative.',
+      'MRI narrative.',
+      'Sequence narrative.',
+    ]) {
+      expect(text).toContain(narrative);
+    }
+  });
+
+  it('leaves a two-level article unchanged in shape and rendering', async () => {
+    mockParsePmcArticle.mockReturnValue({
+      pmcId: 'PMC11391094',
+      pmcUrl: 'https://www.ncbi.nlm.nih.gov/pmc/articles/PMC11391094/',
+      title: 'Shallow Article',
+      sections: [
+        {
+          title: 'Methods',
+          text: 'Methods text.',
+          subsections: [{ label: '2.1', title: 'Cohort', text: 'Cohort text.' }],
+        },
+      ],
+    });
+    mockEFetch.mockResolvedValue([{ 'pmc-articleset': [{ article: [] }] }]);
+
+    const call = await runToolContract(fetchFulltextTool, { pmcids: ['PMC11391094'] });
+    const structured = call.structuredContent as { articles: { sections: DeepSection[] }[] };
+
+    expect(structured.articles[0]?.sections).toEqual([
+      {
+        title: 'Methods',
+        text: 'Methods text.',
+        subsections: [{ label: '2.1', title: 'Cohort', text: 'Cohort text.' }],
+      },
+    ]);
+
+    const text = (call.content as { type: string; text?: string }[])
+      .map((b) => b.text ?? '')
+      .join('\n');
+    expect(text).toContain('#### Methods');
+    expect(text).toContain('##### 2.1 Cohort');
+  });
+
+  it('counts and shortens the folded tail under a character budget', async () => {
+    stageDeepArticle();
+
+    const call = await runToolContract(fetchFulltextTool, {
+      pmcids: ['PMC9575052'],
+      maxCharacters: 40,
+    });
+    const structured = call.structuredContent as {
+      articles: { sections: DeepSection[] }[];
+      truncation?: {
+        originalCharacters: number;
+        returnedCharacters: number;
+        articles: { sections?: { title?: string; originalCharacters: number }[] }[];
+      };
+    };
+
+    // 'Results overview.' (17) plus the folded case-reports tail (178).
+    expect(structured.truncation?.originalCharacters).toBe(17 + FLATTENED_TAIL.length);
+    expect(structured.truncation?.returnedCharacters).toBe(40);
+    expect(structured.truncation?.articles[0]?.sections?.[0]).toMatchObject({
+      title: 'RESULTS',
+      originalCharacters: 17 + FLATTENED_TAIL.length,
+      returnedCharacters: 40,
+      truncated: true,
+    });
+
+    expect(sumText(structured.articles[0]?.sections)).toBe(40);
   });
 });
