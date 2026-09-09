@@ -113,14 +113,32 @@ export class UnpaywallService {
    * present (direct PDF bytes) and falls back to `url` (HTML landing page).
    * Throws `McpError(ServiceUnavailable)` on network/server failures or
    * unreadable responses — caller handles partial failures.
+   *
+   * Publishers routinely answer `url_for_pdf` with an HTML paywall or
+   * interstitial at `200 OK`. That is not a fetch failure, so it takes the same
+   * route as one: fall through to `location.url`, Unpaywall's designated
+   * landing page, which is likelier to hold real content. The HTML already
+   * received is kept and returned when a second fetch cannot improve on it —
+   * the two addresses are the same, or the fallback fetch itself fails. (#104)
    */
   async fetchContent(location: UnpaywallLocation, signal?: AbortSignal): Promise<UnpaywallContent> {
     const pdfUrl = location.url_for_pdf ?? undefined;
     const htmlUrl = location.url;
 
     if (pdfUrl) {
+      /** HTML served where a PDF was advertised — a fallback candidate, not a result. */
+      let servedHtml: UnpaywallContent | undefined;
       try {
-        return await this.fetchAs(pdfUrl, 'pdf', signal);
+        const content = await this.fetchAs(pdfUrl, 'pdf', signal);
+        if (content.kind === 'pdf') return content;
+        servedHtml = content;
+        logger.debug(
+          'Unpaywall PDF URL served non-PDF bytes; falling back to HTML URL',
+          requestContextService.createRequestContext({
+            operation: 'UnpaywallPdfNotPdf',
+            additionalContext: { url: pdfUrl, fetchedUrl: content.fetchedUrl },
+          }),
+        );
       } catch (pdfErr: unknown) {
         logger.debug(
           'Unpaywall PDF fetch failed; falling back to HTML URL',
@@ -133,11 +151,33 @@ export class UnpaywallService {
           }),
         );
       }
+
+      // Refetching an address we already read returns the same bytes.
+      if (servedHtml && (pdfUrl === htmlUrl || servedHtml.fetchedUrl === htmlUrl)) {
+        return servedHtml;
+      }
+
+      try {
+        return await this.fetchAs(htmlUrl, 'auto', signal);
+      } catch (htmlErr: unknown) {
+        if (servedHtml) return servedHtml;
+        throw htmlErr;
+      }
     }
 
     return this.fetchAs(htmlUrl, 'auto', signal);
   }
 
+  /**
+   * Fetch one URL and classify what came back by its own bytes.
+   *
+   * `expected` steers the `Accept` header only. Classification reads the
+   * response body's magic header, because neither the caller's expectation nor
+   * the `content-type` describes it reliably: a genuine PDF is often served as
+   * `application/octet-stream`, and an HTML interstitial is sometimes served as
+   * `application/pdf`. Bytes opening with `%PDF-` are a PDF whatever the header
+   * says; everything else is treated as text. (#104)
+   */
   private async fetchAs(
     url: string,
     expected: 'pdf' | 'auto',
@@ -176,17 +216,25 @@ export class UnpaywallService {
       });
     }
 
-    const contentType = response.headers.get('content-type')?.toLowerCase() ?? '';
     const fetchedUrl = response.url || url;
+    // Read the body once — a Response body can only be consumed once, and the
+    // bytes are what the classification reads.
+    const bytes = new Uint8Array(await response.arrayBuffer());
 
-    if (contentType.includes('pdf') || expected === 'pdf') {
-      const bytes = new Uint8Array(await response.arrayBuffer());
-      return { kind: 'pdf', fetchedUrl, body: bytes };
-    }
+    if (hasPdfMagic(bytes)) return { kind: 'pdf', fetchedUrl, body: bytes };
 
-    const text = await response.text();
-    return { kind: 'html', fetchedUrl, body: text };
+    return { kind: 'html', fetchedUrl, body: new TextDecoder().decode(bytes) };
   }
+}
+
+/** `%PDF-`, the five bytes every PDF file opens with. */
+const PDF_MAGIC = Uint8Array.of(0x25, 0x50, 0x44, 0x46, 0x2d);
+
+/** Whether the received bytes are a PDF, independent of any declared type. */
+function hasPdfMagic(bytes: Uint8Array): boolean {
+  return (
+    bytes.length >= PDF_MAGIC.length && PDF_MAGIC.every((byte, index) => bytes[index] === byte)
+  );
 }
 
 /**

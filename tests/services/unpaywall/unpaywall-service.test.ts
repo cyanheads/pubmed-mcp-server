@@ -220,6 +220,186 @@ describe('UnpaywallService.fetchContent', () => {
       },
     });
   });
+
+  describe('classification by received bytes (issue #104)', () => {
+    /** `%PDF-` — the five magic bytes every PDF starts with. */
+    const PDF_MAGIC = [0x25, 0x50, 0x44, 0x46, 0x2d];
+    const pdfBytes = (trailer = 'X') =>
+      new Uint8Array([...PDF_MAGIC, ...new TextEncoder().encode(trailer)]);
+    const LANDING_HTML = '<html><body>landing</body></html>';
+    const PAYWALL_HTML = '<html><body>Subscribe to read this article</body></html>';
+
+    const bytesResponse = (body: string | Uint8Array, contentType: string, url?: string) => {
+      const response = new Response(body, {
+        status: 200,
+        headers: { 'content-type': contentType },
+      });
+      if (url) Object.defineProperty(response, 'url', { value: url });
+      return response;
+    };
+
+    const requestedUrls = () => mockFetchWithTimeout.mock.calls.map((call) => call[0] as string);
+
+    it('does not label an HTML paywall served at url_for_pdf a PDF, and falls through to location.url', async () => {
+      mockFetchWithTimeout
+        .mockResolvedValueOnce(bytesResponse(PAYWALL_HTML, 'text/html; charset=utf-8'))
+        .mockResolvedValueOnce(bytesResponse(LANDING_HTML, 'text/html'));
+
+      const service = new UnpaywallService('oa@example.com', 20000);
+      const content = await service.fetchContent({
+        url: 'https://example.org/paper',
+        url_for_pdf: 'https://example.org/paper.pdf',
+      });
+
+      expect(content.kind).toBe('html');
+      expect(content.body).toContain('landing');
+      expect(requestedUrls()).toEqual([
+        'https://example.org/paper.pdf',
+        'https://example.org/paper',
+      ]);
+    });
+
+    it('classifies HTML sent with a content-type of application/pdf as HTML', async () => {
+      // The reverse header lie: an interstitial mislabeled as a PDF used to
+      // reach the PDF parser and fail as "Invalid PDF structure".
+      mockFetchWithTimeout
+        .mockResolvedValueOnce(bytesResponse(PAYWALL_HTML, 'application/pdf'))
+        .mockResolvedValueOnce(bytesResponse(LANDING_HTML, 'text/html'));
+
+      const service = new UnpaywallService('oa@example.com', 20000);
+      const content = await service.fetchContent({
+        url: 'https://example.org/paper',
+        url_for_pdf: 'https://example.org/paper.pdf',
+      });
+
+      expect(content.kind).toBe('html');
+      expect(content.body).toContain('landing');
+    });
+
+    it('keeps a genuine PDF served as application/octet-stream classified as a PDF', async () => {
+      mockFetchWithTimeout.mockResolvedValueOnce(
+        bytesResponse(pdfBytes('1.7 body'), 'application/octet-stream'),
+      );
+
+      const service = new UnpaywallService('oa@example.com', 20000);
+      const content = await service.fetchContent({
+        url: 'https://example.org/paper',
+        url_for_pdf: 'https://example.org/paper.pdf',
+      });
+
+      expect(content.kind).toBe('pdf');
+      expect(content.body).toBeInstanceOf(Uint8Array);
+      expect(Array.from(content.body as Uint8Array).slice(0, 5)).toEqual(PDF_MAGIC);
+      expect(requestedUrls()).toEqual(['https://example.org/paper.pdf']);
+    });
+
+    it('keeps a corrupt-but-PDF-headed body classified as a PDF rather than reclassifying it as HTML', async () => {
+      // A genuinely corrupt PDF must still reach the PDF parser so the
+      // downstream failure reads as a PDF parse failure, not an HTML miss.
+      mockFetchWithTimeout.mockResolvedValueOnce(
+        bytesResponse(pdfBytes('  truncated'), 'application/pdf'),
+      );
+
+      const service = new UnpaywallService('oa@example.com', 20000);
+      const content = await service.fetchContent({
+        url: 'https://example.org/paper',
+        url_for_pdf: 'https://example.org/paper.pdf',
+      });
+
+      expect(content.kind).toBe('pdf');
+      expect(Array.from(content.body as Uint8Array).slice(0, 5)).toEqual(PDF_MAGIC);
+      expect(requestedUrls()).toHaveLength(1);
+    });
+
+    it('extracts the received HTML directly when url_for_pdf and url are the same address', async () => {
+      mockFetchWithTimeout.mockResolvedValueOnce(bytesResponse(PAYWALL_HTML, 'application/pdf'));
+
+      const service = new UnpaywallService('oa@example.com', 20000);
+      const content = await service.fetchContent({
+        url: 'https://example.org/paper',
+        url_for_pdf: 'https://example.org/paper',
+      });
+
+      expect(content.kind).toBe('html');
+      expect(content.body).toContain('Subscribe');
+      // Refetching the same address would only repeat the same response.
+      expect(requestedUrls()).toEqual(['https://example.org/paper']);
+    });
+
+    it('extracts the received HTML directly when url_for_pdf redirected to location.url', async () => {
+      mockFetchWithTimeout.mockResolvedValueOnce(
+        bytesResponse(PAYWALL_HTML, 'text/html', 'https://example.org/paper'),
+      );
+
+      const service = new UnpaywallService('oa@example.com', 20000);
+      const content = await service.fetchContent({
+        url: 'https://example.org/paper',
+        url_for_pdf: 'https://example.org/redirect-to-landing',
+      });
+
+      expect(content).toMatchObject({ kind: 'html', fetchedUrl: 'https://example.org/paper' });
+      expect(requestedUrls()).toEqual(['https://example.org/redirect-to-landing']);
+    });
+
+    it('falls back to the HTML received at url_for_pdf when the landing-page fetch also fails', async () => {
+      mockFetchWithTimeout
+        .mockResolvedValueOnce(bytesResponse(PAYWALL_HTML, 'text/html'))
+        .mockRejectedValueOnce(new Error('connect ECONNRESET'));
+
+      const service = new UnpaywallService('oa@example.com', 20000);
+      const content = await service.fetchContent({
+        url: 'https://example.org/paper',
+        url_for_pdf: 'https://example.org/paper.pdf',
+      });
+
+      expect(content).toMatchObject({
+        kind: 'html',
+        fetchedUrl: 'https://example.org/paper.pdf',
+      });
+      expect(content.body).toContain('Subscribe');
+    });
+
+    it('still throws when the PDF slot fetch fails and the landing-page fetch fails too', async () => {
+      // Nothing was received at either address, so there is no body to salvage.
+      mockFetchWithTimeout
+        .mockResolvedValueOnce(new Response('gone', { status: 410 }))
+        .mockRejectedValueOnce(new Error('connect ECONNRESET'));
+
+      const service = new UnpaywallService('oa@example.com', 20000);
+      await expect(
+        service.fetchContent({
+          url: 'https://example.org/paper',
+          url_for_pdf: 'https://example.org/paper.pdf',
+        }),
+      ).rejects.toMatchObject({ data: { reason: 'unpaywall_unreachable' } });
+    });
+
+    it('classifies a PDF served under text/html on the auto branch by its bytes', async () => {
+      // The `auto` branch carried the same latent gap in the other direction.
+      mockFetchWithTimeout.mockResolvedValueOnce(bytesResponse(pdfBytes('1.4'), 'text/html'));
+
+      const service = new UnpaywallService('oa@example.com', 20000);
+      const content = await service.fetchContent({ url: 'https://example.org/paper' });
+
+      expect(content.kind).toBe('pdf');
+      expect(Array.from(content.body as Uint8Array).slice(0, 5)).toEqual(PDF_MAGIC);
+    });
+
+    it('returns an empty body as HTML rather than an empty PDF', async () => {
+      mockFetchWithTimeout
+        .mockResolvedValueOnce(bytesResponse('', 'application/pdf'))
+        .mockResolvedValueOnce(bytesResponse(LANDING_HTML, 'text/html'));
+
+      const service = new UnpaywallService('oa@example.com', 20000);
+      const content = await service.fetchContent({
+        url: 'https://example.org/paper',
+        url_for_pdf: 'https://example.org/paper.pdf',
+      });
+
+      expect(content.kind).toBe('html');
+      expect(content.body).toContain('landing');
+    });
+  });
 });
 
 describe('initUnpaywallService / getUnpaywallService', () => {
