@@ -19,6 +19,7 @@ vi.mock('@cyanheads/mcp-ts-core/utils', async () => {
 const { EuropePmcApiClient } = await import('@/services/europe-pmc/api-client.js');
 const { EuropePmcRequestQueue } = await import('@/services/europe-pmc/request-queue.js');
 const { EuropePmcService } = await import('@/services/europe-pmc/europe-pmc-service.js');
+const { parsePmcArticle } = await import('@/services/ncbi/parsing/pmc-article-parser.js');
 
 function jsonResponse(body: unknown, init: ResponseInit = {}) {
   return new Response(JSON.stringify(body), {
@@ -479,6 +480,54 @@ describe('EuropePmcService.parseFullTextXml', () => {
     expect(() => service.parseFullTextXml('<article><body>')).toThrowError(
       /invalid XML from Europe PMC/i,
     );
+  });
+
+  /**
+   * The EPMC parser once ran with `parseTagValue: true` while the NCBI ordered
+   * parser ran with it off, so the same article rendered different citation
+   * strings depending on which upstream served it. These pin the configs to a
+   * single shared definition. (#127)
+   */
+  describe('bibliographic tokens are verbatim (regression #127)', () => {
+    const parse = (xml: string) => {
+      const node = makeService().parseFullTextXml(xml);
+      if (!node) throw new Error('expected an <article> node');
+      return parsePmcArticle(node);
+    };
+
+    /** `extractJournal` needs a `<journal-meta>` before it reports any field. */
+    const withJournal = (articleMetaInner: string) =>
+      `<article><front>` +
+      `<journal-meta><journal-title-group><journal-title>J Test</journal-title></journal-title-group></journal-meta>` +
+      `<article-meta>${articleMetaInner}</article-meta>` +
+      `</front></article>`;
+
+    it('keeps a page range with a decimal-looking suffix verbatim', () => {
+      const article = parse(withJournal('<fpage>4002.e26</fpage>'));
+      expect(article.journal?.pages).toBe('4002.e26');
+    });
+
+    it('keeps a zero-padded inline token verbatim', () => {
+      const article = parse(
+        `<article><body><sec><title>Results</title><p>Agent <bold>007</bold> reporting.</p></sec></body></article>`,
+      );
+      expect(article.sections[0]?.text).toBe('Agent 007 reporting.');
+    });
+
+    it('still renders a genuinely numeric field as its source string', () => {
+      const article = parse(withJournal('<volume>186</volume>'));
+      expect(article.journal?.volume).toBe('186');
+    });
+
+    it('keeps a reference label’s trailing period', () => {
+      // PMC12973387's six reference labels are `1.`–`6.`; coercion dropped the
+      // period and rendered them `1`–`6`.
+      const article = parse(
+        `<article><back><ref-list><ref id="bib1"><label>1.</label>` +
+          `<mixed-citation>Nybakken JW. Marine Biology. 2001.</mixed-citation></ref></ref-list></back></article>`,
+      );
+      expect(article.references?.[0]?.label).toBe('1.');
+    });
   });
 });
 

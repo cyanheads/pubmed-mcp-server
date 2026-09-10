@@ -3,9 +3,9 @@
  * retries, and JATS XML parsing. `search()` covers keyword discovery across the
  * EPMC corpus (MED/PMC/PPR/PAT/AGR), `fetchRecords()` resolves specific records
  * by `source` + EPMC id, `fullTextXml()` fetches a record's full-text JATS, and
- * `citations()` / `references()` walk EPMC's link graph. The XML parser matches
- * NCBI's ordered config so `parsePmcArticle` consumes the result without
- * modification.
+ * `citations()` / `references()` walk EPMC's link graph. The XML parser is built
+ * from the same `ORDERED_XML_PARSER_OPTIONS` NCBI's ordered parser uses, so
+ * `parsePmcArticle` consumes the result without modification.
  *
  * Optional service: only constructed when `EUROPEPMC_ENABLED=true` (the
  * default). `getEuropePmcService()` returns `undefined` when disabled so
@@ -27,6 +27,7 @@ import { XMLParser, XMLValidator } from 'fast-xml-parser';
 
 import { getServerConfig } from '@/config/server-config.js';
 import { recoveryFor } from '@/services/error-contracts.js';
+import { ORDERED_XML_PARSER_OPTIONS } from '@/services/ncbi/parsing/ordered-xml-parser-options.js';
 import type { JatsNode, JatsNodeList } from '@/services/ncbi/parsing/pmc-xml-helpers.js';
 import { ensureArray } from '@/services/ncbi/parsing/xml-helpers.js';
 import { isTransient } from '@/services/retry-policy.js';
@@ -112,20 +113,11 @@ export class EuropePmcService {
     private readonly maxRetries: number,
   ) {
     /**
-     * EPMC's fullTextXML is JATS Z39.96 — same DTD PMC uses — so the parser
-     * config mirrors `NcbiResponseHandler.orderedXmlParser`. `preserveOrder`
-     * keeps inline mixed content readable; `trimValues: false` retains spaces
-     * between text and inline children.
+     * EPMC's fullTextXML is JATS Z39.96 — the same DTD PMC uses, consumed by
+     * the same `parsePmcArticle` — so it is built from the one shared options
+     * constant rather than a second copy that can drift. (#127)
      */
-    this.orderedXmlParser = new XMLParser({
-      preserveOrder: true,
-      ignoreAttributes: false,
-      attributeNamePrefix: '@_',
-      parseTagValue: true,
-      trimValues: false,
-      processEntities: true,
-      htmlEntities: true,
-    });
+    this.orderedXmlParser = new XMLParser(ORDERED_XML_PARSER_OPTIONS);
   }
 
   /**

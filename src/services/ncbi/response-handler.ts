@@ -20,6 +20,10 @@ import { logger, requestContextService } from '@cyanheads/mcp-ts-core/utils';
 import { XMLParser as FastXmlParser, type X2jOptions, XMLValidator } from 'fast-xml-parser';
 
 import { recoveryFor } from '@/services/error-contracts.js';
+import {
+  ORDERED_XML_PARSER_OPTIONS,
+  XML_PROCESS_ENTITIES_OPTIONS,
+} from './parsing/ordered-xml-parser-options.js';
 import type { NcbiRequestOptions } from './types.js';
 
 /**
@@ -89,17 +93,6 @@ const WARNING_PATHS = [
   'eSearchResult.WarningList.QuotedPhraseNotFound',
   'eSearchResult.WarningList.OutputMessage',
 ];
-
-/**
- * NCBI responses routinely contain numeric character references for punctuation
- * and diacritics, especially in page ranges and author names. Keep entity
- * processing enabled, but raise the aggregate expansion ceiling high enough for
- * trusted PubMed payloads.
- */
-const NCBI_PROCESS_ENTITIES_OPTIONS = {
-  enabled: true,
-  maxTotalExpansions: 100_000,
-} as const;
 
 function resolvePath(obj: unknown, path: string): unknown {
   let current: unknown = obj;
@@ -246,15 +239,9 @@ export function flattenInlineMarkup(xml: string): string {
 export class NcbiResponseHandler {
   private readonly xmlParser: FastXmlParser;
   /**
-   * Parser configured for JATS mixed content (PMC full-text). `preserveOrder`
-   * keeps document order so inline markup in `<p>`, `<abstract>`, `<title>`
-   * doesn't collapse into reordered text. `trimValues: false` retains spacing
-   * between text nodes and adjacent inline children. `parseTagValue: false`
-   * keeps bibliographic tokens verbatim — page ranges like `4002.e26` and
-   * zero-padded pages would otherwise coerce to `Number` (→ `4.002e+29`, `123`);
-   * every value on this path is `String()`-ed downstream, so coercion is pure
-   * downside. Entity decoding is unaffected (it's governed by `processEntities`/
-   * `htmlEntities`), so page-range en-dashes still resolve. (#69)
+   * Parser configured for JATS mixed content (PMC full-text), built from
+   * {@link ORDERED_XML_PARSER_OPTIONS} — the same constant `EuropePmcService`
+   * uses, so the two JATS paths cannot drift apart. (#69, #127)
    */
   private readonly orderedXmlParser: FastXmlParser;
   /**
@@ -274,22 +261,14 @@ export class NcbiResponseHandler {
     const flatOptions = {
       ignoreAttributes: false,
       attributeNamePrefix: '@_',
-      processEntities: NCBI_PROCESS_ENTITIES_OPTIONS,
+      processEntities: XML_PROCESS_ENTITIES_OPTIONS,
       htmlEntities: true,
       isArray: (_name, jpath) => NCBI_ARRAY_JPATHS.has(jpath as string),
     } satisfies X2jOptions;
 
     this.xmlParser = new FastXmlParser({ ...flatOptions, parseTagValue: true });
     this.verbatimXmlParser = new FastXmlParser({ ...flatOptions, parseTagValue: false });
-    this.orderedXmlParser = new FastXmlParser({
-      preserveOrder: true,
-      ignoreAttributes: false,
-      attributeNamePrefix: '@_',
-      parseTagValue: false,
-      trimValues: false,
-      processEntities: NCBI_PROCESS_ENTITIES_OPTIONS,
-      htmlEntities: true,
-    });
+    this.orderedXmlParser = new FastXmlParser(ORDERED_XML_PARSER_OPTIONS);
   }
 
   /**
