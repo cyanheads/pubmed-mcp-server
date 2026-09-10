@@ -1,7 +1,8 @@
 /**
  * @fileoverview Text helpers shared by the tool definitions: the surrogate-safe
  * character cut used to bound returned text to a budget, and the render-time
- * Markdown escape applied to upstream strings interpolated into `format()`.
+ * Markdown escapes applied to upstream strings interpolated into `format()` —
+ * one for an inline position, one for a table cell.
  * @module src/mcp-server/tools/definitions/_text
  */
 
@@ -108,4 +109,28 @@ export function escapeMarkdownInline(text: string): string {
   return escaped.replace(/_/g, (underscore, index: number) =>
     pairable.has(index) ? `\\${underscore}` : underscore,
   );
+}
+
+/**
+ * Escape an upstream string for a Markdown table cell — {@link
+ * escapeMarkdownInline} plus the cell delimiter.
+ *
+ * `|` needs escaping here and nowhere else. Inside a row it ends the cell, so an
+ * unescaped one in a value splits it and shifts every value after it one column
+ * left: a grid that renders cleanly while reporting the wrong numbers under the
+ * wrong headers. Outside a table it is an ordinary character, which is why the
+ * inline escape leaves it alone rather than spending a backslash on every value
+ * that happens to carry one.
+ *
+ * Line breaks are already collapsed to a space by the inline escape — a cell
+ * needs that too, since a newline inside one ends the row. (#111)
+ *
+ * Order is load-bearing. The inline escape runs first because it is what escapes
+ * the backslash; the backslashes added here for `|` are escape characters and
+ * must not be escaped in turn. Reversed, the `\` this step adds is doubled by
+ * the backslash pass that follows, which leaves the `|` bare and splits the cell
+ * anyway — the exact defect this function exists to prevent.
+ */
+export function escapeMarkdownTableCell(text: string): string {
+  return escapeMarkdownInline(text).replace(/\|/g, '\\|');
 }

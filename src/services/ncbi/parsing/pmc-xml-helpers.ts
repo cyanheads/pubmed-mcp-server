@@ -63,15 +63,16 @@ export function textOf(node: JatsNode): string {
 /**
  * Concatenate text content in document order without normalizing whitespace.
  * Internal helper so recursion preserves the original spacing between siblings.
+ * `excluded` skips a whole subtree by tag name; omitting it reads everything.
  */
-function concatText(input: JatsNode | JatsNodeList): string {
+function concatText(input: JatsNode | JatsNodeList, excluded?: ReadonlySet<string>): string {
   const nodes = Array.isArray(input) ? input : [input];
   const parts: string[] = [];
   for (const node of nodes) {
     if (isTextNode(node)) {
       parts.push(textOf(node));
-    } else {
-      parts.push(concatText(childrenOf(node)));
+    } else if (!excluded?.has(tagNameOf(node) ?? '')) {
+      parts.push(concatText(childrenOf(node), excluded));
     }
   }
   return parts.join('');
@@ -99,6 +100,21 @@ export function textContent(input: JatsNode | JatsNodeList | undefined): string 
   return concatText(input).replace(/\s+/g, ' ').trim();
 }
 
+/**
+ * {@link textContent}, with the subtree of any element named in `excludedTags`
+ * left out. Block content a publisher nests inside a `<p>` — a `<table-wrap>` in
+ * particular — would otherwise be flattened into the paragraph, running every
+ * cell together into values that never existed. Such content is extracted
+ * separately and must not appear in the prose twice.
+ */
+export function textContentExcluding(
+  input: JatsNode | JatsNodeList | undefined,
+  excludedTags: ReadonlySet<string>,
+): string {
+  if (!input) return '';
+  return concatText(input, excludedTags).replace(/\s+/g, ' ').trim();
+}
+
 /** First direct child with the given tag name. */
 export function findOne(
   input: JatsNode | JatsNodeList | undefined,
@@ -114,4 +130,29 @@ export function findAll(input: JatsNode | JatsNodeList | undefined, tagName: str
   if (!input) return [];
   const children = Array.isArray(input) ? input : childrenOf(input);
   return children.filter((c) => tagNameOf(c) === tagName);
+}
+
+/**
+ * Every descendant element with the given tag name, in document order.
+ * {@link findAll} matches direct children only, which is right for reading a
+ * known JATS shape; this is for containers publishers place at varying depths
+ * (a `<ref-list>` under `<back>` in one deposit and under `body/sec/sec` in the
+ * next). The walk keeps descending through a match, so a container nested
+ * inside another of the same tag is reported too. Each node is visited once, so
+ * the result never repeats a node.
+ */
+export function findAllDescendants(
+  input: JatsNode | JatsNodeList | undefined,
+  tagName: string,
+): JatsNode[] {
+  if (!input) return [];
+  const found: JatsNode[] = [];
+  const visit = (nodes: JatsNodeList): void => {
+    for (const node of nodes) {
+      if (tagNameOf(node) === tagName) found.push(node);
+      visit(childrenOf(node));
+    }
+  };
+  visit(Array.isArray(input) ? input : childrenOf(input));
+  return found;
 }

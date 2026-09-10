@@ -6,7 +6,7 @@
 
 import { describe, expect, it } from 'vitest';
 
-const { escapeMarkdownInline, sliceCodeUnits } = await import(
+const { escapeMarkdownInline, escapeMarkdownTableCell, sliceCodeUnits } = await import(
   '@/mcp-server/tools/definitions/_text.js'
 );
 
@@ -163,5 +163,34 @@ describe('escapeMarkdownInline (issue #102)', () => {
 
   it('returns an empty string unchanged', () => {
     expect(escapeMarkdownInline('')).toBe('');
+  });
+});
+
+describe('escapeMarkdownTableCell', () => {
+  it('escapes a pipe, which would otherwise end the cell and shift the row', () => {
+    expect(escapeMarkdownTableCell('A|B')).toBe('A\\|B');
+  });
+
+  it('leaves a pipe alone in the inline escape, where it is an ordinary character', () => {
+    expect(escapeMarkdownInline('A|B')).toBe('A|B');
+  });
+
+  it('collapses a line break, which would end the row', () => {
+    expect(escapeMarkdownTableCell('first\nsecond')).toBe('first second');
+  });
+
+  it('still applies the inline escapes', () => {
+    expect(escapeMarkdownTableCell('a *b* c|d')).toBe('a \\*b\\* c\\|d');
+  });
+
+  it('escapes a source backslash and the cell delimiter independently', () => {
+    // The backslash pass has to run before the pipe pass. Reversed, the `\` this
+    // function adds for the pipe is doubled by the backslash pass and the
+    // delimiter is left bare: `back\\slash a\\|b`, which splits the cell.
+    expect(escapeMarkdownTableCell('back\\slash a|b')).toBe('back\\\\slash a\\|b');
+  });
+
+  it('returns an empty string unchanged', () => {
+    expect(escapeMarkdownTableCell('')).toBe('');
   });
 });

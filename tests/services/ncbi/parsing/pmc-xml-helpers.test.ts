@@ -9,10 +9,12 @@ import {
   attrOf,
   childrenOf,
   findAll,
+  findAllDescendants,
   findOne,
   isTextNode,
   tagNameOf,
   textContent,
+  textContentExcluding,
   textOf,
 } from '@/services/ncbi/parsing/pmc-xml-helpers.js';
 
@@ -343,5 +345,77 @@ describe('JATS tree navigation (integration)', () => {
   it('collapses whitespace-only siblings to empty string', () => {
     const node = el('p', [t('   '), t('   ')]);
     expect(textContent(node)).toBe('');
+  });
+});
+
+// ─── textContentExcluding ─────────────────────────────────────────────────────
+
+describe('textContentExcluding', () => {
+  const SKIP_TABLES: ReadonlySet<string> = new Set(['table-wrap']);
+
+  it('returns empty for undefined', () => {
+    expect(textContentExcluding(undefined, SKIP_TABLES)).toBe('');
+  });
+
+  it('reads a node with no excluded descendant exactly as textContent does', () => {
+    const node = el('p', [t('Candidates include '), el('italic', [t('NF1')]), t('.')]);
+    expect(textContentExcluding(node, SKIP_TABLES)).toBe(textContent(node));
+  });
+
+  it('drops an excluded subtree wherever it is nested', () => {
+    const node = el('p', [
+      t('Prose before. '),
+      el('list', [
+        el('list-item', [el('table-wrap', [el('label', [t('Table 1')]), el('td', [t('14.44')])])]),
+      ]),
+      t(' Prose after.'),
+    ]);
+
+    expect(textContentExcluding(node, SKIP_TABLES)).toBe('Prose before. Prose after.');
+  });
+
+  it('excludes nothing when the set is empty', () => {
+    const node = el('p', [t('a'), el('table-wrap', [t('b')])]);
+    expect(textContentExcluding(node, new Set())).toBe('ab');
+  });
+});
+
+// ─── findAllDescendants ───────────────────────────────────────────────────────
+
+describe('findAllDescendants', () => {
+  it('returns empty for undefined', () => {
+    expect(findAllDescendants(undefined, 'ref-list')).toEqual([]);
+  });
+
+  it('returns empty when nothing matches', () => {
+    expect(findAllDescendants(el('body', [el('sec', [el('p', [t('x')])])]), 'ref-list')).toEqual(
+      [],
+    );
+  });
+
+  it('finds matches at mixed depths in document order', () => {
+    const article = el('article', [
+      el('body', [
+        el('sec', [el('sec', [el('ref-list', [el('ref', [t('deep')])])])]),
+        el('ref-list', [el('ref', [t('shallow')])]),
+      ]),
+      el('back', [el('ref-list', [el('ref', [t('back')])])]),
+    ]);
+
+    const found = findAllDescendants(article, 'ref-list');
+    expect(found.map((n) => textContent(n))).toEqual(['deep', 'shallow', 'back']);
+  });
+
+  it('keeps descending through a match into a nested one', () => {
+    const back = el('back', [
+      el('ref-list', [el('ref', [t('outer')]), el('ref-list', [el('ref', [t('inner')])])]),
+    ]);
+
+    expect(findAllDescendants(back, 'ref-list')).toHaveLength(2);
+  });
+
+  it('accepts a sibling list as well as a single node', () => {
+    const nodes = [el('back', [el('ref-list', [])]), el('body', [el('ref-list', [])])];
+    expect(findAllDescendants(nodes, 'ref-list')).toHaveLength(2);
   });
 });

@@ -3897,3 +3897,756 @@ describe('fetchFulltextTool deep section nesting (issue #112)', () => {
     expect(sumText(structured.articles[0]?.sections)).toBe(40);
   });
 });
+
+describe('fetchFulltextTool JATS tables (issue #111)', () => {
+  beforeEach(() => {
+    mockEFetch.mockReset();
+    mockIdConvert.mockReset();
+    mockParsePmcArticle.mockReset();
+    mockGetUnpaywallService.mockReset();
+    mockGetEpmcService.mockReset();
+    mockEpmcSearch.mockReset();
+    mockEpmcFullTextXml.mockReset();
+    mockEpmcParseFullTextXml.mockReset();
+    mockGetUnpaywallService.mockReturnValue(undefined);
+    mockGetEpmcService.mockReturnValue(undefined);
+  });
+
+  /** Reader-side view of one returned table. */
+  interface ReadTable {
+    caption?: string;
+    footnotes?: string;
+    headerRowCount: number;
+    id?: string;
+    label?: string;
+    rows: string[][];
+    sectionTitle?: string;
+    unextractableReason?: string;
+  }
+
+  /**
+   * A table inside a section, carrying a header row, a data row, and a row that
+   * spans columns — the shape a `colspan` deposit produces, with fewer cells
+   * than its neighbours and no padding from the parser.
+   */
+  const TABLE_IN_SECTION = {
+    id: 'T1',
+    label: 'TABLE 1',
+    caption: 'Baseline characteristics of the study population',
+    sectionTitle: 'METHODS',
+    headerRowCount: 1,
+    rows: [
+      ['Characteristic', 'Placebo', 'Active'],
+      ['Age, years', '30.4±12.3', '31.5±13.3'],
+      ['Pooled cohort'],
+    ],
+    footnotes: 'Data are mean±SD.',
+  };
+
+  /** A `<floats-group>` deposit: no enclosing `<sec>`, so no section name. */
+  const TABLE_NO_SECTION = {
+    label: 'TABLE 2',
+    caption: 'Treatment-emergent adverse events',
+    headerRowCount: 0,
+    rows: [['TEAE related to study drug', '3']],
+  };
+
+  /** A scanned deposit — label and caption are live, the body is an image. */
+  const TABLE_UNEXTRACTABLE = {
+    id: 'T3',
+    label: 'TABLE 3',
+    caption: 'Scanned summary table',
+    sectionTitle: 'RESULTS',
+    headerRowCount: 0,
+    rows: [] as string[][],
+    unextractableReason: 'graphic-only' as const,
+  };
+
+  function stageArticle(article: Record<string, unknown>) {
+    mockParsePmcArticle.mockReturnValue({
+      pmcId: 'PMC11391094',
+      pmcUrl: 'https://www.ncbi.nlm.nih.gov/pmc/articles/PMC11391094/',
+      title: 'Table-bearing Article',
+      sections: [
+        { title: 'METHODS', text: 'Methods body.' },
+        { title: 'RESULTS', text: 'Results body.' },
+      ],
+      ...article,
+    });
+    mockEFetch.mockResolvedValue([{ 'pmc-articleset': [{ article: [] }] }]);
+  }
+
+  function readTables(call: { structuredContent?: unknown }): ReadTable[] | undefined {
+    const structured = call.structuredContent as { articles: { tables?: ReadTable[] }[] };
+    return structured.articles[0]?.tables;
+  }
+
+  function rendered(call: { content?: unknown }): string {
+    return (call.content as { type: string; text?: string }[]).map((b) => b.text ?? '').join('\n');
+  }
+
+  it('returns every table on structuredContent and content[] with label, caption, cells, and footnotes', async () => {
+    stageArticle({ tables: [TABLE_IN_SECTION, TABLE_NO_SECTION, TABLE_UNEXTRACTABLE] });
+
+    const call = await runToolContract(fetchFulltextTool, { pmcids: ['PMC11391094'] });
+
+    expect(readTables(call)).toEqual([TABLE_IN_SECTION, TABLE_NO_SECTION, TABLE_UNEXTRACTABLE]);
+
+    const text = rendered(call);
+    expect(text).toContain('#### Tables (3)');
+    expect(text).toContain('##### TABLE 1 — Baseline characteristics of the study population');
+    expect(text).toContain('| Characteristic | Placebo | Active |');
+    expect(text).toContain('| Age, years | 30.4±12.3 | 31.5±13.3 |');
+    expect(text).toContain('Data are mean±SD.');
+    expect(text).toContain('TEAE related to study drug');
+    expect(text).toContain('Section: METHODS');
+    expect(text).toContain('id: T1');
+    expect(text).toContain('header rows: 1');
+  });
+
+  it('renders a row that spans columns without shifting its cells out of alignment', async () => {
+    stageArticle({ tables: [TABLE_IN_SECTION] });
+
+    const call = await runToolContract(fetchFulltextTool, { pmcids: ['PMC11391094'] });
+    const text = rendered(call);
+
+    // Three source cells stay in three columns; the short row keeps its single
+    // value in the first column and gains empty cells, never borrowed values.
+    expect(text).toContain('| --- | --- | --- |');
+    expect(text).toContain('| Pooled cohort |  |  |');
+  });
+
+  it('escapes a pipe inside a cell so the row keeps its column boundaries', async () => {
+    stageArticle({
+      tables: [
+        {
+          label: 'TABLE 1',
+          headerRowCount: 1,
+          rows: [
+            ['Ratio', 'Value'],
+            ['A|B', '2.5'],
+          ],
+        },
+      ],
+    });
+
+    const call = await runToolContract(fetchFulltextTool, { pmcids: ['PMC11391094'] });
+    const text = rendered(call);
+
+    expect(text).toContain('| A\\|B | 2.5 |');
+    expect(text).not.toContain('| A|B | 2.5 |');
+    // structuredContent keeps the plain-text value — escaping is render-only.
+    expect(readTables(call)?.[0]?.rows[1]).toEqual(['A|B', '2.5']);
+  });
+
+  it('returns an unextractable table with its label and caption and says the body could not be read', async () => {
+    stageArticle({ tables: [TABLE_UNEXTRACTABLE] });
+
+    const call = await runToolContract(fetchFulltextTool, { pmcids: ['PMC11391094'] });
+
+    expect(readTables(call)?.[0]).toEqual(TABLE_UNEXTRACTABLE);
+
+    const text = rendered(call);
+    expect(text).toContain('##### TABLE 3 — Scanned summary table');
+    expect(text).toContain('graphic-only');
+    expect(text).toMatch(/could not be read/i);
+  });
+
+  it('omits the table field entirely for an article with no tables', async () => {
+    stageArticle({});
+
+    const call = await runToolContract(fetchFulltextTool, { pmcids: ['PMC11391094'] });
+
+    expect(readTables(call)).toBeUndefined();
+    expect(rendered(call)).not.toContain('#### Tables');
+  });
+
+  it('drops the table field wholesale under includeTables: false', async () => {
+    stageArticle({ tables: [TABLE_IN_SECTION, TABLE_NO_SECTION] });
+
+    const withTables = await runToolContract(fetchFulltextTool, { pmcids: ['PMC11391094'] });
+    const without = await runToolContract(fetchFulltextTool, {
+      pmcids: ['PMC11391094'],
+      includeTables: false,
+    });
+
+    expect(readTables(withTables)).toHaveLength(2);
+    expect(readTables(without)).toBeUndefined();
+    expect(rendered(without)).not.toContain('#### Tables');
+  });
+
+  it('narrows tables with the sections filter, dropping sectionless tables and unmatched sections', async () => {
+    stageArticle({ tables: [TABLE_IN_SECTION, TABLE_NO_SECTION, TABLE_UNEXTRACTABLE] });
+
+    const call = await runToolContract(fetchFulltextTool, {
+      pmcids: ['PMC11391094'],
+      sections: ['METHODS'],
+    });
+
+    expect(readTables(call)).toEqual([TABLE_IN_SECTION]);
+  });
+
+  it('returns every table when no sections filter is supplied', async () => {
+    stageArticle({ tables: [TABLE_IN_SECTION, TABLE_NO_SECTION, TABLE_UNEXTRACTABLE] });
+
+    const call = await runToolContract(fetchFulltextTool, { pmcids: ['PMC11391094'] });
+
+    expect(readTables(call)).toHaveLength(3);
+  });
+
+  it('drops every table when the sections filter leaves no matching section', async () => {
+    stageArticle({ tables: [TABLE_IN_SECTION, TABLE_NO_SECTION] });
+
+    const call = await runToolContract(fetchFulltextTool, {
+      pmcids: ['PMC11391094'],
+      sections: ['DISCUSSION'],
+    });
+
+    expect(readTables(call)).toBeUndefined();
+  });
+
+  it('counts table text against maxCharacters and drops a table that does not fit, whole', async () => {
+    const smallTable = {
+      label: 'TABLE 1',
+      sectionTitle: 'METHODS',
+      headerRowCount: 1,
+      rows: [
+        ['A', 'B'],
+        ['1', '2'],
+      ],
+    };
+    const bigTable = {
+      label: 'TABLE 2',
+      sectionTitle: 'RESULTS',
+      headerRowCount: 0,
+      rows: [['X'.repeat(200)]],
+    };
+    stageArticle({
+      sections: [{ title: 'METHODS', text: 'M'.repeat(20) }],
+      tables: [smallTable, bigTable],
+    });
+
+    const call = await runToolContract(fetchFulltextTool, {
+      pmcids: ['PMC11391094'],
+      maxCharacters: 100,
+    });
+    const structured = call.structuredContent as {
+      articles: { tables?: ReadTable[] }[];
+      truncation?: {
+        originalCharacters: number;
+        returnedCharacters: number;
+        omittedTables?: number;
+        articles: { omittedTables?: number }[];
+      };
+    };
+
+    // TABLE 1 fits (label 7 + 4 cells = 11); TABLE 2 (7 + 200) does not.
+    expect(structured.articles[0]?.tables).toEqual([smallTable]);
+    expect(structured.truncation?.originalCharacters).toBe(20 + 11 + 207);
+    expect(structured.truncation?.returnedCharacters).toBe(20 + 11);
+    expect(structured.truncation?.omittedTables).toBe(1);
+    expect(structured.truncation?.articles[0]?.omittedTables).toBe(1);
+
+    // No partial grid: the dropped table contributes no cell text anywhere.
+    expect(rendered(call)).not.toContain('X'.repeat(200));
+  });
+
+  it('leaves the tables alone when the budget covers them', async () => {
+    stageArticle({
+      sections: [{ title: 'METHODS', text: 'M'.repeat(10) }],
+      tables: [TABLE_IN_SECTION],
+    });
+
+    const call = await runToolContract(fetchFulltextTool, {
+      pmcids: ['PMC11391094'],
+      maxCharacters: 5000,
+    });
+    const structured = call.structuredContent as {
+      articles: { tables?: ReadTable[] }[];
+      truncation?: unknown;
+    };
+
+    expect(structured.truncation).toBeUndefined();
+    expect(structured.articles[0]?.tables).toEqual([TABLE_IN_SECTION]);
+  });
+
+  it('folds several header rows into the one header a Markdown grid carries', async () => {
+    // PMC11391094 TABLE 2 after span expansion: a rowspan stub column beside two
+    // colspan group headers, with the per-column labels on the second row.
+    stageArticle({
+      tables: [
+        {
+          label: 'TABLE 2',
+          sectionTitle: 'RESULTS',
+          headerRowCount: 2,
+          rows: [
+            ['', 'Benralizumab', 'Benralizumab', 'Benralizumab', 'Placebo', 'Placebo', 'Placebo'],
+            ['', 'Baseline', 'Week 4', 'Week 9', 'Baseline', 'Week 4', 'Week 9'],
+            ['Blood eosinophils', '268.4±183.6', 'a', 'b', 'c', 'd', 'e'],
+          ],
+        },
+      ],
+    });
+
+    const call = await runToolContract(fetchFulltextTool, { pmcids: ['PMC11391094'] });
+    const text = rendered(call);
+
+    // One header row, each column carrying its full header path top to bottom,
+    // with the span's repeats collapsed.
+    expect(text).toContain(
+      '|  | Benralizumab · Baseline | Benralizumab · Week 4 | Benralizumab · Week 9 | Placebo · Baseline | Placebo · Week 4 | Placebo · Week 9 |',
+    );
+    expect(text).toContain('| Blood eosinophils | 268.4±183.6 | a | b | c | d | e |');
+    // The second source header row must not render as a data row.
+    expect(text).not.toContain('| Baseline | Week 4 | Week 9 |');
+    expect(text).toContain('header rows: 2 (folded into one)');
+
+    // structuredContent keeps both source header rows verbatim.
+    expect(readTables(call)?.[0]?.rows).toHaveLength(3);
+  });
+
+  it('says a table declared no header row rather than leaving the empty row unexplained', async () => {
+    stageArticle({
+      tables: [{ label: 'TABLE 1', headerRowCount: 0, rows: [['a', 'b']] }],
+    });
+
+    const text = rendered(await runToolContract(fetchFulltextTool, { pmcids: ['PMC11391094'] }));
+
+    expect(text).toContain('header rows: none declared — every row below is data');
+    expect(text).toContain('| a | b |');
+  });
+
+  it('stops admitting tables at the first that does not fit and names every one it dropped', async () => {
+    // A small table sits *after* the oversized one. Scanning past the first
+    // non-fit would return TABLE 3 alone, with nothing saying TABLE 1–2 exist.
+    stageArticle({
+      sections: [{ title: 'METHODS', text: 'M'.repeat(20) }],
+      tables: [
+        { label: 'TABLE 1', headerRowCount: 0, rows: [['x'.repeat(30)]] },
+        { label: 'TABLE 2', headerRowCount: 0, rows: [['y'.repeat(200)]] },
+        { label: 'TABLE 3', headerRowCount: 0, rows: [['z']] },
+      ],
+    });
+
+    const call = await runToolContract(fetchFulltextTool, {
+      pmcids: ['PMC11391094'],
+      maxCharacters: 100,
+    });
+    const structured = call.structuredContent as {
+      articles: { tables?: ReadTable[] }[];
+      notice?: string;
+      truncation?: {
+        omittedTables?: number;
+        articles: { omittedTables?: number; omittedTableNames?: string[] }[];
+      };
+    };
+
+    expect(structured.articles[0]?.tables?.map((tb) => tb.label)).toEqual(['TABLE 1']);
+    expect(structured.truncation?.omittedTables).toBe(2);
+    expect(structured.truncation?.articles[0]?.omittedTableNames).toEqual(['TABLE 2', 'TABLE 3']);
+    expect(structured.notice).toContain('TABLE 2, TABLE 3');
+
+    const text = rendered(call);
+    expect(text).toContain('TABLE 2, TABLE 3');
+    expect(text).not.toContain('z');
+  });
+
+  it('drops and names every table when the sections spent the whole budget', async () => {
+    stageArticle({
+      sections: [{ title: 'METHODS', text: 'M'.repeat(40) }],
+      tables: [
+        { id: 'tbl-a', headerRowCount: 0, rows: [['a']] },
+        { headerRowCount: 0, rows: [['b']] },
+      ],
+    });
+
+    const call = await runToolContract(fetchFulltextTool, {
+      pmcids: ['PMC11391094'],
+      maxCharacters: 40,
+    });
+    const structured = call.structuredContent as {
+      articles: { tables?: ReadTable[] }[];
+      truncation?: { articles: { omittedTableNames?: string[] }[] };
+    };
+
+    // The table field is absent, not an empty array, once every table is dropped.
+    expect(structured.articles[0]?.tables).toBeUndefined();
+    expect(structured.truncation?.articles[0]?.omittedTableNames).toEqual(['tbl-a', 'table 2']);
+  });
+
+  /**
+   * The two graphic-only deposits issue #111 names. No JATS fixture for either
+   * record exists in this repo and `parsePmcArticle` is mocked at this layer, so
+   * these are constructed parser outputs keyed to those PMCIDs — the tool-layer
+   * contract is exercised; the upstream records themselves are not fetched.
+   */
+  const PMC1189076_TABLE = {
+    id: 'T1',
+    label: 'TABLE 1',
+    caption: 'Summary of assay conditions',
+    sectionTitle: 'METHODS',
+    headerRowCount: 0,
+    rows: [] as string[][],
+    unextractableReason: 'graphic-only' as const,
+  };
+  const PMC1183531_TABLE = {
+    label: 'TABLE 2',
+    caption: 'Observed response rates',
+    headerRowCount: 0,
+    rows: [] as string[][],
+    unextractableReason: 'graphic-only' as const,
+  };
+
+  it('names every cell-less table in one response-level notice, on both surfaces', async () => {
+    mockParsePmcArticle
+      .mockReturnValueOnce({
+        pmcId: 'PMC1189076',
+        pmcUrl: 'https://www.ncbi.nlm.nih.gov/pmc/articles/PMC1189076/',
+        title: 'First graphic-only deposit',
+        sections: [{ title: 'METHODS', text: 'Methods body.' }],
+        tables: [PMC1189076_TABLE],
+      })
+      .mockReturnValueOnce({
+        pmcId: 'PMC1183531',
+        pmcUrl: 'https://www.ncbi.nlm.nih.gov/pmc/articles/PMC1183531/',
+        title: 'Second graphic-only deposit',
+        sections: [{ title: 'RESULTS', text: 'Results body.' }],
+        tables: [PMC1183531_TABLE],
+      });
+    mockEFetch.mockResolvedValue([{ 'pmc-articleset': [{ article: [] }, { article: [] }] }]);
+
+    const call = await runToolContract(fetchFulltextTool, {
+      pmcids: ['PMC1189076', 'PMC1183531'],
+    });
+    const notice = (call.structuredContent as { notice?: string }).notice;
+
+    // structuredContent surface — enrichment is merged into the record.
+    expect(notice).toBeDefined();
+    expect(notice).toMatch(/^2 tables were returned/);
+    expect(notice).toContain('TABLE 1 (PMC1189076, graphic-only)');
+    expect(notice).toContain('TABLE 2 (PMC1183531, graphic-only)');
+    expect(notice).toMatch(/Re-calling will not recover the cells/);
+
+    // content[] surface carries the same string in the enrichment trailer.
+    expect(rendered(call)).toContain(notice ?? '<<missing>>');
+  });
+
+  it('emits no cell-less-table notice when every returned table carries cells', async () => {
+    stageArticle({ tables: [TABLE_IN_SECTION] });
+
+    const ctx = createMockContext({ errors: fetchFulltextTool.errors });
+    const input = fetchFulltextTool.input.parse({ pmcids: ['PMC11391094'] });
+    await fetchFulltextTool.handler(input, ctx);
+
+    expect(getEnrichment(ctx).notice).toBeUndefined();
+  });
+
+  it('does not name a cell-less table the sections filter already removed', async () => {
+    stageArticle({ tables: [TABLE_IN_SECTION, TABLE_UNEXTRACTABLE] });
+
+    const ctx = createMockContext({ errors: fetchFulltextTool.errors });
+    const input = fetchFulltextTool.input.parse({
+      pmcids: ['PMC11391094'],
+      sections: ['METHODS'],
+    });
+    await fetchFulltextTool.handler(input, ctx);
+
+    // TABLE 3 lived in RESULTS, which the filter dropped — it is not in the
+    // response, so naming it would describe something the caller never received.
+    expect(getEnrichment(ctx).notice).toBeUndefined();
+  });
+
+  it('falls back to the table id, then to its position, when it carries no label', async () => {
+    stageArticle({
+      tables: [
+        { id: 'tbl-a', headerRowCount: 0, rows: [], unextractableReason: 'no-rows' },
+        { headerRowCount: 0, rows: [], unextractableReason: 'cals-tgroup' },
+      ],
+    });
+
+    const ctx = createMockContext({ errors: fetchFulltextTool.errors });
+    const input = fetchFulltextTool.input.parse({ pmcids: ['PMC11391094'] });
+    await fetchFulltextTool.handler(input, ctx);
+
+    const notice = getEnrichment(ctx).notice;
+    expect(notice).toContain('tbl-a (PMC11391094, no-rows)');
+    expect(notice).toContain('table 2 (PMC11391094, cals-tgroup)');
+  });
+
+  it('returns a byte-identical response under includeTables: false', async () => {
+    const sections = [{ title: 'METHODS', text: 'Methods body.' }];
+    const base = {
+      pmcId: 'PMC11391094',
+      pmcUrl: 'https://www.ncbi.nlm.nih.gov/pmc/articles/PMC11391094/',
+      title: 'Table-bearing Article',
+      sections,
+    };
+
+    // The pre-change response for this input is exactly the response for an
+    // article the parser produced no tables for — nothing else about the record
+    // differs — so that is the reference to compare against.
+    mockParsePmcArticle.mockReturnValue(base);
+    mockEFetch.mockResolvedValue([{ 'pmc-articleset': [{ article: [] }] }]);
+    const reference = await runToolContract(fetchFulltextTool, { pmcids: ['PMC11391094'] });
+
+    mockParsePmcArticle.mockReturnValue({
+      ...base,
+      tables: [TABLE_IN_SECTION, TABLE_NO_SECTION, TABLE_UNEXTRACTABLE],
+    });
+    const suppressed = await runToolContract(fetchFulltextTool, {
+      pmcids: ['PMC11391094'],
+      includeTables: false,
+    });
+
+    expect(JSON.stringify(suppressed.structuredContent)).toBe(
+      JSON.stringify(reference.structuredContent),
+    );
+    expect(rendered(suppressed)).toBe(rendered(reference));
+  });
+
+  it('keeps a table whose section is folded away by the depth clamp', async () => {
+    // MRI sits at depth 4 — past MAX_SECTION_DEPTH, so `clampSectionDepth` folds
+    // it into the deepest surviving node's text and its title disappears from the
+    // output. The table naming it must survive that fold, filtered or not.
+    const deepTable = {
+      label: 'TABLE 4',
+      caption: 'Sequence parameters',
+      sectionTitle: 'MRI',
+      headerRowCount: 1,
+      rows: [
+        ['Sequence', 'TR'],
+        ['T2', '4000'],
+      ],
+    };
+    mockParsePmcArticle.mockReturnValue({
+      pmcId: 'PMC9575052',
+      pmcUrl: 'https://www.ncbi.nlm.nih.gov/pmc/articles/PMC9575052/',
+      title: 'Deeply Nested Article',
+      sections: [
+        {
+          title: 'RESULTS',
+          text: 'Results overview.',
+          subsections: [
+            {
+              title: 'Case reports of surgical patients',
+              text: '',
+              subsections: [
+                {
+                  title: 'Imaging',
+                  text: 'Imaging narrative.',
+                  subsections: [{ title: 'MRI', text: 'MRI narrative.' }],
+                },
+              ],
+            },
+          ],
+        },
+      ],
+      tables: [deepTable],
+    });
+    mockEFetch.mockResolvedValue([{ 'pmc-articleset': [{ article: [] }] }]);
+
+    const unfiltered = await runToolContract(fetchFulltextTool, { pmcids: ['PMC9575052'] });
+    expect(readTables(unfiltered)).toEqual([deepTable]);
+
+    // The title set is collected before the clamp, so a filter matching an
+    // ancestor still keeps the table its folded descendant owned.
+    const filtered = await runToolContract(fetchFulltextTool, {
+      pmcids: ['PMC9575052'],
+      sections: ['Case reports'],
+    });
+    expect(readTables(filtered)).toEqual([deepTable]);
+    // The MRI heading itself is gone from the output — folded into text.
+    expect(rendered(filtered)).not.toContain('###### MRI');
+    expect(rendered(filtered)).toContain('| T2 | 4000 |');
+  });
+
+  it('carries tables through the Europe PMC stage', async () => {
+    mockGetEpmcService.mockReturnValue({
+      search: mockEpmcSearch,
+      fullTextXml: mockEpmcFullTextXml,
+      parseFullTextXml: mockEpmcParseFullTextXml,
+    });
+    mockIdConvert.mockResolvedValue([{ 'requested-id': '42', pmid: '42' }]);
+    mockEpmcSearch.mockResolvedValue({
+      hits: [{ id: '42', source: 'MED', pmid: '42', pmcid: 'PMC42', doi: '10.1/x' }],
+      hitCount: 1,
+      cursorMark: '*',
+    });
+    mockEpmcFullTextXml.mockResolvedValue({
+      kind: 'found',
+      xml: '<article/>',
+      epmcId: 'PMC42',
+      source: 'MED',
+    });
+    mockEpmcParseFullTextXml.mockReturnValue({ article: [{ body: [] }] });
+    mockParsePmcArticle.mockReturnValue({
+      pmcId: 'PMC42',
+      pmcUrl: 'https://www.ncbi.nlm.nih.gov/pmc/articles/PMC42/',
+      title: 'EPMC article with a table',
+      sections: [{ title: 'METHODS', text: 'Methods body.' }],
+      tables: [TABLE_IN_SECTION],
+    });
+
+    const call = await runToolContract(fetchFulltextTool, { pmids: ['42'] });
+
+    expect(readTables(call)).toEqual([TABLE_IN_SECTION]);
+    expect(rendered(call)).toContain('| Age, years | 30.4±12.3 | 31.5±13.3 |');
+  });
+});
+
+describe('fetchFulltextTool nested sections filter (issue #126)', () => {
+  beforeEach(() => {
+    mockEFetch.mockReset();
+    mockIdConvert.mockReset();
+    mockParsePmcArticle.mockReset();
+    mockGetUnpaywallService.mockReset();
+    mockGetEpmcService.mockReset();
+    mockGetUnpaywallService.mockReturnValue(undefined);
+    mockGetEpmcService.mockReturnValue(undefined);
+  });
+
+  /** PMC9575052's shape: `Demographics` is a second-level heading under `RESULTS`. */
+  function stageNestedArticle() {
+    mockParsePmcArticle.mockReturnValue({
+      pmcId: 'PMC9575052',
+      pmcUrl: 'https://www.ncbi.nlm.nih.gov/pmc/articles/PMC9575052/',
+      title: 'Nested Article',
+      sections: [
+        { title: 'Introduction', text: 'Intro body.' },
+        {
+          title: 'RESULTS',
+          label: '3',
+          text: 'Results overview.',
+          subsections: [
+            { title: 'Demographics', text: 'Demographics body.' },
+            { title: 'Outcomes', text: 'Outcomes body.' },
+          ],
+        },
+      ],
+    });
+    mockEFetch.mockResolvedValue([{ 'pmc-articleset': [{ article: [] }] }]);
+  }
+
+  function readSections(call: { structuredContent?: unknown }): DeepSection[] | undefined {
+    const structured = call.structuredContent as { articles: { sections: DeepSection[] }[] };
+    return structured.articles[0]?.sections;
+  }
+
+  function rendered(call: { content?: unknown }): string {
+    return (call.content as { type: string; text?: string }[]).map((b) => b.text ?? '').join('\n');
+  }
+
+  it('matches a subsection title and returns it under a breadcrumb ancestor', async () => {
+    stageNestedArticle();
+
+    const call = await runToolContract(fetchFulltextTool, {
+      pmcids: ['PMC9575052'],
+      sections: ['Demographics'],
+    });
+
+    expect(readSections(call)).toEqual([
+      {
+        title: 'RESULTS',
+        label: '3',
+        text: '',
+        subsections: [{ title: 'Demographics', text: 'Demographics body.' }],
+      },
+    ]);
+
+    const text = rendered(call);
+    expect(text).toContain('#### 3 RESULTS');
+    expect(text).toContain('##### Demographics');
+    expect(text).toContain('Demographics body.');
+    expect(text).not.toContain('Results overview.');
+    expect(text).not.toContain('Outcomes body.');
+  });
+
+  it('returns a directly matched top-level section whole', async () => {
+    stageNestedArticle();
+
+    const call = await runToolContract(fetchFulltextTool, {
+      pmcids: ['PMC9575052'],
+      sections: ['results'],
+    });
+
+    expect(readSections(call)).toEqual([
+      {
+        title: 'RESULTS',
+        label: '3',
+        text: 'Results overview.',
+        subsections: [
+          { title: 'Demographics', text: 'Demographics body.' },
+          { title: 'Outcomes', text: 'Outcomes body.' },
+        ],
+      },
+    ]);
+  });
+
+  it('returns both matches when one term is top-level and the other is nested', async () => {
+    stageNestedArticle();
+
+    const call = await runToolContract(fetchFulltextTool, {
+      pmcids: ['PMC9575052'],
+      sections: ['Introduction', 'Demographics'],
+    });
+
+    const sections = readSections(call);
+    expect(sections?.map((s) => s.title)).toEqual(['Introduction', 'RESULTS']);
+    expect(sections?.[1]?.subsections?.map((s) => s.title)).toEqual(['Demographics']);
+  });
+
+  it('keeps maxSections capping genuine top-level sections', async () => {
+    stageNestedArticle();
+
+    const call = await runToolContract(fetchFulltextTool, {
+      pmcids: ['PMC9575052'],
+      sections: ['Introduction', 'Demographics'],
+      maxSections: 1,
+    });
+
+    expect(readSections(call)?.map((s) => s.title)).toEqual(['Introduction']);
+  });
+
+  it('names subsection titles in the filter-miss notice', async () => {
+    stageNestedArticle();
+
+    const ctx = createMockContext({ errors: fetchFulltextTool.errors });
+    const input = fetchFulltextTool.input.parse({
+      pmcids: ['PMC9575052'],
+      sections: ['DefinitelyNotARealSectionName'],
+    });
+    await fetchFulltextTool.handler(input, ctx);
+
+    const notice = getEnrichment(ctx).notice;
+    expect(notice).toMatch(/subsection/i);
+    expect(notice).toContain('DefinitelyNotARealSectionName');
+  });
+
+  it('accounts a budgeted nested match against the body it actually returned', async () => {
+    stageNestedArticle();
+
+    const call = await runToolContract(fetchFulltextTool, {
+      pmcids: ['PMC9575052'],
+      sections: ['Demographics'],
+      maxCharacters: 10,
+    });
+    const structured = call.structuredContent as {
+      articles: { sections: DeepSection[] }[];
+      truncation?: { originalCharacters: number; returnedCharacters: number };
+    };
+
+    // The breadcrumb contributes nothing; only 'Demographics body.' (18) counts.
+    expect(structured.truncation?.originalCharacters).toBe(18);
+    expect(structured.truncation?.returnedCharacters).toBe(10);
+    expect(structured.articles[0]?.sections[0]?.subsections?.[0]?.text).toBe('Demographi');
+  });
+
+  it('states the matching scope on the sections input description', () => {
+    const shape = fetchFulltextTool.input as unknown as {
+      shape: Record<string, { description?: string }>;
+    };
+    const description = shape.shape.sections?.description ?? '';
+    expect(description).toMatch(/subsection/i);
+    expect(description).toMatch(/depth/i);
+  });
+});

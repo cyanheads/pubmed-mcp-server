@@ -588,6 +588,7 @@ export interface ParsedPmcArticle {
   pubmedUrl?: string;
   references?: ParsedPmcReference[];
   sections: ParsedPmcSection[];
+  tables?: ParsedPmcTable[];
   title?: string;
 }
 
@@ -620,6 +621,46 @@ export interface ParsedPmcReference {
   citation: string;
   id?: string;
   label?: string;
+}
+
+/**
+ * Why a `<table-wrap>` yielded no rows. Not an error — the table is still
+ * returned with its label and caption so a reader is never shown a response
+ * that silently omits it.
+ * - `graphic-only` — the deposit is a scanned image, with no markup to read.
+ * - `cals-tgroup` — a CALS `<tgroup>` body, deliberately not extracted.
+ * - `no-rows` — an XHTML `<table>` with no `<tr>` carrying cells.
+ */
+export type ParsedPmcTableUnextractableReason = 'cals-tgroup' | 'graphic-only' | 'no-rows';
+
+/**
+ * Parsed `<table-wrap>` from a PMC full-text article. Rows are a plain
+ * `string[][]` of cell text, one entry per grid column: `colspan` and `rowspan`
+ * are expanded, so a cell covering several columns or rows repeats its text
+ * across the cells it covers and a well-formed table comes back rectangular.
+ * Nothing deeper than a string hangs off a row — the tool-layer schema that
+ * renders these sits at the framework's parity-walker depth cap.
+ */
+export interface ParsedPmcTable {
+  /** Caption text, without the label. */
+  caption?: string;
+  /** `<table-wrap-foot>` text, flattened. */
+  footnotes?: string;
+  /** Leading rows of {@link rows} that came from `<thead>` or are all `<th>`. */
+  headerRowCount: number;
+  /** The `id` attribute, when the deposit carries one. */
+  id?: string;
+  /** Display label, e.g. `TABLE 1`. */
+  label?: string;
+  /** Cell text by grid column, spans expanded. Empty when unextractable. */
+  rows: string[][];
+  /**
+   * Title of the innermost enclosing `<sec>` wherever it sits — body, back
+   * matter, or appendix. Absent only for a table inside no section at all.
+   */
+  sectionTitle?: string;
+  /** Set only when {@link rows} is empty. */
+  unextractableReason?: ParsedPmcTableUnextractableReason;
 }
 
 // ─── ECitMatch Types ──────────────────────────────────────────────────────────

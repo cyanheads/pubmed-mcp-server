@@ -38,6 +38,7 @@ import { findAll, findOne, type JatsNodeList } from '@/services/ncbi/parsing/pmc
 import { ensureArray } from '@/services/ncbi/parsing/xml-helpers.js';
 import type {
   ParsedPmcArticle,
+  ParsedPmcTable,
   XmlPubmedArticle,
   XmlPubmedArticleSet,
 } from '@/services/ncbi/types.js';
@@ -53,7 +54,7 @@ import {
 import { fitWholeItems } from './_budget.js';
 import { conceptMeta, EDAM_DATA_RETRIEVAL, SCHEMA_SCHOLARLY_ARTICLE } from './_concepts.js';
 import { pmidStringSchema } from './_schemas.js';
-import { escapeMarkdownInline, sliceCodeUnits } from './_text.js';
+import { escapeMarkdownInline, escapeMarkdownTableCell, sliceCodeUnits } from './_text.js';
 
 function normalizePmcId(id: string): string {
   return id.replace(/^PMC/i, '');
@@ -63,18 +64,65 @@ function withPmcPrefix(id: string): string {
   return id.startsWith('PMC') ? id : `PMC${id}`;
 }
 
-function filterSections(
-  sections: ParsedPmcArticle['sections'],
-  sectionFilter: string[],
-): ParsedPmcArticle['sections'] {
-  const lowerFilter = sectionFilter.map((s) => s.toLowerCase());
-  return sections.filter(
-    (s) => s.title && lowerFilter.some((f) => s.title?.toLowerCase().includes(f)),
-  );
+/** Case-insensitive substring match of one section heading against the filter. */
+function matchesSectionFilter(title: string | undefined, lowerFilter: string[]): boolean {
+  const lowered = title?.toLowerCase();
+  return lowered !== undefined && lowerFilter.some((f) => lowered.includes(f));
+}
+
+function lowerCase(s: string): string {
+  return s.toLowerCase();
+}
+
+/**
+ * Prune a section tree to the branches a `sections` filter selects, matching
+ * titles at every nesting depth rather than the top level alone. (#126)
+ *
+ * A section whose own title matches is returned whole — object identity
+ * included, so an unfiltered subtree is never rebuilt. A section kept only
+ * because a descendant matched becomes a breadcrumb: its `title` and `label`
+ * survive so the match can be placed in the document, its own `text` is cleared
+ * because the caller filtered that prose away, and it carries just the matching
+ * branch of its subsections. Promoting the match to the top level instead would
+ * make `maxSections` — which caps genuine top-level sections — count nested
+ * content as top-level.
+ */
+function pruneSections(sections: ParsedSection[], lowerFilter: string[]): ParsedSection[] {
+  const kept: ParsedSection[] = [];
+  for (const section of sections) {
+    if (matchesSectionFilter(section.title, lowerFilter)) {
+      kept.push(section);
+      continue;
+    }
+    const subsections = pruneSections(section.subsections ?? [], lowerFilter);
+    if (subsections.length > 0) kept.push({ ...section, text: '', subsections });
+  }
+  return kept;
+}
+
+/**
+ * Titles of the sections a `sections` filter actually selected — a section that
+ * matched directly plus everything beneath it. Breadcrumb ancestors are left
+ * out: their own text was cleared because the caller did not ask for it, and a
+ * table sitting in one was not asked for either. Walks the *pruned* tree, so a
+ * top-level section the `maxSections` slice removed contributes nothing.
+ */
+function matchedSectionTitles(sections: ParsedSection[], lowerFilter: string[]): Set<string> {
+  const titles = new Set<string>();
+  const walk = (nodes: ParsedSection[], inherited: boolean) => {
+    for (const section of nodes) {
+      const matched = inherited || matchesSectionFilter(section.title, lowerFilter);
+      if (matched && section.title) titles.add(section.title);
+      walk(section.subsections ?? [], matched);
+    }
+  };
+  walk(sections, false);
+  return titles;
 }
 
 interface PmcFilterOptions {
   includeReferences: boolean;
+  includeTables: boolean;
   maxSections?: number | undefined;
   sections?: string[] | undefined;
 }
@@ -113,17 +161,59 @@ function clampSectionDepth(sections: ParsedSection[], depth = 1): ParsedSection[
   });
 }
 
+/** Anything carrying the optional table list — the article, before or after filtering. */
+type WithTables = { tables?: ParsedPmcTable[] | undefined };
+
 /**
- * Apply the requested section/reference filters, then clamp the section tree to
- * the depth the output schema carries. Both run here so every path producing a
- * `pmc` article — PMC EFetch and the Europe PMC stage — shares one shape, and
- * the budget helpers downstream count the text that will actually survive
- * validation. (#112)
+ * Replace an article's table list, dropping the field entirely when nothing is
+ * left. An empty array would read as "this article has no tables", which is the
+ * one thing an absent field already says and a filtered-to-nothing list does
+ * not mean.
+ */
+function withTables<T extends WithTables>(article: T, tables: ParsedPmcTable[]): T {
+  const { tables: _replaced, ...rest } = article;
+  return (tables.length > 0 ? { ...rest, tables } : rest) as T;
+}
+
+/**
+ * Narrow the table list to what the request asked for. `includeTables: false`
+ * is the wholesale off switch. An active `sections` filter narrows tables with
+ * it: a table names the section it sat in — body, back matter or appendix
+ * alike — so it survives when that section did, and a table that names no
+ * section, such as a `<floats-group>` deposit, is dropped because the caller
+ * asked for named headings and it belongs to none. With no `sections` filter
+ * every table is returned. (#111)
+ */
+function applyTableFilters(article: ParsedPmcArticle, filters: PmcFilterOptions): ParsedPmcArticle {
+  if (!article.tables?.length) return article;
+  if (!filters.includeTables) return withTables(article, []);
+  if (!filters.sections?.length) return article;
+
+  const surviving = matchedSectionTitles(article.sections, filters.sections.map(lowerCase));
+  return withTables(
+    article,
+    article.tables.filter((t) => t.sectionTitle !== undefined && surviving.has(t.sectionTitle)),
+  );
+}
+
+/**
+ * Apply the requested section/reference/table filters, then clamp the section
+ * tree to the depth the output schema carries. All of it runs here so every path
+ * producing a `pmc` article — PMC EFetch and the Europe PMC stage — shares one
+ * shape, and the budget helpers downstream count the text that will actually
+ * survive validation. (#112)
+ *
+ * Order is load-bearing. Tables are matched against the section tree *after*
+ * `filterSections` and the `maxSections` slice, so they narrow with exactly what
+ * the response returns, and *before* `clampSectionDepth`, which folds sections
+ * past {@link MAX_SECTION_DEPTH} into a parent's text — their titles vanish from
+ * the output while a table still names them, so a title set built after the
+ * clamp would drop tables that should have survived. (#111)
  */
 function applyPmcFilters(article: ParsedPmcArticle, filters: PmcFilterOptions): ParsedPmcArticle {
   let out = article;
   if (filters.sections?.length) {
-    out = { ...out, sections: filterSections(out.sections, filters.sections) };
+    out = { ...out, sections: pruneSections(out.sections, filters.sections.map(lowerCase)) };
   }
   if (filters.maxSections !== undefined) {
     out = { ...out, sections: out.sections.slice(0, filters.maxSections) };
@@ -132,6 +222,7 @@ function applyPmcFilters(article: ParsedPmcArticle, filters: PmcFilterOptions): 
     const { references: _, ...rest } = out;
     out = rest as ParsedPmcArticle;
   }
+  out = applyTableFilters(out, filters);
   return { ...out, sections: clampSectionDepth(out.sections) };
 }
 
@@ -181,12 +272,17 @@ function articleDisplayId(a: {
  * Compose the single recovery notice for `sections`-filter misses. Names the
  * requested terms and the affected article id(s) so the agent can distinguish a
  * filtered-empty body from one absent upstream, and points at the recovery. (#80)
+ *
+ * States the scope the filter actually searches — section and subsection titles
+ * at every depth — so a caller who named a nested heading learns the term itself
+ * matched nothing, rather than being left to suspect the filter never looked
+ * that deep. (#126)
  */
 function buildSectionFilterMissNotice(affectedIds: string[], sectionFilter: string[]): string {
   const terms = sectionFilter.join(', ');
   const subject =
     affectedIds.length === 1 ? `article ${affectedIds[0]}` : `articles ${affectedIds.join(', ')}`;
-  return `No body sections matched the requested section filter (${terms}) for ${subject}. The full text was retrieved but every body section was filtered out. Retry without \`sections\`, or filter on broader headings such as Introduction, Methods, Results, or Discussion.`;
+  return `No section or subsection title, at any nesting depth, matched the requested section filter (${terms}) for ${subject}. The full text was retrieved but every body section was filtered out. Retry without \`sections\`, or filter on broader headings such as Introduction, Methods, Results, or Discussion.`;
 }
 
 /**
@@ -273,6 +369,57 @@ const ReferenceSchema = z
   })
   .describe('Reference entry');
 
+/**
+ * One `<table-wrap>`, hung off the article rather than off a section.
+ *
+ * The article is the only level that can hold every table: roughly a quarter of
+ * real `<table-wrap>` elements sit in `<floats-group>`, `<back>`, a
+ * `<table-wrap-group>` or an appendix, with no `<sec>` to attach to. A table
+ * inside a section names it in {@link sectionTitle} instead of being placed by
+ * position.
+ *
+ * The shape also lands exactly on the `format-parity` sentinel walker's eight-hop
+ * budget — `articles[]` → the article union → `tables[]` → `rows[][]` — with no
+ * headroom, and a section-hung variant would spend a hop the existing
+ * `sections[]` → `subsections[]` chain already needs. Re-run
+ * `bun run lint:mcp` after any change here; a level added anywhere inside puts
+ * its own leaves out of the walker's reach and ships their `format()` parity
+ * unverified. (#111, #112)
+ */
+const TableSchema = z
+  .object({
+    label: z.string().optional().describe('Table label as printed, e.g. `TABLE 1`'),
+    caption: z.string().optional().describe('Caption text, with the label excluded'),
+    id: z
+      .string()
+      .optional()
+      .describe('JATS `id` attribute — the target body-text cross-references point at'),
+    sectionTitle: z
+      .string()
+      .optional()
+      .describe(
+        'Title of the innermost section enclosing the table, wherever that section sits — body, `<back>` matter, or an appendix all count, and in back matter the section name is the only positional cue there is. Absent only for a table inside no section at all, such as a `<floats-group>` deposit.',
+      ),
+    headerRowCount: z
+      .number()
+      .describe(
+        'How many leading `rows` entries are header rows — a `<thead>` block, or leading rows made entirely of `<th>`. 0 when the table declares none. Several header rows stack: read one column top to bottom for its full header path.',
+      ),
+    rows: z
+      .array(z.array(z.string()).describe('One row, as cell text by grid column'))
+      .describe(
+        'Cell text by row, in document order, one entry per grid column. `colspan` and `rowspan` are expanded, so a cell covering several columns or rows repeats its text across each cell it covers and a well-formed table is rectangular — align on position from the left, and read a repeated value as one spanning cell rather than several measurements. Empty when `unextractableReason` is set.',
+      ),
+    footnotes: z.string().optional().describe('`<table-wrap-foot>` text, flattened to one string'),
+    unextractableReason: z
+      .enum(['cals-tgroup', 'graphic-only', 'no-rows'])
+      .optional()
+      .describe(
+        'Why `rows` is empty — set only then. graphic-only: the table was deposited as an image with no underlying markup. cals-tgroup: the table uses the CALS `<tgroup>` model, which this server does not extract (0 of 283 tables in an open-access survey used it). no-rows: the markup carried no rows. The label and caption are still returned, so a table that could not be read is visible rather than silently missing.',
+      ),
+  })
+  .describe('One table from the article, with its cells, caption, and owning section');
+
 const PublicationDateSchema = z
   .object({
     year: z.string().optional().describe('Publication year'),
@@ -315,6 +462,12 @@ const PmcArticleSchema = z
     articleType: z.string().optional().describe('Article type'),
     publicationDate: PublicationDateSchema.optional(),
     sections: z.array(SectionSchema).describe('Article body sections'),
+    tables: z
+      .array(TableSchema)
+      .optional()
+      .describe(
+        'Every `<table-wrap>` the article carries, in document order — from the body and from `<floats-group>`, `<back>` and appendices alike. Absent when the article deposits none, when `includeTables` is false, or when a `sections` filter left none standing.',
+      ),
     references: z.array(ReferenceSchema).optional().describe('Reference list'),
     epmcId: z
       .string()
@@ -496,6 +649,18 @@ const TruncatedArticleSchema = z
       .describe(
         'Per-section accounting for `source: pmc` articles, in document order, including sections dropped for budget. Absent for `source: unpaywall`, whose body has no section structure.',
       ),
+    omittedTables: z
+      .number()
+      .optional()
+      .describe(
+        'Tables this article dropped whole because the budget left no room for them. A table is never cut mid-row, so it is either returned complete or counted here. Absent when none were dropped.',
+      ),
+    omittedTableNames: z
+      .array(z.string())
+      .optional()
+      .describe(
+        "The dropped tables by name, in document order — each table's label, else its `id`, else `table <n>` for its position in the article. Names the tables a bare count only hints at, the way `deferred.ids` names deferred articles. Every table from the first that did not fit onward is here: admission stops at that table rather than skipping ahead to a smaller one, so these are contiguous. Absent when none were dropped.",
+      ),
   })
   .describe('Character accounting for one article the budget shortened');
 
@@ -519,6 +684,12 @@ const TruncationSchema = z
       .number()
       .describe(
         'Body sections dropped entirely because an article budget was exhausted before reaching them. Always 0 in `outline` mode, which keeps every heading.',
+      ),
+    omittedTables: z
+      .number()
+      .optional()
+      .describe(
+        'Tables dropped whole across every budgeted article, because the budget left no room once body sections were served. Absent when none were dropped. Re-request the affected articles with a higher `maxCharacters`, or with `sections` narrowed, to receive them.',
       ),
     articles: z
       .array(TruncatedArticleSchema)
@@ -582,6 +753,11 @@ function sectionTextFields(section: ParsedSection): string[] {
   return [section.text, ...(section.subsections ?? []).flatMap(sectionTextFields)];
 }
 
+/** Combined length of the strings given, skipping the absent ones. */
+function totalLength(parts: readonly (string | undefined)[]): number {
+  return parts.reduce((n, part) => n + (part?.length ?? 0), 0);
+}
+
 /**
  * Body characters a section carries — its own text plus every nested
  * subsection's. Measured off {@link sectionTextFields} rather than its own walk,
@@ -589,7 +765,51 @@ function sectionTextFields(section: ParsedSection): string[] {
  * exactly the fields {@link fitFields} shortens.
  */
 function sectionCharacters(section: ParsedSection): number {
-  return sectionTextFields(section).reduce((n, text) => n + text.length, 0);
+  return totalLength(sectionTextFields(section));
+}
+
+/**
+ * Characters a table costs the budget: everything it renders — label, caption,
+ * every cell, footnotes. The whole figure is what admitting the table spends,
+ * and a table is admitted or dropped whole, so there is no partial measure to
+ * take. (#111)
+ */
+function tableCharacters(table: ParsedPmcTable): number {
+  return totalLength([table.label, table.caption, table.footnotes, ...table.rows.flat()]);
+}
+
+/**
+ * Admit tables in document order until the allowance is spent, then drop the
+ * rest whole and name them.
+ *
+ * Admission stops at the first table that does not fit rather than skipping past
+ * it to a smaller one further down: the returned set stays a document-order
+ * prefix, so a caller reading it knows where the response stopped instead of
+ * receiving a late table with nothing saying the earlier ones exist. A table
+ * that does not fit is never cut either — half a grid reads as a complete one
+ * carrying values that were never deposited, the defect the table extraction
+ * exists to fix. Both mirror how `maxResponseCharacters` defers a whole article
+ * rather than half-populating it. (#111)
+ */
+function fitTables(
+  tables: readonly ParsedPmcTable[],
+  allowance: number,
+): { kept: ParsedPmcTable[]; omittedNames: string[]; spent: number } {
+  const kept: ParsedPmcTable[] = [];
+  let spent = 0;
+  for (const [index, table] of tables.entries()) {
+    const size = tableCharacters(table);
+    if (spent + size > allowance) {
+      return {
+        kept,
+        omittedNames: tables.slice(index).map((t, i) => tableDisplayName(t, index + i)),
+        spent,
+      };
+    }
+    kept.push(table);
+    spent += size;
+  }
+  return { kept, omittedNames: [], spent };
 }
 
 /**
@@ -689,9 +909,16 @@ function allotSectionBudgets(sizes: number[], budget: BudgetOptions): number[] {
 /**
  * Apply the character budget to a JATS article's body. Runs as a pure
  * post-processing pass after `applyPmcFilters`, so `sections` / `maxSections` /
- * `includeReferences` and the empty-body signals they feed are unaffected.
- * Titles, abstracts, identifiers, and references are never counted or cut —
- * the budget only spends on body text, keeping every article citable.
+ * `includeReferences` / `includeTables` and the empty-body signals they feed are
+ * unaffected. Titles, abstracts, identifiers, and references are never counted
+ * or cut — the budget spends on body text and table content, keeping every
+ * article citable.
+ *
+ * Body sections are served first and tables spend what `maxCharacters` leaves,
+ * in document order: a table that does not fit is dropped whole and counted,
+ * never truncated into a partial grid. With no `maxCharacters` — a bare
+ * `maxCharactersPerSection` request — nothing bounds the tables and every one is
+ * kept. (#111)
  *
  * Returns the article untouched (same object identity) when no budget was
  * requested or nothing exceeded it. A section left with zero characters is
@@ -699,16 +926,18 @@ function allotSectionBudgets(sizes: number[], budget: BudgetOptions): number[] {
  * heading-only entry. Dropped sections still appear in the accounting so the
  * caller can see which headings exist. (#81)
  */
-function applyPmcBudget<T extends { sections: ParsedPmcArticle['sections'] }>(
+function applyPmcBudget<T extends { sections: ParsedPmcArticle['sections'] } & WithTables>(
   article: T,
   budget: BudgetOptions,
 ): { article: T; omittedSections: number; truncation?: UnkeyedTruncation } {
-  if (!budgetRequested(budget) || article.sections.length === 0) {
+  const tables = article.tables ?? [];
+  if (!budgetRequested(budget) || (article.sections.length === 0 && tables.length === 0)) {
     return { article, omittedSections: 0 };
   }
 
   const sizes = article.sections.map(sectionCharacters);
-  const originalCharacters = sizes.reduce((sum, size) => sum + size, 0);
+  const tablesOriginal = tables.reduce((sum, table) => sum + tableCharacters(table), 0);
+  const originalCharacters = sizes.reduce((sum, size) => sum + size, 0) + tablesOriginal;
   const allowances = allotSectionBudgets(sizes, budget);
 
   const kept: ParsedPmcArticle['sections'] = [];
@@ -719,7 +948,7 @@ function applyPmcBudget<T extends { sections: ParsedPmcArticle['sections'] }>(
   article.sections.forEach((section, i) => {
     const original = sizes[i] ?? 0;
     const fitted = fitFields(sectionTextFields(section), allowances[i] ?? 0);
-    const returned = fitted.reduce((sum, text) => sum + text.length, 0);
+    const returned = totalLength(fitted);
     returnedCharacters += returned;
     sectionReports.push({
       ...(section.title !== undefined && { title: section.title }),
@@ -735,14 +964,32 @@ function applyPmcBudget<T extends { sections: ParsedPmcArticle['sections'] }>(
     kept.push(withFittedTexts(section, fitted, { i: 0 }));
   });
 
-  if (returnedCharacters === originalCharacters && omittedSections === 0) {
+  // Sections are served first; the tables spend whatever `maxCharacters` has
+  // left. A bare per-section budget sets no total, so nothing bounds them.
+  const tableAllowance =
+    budget.maxCharacters === undefined
+      ? Number.POSITIVE_INFINITY
+      : Math.max(budget.maxCharacters - returnedCharacters, 0);
+  const fittedTables = fitTables(tables, tableAllowance);
+  returnedCharacters += fittedTables.spent;
+  const omittedTables = fittedTables.omittedNames.length;
+
+  if (returnedCharacters === originalCharacters && omittedSections === 0 && omittedTables === 0) {
     return { article, omittedSections: 0 };
   }
 
   return {
-    article: { ...article, sections: kept },
+    article: withTables({ ...article, sections: kept }, fittedTables.kept),
     omittedSections,
-    truncation: { originalCharacters, returnedCharacters, sections: sectionReports },
+    truncation: {
+      originalCharacters,
+      returnedCharacters,
+      sections: sectionReports,
+      ...(omittedTables > 0 && {
+        omittedTables,
+        omittedTableNames: fittedTables.omittedNames,
+      }),
+    },
   };
 }
 
@@ -765,6 +1012,76 @@ function applyContentBudget(
   };
 }
 
+type UnextractableTableReason = NonNullable<z.infer<typeof TableSchema>['unextractableReason']>;
+
+/** Why a table arrived with no rows, in the reader's terms. */
+const UNEXTRACTABLE_TABLE_EXPLANATIONS: Record<UnextractableTableReason, string> = {
+  'cals-tgroup': 'it uses the CALS `<tgroup>` model, which this server does not extract',
+  'graphic-only': 'it was deposited as an image, with no underlying markup to read',
+  'no-rows': 'its markup carried no rows',
+};
+
+/** One returned table that carries no cell values, and the article it came from. */
+interface UnextractableTableEntry {
+  articleId: string;
+  name: string;
+  reason: UnextractableTableReason;
+}
+
+/** How a table is named in a notice: its label, else its id, else its position. */
+function tableDisplayName(
+  table: { id?: string | undefined; label?: string | undefined },
+  index: number,
+): string {
+  return table.label ?? table.id ?? `table ${index + 1}`;
+}
+
+/**
+ * Collect the returned tables that carry no cell values. Read off the articles
+ * the response actually ships — after every filter and both budgets — so a table
+ * the `sections` filter removed, or one belonging to a deferred article, is
+ * never named as though the caller received it. (#111)
+ */
+function collectUnextractableTables(articles: FulltextArticle[]): UnextractableTableEntry[] {
+  const entries: UnextractableTableEntry[] = [];
+  for (const article of articles) {
+    if (article.source !== 'pmc') continue;
+    for (const [index, table] of (article.tables ?? []).entries()) {
+      const reason = table.unextractableReason;
+      if (!reason) continue;
+      entries.push({
+        articleId: articleDisplayId(article),
+        name: tableDisplayName(table, index),
+        reason,
+      });
+    }
+  }
+  return entries;
+}
+
+/**
+ * Compose the recovery notice for tables returned with a label and caption but
+ * no cells. Without it a table-bearing response carries no response-level signal
+ * that some of the numbers the caller asked for are absent — the per-table
+ * `unextractableReason` only helps a reader who already went looking at that
+ * table. One notice covers the whole response, aggregated across articles, the
+ * way the `sections`-filter miss notice does. (#111)
+ *
+ * The wording turns on recoverability: nothing the caller changes produces these
+ * cells, because the markup does not exist upstream. Tables the character budget
+ * dropped are the opposite case — recoverable by raising `maxCharacters` — so
+ * they stay with the rest of the budget accounting in {@link
+ * buildTruncationNotice} rather than being mixed in here.
+ */
+function buildUnextractableTablesNotice(entries: UnextractableTableEntry[]): string {
+  const subject = entries.length === 1 ? '1 table was' : `${entries.length} tables were`;
+  const named = entries.map((e) => `${e.name} (${e.articleId}, ${e.reason})`).join(', ');
+  const reasons = [...new Set(entries.map((e) => e.reason))]
+    .map((reason) => `${reason} — ${UNEXTRACTABLE_TABLE_EXPLANATIONS[reason]}`)
+    .join('; ');
+  return `${subject} returned with a label and caption but no cell values: ${named}. Re-calling will not recover the cells (${reasons}); see \`unextractableReason\` on each table.`;
+}
+
 /**
  * Compose the recovery notice for a budgeted response. Names what was spent and
  * where the detail lives so an agent reading only `content[]` knows the body it
@@ -777,13 +1094,20 @@ function buildTruncationNotice(truncation: z.infer<typeof TruncationSchema>): st
     truncation.omittedSections > 0
       ? ` ${truncation.omittedSections} section(s) were dropped once the budget ran out.`
       : '';
+  // Tables are admitted after sections and only whole, so a dropped one is
+  // absent rather than partial — say so, and name them: a bare count leaves the
+  // reader unable to tell which numbers are missing from what they received.
+  const droppedNames = truncation.articles.flatMap((a) => a.omittedTableNames ?? []);
+  const omittedTables = truncation.omittedTables
+    ? ` ${truncation.omittedTables} table(s) were dropped whole rather than cut mid-row: ${droppedNames.join(', ')}.`
+    : '';
   // Name only the budgets the request actually set — pointing at `maxCharacters`
   // when the caller only capped per-section sends them to a knob that is unset.
   const knobs = [
     truncation.maxCharacters !== undefined ? '`maxCharacters`' : undefined,
     truncation.maxCharactersPerSection !== undefined ? '`maxCharactersPerSection`' : undefined,
   ].filter((k): k is string => k !== undefined);
-  return `Full text was shortened to fit the requested character budget: ${truncation.returnedCharacters} of ${truncation.originalCharacters} body characters returned across ${subject} in ${truncation.mode} mode.${omitted} See \`truncation\` for per-article and per-section counts, and raise ${knobs.join(' or ')} or narrow \`sections\` to retrieve more.`;
+  return `Full text was shortened to fit the requested character budget: ${truncation.returnedCharacters} of ${truncation.originalCharacters} body characters returned across ${subject} in ${truncation.mode} mode.${omitted}${omittedTables} See \`truncation\` for per-article and per-section counts, and raise ${knobs.join(' or ')} or narrow \`sections\` to retrieve more.`;
 }
 
 /**
@@ -830,7 +1154,7 @@ export function buildFulltextDescription(tiers: {
   unpaywall: boolean;
 }): string {
   const base =
-    'Fetch full-text articles from PubMed Central with structured sections and references.';
+    'Fetch full-text articles from PubMed Central with structured sections, tables, and references.';
   const epmcClause =
     'Europe PMC `fullTextXML` (structured JATS for records with a PMC counterpart)';
   const unpaywallClause =
@@ -918,6 +1242,12 @@ export const fetchFulltextTool = tool('pubmed_fetch_fulltext', {
         .boolean()
         .default(false)
         .describe('Include reference list. Applies to `source=pmc` results only.'),
+      includeTables: z
+        .boolean()
+        .default(true)
+        .describe(
+          "Include the article's tables — cells, captions, labels and footnotes. On by default because a dropped table takes its numbers with it. Table-dense articles pay for it: rendered tables typically add 12–17% to an article record and can more than double it. Set false to omit them, or cap the cost with `maxCharacters`, which drops tables it cannot fit whole. Applies to `source=pmc` results only.",
+        ),
       maxSections: z
         .number()
         .int()
@@ -929,7 +1259,7 @@ export const fetchFulltextTool = tool('pubmed_fetch_fulltext', {
         .array(z.string())
         .optional()
         .describe(
-          'Filter to specific sections by title, case-insensitive (e.g. ["Introduction", "Methods", "Results", "Discussion"]). Applies to `source=pmc` results only.',
+          'Filter to specific sections by title (e.g. ["Introduction", "Methods", "Results", "Discussion"]). A term matches a section or subsection title at any nesting depth, case-insensitively, as a substring — "resul" matches "Results". A section whose own title matches is returned whole; one kept only because a nested subsection matched keeps its heading as a breadcrumb, with its own text cleared and only the matching branch beneath it. Tables narrow with the filter: one whose section did not survive, or that names no section, is dropped. Applies to `source=pmc` results only.',
         ),
       maxCharacters: z
         .number()
@@ -938,7 +1268,7 @@ export const fetchFulltextTool = tool('pubmed_fetch_fulltext', {
         .max(1_000_000)
         .optional()
         .describe(
-          'Per-article budget for body text, in characters. Counts `source=pmc` section and subsection text, or the `source=unpaywall` `content` body; titles, abstracts, identifiers, and references are never counted or shortened. Applied after `sections`, `maxSections`, and `includeReferences`, so semantic filtering is unaffected. This knob alone bounds only bodies: the response-wide ceiling it implies is this value times the number of articles returned, plus every uncounted field. Use `maxResponseCharacters` for a true whole-response ceiling. Omit for the full body.',
+          'Per-article budget for body text, in characters. Counts `source=pmc` section and subsection text plus table label, caption, cell and footnote text, or the `source=unpaywall` `content` body; titles, abstracts, identifiers, and references are never counted or shortened. The counted unit is that text alone — the Markdown grid `content[]` renders around the cells (pipes, padding, the divider row, headings) is scaffolding this budget does not measure, so a table renders longer than it costs here. Sections are served first and tables spend what is left, in document order — admission stops at the first table that does not fit, and every table from there on is dropped whole rather than cut mid-row, counted in `truncation.omittedTables` and named in `truncation.articles[].omittedTableNames`. Applied after `sections`, `maxSections`, `includeReferences`, and `includeTables`, so semantic filtering is unaffected. This knob alone bounds only bodies: the response-wide ceiling it implies is this value times the number of articles returned, plus every uncounted field. Use `maxResponseCharacters` for a true whole-response ceiling. Omit for the full body.',
         ),
       maxCharactersPerSection: z
         .number()
@@ -986,10 +1316,11 @@ export const fetchFulltextTool = tool('pubmed_fetch_fulltext', {
     deferred: DeferredSchema.optional(),
   }),
 
-  // Recovery guidance for four cases — a `sections` filter that removed every
+  // Recovery guidance for five cases — a `sections` filter that removed every
   // body section (#80), a record the chain could only retrieve as front matter
-  // (#86), a body the per-article character budget shortened (#81), and articles
-  // the whole-response budget withheld (#100). Agent-facing context surfaced via
+  // (#86), a table returned with no cell values (#111), a body the per-article
+  // character budget shortened (#81), and articles the whole-response budget
+  // withheld (#100). Agent-facing context surfaced via
   // ctx.enrich.notice() to structuredContent and content[]; absent when none
   // applies.
   enrichment: {
@@ -997,7 +1328,7 @@ export const fetchFulltextTool = tool('pubmed_fetch_fulltext', {
       .string()
       .optional()
       .describe(
-        'Optional guidance for a partial or empty body. A `sections`-filter miss names the requested terms and affected article id(s) and suggests retrying without `sections` or using broader headings. A metadata-only record names the id(s) the chain could retrieve as front matter only and points at `pubmed_fetch_articles` for the abstract. A budgeted response names the characters returned versus carried and points at `truncation`. A response-wide budget that deferred articles names the ids to re-request. Absent when none of those applies.',
+        'Optional guidance for a partial or empty body. A `sections`-filter miss names the requested terms and affected article id(s) and suggests retrying without `sections` or using broader headings. A metadata-only record names the id(s) the chain could retrieve as front matter only and points at `pubmed_fetch_articles` for the abstract. A table returned with no cell values names the affected table(s), the article each came from, and why the cells cannot be recovered. A budgeted response names the characters returned versus carried and points at `truncation`. A response-wide budget that deferred articles names the ids to re-request. Absent when none of those applies.',
       ),
     truncated: z
       .boolean()
@@ -1604,6 +1935,11 @@ export const fetchFulltextTool = tool('pubmed_fetch_fulltext', {
       ...(deferred && { deferred: deferred.deferredCount }),
     });
 
+    // Summed off the per-article entries rather than carried through every
+    // stage, so a deferred article's dropped tables leave the roll-up together
+    // with its entry when the splice above removes it. (#111)
+    const omittedTables = truncatedArticles.reduce((n, a) => n + (a.omittedTables ?? 0), 0);
+
     // Rolled up only when the budget actually removed characters, so an
     // under-budget request returns exactly what it did before the budget
     // controls existed. (#81)
@@ -1618,6 +1954,7 @@ export const fetchFulltextTool = tool('pubmed_fetch_fulltext', {
             originalCharacters: truncatedArticles.reduce((n, a) => n + a.originalCharacters, 0),
             returnedCharacters: truncatedArticles.reduce((n, a) => n + a.returnedCharacters, 0),
             omittedSections,
+            ...(omittedTables > 0 && { omittedTables }),
             articles: truncatedArticles,
           }
         : undefined;
@@ -1630,6 +1967,10 @@ export const fetchFulltextTool = tool('pubmed_fetch_fulltext', {
     }
     const unrecoveredBodyless = [...bodylessInputIds].filter((id) => !recoveredIds.has(id));
     if (unrecoveredBodyless.length > 0) notices.push(buildBodylessNotice(unrecoveredBodyless));
+    const unextractableTables = collectUnextractableTables(articles);
+    if (unextractableTables.length > 0) {
+      notices.push(buildUnextractableTablesNotice(unextractableTables));
+    }
     if (truncation) {
       notices.push(buildTruncationNotice(truncation));
       ctx.enrich({ truncated: true });
@@ -2377,8 +2718,10 @@ function formatUnqueriedTiers(
  * separators — so the numbers stay greppable. (#81)
  */
 function formatTruncation(t: z.infer<typeof TruncationSchema>, lines: string[]): void {
+  const tablesOmitted =
+    t.omittedTables === undefined ? '' : `; ${t.omittedTables} table(s) omitted whole`;
   lines.push(
-    `\n**Truncated (${t.mode} mode):** ${t.returnedCharacters} of ${t.originalCharacters} body characters returned across ${t.articles.length} article(s); ${t.omittedSections} section(s) omitted`,
+    `\n**Truncated (${t.mode} mode):** ${t.returnedCharacters} of ${t.originalCharacters} body characters returned across ${t.articles.length} article(s); ${t.omittedSections} section(s) omitted${tablesOmitted}`,
   );
   const budgets = [
     t.maxCharacters === undefined ? undefined : `maxCharacters ${t.maxCharacters}`,
@@ -2389,8 +2732,12 @@ function formatTruncation(t: z.infer<typeof TruncationSchema>, lines: string[]):
   if (budgets.length) lines.push(`Budget applied: ${budgets.join(', ')}`);
 
   for (const a of t.articles) {
+    const tablesDropped =
+      a.omittedTables === undefined
+        ? ''
+        : `, ${a.omittedTables} table(s) dropped whole: ${(a.omittedTableNames ?? []).join(', ')}`;
     lines.push(
-      `- ${a.id} (${a.source}): ${a.returnedCharacters} of ${a.originalCharacters} characters`,
+      `- ${a.id} (${a.source}): ${a.returnedCharacters} of ${a.originalCharacters} characters${tablesDropped}`,
     );
     for (const s of a.sections ?? []) {
       lines.push(
@@ -2456,6 +2803,8 @@ function formatPmcArticle(
 
   for (const sec of a.sections) formatSection(sec, lines, 4);
 
+  if (a.tables?.length) formatTables(a.tables, lines);
+
   if (a.references?.length) {
     lines.push(`\n#### References (${a.references.length})`);
     for (const ref of a.references) {
@@ -2463,6 +2812,85 @@ function formatPmcArticle(
       lines.push(`- ${tag ? `[${tag}] ` : ''}${ref.citation}`);
     }
   }
+}
+
+/**
+ * Render every table as a Markdown grid, so a `content[]` reader gets the same
+ * cells `structuredContent` carries rather than a note that tables exist. (#111)
+ *
+ * Cell text goes through {@link escapeMarkdownTableCell} — the inline escape
+ * plus the `|` a cell cannot carry raw. The parser expands `colspan` and
+ * `rowspan`, so a well-formed table arrives rectangular and every value renders
+ * under the header it belongs to; a row still short of the widest is padded on
+ * the right with empty cells only, never a neighbour's value.
+ */
+function formatTables(tables: z.infer<typeof TableSchema>[], lines: string[]): void {
+  lines.push(`\n#### Tables (${tables.length})`);
+  for (const table of tables) {
+    const heading = [table.label, table.caption].filter(Boolean).join(' — ');
+    lines.push(`\n##### ${escapeMarkdownInline(heading || 'Table')}`);
+
+    const meta = [
+      table.sectionTitle ? `Section: ${escapeMarkdownInline(table.sectionTitle)}` : undefined,
+      table.id ? `id: ${escapeMarkdownInline(table.id)}` : undefined,
+      describeHeaderRows(table),
+    ].filter((part): part is string => part !== undefined);
+    if (meta.length) lines.push(`*${meta.join(' · ')}*`);
+
+    if (table.unextractableReason) {
+      lines.push(
+        `\n> Table body could not be read (${table.unextractableReason}) — ${UNEXTRACTABLE_TABLE_EXPLANATIONS[table.unextractableReason]}. The label and caption above are all this deposit carries; no cell values exist to return.`,
+      );
+    }
+    if (table.rows.length > 0) lines.push(...renderTableGrid(table.rows, table.headerRowCount));
+    if (table.footnotes) lines.push(`\nFootnotes: ${escapeMarkdownInline(table.footnotes)}`);
+  }
+}
+
+/**
+ * The meta-line clause describing a table's header rows.
+ *
+ * A Markdown grid carries exactly one header row, so a table declaring several
+ * has them folded into it — say how many were folded, or the grid understates
+ * what the deposit declared. A table declaring none still needs the empty header
+ * row Markdown requires above the divider; naming that keeps a reader from
+ * taking the blank row for a header the publisher deposited and left empty.
+ */
+function describeHeaderRows(table: z.infer<typeof TableSchema>): string | undefined {
+  if (table.rows.length === 0) return;
+  if (table.headerRowCount === 0) return 'header rows: none declared — every row below is data';
+  if (table.headerRowCount === 1) return 'header rows: 1';
+  return `header rows: ${table.headerRowCount} (folded into one)`;
+}
+
+/**
+ * Join one grid column's header cells into the single header path Markdown can
+ * carry. Consecutive repeats — what expanding a `colspan` produces — collapse to
+ * one, so a group header spanning three columns reads once per column rather
+ * than three times in each.
+ */
+function foldHeaderColumn(headerRows: string[][], column: number): string {
+  const path: string[] = [];
+  for (const row of headerRows) {
+    const cell = row[column] ?? '';
+    if (cell && cell !== path.at(-1)) path.push(cell);
+  }
+  return path.join(' · ');
+}
+
+/** One table's rows as Markdown grid lines, preceded by a blank line. */
+function renderTableGrid(rows: string[][], headerRowCount: number): string[] {
+  const columns = rows.reduce((widest, row) => Math.max(widest, row.length), 0);
+  const renderRow = (cells: string[]) =>
+    `| ${Array.from({ length: columns }, (_, i) => escapeMarkdownTableCell(cells[i] ?? '')).join(' | ')} |`;
+  const headerRows = rows.slice(0, headerRowCount);
+  const header = Array.from({ length: columns }, (_, i) => foldHeaderColumn(headerRows, i));
+  return [
+    '',
+    renderRow(header),
+    `| ${Array.from({ length: columns }, () => '---').join(' | ')} |`,
+    ...rows.slice(headerRowCount).map(renderRow),
+  ];
 }
 
 function formatUnpaywallArticle(
