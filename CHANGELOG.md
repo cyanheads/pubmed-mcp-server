@@ -2,6 +2,10 @@
 
 All notable changes to this project. Each entry links to its full per-version file in [changelog/](changelog/).
 
+## [2.10.9](changelog/2.10.x/2.10.9.md) — 2026-09-10
+
+pubmed_fetch_fulltext now extracts JATS tables as structured cells, finds Europe PMC references nested under <body> at any depth, and matches a sections filter against subsection titles too; mixed-citation author names and Europe PMC's numeric-text coercion are also fixed.
+
 ## [2.10.8](changelog/2.10.x/2.10.8.md) — 2026-09-09
 
 ECitMatch reconciliation now keys on per-request wire tokens so duplicate caller keys no longer misassign results; pubmed_fetch_fulltext folds JATS sections nested three or more levels deep into the deepest surviving subsection's text; mixed-citation references separate zero-gap adjacent pub-ids and title/volume pairs.
