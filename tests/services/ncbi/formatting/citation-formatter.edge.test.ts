@@ -104,18 +104,30 @@ describe('formatApa — author edge cases', () => {
     expect(citation).not.toMatch(/OnlyLast,\s+,/);
   });
 
-  it('handles article with no authors at all', () => {
+  it('moves the title into the author position when a record has no authors (#139)', () => {
+    // APA 7 §9.12: with no author the title takes the author position — the
+    // reference must not open on the year.
     const article: ParsedArticle = { ...baseArticle, authors: [] };
     const citation = formatApa(article);
-    // Should still produce a valid citation string with title and year
-    expect(citation).toContain('(2024).');
-    expect(citation).toContain('Test Article.');
+
+    expect(citation).toBe(
+      'Test Article. (2024). *Test Journal*, *10*(2), 100-110. https://doi.org/10.1000/test',
+    );
+    expect(citation).not.toMatch(/^\(2024\)\./);
   });
 
-  it('handles article with undefined authors', () => {
+  it('moves the title into the author position when authors is undefined (#139)', () => {
     const { authors: _authors, ...article } = baseArticle;
     const citation = formatApa(article);
-    expect(citation).toContain('(2024).');
+
+    expect(citation).toMatch(/^Test Article\. \(2024\)\./);
+    // The title takes the author position exactly once — it is not repeated
+    // after the year.
+    expect(citation.match(/Test Article/g)).toHaveLength(1);
+  });
+
+  it('keeps the author position for a record that has authors (#139)', () => {
+    expect(formatApa(baseArticle)).toMatch(/^Smith, J\. \(2024\)\. Test Article\./);
   });
 
   it('derives initials from firstName when initials field is absent', () => {

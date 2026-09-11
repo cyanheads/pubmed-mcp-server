@@ -299,14 +299,6 @@ function formatAuthorBibtex(author: ParsedArticleAuthor): string {
 // ---------------------------------------------------------------------------
 
 /**
- * Format a PubMed article as an APA 7th edition citation.
- *
- * Pattern:
- * ```
- * Authors (Year). Title. *Journal*, *Volume*(Issue), Pages. https://doi.org/DOI
- * ```
- */
-/**
  * Format an editor in APA's "In E. E. Editor (Ed.)," position: initials first,
  * surname last — the inverse of the author position.
  */
@@ -343,24 +335,37 @@ function formatEditorsApa(editors: ParsedBookEditor[]): string {
  * Authors (Year). Chapter title. In E. Editor (Ed.), *Book title*. Publisher. URL
  * ```
  * A whole-book record drops the `In …` clause and italicizes its own title.
+ *
+ * A record crediting nobody at all — no authors, and for a whole book no
+ * editors either — moves its title into the author position instead (APA 7
+ * §9.12). Bookshelf makes that common: a whole-book record frequently credits
+ * neither. The title is not italicized there, and the year follows it. (#139)
  */
 function formatApaBook(article: BookRecord): string {
   const { book } = article;
   const parts: string[] = [];
 
   const authorStr = article.authors?.length ? formatAuthorsApa(article.authors) : '';
+  /** The record's own title, which stands in the author position when set. */
+  const leadTitle = article.recordType === 'book-chapter' ? article.title : book.title;
+  let titleLedTheReference = false;
+
   if (authorStr) {
     parts.push(terminate(authorStr));
   } else if (article.recordType === 'book' && book.editors?.length) {
     // APA 7: an edited book with no authors of its own is cited from the editor
     // position — `Last, F. M. (Ed.).` — rather than opening on the year.
     parts.push(`${formatAuthorsApa(book.editors)} (${book.editors.length > 1 ? 'Eds.' : 'Ed.'}).`);
+  } else if (leadTitle) {
+    parts.push(`${stripTrailingPeriod(leadTitle)}.`);
+    titleLedTheReference = true;
   }
 
   parts.push(`(${getYear(article)}).`);
 
   if (article.recordType === 'book-chapter') {
-    if (article.title) parts.push(`${stripTrailingPeriod(article.title)}.`);
+    if (article.title && !titleLedTheReference)
+      parts.push(`${stripTrailingPeriod(article.title)}.`);
     const editorStr = book.editors?.length ? formatEditorsApa(book.editors) : '';
     const editorLabel = (book.editors?.length ?? 0) > 1 ? 'Eds.' : 'Ed.';
     const container = book.title ? `*${stripTrailingPeriod(book.title)}*` : '';
@@ -369,7 +374,7 @@ function formatApaBook(article: BookRecord): string {
         editorStr ? `In ${editorStr} (${editorLabel}), ${container}.` : `In ${container}.`,
       );
     }
-  } else if (book.title) {
+  } else if (book.title && !titleLedTheReference) {
     parts.push(`*${stripTrailingPeriod(book.title)}*.`);
   }
 
@@ -381,6 +386,19 @@ function formatApaBook(article: BookRecord): string {
   return parts.join(' ');
 }
 
+/**
+ * Format a PubMed article as an APA 7th edition citation.
+ *
+ * Pattern:
+ * ```
+ * Authors (Year). Title. *Journal*, *Volume*(Issue), Pages. https://doi.org/DOI
+ * ```
+ * With no author the title takes the author position (APA 7 §9.12):
+ * ```
+ * Title. (Year). *Journal*, *Volume*(Issue), Pages. https://doi.org/DOI
+ * ```
+ * A Bookshelf record routes to {@link formatApaBook}.
+ */
 export function formatApa(article: ParsedArticle): string {
   if (isBookRecord(article)) return formatApaBook(article);
   const parts: string[] = [];
@@ -388,9 +406,15 @@ export function formatApa(article: ParsedArticle): string {
   // Authors — ensure trailing period (individual author initials end with '.',
   // but collective names do not, which would otherwise produce "Name (Year).")
   const authorStr = article.authors?.length ? formatAuthorsApa(article.authors) : '';
+  // APA 7 §9.12: with no author the title takes the author position — the
+  // reference reads `Title. (Year). *Journal*, …` rather than opening on the
+  // date. It is not italicized there. (#139)
+  const titleLedTheReference = !authorStr && Boolean(article.title);
 
   if (authorStr) {
     parts.push(terminate(authorStr));
+  } else if (article.title) {
+    parts.push(`${stripTrailingPeriod(article.title)}.`);
   }
 
   // Year
@@ -398,7 +422,7 @@ export function formatApa(article: ParsedArticle): string {
   parts.push(`(${year}).`);
 
   // Title — use as-is from PubMed (sentence case already assumed)
-  if (article.title) {
+  if (article.title && !titleLedTheReference) {
     // Strip trailing period from title if present; we add our own
     const title = stripTrailingPeriod(article.title);
     parts.push(`${title}.`);

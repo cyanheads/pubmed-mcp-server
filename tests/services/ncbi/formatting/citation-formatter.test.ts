@@ -740,11 +740,49 @@ describe('Bookshelf records (#114)', () => {
     });
 
     it('renders a whole book as title, publisher, URL', () => {
+      // APA 7 §9.12: a record crediting neither authors nor editors puts the
+      // title in the author position, unitalicized, with the year after it —
+      // never opening on the date. (#139)
       expect(formatApa(adaBook())).toBe(
-        '(2026). *A Practical Guide to Hypoglycemia: New Approaches to Overcoming a Persistent ' +
-          'Barrier to Optimal Glycemic Management*. American Diabetes Association. ' +
+        'A Practical Guide to Hypoglycemia: New Approaches to Overcoming a Persistent ' +
+          'Barrier to Optimal Glycemic Management. (2026). American Diabetes Association. ' +
           'https://doi.org/10.2337/db20261',
       );
+    });
+
+    it('puts a chapter title in the author position when nothing else credits it (#139)', () => {
+      expect(formatApa(lactMed())).toBe(
+        'Carboplatin. (2006). In *Drugs and Lactation Database (LactMed®)*. ' +
+          'National Institute of Child Health and Human Development. ' +
+          'https://www.ncbi.nlm.nih.gov/books/NBK500577/',
+      );
+    });
+
+    it('keeps a chapter title in the author position when only the book has editors (#139)', () => {
+      // The editor position belongs to the book. A chapter crediting no author
+      // of its own still opens on its title, with the editors in the `In …`
+      // clause where APA 7 §10.3 puts them.
+      const chapterUnderEditedBook = record(
+        LACTMED_CHAPTER_XML.replace(
+          '<Medium>Internet</Medium>',
+          '<Medium>Internet</Medium><AuthorList Type="editors" CompleteYN="Y">' +
+            '<Author ValidYN="Y"><LastName>Adam</LastName><ForeName>Margaret P</ForeName>' +
+            '<Initials>MP</Initials></Author></AuthorList>',
+        ),
+      );
+
+      expect(chapterUnderEditedBook.authors).toEqual([]);
+      expect(formatApa(chapterUnderEditedBook)).toBe(
+        'Carboplatin. (2006). In M. P. Adam (Ed.), *Drugs and Lactation Database (LactMed®)*. ' +
+          'National Institute of Child Health and Human Development. ' +
+          'https://www.ncbi.nlm.nih.gov/books/NBK500577/',
+      );
+    });
+
+    it('leaves the author position alone when a contributor exists (#139)', () => {
+      // The title moves up only when nothing else credits the record.
+      expect(formatApa(geneReviews())).toMatch(/^Petrucelli, N\./);
+      expect(formatApa(napBook())).toMatch(/^National Academies of Sciences/);
     });
   });
 
@@ -872,8 +910,13 @@ describe('Bookshelf records (#114)', () => {
       );
     });
 
-    it('leaves the author position empty when the book credits nobody', () => {
-      expect(formatApa(adaBook())).toMatch(/^\(2026\)\./);
+    it('falls through to the title position when the book credits nobody', () => {
+      // The editor position is for a book that has editors; with neither
+      // authors nor editors the title takes the author position instead of the
+      // reference opening on the year. (#139)
+      expect(formatApa(adaBook())).toMatch(/^A Practical Guide to Hypoglycemia/);
+      expect(formatApa(adaBook())).not.toContain('(Ed.)');
+      expect(formatApa(adaBook())).not.toContain(ADA_TITLE);
     });
   });
 

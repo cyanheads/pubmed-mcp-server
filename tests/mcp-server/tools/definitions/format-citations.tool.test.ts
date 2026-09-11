@@ -598,6 +598,35 @@ describe('formatCitationsTool Bookshelf records (issue #114)', () => {
     expect(entry?.citations.ris).toContain('SN  - 0309605393');
   });
 
+  it('opens an authorless APA citation on the title on both surfaces (#139)', async () => {
+    // PMID 42715368 — a whole book crediting neither authors nor editors. APA 7
+    // §9.12 moves the title into the author position; the reference must not
+    // start on the year on either surface a client may read.
+    const expected =
+      'A Practical Guide to Hypoglycemia: New Approaches to Overcoming a Persistent Barrier ' +
+      'to Optimal Glycemic Management. (2026). American Diabetes Association. ' +
+      'https://doi.org/10.2337/db20261';
+
+    mockEFetch.mockResolvedValue({
+      PubmedArticleSet: parseArticleSetXml(articleSetXml(ADA_WHOLE_BOOK_XML)),
+    });
+    const result = await runToolContract(formatCitationsTool, {
+      pmids: ['42715368'],
+      format: 'apa',
+    });
+
+    const structured = result.structuredContent as {
+      citations?: { citations?: Record<string, string> }[];
+    };
+    expect(structured.citations?.[0]?.citations?.apa).toBe(expected);
+
+    const rendered = textBlocks(result.content as ContentBlock[])
+      .map((b) => b.text)
+      .join('\n');
+    expect(rendered).toContain(expected);
+    expect(rendered).not.toContain('(2026). *A Practical Guide');
+  });
+
   it('cites a mixed batch and reports no PMID unavailable', async () => {
     stageSet(JOURNAL_ARTICLE_XML, STATPEARLS_CHAPTER_XML, ADA_WHOLE_BOOK_XML);
 
