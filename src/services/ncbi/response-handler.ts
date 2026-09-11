@@ -31,50 +31,74 @@ import type { NcbiRequestOptions } from './types.js';
  * jpaths that NCBI may return as either a single value or an array.
  * The `isArray` callback forces these to always parse as arrays for consistency.
  *
- * A jpath is the **full** dotted path from the document root, so only an entry
- * that spells out every ancestor matches. Read sites still pass values through
- * `ensureArray`, which is what makes the shorter, ancestor-less entries below
- * harmless.
+ * **Convention: one entry per shape, spelling the full path from the document
+ * root.** fast-xml-parser supplies that full dotted path and the lookup is an
+ * exact match, so an entry naming only its last segments never fires. Where a
+ * child is shared between record kinds, both ancestries are listed —
+ * `PubmedArticle` and `PubmedBookArticle.BookDocument` each get their own line.
+ * (#138)
+ *
+ * Two absences are deliberate. `<Link>` carries exactly one `<Id>`, which
+ * `find-related` reads without `ensureArray`, so listing it would strand every
+ * related PMID; and the JATS paths a PMC full-text response uses are governed by
+ * {@link ORDERED_XML_PARSER_OPTIONS}, which declares no `isArray` at all, so an
+ * entry for one here could never fire.
+ *
+ * Read sites still pass values through `ensureArray`, which is why correcting
+ * the previously ancestor-less entries changes nothing downstream. It stays.
  */
 const NCBI_ARRAY_JPATHS = new Set([
-  'IdList.Id',
+  // ESearch
   'eSearchResult.IdList.Id',
+  // EFetch — journal articles
   'PubmedArticleSet.PubmedArticle',
+  'PubmedArticleSet.PubmedArticle.MedlineCitation.Article.AuthorList.Author',
+  'PubmedArticleSet.PubmedArticle.MedlineCitation.Article.AuthorList.Author.AffiliationInfo',
+  'PubmedArticleSet.PubmedArticle.MedlineCitation.Article.GrantList.Grant',
+  'PubmedArticleSet.PubmedArticle.MedlineCitation.Article.PublicationTypeList.PublicationType',
+  'PubmedArticleSet.PubmedArticle.MedlineCitation.KeywordList.Keyword',
+  'PubmedArticleSet.PubmedArticle.MedlineCitation.MeshHeadingList.MeshHeading',
+  'PubmedArticleSet.PubmedArticle.MedlineCitation.MeshHeadingList.MeshHeading.QualifierName',
+  'PubmedArticleSet.PubmedArticle.PubmedData.History.PubMedPubDate',
+  // EFetch — Bookshelf records
   'PubmedArticleSet.PubmedBookArticle',
   'PubmedArticleSet.PubmedBookArticle.BookDocument.AuthorList',
+  'PubmedArticleSet.PubmedBookArticle.BookDocument.AuthorList.Author',
+  'PubmedArticleSet.PubmedBookArticle.BookDocument.AuthorList.Author.AffiliationInfo',
+  'PubmedArticleSet.PubmedBookArticle.BookDocument.KeywordList.Keyword',
   'PubmedArticleSet.PubmedBookArticle.BookDocument.PublicationType',
   'PubmedArticleSet.PubmedBookArticle.BookDocument.Book.AuthorList',
+  'PubmedArticleSet.PubmedBookArticle.BookDocument.Book.AuthorList.Author',
   'PubmedArticleSet.PubmedBookArticle.BookDocument.Book.ELocationID',
   'PubmedArticleSet.PubmedBookArticle.BookDocument.Book.Isbn',
+  'PubmedArticleSet.PubmedBookArticle.PubmedBookData.History.PubMedPubDate',
   'PubmedArticleSet.DeleteCitation.PMID',
-  'AuthorList.Author',
-  'AffiliationInfo',
-  'MeshHeadingList.MeshHeading',
-  'MeshHeading.QualifierName',
-  'GrantList.Grant',
-  'KeywordList.Keyword',
-  'PublicationTypeList.PublicationType',
-  'History.PubMedPubDate',
-  'LinkSet.LinkSetDb.Link',
-  'Link.Id',
-  'DbInfo.FieldList.Field',
-  'DbInfo.LinkList.Link',
+  // ELink
+  'eLinkResult.LinkSet.LinkSetDb',
+  'eLinkResult.LinkSet.LinkSetDb.Link',
+  // EInfo
+  'eInfoResult.DbInfo.FieldList.Field',
+  'eInfoResult.DbInfo.LinkList.Link',
+  // ESummary
   'eSummaryResult.DocSum',
-  'DocSum.Item',
+  // EFetch — MeSH descriptor records
   'DescriptorRecordSet.DescriptorRecord',
-  'ConceptList.Concept',
-  'TermList.Term',
-  'TreeNumberList.TreeNumber',
-  'pmc-articleset.article',
-  'article-meta.article-id',
-  'article-meta.pub-date',
-  'contrib-group.contrib',
-  'kwd-group.kwd',
-  'body.sec',
-  'sec.sec',
-  'sec.p',
-  'ref-list.ref',
+  'DescriptorRecordSet.DescriptorRecord.ConceptList.Concept',
+  'DescriptorRecordSet.DescriptorRecord.ConceptList.Concept.TermList.Term',
+  'DescriptorRecordSet.DescriptorRecord.TreeNumberList.TreeNumber',
 ]);
+
+/**
+ * ESummary version-1 `<Item>` elements, at any nesting depth.
+ *
+ * A `DocSum` item of `Type="List"` or `Type="Structure"` holds further `<Item>`
+ * children, and `lookup-mesh` walks three levels of them to reach a tree number.
+ * The nesting is open-ended, so one anchored pattern covers it where a fixed
+ * list of paths would silently cap the depth. Anchored at the root for the same
+ * reason the set is: a suffix match would catch an unrelated `Item` elsewhere.
+ * (#138)
+ */
+const ESUMMARY_ITEM_JPATH = /^eSummaryResult\.DocSum(?:\.Item)+$/;
 
 /**
  * Ordered paths to check for NCBI error messages in parsed XML.
@@ -305,7 +329,11 @@ export class NcbiResponseHandler {
       attributeNamePrefix: '@_',
       processEntities: XML_PROCESS_ENTITIES_OPTIONS,
       htmlEntities: true,
-      isArray: (_name, jpath) => NCBI_ARRAY_JPATHS.has(jpath as string),
+      isArray: (_name, jpath) => {
+        // `jPathOrMatcher` is a string unless `jPath: false` is set, which it is not.
+        const path = jpath as string;
+        return NCBI_ARRAY_JPATHS.has(path) || ESUMMARY_ITEM_JPATH.test(path);
+      },
       tagValueProcessor: preserveIsbnText,
     } satisfies X2jOptions;
 

@@ -620,3 +620,173 @@ describe('NcbiResponseHandler', () => {
     });
   });
 });
+
+// ─── Single-element list normalization (#138) ────────────────────────────────
+
+describe('NCBI_ARRAY_JPATHS single-element normalization (#138)', () => {
+  const parse = (xml: string): unknown =>
+    createHandler().parseAndHandleResponse<unknown>(xml, 'efetch', { retmode: 'xml' });
+
+  /**
+   * Read a parsed response by the same dotted jpath fast-xml-parser reports,
+   * stepping into the first entry of any list on the way, so an assertion names
+   * the path under test rather than a cast chain.
+   */
+  const at = (root: unknown, jpath: string): unknown => {
+    let current: unknown = root;
+    for (const key of jpath.split('.')) {
+      const target = Array.isArray(current) ? current[0] : current;
+      current = (target as Record<string, unknown> | undefined)?.[key];
+    }
+    return current;
+  };
+
+  /** True when the value at `jpath` parsed as an array rather than a scalar. */
+  const isList = (root: unknown, jpath: string): boolean => Array.isArray(at(root, jpath));
+
+  it('normalizes every EFetch list a one-entry article collapses', () => {
+    const xml =
+      '<?xml version="1.0"?><PubmedArticleSet><PubmedArticle><MedlineCitation>' +
+      '<PMID>1</PMID><Article><AuthorList><Author><LastName>Solo</LastName>' +
+      '<AffiliationInfo><Affiliation>Only lab</Affiliation></AffiliationInfo></Author></AuthorList>' +
+      '<GrantList><Grant><GrantID>G1</GrantID></Grant></GrantList>' +
+      '<PublicationTypeList><PublicationType>Journal Article</PublicationType></PublicationTypeList>' +
+      '</Article><MeshHeadingList><MeshHeading><DescriptorName>Humans</DescriptorName>' +
+      '<QualifierName>genetics</QualifierName></MeshHeading></MeshHeadingList>' +
+      '<KeywordList><Keyword>solo</Keyword></KeywordList></MedlineCitation>' +
+      '<PubmedData><History><PubMedPubDate PubStatus="pubmed"><Year>2026</Year></PubMedPubDate>' +
+      '</History></PubmedData></PubmedArticle></PubmedArticleSet>';
+
+    const parsed = parse(xml);
+    const citation = 'PubmedArticleSet.PubmedArticle.MedlineCitation';
+    const article = `${citation}.Article`;
+
+    for (const jpath of [
+      'PubmedArticleSet.PubmedArticle',
+      `${article}.AuthorList.Author`,
+      `${article}.AuthorList.Author.AffiliationInfo`,
+      `${article}.GrantList.Grant`,
+      `${article}.PublicationTypeList.PublicationType`,
+      `${citation}.MeshHeadingList.MeshHeading`,
+      `${citation}.MeshHeadingList.MeshHeading.QualifierName`,
+      `${citation}.KeywordList.Keyword`,
+      'PubmedArticleSet.PubmedArticle.PubmedData.History.PubMedPubDate',
+    ]) {
+      expect(isList(parsed, jpath), jpath).toBe(true);
+    }
+  });
+
+  it('normalizes the Bookshelf lists a one-entry book article collapses', () => {
+    const xml =
+      '<?xml version="1.0"?><PubmedArticleSet><PubmedBookArticle><BookDocument><PMID>2</PMID>' +
+      '<AuthorList><Author><LastName>Solo</LastName>' +
+      '<AffiliationInfo><Affiliation>Only lab</Affiliation></AffiliationInfo></Author></AuthorList>' +
+      '<Book><AuthorList><Author><LastName>Ed</LastName></Author></AuthorList>' +
+      '<Isbn>0309605393</Isbn><ELocationID EIdType="doi">10.1/x</ELocationID></Book>' +
+      '<PublicationType>Review</PublicationType><KeywordList><Keyword>solo</Keyword></KeywordList>' +
+      '</BookDocument><PubmedBookData><History><PubMedPubDate PubStatus="pubmed">' +
+      '<Year>2026</Year></PubMedPubDate></History></PubmedBookData>' +
+      '</PubmedBookArticle></PubmedArticleSet>';
+
+    const parsed = parse(xml);
+    const book = 'PubmedArticleSet.PubmedBookArticle';
+    const doc = `${book}.BookDocument`;
+
+    for (const jpath of [
+      book,
+      `${doc}.AuthorList`,
+      `${doc}.AuthorList.Author`,
+      `${doc}.AuthorList.Author.AffiliationInfo`,
+      `${doc}.PublicationType`,
+      `${doc}.KeywordList.Keyword`,
+      `${doc}.Book.AuthorList`,
+      `${doc}.Book.AuthorList.Author`,
+      `${doc}.Book.Isbn`,
+      `${doc}.Book.ELocationID`,
+      `${book}.PubmedBookData.History.PubMedPubDate`,
+    ]) {
+      expect(isList(parsed, jpath), jpath).toBe(true);
+    }
+  });
+
+  it('normalizes a one-hit ESearch id list', () => {
+    const xml =
+      '<?xml version="1.0"?><eSearchResult><Count>1</Count><IdList><Id>39000000</Id></IdList>' +
+      '</eSearchResult>';
+    // NcbiService.eSearch maps over `IdList.Id` with no ensureArray, so this is
+    // the one entry the set is load-bearing for.
+    expect(isList(parse(xml), 'eSearchResult.IdList.Id')).toBe(true);
+  });
+
+  it('normalizes a one-entry ELink link set without turning Link/Id into a list', () => {
+    const xml =
+      '<?xml version="1.0"?><eLinkResult><LinkSet><DbFrom>pubmed</DbFrom><LinkSetDb>' +
+      '<LinkName>pubmed_pubmed</LinkName><Link><Id>39000001</Id></Link></LinkSetDb>' +
+      '</LinkSet></eLinkResult>';
+
+    const parsed = parse(xml);
+    expect(isList(parsed, 'eLinkResult.LinkSet.LinkSetDb')).toBe(true);
+    expect(isList(parsed, 'eLinkResult.LinkSet.LinkSetDb.Link')).toBe(true);
+    // `<LinkSet>` is read as a single object and `<Link>` carries exactly one
+    // `<Id>`, which find-related reads without ensureArray — listing either
+    // would strand every related PMID. Assert the value first: a path that
+    // resolves to nothing is not an array either, so `isList` alone would pass
+    // on a misspelling.
+    expect(at(parsed, 'eLinkResult.LinkSet')).toBeDefined();
+    expect(isList(parsed, 'eLinkResult.LinkSet')).toBe(false);
+    expect(at(parsed, 'eLinkResult.LinkSet.LinkSetDb.Link.Id')).toBe(39000001);
+    expect(isList(parsed, 'eLinkResult.LinkSet.LinkSetDb.Link.Id')).toBe(false);
+  });
+
+  it('normalizes ESummary DocSum items at every nesting level', () => {
+    const xml =
+      '<?xml version="1.0"?><eSummaryResult><DocSum><Id>68003924</Id>' +
+      '<Item Name="DS_IdxLinks" Type="List"><Item Name="IdxLink" Type="Structure">' +
+      '<Item Name="TreeNum" Type="String">C18.452.394</Item></Item></Item>' +
+      '</DocSum></eSummaryResult>';
+
+    // lookup-mesh walks three levels of `<Item>` to reach a tree number, so the
+    // nesting is load-bearing, not decorative.
+    const parsed = parse(xml);
+    for (const jpath of [
+      'eSummaryResult.DocSum',
+      'eSummaryResult.DocSum.Item',
+      'eSummaryResult.DocSum.Item.Item',
+      'eSummaryResult.DocSum.Item.Item.Item',
+    ]) {
+      expect(isList(parsed, jpath), jpath).toBe(true);
+    }
+  });
+
+  it('normalizes a one-entry EInfo field list and link list', () => {
+    const xml =
+      '<?xml version="1.0"?><eInfoResult><DbInfo><DbName>pubmed</DbName>' +
+      '<FieldList><Field><Name>TIAB</Name></Field></FieldList>' +
+      '<LinkList><Link><Name>pubmed_pmc</Name></Link></LinkList></DbInfo></eInfoResult>';
+
+    const parsed = parse(xml);
+    expect(isList(parsed, 'eInfoResult.DbInfo.FieldList.Field')).toBe(true);
+    expect(isList(parsed, 'eInfoResult.DbInfo.LinkList.Link')).toBe(true);
+  });
+
+  it('normalizes a one-entry MeSH descriptor record', () => {
+    const xml =
+      '<?xml version="1.0"?><DescriptorRecordSet><DescriptorRecord><DescriptorUI>D003924</DescriptorUI>' +
+      '<TreeNumberList><TreeNumber>C18.452.394</TreeNumber></TreeNumberList>' +
+      '<ConceptList><Concept><ConceptUI>M0005768</ConceptUI>' +
+      '<TermList><Term><String>Diabetes Mellitus</String></Term></TermList>' +
+      '</Concept></ConceptList></DescriptorRecord></DescriptorRecordSet>';
+
+    const parsed = parse(xml);
+    const record = 'DescriptorRecordSet.DescriptorRecord';
+
+    for (const jpath of [
+      record,
+      `${record}.TreeNumberList.TreeNumber`,
+      `${record}.ConceptList.Concept`,
+      `${record}.ConceptList.Concept.TermList.Term`,
+    ]) {
+      expect(isList(parsed, jpath), jpath).toBe(true);
+    }
+  });
+});
