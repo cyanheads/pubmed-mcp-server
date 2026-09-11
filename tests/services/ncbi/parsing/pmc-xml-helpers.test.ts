@@ -12,6 +12,8 @@ import {
   findAllDescendants,
   findOne,
   isTextNode,
+  rawTextContent,
+  selectAlternative,
   tagNameOf,
   textContent,
   textContentExcluding,
@@ -25,6 +27,16 @@ const t = (text: string): JatsNode => ({ '#text': text });
 /** Build an element node, optionally with attributes. */
 const el = (tag: string, children: JatsNode[], attrs?: Record<string, string>): JatsNode =>
   attrs ? { [tag]: children, ':@': attrs } : { [tag]: children };
+
+/**
+ * The LaTeX document publishers deposit as a `<tex-math>` body, reproducing the
+ * preamble, the tab indentation and the `\begin{document}` wrapper of a real
+ * Springer/Nature deposit.
+ */
+const texDocument = (expression: string): string =>
+  '\\documentclass[12pt]{minimal}\n\t\t\t\t\\usepackage{amsmath}\n\t\t\t\t' +
+  '\\usepackage{upgreek}\n\t\t\t\t\\setlength{\\oddsidemargin}{-69pt}\n\t\t\t\t' +
+  `\\begin{document}${expression}\\end{document}`;
 
 // ─── tagNameOf ────────────────────────────────────────────────────────────────
 
@@ -417,5 +429,136 @@ describe('findAllDescendants', () => {
   it('accepts a sibling list as well as a single node', () => {
     const nodes = [el('back', [el('ref-list', [])]), el('body', [el('ref-list', [])])];
     expect(findAllDescendants(nodes, 'ref-list')).toHaveLength(2);
+  });
+});
+
+// ─── <tex-math> and <alternatives> (#135) ─────────────────────────────────────
+
+describe('tex-math and alternatives (#135)', () => {
+  it('contributes only the document body of a preamble-wrapped <tex-math>', () => {
+    const node = el('tex-math', [t(texDocument('$$\\mathbb {F}_q$$'))]);
+    expect(textContent(node)).toBe('$$\\mathbb {F}_q$$');
+  });
+
+  it('leaves a <tex-math> deposited without a preamble unchanged', () => {
+    expect(textContent(el('tex-math', [t('\\eta_{crit}')]))).toBe('\\eta_{crit}');
+  });
+
+  it('keeps the math delimiters so the expression still reads as math', () => {
+    const node = el('tex-math', [t(texDocument('\\(x_i\\)'))]);
+    expect(textContent(node)).toBe('\\(x_i\\)');
+  });
+
+  it('strips the preamble from a <tex-math> the deposit never closed', () => {
+    // A truncated deposit opens \begin{document} and never closes it. Requiring
+    // the closing marker returns the whole document, preamble included.
+    const node = el('tex-math', [
+      t('\\documentclass[12pt]{minimal}\\usepackage{amsmath}\\begin{document}$$\\gamma$$'),
+    ]);
+    expect(textContent(node)).toBe('$$\\gamma$$');
+  });
+
+  it('reads exactly one rendering from <alternatives>, preferring <tex-math>', () => {
+    const node = el('alternatives', [
+      el('tex-math', [t(texDocument('$$\\eta_{crit}$$'))]),
+      el('mml:math', [t('ηcrit')]),
+    ]);
+    expect(textContent(node)).toBe('$$\\eta_{crit}$$');
+  });
+
+  it('falls back to the first child carrying text when <alternatives> has no <tex-math>', () => {
+    const node = el('alternatives', [
+      el('graphic', [], { '@_xlink:href': 'eq1.gif' }),
+      el('mml:math', [t('ηcrit')]),
+    ]);
+    expect(textContent(node)).toBe('ηcrit');
+  });
+
+  it('applies the rule through rawTextContent', () => {
+    const node = el('p', [
+      t('before '),
+      el('inline-formula', [el('tex-math', [t(texDocument('$$Q$$'))])]),
+      t(' after'),
+    ]);
+    expect(rawTextContent(node)).toBe('before $$Q$$ after');
+  });
+
+  it('applies the rule through textContentExcluding', () => {
+    const node = el('p', [
+      el('inline-formula', [el('tex-math', [t(texDocument('$$Q$$'))])]),
+      el('table-wrap', [el('label', [t('Table 1')])]),
+    ]);
+    expect(textContentExcluding(node, new Set(['table-wrap']))).toBe('$$Q$$');
+  });
+
+  it('skips an <alternatives> child the caller excluded and reads the next', () => {
+    // The rendering a caller excluded by tag is not a rendering it can read, so
+    // selecting it would contribute nothing where a sibling carries the text.
+    const node = el('alternatives', [
+      el('graphic', [el('alt-text', [t('eq1.gif')])], { '@_xlink:href': 'eq1.gif' }),
+      el('mml:math', [t('ηcrit')]),
+    ]);
+    expect(textContentExcluding(node, new Set(['graphic']))).toBe('ηcrit');
+  });
+
+  it('resolves an <alternatives> nested inside inline markup', () => {
+    const node = el('p', [
+      t('stalls once '),
+      el('italic', [
+        el('inline-formula', [
+          el('alternatives', [
+            el('tex-math', [t(texDocument('$$\\eta$$'))]),
+            el('mml:math', [t('η')]),
+          ]),
+        ]),
+      ]),
+      t(' is exceeded'),
+    ]);
+    expect(textContent(node)).toBe('stalls once $$\\eta$$ is exceeded');
+  });
+});
+
+describe('selectAlternative', () => {
+  it('returns the <tex-math> child when one is present', () => {
+    const texMath = el('tex-math', [t('x')]);
+    const node = el('alternatives', [el('mml:math', [t('y')]), texMath]);
+    expect(selectAlternative(node)).toBe(texMath);
+  });
+
+  it('returns the first child carrying text otherwise', () => {
+    const mathml = el('mml:math', [t('y')]);
+    const node = el('alternatives', [el('graphic', []), mathml]);
+    expect(selectAlternative(node)).toBe(mathml);
+  });
+
+  it('returns undefined when no child carries text', () => {
+    expect(selectAlternative(el('alternatives', [el('graphic', [])]))).toBeUndefined();
+  });
+
+  it('passes over a <tex-math> that carries no expression', () => {
+    // An empty <tex-math> stands for no rendering at all. Preferring it by tag
+    // alone drops the MathML beside it and the formula disappears.
+    const mathml = el('mml:math', [t('ηcrit')]);
+    expect(selectAlternative(el('alternatives', [el('tex-math', []), mathml]))).toBe(mathml);
+  });
+
+  it('passes over a <tex-math> whose document body is empty', () => {
+    const mathml = el('mml:math', [t('ηcrit')]);
+    const preambleOnly = el('tex-math', [t(texDocument(''))]);
+    expect(selectAlternative(el('alternatives', [preambleOnly, mathml]))).toBe(mathml);
+  });
+
+  it('prefers a rendering over a pointer that carries alt text', () => {
+    // <graphic> and <inline-graphic> point at an external image; their
+    // <alt-text> names the file rather than stating the object, so selecting
+    // one positionally drops the only readable rendering the deposit carries.
+    const mathml = el('mml:math', [t('ηcrit')]);
+    const pointer = el('graphic', [el('alt-text', [t('eq1.gif')])], { '@_xlink:href': 'eq1.gif' });
+    expect(selectAlternative(el('alternatives', [pointer, mathml]))).toBe(mathml);
+  });
+
+  it('falls back to a pointer when it is the only child carrying text', () => {
+    const pointer = el('graphic', [el('alt-text', [t('Structure of benzene')])]);
+    expect(selectAlternative(el('alternatives', [pointer]))).toBe(pointer);
   });
 });

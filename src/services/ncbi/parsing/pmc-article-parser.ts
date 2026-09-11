@@ -29,6 +29,7 @@ import {
   type JatsNode,
   type JatsNodeList,
   rawTextContent,
+  selectAlternative,
   tagNameOf,
   textContent,
   textContentExcluding,
@@ -77,8 +78,10 @@ const LIFTED_BLOCK_TAGS: ReadonlySet<string> = new Set([
  * right, so its placement is whatever holds it: naming it here broke the
  * standard `<inline-formula><alternatives><tex-math/><mml:math/></alternatives>`
  * deposit out of the sentence it belonged to and split that sentence in two.
- * `<disp-formula>`, `<table-wrap>` and `<fig>` resolve their own
- * `<alternatives>` children, so nothing depends on it flushing the run. (#130)
+ * `<disp-formula>` and `<table-wrap>` resolve their own `<alternatives>`
+ * children, and a `<fig>` is a block in its own right, so nothing depends on it
+ * flushing the run. What it contributes is one of those renderings rather than
+ * all of them — see `selectAlternative`. (#130, #135)
  */
 const BLOCK_TAGS: ReadonlySet<string> = new Set([
   ...LIFTED_BLOCK_TAGS,
@@ -357,6 +360,13 @@ function flushRun(flow: Flow): void {
  * `blockTags` names what interrupts the run: {@link BLOCK_TAGS} for article
  * prose, {@link STATEMENT_BLOCK_TAGS} for a container whose `<title>` and `<p>`
  * children are separate statements rather than one continuous sentence.
+ *
+ * `<tex-math>` and `<alternatives>` are the two elements whose text is not the
+ * concatenation of their subtree, so this walk defers to the shared rule rather
+ * than reading their children one at a time: a `<tex-math>` contributes its
+ * LaTeX document body via `rawTextContent`, and an `<alternatives>` re-enters
+ * this walk with its single chosen child, which keeps a `<disp-formula>` found
+ * there at block position. (#135)
  */
 function walkFlow(nodes: JatsNodeList, flow: Flow, blockTags: ReadonlySet<string>): void {
   for (const node of nodes) {
@@ -365,6 +375,15 @@ function walkFlow(nodes: JatsNodeList, flow: Flow, blockTags: ReadonlySet<string
       continue;
     }
     const tag = tagNameOf(node) ?? '';
+    if (tag === 'alternatives') {
+      const chosen = selectAlternative(node);
+      if (chosen) walkFlow([chosen], flow, blockTags);
+      continue;
+    }
+    if (tag === 'tex-math') {
+      flow.run += rawTextContent(node);
+      continue;
+    }
     if (blockTags.has(tag)) {
       flushRun(flow);
       const rendered = renderBlock(node);
@@ -604,6 +623,10 @@ const DISP_FORMULA_NON_BODY: ReadonlySet<string> = new Set(['label', 'graphic', 
  * 68-record draw against 3 for `<tex-math>`. A graphic-only deposit has no
  * fallback text and contributes nothing at all rather than a bare label on an
  * otherwise empty line. (#130)
+ *
+ * A `<tex-math>` contributes only the expression between `\begin{document}` and
+ * `\end{document}`; `textContent` applies that rule, so the LaTeX preamble
+ * publishers wrap around every formula never reaches the rendered line. (#135)
  */
 function renderDispFormula(formula: JatsNode): string {
   const texMath =

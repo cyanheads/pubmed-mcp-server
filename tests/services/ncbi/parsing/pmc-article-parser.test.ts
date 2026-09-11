@@ -23,6 +23,19 @@ const t = (text: string): JatsNode => ({ '#text': text });
 const el = (tag: string, children: JatsNode[], attrs?: Record<string, string>): JatsNode =>
   attrs ? { [tag]: children, ':@': attrs } : { [tag]: children };
 
+/**
+ * The LaTeX document publishers deposit as a `<tex-math>` body, reproducing the
+ * preamble, the tab indentation and the `\begin{document}` wrapper of a real
+ * Springer/Nature deposit. Every `<tex-math>` in PMC12855809 carries this shape.
+ */
+const texDocument = (expression: string): string =>
+  '\\documentclass[12pt]{minimal}\n\t\t\t\t\\usepackage{amsmath}\n\t\t\t\t' +
+  '\\usepackage{upgreek}\n\t\t\t\t\\setlength{\\oddsidemargin}{-69pt}\n\t\t\t\t' +
+  `\\begin{document}${expression}\\end{document}`;
+
+/** `<tex-math>` carrying the full LaTeX document wrapper around `expression`. */
+const texMath = (expression: string): JatsNode => el('tex-math', [t(texDocument(expression))]);
+
 describe('extractJatsAuthors', () => {
   it('returns empty for undefined', () => {
     expect(extractJatsAuthors(undefined)).toEqual([]);
@@ -547,9 +560,9 @@ describe('extractBodySections', () => {
     // </alternatives></inline-formula>, the standard Springer/Nature deposit,
     // here inside a <p>. <alternatives> is a container for equivalent renderings
     // of one object, so it takes the placement of whatever holds it; at this
-    // position that is the sentence, not a block of its own. It still emits
-    // every rendering it carries, exactly as it did at block position — only
-    // the placement changes.
+    // position that is the sentence, not a block of its own. One rendering
+    // reaches that sentence — the <tex-math> — rather than every rendering the
+    // container carries. (#135)
     const body = el('body', [
       el('sec', [
         el('title', [t('Methods')]),
@@ -571,7 +584,7 @@ describe('extractBodySections', () => {
     ]);
 
     const text = extractBodySections(body)[0]?.text ?? '';
-    expect(text).toBe('Transport stalls once \\eta_{crit}ηcrit is exceeded.');
+    expect(text).toBe('Transport stalls once \\eta_{crit} is exceeded.');
     expect(text).not.toContain('\n\n');
   });
 
@@ -2195,5 +2208,248 @@ describe('parsePmcArticle', () => {
     const result = parsePmcArticle(article);
     expect(result.journal?.pages).toBe('e0300123');
     expect(result.journal?.elocationId).toBe('e0300123');
+  });
+});
+
+// ─── LaTeX preambles and <alternatives> duplication (#135) ───────────────────
+
+describe('tex-math preamble and alternatives duplication (#135)', () => {
+  /** Text a `<p>` contributes when it sits alone in a titled section. */
+  const paragraphText = (children: JatsNode[]): string =>
+    extractBodySections(
+      el('body', [el('sec', [el('title', [t('Methods')]), el('p', children)])]),
+    )[0]?.text ?? '';
+
+  it('renders a bare <inline-formula><tex-math> in place without the preamble', () => {
+    // PMC12855809's dominant shape: 310 bare inline formulae, every one carrying
+    // the \documentclass preamble, no <alternatives> and no <mml:math>.
+    const text = paragraphText([
+      t('Operations run over '),
+      el('inline-formula', [texMath('$$\\mathbb {F}_q$$')], { '@_id': 'IEq1' }),
+      t(' throughout.'),
+    ]);
+
+    expect(text).toBe('Operations run over $$\\mathbb {F}_q$$ throughout.');
+    expect(text).not.toContain('\\documentclass');
+    expect(text).not.toContain('\\usepackage');
+    expect(text).not.toContain('\\begin{document}');
+  });
+
+  it('renders an <alternatives>-wrapped inline formula once, without the preamble', () => {
+    const text = paragraphText([
+      t('Reducing threshold RH '),
+      el(
+        'inline-formula',
+        [el('alternatives', [texMath('$$\\eta_{crit}$$'), el('mml:math', [t('ηcrit')])])],
+        { '@_id': 'IEq1' },
+      ),
+      t(' by 0.8.'),
+    ]);
+
+    expect(text).toBe('Reducing threshold RH $$\\eta_{crit}$$ by 0.8.');
+    expect(text).not.toContain('ηcrit');
+    expect(text).not.toContain('\\documentclass');
+  });
+
+  it('reaches a formula nested inside <italic> inside a <p>', () => {
+    const text = paragraphText([
+      t('The bound '),
+      el('italic', [
+        el('inline-formula', [
+          el('alternatives', [texMath('$$\\eta$$'), el('mml:math', [t('η')])]),
+        ]),
+      ]),
+      t(' holds.'),
+    ]);
+
+    expect(text).toBe('The bound $$\\eta$$ holds.');
+  });
+
+  it('renders a <disp-formula> at block position without the preamble', () => {
+    const body = el('body', [
+      el('sec', [
+        el('title', [t('Model')]),
+        el('p', [t('We define the delay as')]),
+        el('disp-formula', [el('label', [t('1')]), texMath('$$D = a - b$$')], { '@_id': 'Equ1' }),
+        el('p', [t('where a is arrival.')]),
+      ]),
+    ]);
+
+    const text = extractBodySections(body)[0]?.text ?? '';
+    expect(text).toBe('We define the delay as\n\n1 $$D = a - b$$\n\nwhere a is arrival.');
+    expect(text).not.toContain('\\documentclass');
+  });
+
+  it('renders a <disp-formula> whose <tex-math> sits under <alternatives>', () => {
+    const body = el('body', [
+      el('sec', [
+        el('title', [t('Model')]),
+        el('disp-formula', [
+          el('label', [t('2')]),
+          el('alternatives', [texMath('$$E = mc^2$$'), el('mml:math', [t('E=mc2')])]),
+        ]),
+      ]),
+    ]);
+
+    expect(extractBodySections(body)[0]?.text).toBe('2 $$E = mc^2$$');
+  });
+
+  it('renders a <disp-formula> whose rendering sits beside a pointer carrying alt text', () => {
+    // renderDispFormula excludes <graphic> from its fallback text, so choosing
+    // the pointer leaves the formula with no body and it drops out entirely,
+    // label and all.
+    const body = el('body', [
+      el('sec', [
+        el('title', [t('Model')]),
+        el('p', [t('Before.')]),
+        el('disp-formula', [
+          el('label', [t('3')]),
+          el('alternatives', [
+            el('graphic', [el('alt-text', [t('equ3.gif')])], { '@_xlink:href': 'equ3.gif' }),
+            el('mml:math', [t('η')]),
+          ]),
+        ]),
+        el('p', [t('After.')]),
+      ]),
+    ]);
+
+    expect(extractBodySections(body)[0]?.text).toBe('Before.\n\n3 η\n\nAfter.');
+  });
+
+  it('renders the MathML beside a <tex-math> carrying no expression', () => {
+    const text = paragraphText([
+      t('Threshold '),
+      el('inline-formula', [
+        el('alternatives', [el('tex-math', []), el('mml:math', [t('ηcrit')])]),
+      ]),
+      t(' applies.'),
+    ]);
+
+    expect(text).toBe('Threshold ηcrit applies.');
+  });
+
+  it('keeps block placement for a <disp-formula> under <alternatives> in a nested <sec>', () => {
+    const body = el('body', [
+      el('sec', [
+        el('title', [t('Results')]),
+        el('sec', [
+          el('title', [t('Derivation')]),
+          el('p', [t('Before.')]),
+          el('alternatives', [el('disp-formula', [texMath('$$x = y$$')])]),
+          el('p', [t('After.')]),
+        ]),
+      ]),
+    ]);
+
+    const subsection = extractBodySections(body)[0]?.subsections?.[0];
+    expect(subsection?.text).toBe('Before.\n\n$$x = y$$\n\nAfter.');
+  });
+
+  it('strips the preamble from an <alternatives> inside a <td> inside a nested <table-wrap>', () => {
+    // PMC12816603's only <alternatives> sits in a table cell, so the defect
+    // reaches tables[].rows as well as sections[].text.
+    const tableWrap = el(
+      'table-wrap',
+      [
+        el('label', [t('Table 1')]),
+        el('table', [
+          el('tbody', [
+            el('tr', [
+              el('td', [t('REF-S2')]),
+              el('td', [
+                t('Reducing threshold RH '),
+                el('inline-formula', [
+                  el('alternatives', [texMath('$$\\eta_{crit}$$'), el('mml:math', [t('ηcrit')])]),
+                ]),
+                t(' over the ocean'),
+              ]),
+            ]),
+          ]),
+        ]),
+      ],
+      { '@_id': 'Tab1' },
+    );
+
+    const body = el('body', [el('sec', [el('title', [t('Setup')]), el('p', [tableWrap])])]);
+    const article = el('article', [body]);
+
+    const tables = extractPmcTables(article);
+    expect(tables[0]?.rows).toEqual([
+      ['REF-S2', 'Reducing threshold RH $$\\eta_{crit}$$ over the ocean'],
+    ]);
+    expect(JSON.stringify(tables)).not.toContain('documentclass');
+    // The table's text is carried by tables[], never duplicated into the prose.
+    expect(extractBodySections(body)[0]?.text).toBe('');
+  });
+
+  it('leaves a record with no <tex-math> and no <alternatives> untouched', () => {
+    const body = el('body', [
+      el('sec', [
+        el('title', [t('Results')]),
+        el('p', [t('Our candidates include '), el('italic', [t('NF1')]), t('.')]),
+      ]),
+    ]);
+
+    expect(extractBodySections(body)).toEqual([
+      { title: 'Results', text: 'Our candidates include NF1.' },
+    ]);
+  });
+
+  it('carries no LaTeX preamble anywhere in a parsed article (#135)', () => {
+    const article = el('article', [
+      el('front', [
+        el('journal-meta', [el('journal-title-group', [el('journal-title', [t('Sci Rep')])])]),
+        el('article-meta', [
+          el('article-id', [t('12855809')], { '@_pub-id-type': 'pmcid' }),
+          el('title-group', [el('article-title', [t('Threshold transport')])]),
+          el('abstract', [
+            el('p', [t('We bound '), el('inline-formula', [texMath('$$Q$$')]), t(' from below.')]),
+          ]),
+        ]),
+      ]),
+      el('body', [
+        el('sec', [
+          el('title', [t('Methods')]),
+          el('p', [
+            t('Operations run over '),
+            el('inline-formula', [texMath('$$\\mathbb {F}_q$$')]),
+            t('.'),
+          ]),
+          el('disp-formula', [el('label', [t('1')]), texMath('$$D = a - b$$')]),
+          el(
+            'table-wrap',
+            [
+              el('caption', [
+                el('p', [t('Symbols used in '), el('inline-formula', [texMath('$$Q$$')])]),
+              ]),
+              el('table', [
+                el('tbody', [
+                  el('tr', [
+                    el('td', [el('inline-formula', [texMath('$$r_i$$')])]),
+                    el('td', [t('rounds')]),
+                  ]),
+                ]),
+              ]),
+            ],
+            { '@_id': 'Tab1' },
+          ),
+        ]),
+      ]),
+    ]);
+
+    const parsed = parsePmcArticle(article);
+    const serialized = JSON.stringify(parsed);
+
+    for (const marker of ['documentclass', 'usepackage', 'begin{document}']) {
+      expect(serialized).not.toContain(marker);
+    }
+    expect(parsed.abstract).toBe('We bound $$Q$$ from below.');
+    expect(parsed.sections[0]?.text).toBe(
+      'Operations run over $$\\mathbb {F}_q$$.\n\n1 $$D = a - b$$',
+    );
+    expect(parsed.tables?.[0]?.rows).toEqual([['$$r_i$$', 'rounds']]);
+    expect(parsed.tables?.[0]?.caption).toBe('Symbols used in $$Q$$');
+    // One rendering per formula: the expression appears exactly once per site.
+    expect(parsed.sections[0]?.text.match(/\$\$/g)).toHaveLength(4);
   });
 });

@@ -60,10 +60,88 @@ export function textOf(node: JatsNode): string {
   return v == null ? '' : String(v);
 }
 
+/** JATS element carrying a LaTeX rendering of a formula. */
+const TEX_MATH_TAG = 'tex-math';
+
+/** JATS container holding equivalent renderings of one object. */
+const ALTERNATIVES_TAG = 'alternatives';
+
+/**
+ * JATS pointers to an external rendering: a file reference, not a rendering of
+ * the object itself.
+ */
+const POINTER_TAGS: ReadonlySet<string> = new Set([
+  'graphic',
+  'inline-graphic',
+  'media',
+  'inline-media',
+]);
+
+/**
+ * The `\begin{document}` … `\end{document}` body of a LaTeX document. The
+ * closing marker is optional so a deposit that opens the document and never
+ * closes it still yields its expression rather than falling back to the whole
+ * document, preamble included.
+ */
+const TEX_DOCUMENT_BODY = /\\begin\{document\}([\s\S]*?)(?:\\end\{document\}|$)/;
+
+/**
+ * The expression a `<tex-math>` contributes: the body between
+ * `\begin{document}` and `\end{document}`.
+ *
+ * Publishers deposit `<tex-math>` as a complete LaTeX document —
+ * `\documentclass[12pt]{minimal}\usepackage{amsmath}…\begin{document}$$…$$\end{document}`
+ * — and every character of that preamble reached prose before this rule
+ * existed, once per formula (312 times in one Scientific Reports record). The
+ * math delimiters inside the body are kept, so the expression still reads as
+ * math rather than as bare tokens. A body deposited without the wrapper is
+ * already the expression and is returned unchanged. (#135)
+ */
+function texMathExpression(raw: string): string {
+  return TEX_DOCUMENT_BODY.exec(raw)?.[1] ?? raw;
+}
+
+/**
+ * The single child of an `<alternatives>` whose text stands for the whole
+ * element.
+ *
+ * `<alternatives>` offers equivalent renderings of one object — a TeX and a
+ * MathML spelling of the same formula, a graphic and a marked-up table — so
+ * reading every child states the object twice in the same sentence. The
+ * `<tex-math>` is preferred because it survives as readable math, then any other
+ * rendering that carries text, and a pointer's own `<alt-text>` only when the
+ * deposit offers nothing else. Every candidate must carry text under the
+ * caller's `excluded` set, which is what keeps the selection from landing on a
+ * rendering that would then contribute nothing: an empty `<tex-math>`, a
+ * `<graphic>` naming its file, or a child the caller excludes by tag. Returns
+ * undefined when no child qualifies. (#135)
+ *
+ * Structural selections are unaffected: `<table-wrap>` and `<disp-formula>`
+ * resolve their own `<alternatives>` children by tag.
+ */
+export function selectAlternative(
+  node: JatsNode,
+  excluded?: ReadonlySet<string>,
+): JatsNode | undefined {
+  const children = childrenOf(node);
+  const carriesText = (child: JatsNode): boolean => concatText(child, excluded).trim() !== '';
+  return (
+    children.find((child) => tagNameOf(child) === TEX_MATH_TAG && carriesText(child)) ??
+    children.find((child) => !POINTER_TAGS.has(tagNameOf(child) ?? '') && carriesText(child)) ??
+    children.find(carriesText)
+  );
+}
+
 /**
  * Concatenate text content in document order without normalizing whitespace.
  * Internal helper so recursion preserves the original spacing between siblings.
  * `excluded` skips a whole subtree by tag name; omitting it reads everything.
+ *
+ * Two JATS elements do not contribute the plain concatenation of their subtree:
+ * a `<tex-math>` contributes only its LaTeX document body, and an
+ * `<alternatives>` contributes exactly one child. Both rules live here so every
+ * prose consumer inherits them — paragraphs, table cells, captions, abstracts.
+ * (#135)
  */
 function concatText(input: JatsNode | JatsNodeList, excluded?: ReadonlySet<string>): string {
   const nodes = Array.isArray(input) ? input : [input];
@@ -71,9 +149,20 @@ function concatText(input: JatsNode | JatsNodeList, excluded?: ReadonlySet<strin
   for (const node of nodes) {
     if (isTextNode(node)) {
       parts.push(textOf(node));
-    } else if (!excluded?.has(tagNameOf(node) ?? '')) {
-      parts.push(concatText(childrenOf(node), excluded));
+      continue;
     }
+    const tag = tagNameOf(node) ?? '';
+    if (excluded?.has(tag)) continue;
+    if (tag === TEX_MATH_TAG) {
+      parts.push(texMathExpression(concatText(childrenOf(node))));
+      continue;
+    }
+    if (tag === ALTERNATIVES_TAG) {
+      const chosen = selectAlternative(node, excluded);
+      if (chosen) parts.push(concatText(chosen, excluded));
+      continue;
+    }
+    parts.push(concatText(childrenOf(node), excluded));
   }
   return parts.join('');
 }
