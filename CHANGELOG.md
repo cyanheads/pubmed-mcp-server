@@ -2,6 +2,10 @@
 
 All notable changes to this project. Each entry links to its full per-version file in [changelog/](changelog/).
 
+## [2.10.10](changelog/2.10.x/2.10.10.md) — 2026-09-10
+
+pubmed_fetch_fulltext renders JATS block content at its own position and returns figures and supplementary material as a structured assets[] field, pubmed_find_related's OpenAlex fallback pages to the full requested window, and the query tools reject a blank query instead of forwarding it to NCBI.
+
 ## [2.10.9](changelog/2.10.x/2.10.9.md) — 2026-09-10
 
 pubmed_fetch_fulltext now extracts JATS tables as structured cells, finds Europe PMC references nested under <body> at any depth, and matches a sections filter against subsection titles too; mixed-citation author names and Europe PMC's numeric-text coercion are also fixed.
