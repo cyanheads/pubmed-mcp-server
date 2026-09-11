@@ -2,6 +2,10 @@
 
 All notable changes to this project. Each entry links to its full per-version file in [changelog/](changelog/).
 
+## [2.10.12](changelog/2.10.x/2.10.12.md) — 2026-09-11
+
+pubmed_fetch_fulltext no longer emits LaTeX preambles or duplicate renderings for <alternatives>-wrapped formulas, APA citations for authorless records open on the title instead of the year, and internal NCBI response-parsing helpers are hardened against defects that were silently inert until now.
+
 ## [2.10.11](changelog/2.10.x/2.10.11.md) — 2026-09-10
 
 pubmed_fetch_articles and pubmed_format_citations return NCBI Bookshelf chapters and books instead of reporting them unavailable, journal article locators are preserved through metadata and every citation style, and pubmed_convert_ids and pubmed_lookup_citation reject inputs that could shift NCBI's own field parsing.
