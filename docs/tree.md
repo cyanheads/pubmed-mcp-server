@@ -1,6 +1,6 @@
 # pubmed-mcp-server - Directory Structure
 
-Generated on: 2026-09-10 20:37:06
+Generated on: 2026-09-11 05:18:59
 
 ```text
 pubmed-mcp-server/
@@ -242,6 +242,7 @@ pubmed-mcp-server/
 │   │   │   │   ├── citation-formatter.edge.test.ts
 │   │   │   │   └── citation-formatter.test.ts
 │   │   │   ├── parsing/
+│   │   │   │   ├── _book-fixtures.ts
 │   │   │   │   ├── article-parser.test.ts
 │   │   │   │   ├── esummary-parser.test.ts
 │   │   │   │   ├── pmc-article-parser.test.ts
