@@ -8,9 +8,11 @@ import { describe, expect, it } from 'vitest';
 import {
   extractBriefSummaries,
   formatESummaryAuthors,
+  parseESummaryAuthorsFromDocumentSummary,
   parseNcbiDate,
   standardizeESummaryDate,
 } from '@/services/ncbi/parsing/esummary-parser.js';
+import { ensureArray } from '@/services/ncbi/parsing/xml-helpers.js';
 import type { ESummaryAuthor, ESummaryResult } from '@/services/ncbi/types.js';
 import { BOOK_ESUMMARY_XML, parseESummaryXml } from './_book-fixtures.js';
 
@@ -713,5 +715,54 @@ describe('Bookshelf records (#114)', () => {
     expect(summary?.publisherName).toBeUndefined();
     expect(summary?.docType).toBeUndefined();
     expect(summary?.editors).toBeUndefined();
+  });
+});
+
+// ─── Absent vs. empty upstream fields (#137) ─────────────────────────────────
+
+describe('parseESummaryAuthorsFromDocumentSummary (#137)', () => {
+  /** A journal DocumentSummary: NCBI ships no `AuthType` and no `ClusterID`. */
+  const NO_AUTHTYPE_XML =
+    '<?xml version="1.0" encoding="UTF-8" ?><eSummaryResult><DocumentSummarySet status="OK">' +
+    '<DocumentSummary uid="12345"><Authors><Author><Name>Smith J</Name></Author></Authors>' +
+    '<Title>Test Article</Title></DocumentSummary></DocumentSummarySet></eSummaryResult>';
+
+  const firstSummary = (xml: string) =>
+    ensureArray(parseESummaryXml(xml).DocumentSummarySet?.DocumentSummary)[0];
+
+  it('omits authtype entirely when the record carries no AuthType', () => {
+    const summary = firstSummary(NO_AUTHTYPE_XML);
+    if (!summary) throw new Error('fixture did not parse');
+
+    const authors = parseESummaryAuthorsFromDocumentSummary(summary);
+
+    expect(authors).toEqual([{ name: 'Smith J' }]);
+    expect(authors[0]).not.toHaveProperty('authtype');
+    expect(authors[0]).not.toHaveProperty('clusterid');
+  });
+
+  it('keeps an AuthType the record does carry, and drops an empty ClusterID', () => {
+    // Every author in the GeneReviews summary carries `<AuthType>` and an empty
+    // `<ClusterID/>` — a field present with no value is the same absence.
+    const summary = firstSummary(BOOK_ESUMMARY_XML);
+    if (!summary) throw new Error('fixture did not parse');
+
+    const authors = parseESummaryAuthorsFromDocumentSummary(summary);
+
+    expect(authors[0]).toEqual({ name: 'Adam MP', authtype: 'Editor' });
+    expect(authors.at(-1)).toEqual({ name: 'Pal T', authtype: 'Author' });
+  });
+
+  it('still splits editors from authors on the AuthType it kept', async () => {
+    const summaries = await extractBriefSummaries(parseESummaryXml(BOOK_ESUMMARY_XML));
+
+    expect(summaries[0]?.editors).toEqual([
+      'Adam MP',
+      'Bick S',
+      'Mirzaa GM',
+      'Wallace SE',
+      'Amemiya A',
+    ]);
+    expect(summaries[0]?.authorNames).toEqual(['Petrucelli N', 'Daly MB', 'Pal T']);
   });
 });

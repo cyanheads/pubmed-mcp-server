@@ -17,7 +17,7 @@ import type {
   ESummaryAuthor as XmlESummaryAuthor,
   XmlESummaryAuthorRaw,
 } from '../types.js';
-import { ensureArray, getAttribute, getText } from './xml-helpers.js';
+import { ensureArray, getAttribute, getOptionalText, getText } from './xml-helpers.js';
 
 /**
  * Formats an array of ESummary authors into a string.
@@ -142,7 +142,16 @@ function getArticleIdValue(id: ESummaryArticleId): unknown {
   return id.value ?? id.Value;
 }
 
-function parseESummaryAuthorsFromDocumentSummary(
+/**
+ * Read the contributor list of a `DocumentSummarySet` summary.
+ *
+ * `authtype` and `clusterid` are omitted rather than written as empty strings
+ * when the record carries neither — NCBI ships `<ClusterID/>` on every author of
+ * a Bookshelf summary, and a field present with no value is the same absence to
+ * every consumer. (#137)
+ * @internal exported for direct unit tests
+ */
+export function parseESummaryAuthorsFromDocumentSummary(
   docSummary: ESummaryDocumentSummary,
 ): XmlESummaryAuthor[] {
   const authorsProp = docSummary.Authors;
@@ -165,8 +174,8 @@ function parseESummaryAuthorsFromDocumentSummary(
         name = getText(authorObj.Name || authorObj.name, '');
       }
 
-      authtype = getText(authorObj.AuthType || authorObj.authtype, undefined);
-      clusterid = getText(authorObj.ClusterId || authorObj.clusterid, undefined);
+      authtype = getOptionalText(authorObj.AuthType || authorObj.authtype);
+      clusterid = getOptionalText(authorObj.ClusterId || authorObj.clusterid);
 
       if (!name) {
         const authInputString = JSON.stringify(authorObj);
@@ -295,16 +304,16 @@ function parseSingleDocumentSummary(docSummary: ESummaryDocumentSummary): Omit<
         );
   }
 
-  let doiValue: string | undefined = getText(docSummary.DOI, undefined);
+  let doiValue = getOptionalText(docSummary.DOI);
   if (!doiValue) {
     const doiEntry = idsArray.find((id) => getArticleIdType(id) === 'doi');
     if (doiEntry) {
-      doiValue = getText(getArticleIdValue(doiEntry), undefined);
+      doiValue = getOptionalText(getArticleIdValue(doiEntry));
     }
   }
 
   const pmcEntry = idsArray.find((id) => getArticleIdType(id) === 'pmc');
-  const pmcIdValue = pmcEntry ? getText(getArticleIdValue(pmcEntry), undefined) : undefined;
+  const pmcIdValue = pmcEntry ? getOptionalText(getArticleIdValue(pmcEntry)) : undefined;
 
   const title = getText(docSummary.Title);
   const source =

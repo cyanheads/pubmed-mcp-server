@@ -6,7 +6,7 @@
 
 import { resource, z } from '@cyanheads/mcp-ts-core';
 import { getNcbiService } from '@/services/ncbi/ncbi-service.js';
-import { ensureArray, getText } from '@/services/ncbi/parsing/xml-helpers.js';
+import { ensureArray, getOptionalText, getText } from '@/services/ncbi/parsing/xml-helpers.js';
 
 const FieldSchema = z
   .object({
@@ -44,9 +44,9 @@ export const databaseInfoResource = resource('pubmed://database/info', {
     const dbInfo = (eInfoResult.DbInfo ?? eInfoResult) as Record<string, unknown>;
 
     const dbName = getText(dbInfo.DbName, 'pubmed');
-    const description = getText(dbInfo.Description) || undefined;
-    const count = getText(dbInfo.Count) || undefined;
-    const lastUpdate = getText(dbInfo.LastUpdate) || undefined;
+    const description = getOptionalText(dbInfo.Description);
+    const count = getOptionalText(dbInfo.Count);
+    const lastUpdate = getOptionalText(dbInfo.LastUpdate);
 
     const fieldListContainer = dbInfo.FieldList as Record<string, unknown> | undefined;
     let fields: z.infer<typeof FieldSchema>[] | undefined;
@@ -55,8 +55,8 @@ export const databaseInfoResource = resource('pubmed://database/info', {
       const rawFields = ensureArray(fieldListContainer.Field) as Record<string, unknown>[];
       fields = rawFields.map((f) => ({
         name: getText(f.Name),
-        fullName: getText(f.FullName) || undefined,
-        description: getText(f.Description) || undefined,
+        fullName: getOptionalText(f.FullName),
+        description: getOptionalText(f.Description),
       }));
     }
 

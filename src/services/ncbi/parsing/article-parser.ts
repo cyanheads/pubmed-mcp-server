@@ -39,7 +39,13 @@ import type {
   XmlPubmedBookArticle,
 } from '../types.js';
 import { decodeHtmlEntities } from './text-helpers.js';
-import { ensureArray, getAttribute, getText } from './xml-helpers.js';
+import {
+  ensureArray,
+  getAttribute,
+  getOptionalAttribute,
+  getOptionalText,
+  getText,
+} from './xml-helpers.js';
 
 /**
  * Result of extracting authors with deduplicated affiliations.
@@ -128,11 +134,11 @@ function extractELocationId(articleXml?: XmlArticle): { value: string; type?: st
     (eloc) =>
       getAttribute(eloc, 'EIdType') !== 'doi' &&
       getAttribute(eloc, 'ValidYN') !== 'N' &&
-      getText(eloc, undefined),
+      getOptionalText(eloc),
   );
   const locator = candidates.find((eloc) => getAttribute(eloc, 'ValidYN') === 'Y') ?? candidates[0];
   if (!locator) return;
-  const type = getAttribute(locator, 'EIdType', undefined);
+  const type = getOptionalAttribute(locator, 'EIdType');
   return { value: getText(locator), ...(type && { type }) };
 }
 
@@ -472,19 +478,10 @@ export function parseFullArticle(
 
 // ─── Bookshelf records (PubmedBookArticle) ──────────────────────────────────
 
-/**
- * Text of an XML element, with an absent or empty element reported as absent.
- * `getText(x, undefined)` cannot do this: `undefined` triggers the parameter's
- * own `''` default, so it returns the empty string for a missing element.
- */
-function optionalText(element: unknown): string | undefined {
-  return getText(element) || undefined;
-}
-
 /** Year text from a `PubDate`-shaped element, falling back to a `MedlineDate` span. */
 function extractYear(dateXml?: XmlPubDate): string | undefined {
   if (!dateXml) return;
-  return optionalText(dateXml.Year) ?? getText(dateXml.MedlineDate).match(/\d{4}/)?.[0];
+  return getOptionalText(dateXml.Year) ?? getText(dateXml.MedlineDate).match(/\d{4}/)?.[0];
 }
 
 /** First `ArticleId` of the given `IdType`, or undefined. */
@@ -494,7 +491,7 @@ function findArticleId(
 ): string | undefined {
   for (const articleId of ensureArray(idListXml?.ArticleId)) {
     if (getAttribute(articleId, 'IdType') === idType) {
-      const value = optionalText(articleId);
+      const value = getOptionalText(articleId);
       if (value) return value;
     }
   }
@@ -536,22 +533,22 @@ export function extractBookInfo(bookDocumentXml: XmlBookDocument): ParsedBookInf
   );
 
   const isbns = ensureArray(book?.Isbn)
-    .map(optionalText)
+    .map(getOptionalText)
     .filter((isbn): isbn is string => isbn !== undefined);
   const bookDoi = ensureArray(book?.ELocationID)
     .filter((eloc) => getAttribute(eloc, 'EIdType') === 'doi')
-    .map(optionalText)
+    .map(getOptionalText)
     .find(Boolean);
 
-  const title = optionalText(book?.BookTitle);
-  const publisher = optionalText(book?.Publisher?.PublisherName);
-  const publisherLocation = optionalText(book?.Publisher?.PublisherLocation);
+  const title = getOptionalText(book?.BookTitle);
+  const publisher = getOptionalText(book?.Publisher?.PublisherName);
+  const publisherLocation = getOptionalText(book?.Publisher?.PublisherLocation);
   const pubDate = extractYear(book?.PubDate);
   const beginningDate = extractYear(book?.BeginningDate);
   const endingDate = extractYear(book?.EndingDate);
-  const medium = optionalText(book?.Medium);
-  const edition = optionalText(book?.Edition);
-  const collectionTitle = optionalText(book?.CollectionTitle);
+  const medium = getOptionalText(book?.Medium);
+  const edition = getOptionalText(book?.Edition);
+  const collectionTitle = getOptionalText(book?.CollectionTitle);
   const accession = findArticleId(bookDocumentXml.ArticleIdList, 'bookaccession');
 
   return {
@@ -590,7 +587,7 @@ export function parseFullBookArticle(xmlBookArticle: XmlPubmedBookArticle): Pars
   const bookDocument = xmlBookArticle.BookDocument;
   const book = extractBookInfo(bookDocument);
 
-  const chapterTitle = optionalText(bookDocument?.ArticleTitle);
+  const chapterTitle = getOptionalText(bookDocument?.ArticleTitle);
   const bookAuthorLists = ensureArray(bookDocument?.Book?.AuthorList).filter(
     (list) => getAttribute(list, 'Type') !== 'editors',
   );
