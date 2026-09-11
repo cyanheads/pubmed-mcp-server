@@ -194,3 +194,32 @@ describe('escapeMarkdownTableCell', () => {
     expect(escapeMarkdownTableCell('')).toBe('');
   });
 });
+
+describe('escapeMarkdownInline over asset fields (issue #130)', () => {
+  it('neutralizes a caption that would otherwise form a link and emphasis', () => {
+    const caption = 'Effect of *treatment* on [outcome](https://evil.test)';
+    const escaped = escapeMarkdownInline(caption);
+
+    expect(escaped).toBe('Effect of \\*treatment\\* on \\[outcome\\](https://evil.test)');
+  });
+
+  it('neutralizes a bracket pair and a tag-shaped angle bracket in an href', () => {
+    // The `href` is upstream text, not a value this server composes, so it gets
+    // the same treatment as any other interpolated string.
+    expect(escapeMarkdownInline('bin/g001[1].jpg <img src=x>')).toBe(
+      'bin/g001\\[1\\].jpg \\<img src=x>',
+    );
+  });
+
+  it('leaves a deposit filename legible — its underscores are intraword', () => {
+    // `12345_2024_MOESM1_ESM.pdf` is the shape supplementary pointers arrive in.
+    // Every underscore is flanked by alphanumerics, so none can open emphasis
+    // and spending a backslash on each would only cost the reader.
+    expect(escapeMarkdownInline('12345_2024_MOESM1_ESM.pdf')).toBe('12345_2024_MOESM1_ESM.pdf');
+    expect(escapeMarkdownInline('MOL2-20-1253-g001.jpg')).toBe('MOL2-20-1253-g001.jpg');
+  });
+
+  it('collapses a multi-line caption so it cannot escape its meta line', () => {
+    expect(escapeMarkdownInline('Panel A\nPanel B')).toBe('Panel A Panel B');
+  });
+});

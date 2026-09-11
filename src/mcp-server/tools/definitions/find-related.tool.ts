@@ -20,6 +20,10 @@ import { extractBriefSummaries } from '@/services/ncbi/parsing/esummary-parser.j
 import { ensureArray } from '@/services/ncbi/parsing/xml-helpers.js';
 import type { ParsedBriefSummary } from '@/services/ncbi/types.js';
 import { getOpenAlexServiceOptional } from '@/services/openalex/openalex-service.js';
+import {
+  OPENALEX_MAX_UPSTREAM_REQUESTS,
+  type OpenAlexRelatedResult,
+} from '@/services/openalex/types.js';
 import { conceptMeta, EDAM_DATA_RETRIEVAL, SCHEMA_SCHOLARLY_ARTICLE } from './_concepts.js';
 import { pmidStringSchema } from './_schemas.js';
 import { escapeMarkdownInline } from './_text.js';
@@ -72,9 +76,9 @@ const UNCLASSIFIED_ERROR = 'unclassified_error';
  */
 interface ProviderResult {
   allPmids: string[];
-  /** Upstream rows in the served page that carry no PubMed PMID (Europe PMC). */
+  /** Rows fetched for this request that carry no PubMed PMID (Europe PMC, OpenAlex). */
   droppedNoPmid?: number;
-  /** Europe PMC paging stopped at its page cap before the window was covered. */
+  /** The provider's paging stopped at its cap before the window was covered. */
   reachCapped?: boolean;
   source: ProviderName;
   totalCount: number;
@@ -86,6 +90,26 @@ interface ProviderAttempt {
   provider: ProviderName;
   reason: string;
 }
+
+/**
+ * A reference-coverage fallback that threw instead of answering. Carries the
+ * declared reason and whether a retry can reach it — never the upstream
+ * message, which can hold URLs and request detail this success payload has no
+ * business publishing.
+ */
+interface CoverageFailure {
+  provider: 'europepmc' | 'openalex';
+  reason: string;
+  retryable: boolean;
+}
+
+/** Declared retryability per reason the two coverage fallbacks can throw. */
+const RETRYABLE_BY_REASON = new Map<string, boolean>(
+  [...EUROPEPMC_SERVICE_ERRORS, ...OPENALEX_SERVICE_ERRORS].map((entry) => [
+    entry.reason,
+    entry.retryable,
+  ]),
+);
 
 // ─── NCBI provider ────────────────────────────────────────────────────────────
 
@@ -219,7 +243,7 @@ async function openAlexProvider(
     });
   }
 
-  let result: { pmids: string[]; totalCount: number };
+  let result: OpenAlexRelatedResult;
   switch (relationship) {
     case 'similar':
       result = await oa.similar(pmid, maxNeeded, signal);
@@ -232,7 +256,62 @@ async function openAlexProvider(
       break;
   }
 
-  return { allPmids: result.pmids, totalCount: result.totalCount, source: 'openalex' };
+  return {
+    allPmids: result.pmids,
+    totalCount: result.totalCount,
+    source: 'openalex',
+    droppedNoPmid: result.droppedNoPmid,
+    reachCapped: result.reachCapped,
+  };
+}
+
+/**
+ * Record a coverage-fallback failure with its declared reason. A provider off by
+ * configuration never recovers on retry; an unclassified transport failure is
+ * treated as transient, matching how the fully-failed chain reports one.
+ */
+function coverageFailureFrom(provider: 'europepmc' | 'openalex', err: unknown): CoverageFailure {
+  const { reason } = attemptFrom(provider, err);
+  const retryable =
+    reason === PROVIDER_DISABLED ? false : (RETRYABLE_BY_REASON.get(reason) ?? true);
+  return { provider, reason, retryable };
+}
+
+/** "A", "A or B", "A, B, or C" — the providers a notice may claim answered. */
+function joinWithOr(labels: readonly string[]): string {
+  if (labels.length <= 1) return labels[0] ?? '';
+  if (labels.length === 2) return `${labels[0]} or ${labels[1]}`;
+  return `${labels.slice(0, -1).join(', ')}, or ${labels[labels.length - 1]}`;
+}
+
+/** One provider outcome per entry: `Europe PMC (provider_disabled), OpenAlex (openalex_unreachable)`. */
+function summarizeOutcomes(entries: readonly { provider: ProviderName; reason: string }[]): string {
+  return entries.map((e) => `${PROVIDER_LABELS[e.provider]} (${e.reason})`).join(', ');
+}
+
+/**
+ * Trailing clause naming the providers configuration turned off, which no retry
+ * brings back. Empty when every entry is a transient failure.
+ */
+function disabledClause(entries: readonly { provider: ProviderName; reason: string }[]): string {
+  const disabled = entries
+    .filter((e) => e.reason === PROVIDER_DISABLED)
+    .map((e) => PROVIDER_LABELS[e.provider]);
+  if (disabled.length === 0) return '';
+  return ` ${disabled.join(' and ')} ${disabled.length > 1 ? 'are' : 'is'} turned off by server configuration and will not recover on retry.`;
+}
+
+/**
+ * Disclosure for a `references` answer whose coverage check came back short.
+ * Names each provider that failed and its reason, separates a
+ * configuration-disabled provider from the transient failures worth retrying,
+ * and never describes a failed provider as having answered.
+ */
+function coverageIncompleteNotice(failures: readonly CoverageFailure[]): string {
+  const retryClause = failures.some((f) => f.retryable)
+    ? ' Retry after a brief delay to complete the coverage check.'
+    : '';
+  return `Reference coverage could not be fully checked — ${summarizeOutcomes(failures)} did not answer.${retryClause}${disabledClause(failures)}`;
 }
 
 /** Compact, log-safe description of an unknown thrown value. */
@@ -260,14 +339,7 @@ function attemptFrom(provider: ProviderName, err: unknown): ProviderAttempt {
  * the transient failures worth retrying.
  */
 function allProvidersFailedHint(attempts: readonly ProviderAttempt[]): string {
-  const summary = attempts.map((a) => `${PROVIDER_LABELS[a.provider]} (${a.reason})`).join(', ');
-  const disabled = attempts
-    .filter((a) => a.reason === PROVIDER_DISABLED)
-    .map((a) => PROVIDER_LABELS[a.provider]);
-  const disabledClause = disabled.length
-    ? ` ${disabled.join(' and ')} ${disabled.length > 1 ? 'are' : 'is'} turned off by server configuration and will not recover on retry.`
-    : '';
-  return `Providers attempted: ${summary}. Retry the transient failures after a brief delay.${disabledClause}`;
+  return `Providers attempted: ${summarizeOutcomes(attempts)}. Retry the transient failures after a brief delay.${disabledClause(attempts)}`;
 }
 
 // ─── Tool Definition ─────────────────────────────────────────────────────────
@@ -339,7 +411,7 @@ export const findRelatedTool = tool('pubmed_find_related', {
     totalCount: z
       .number()
       .describe(
-        'Total related articles found before windowing. A Europe PMC total may shrink to the PubMed-addressable count once a request window covers the whole upstream set, since rows without a PubMed PMID cannot be returned.',
+        'Total related articles found before windowing. A Europe PMC or OpenAlex total may shrink to the PubMed-addressable count once a request window covers the whole upstream set, since rows without a PubMed PMID cannot be returned.',
       ),
     source: z
       .enum(['ncbi', 'europepmc', 'openalex'])
@@ -348,13 +420,34 @@ export const findRelatedTool = tool('pubmed_find_related', {
       .string()
       .optional()
       .describe(
-        'Guidance when results are empty, a fallback provider answered, offset overshot, or Europe PMC rows were excluded for carrying no PubMed PMID. Absent on a clean NCBI result page.',
+        'Guidance when results are empty, a fallback provider answered, offset overshot, a fallback provider could not be reached, or upstream rows were excluded for carrying no PubMed PMID. Absent on a clean NCBI result page.',
+      ),
+    coverageFailures: z
+      .array(
+        z
+          .object({
+            provider: z
+              .enum(['europepmc', 'openalex'])
+              .describe('Reference-coverage provider that failed'),
+            reason: z
+              .string()
+              .describe('Declared failure reason, e.g. europepmc_unreachable or provider_disabled'),
+            retryable: z.boolean().describe('Whether a retry can reach this provider'),
+          })
+          .describe('One coverage provider that could not be checked'),
+      )
+      .optional()
+      .describe(
+        'Reference-coverage fallbacks that failed instead of answering, so the reference set is unverified rather than confirmed absent. Absent when every provider consulted answered.',
       ),
   },
 
   enrichmentTrailer: {
     totalCount: { label: 'Total Found' },
     source: { label: 'Source' },
+    coverageFailures: {
+      render: (value = []) => `**Coverage not checked:** ${summarizeOutcomes(value)}`,
+    },
   },
 
   async handler(input, ctx) {
@@ -381,6 +474,10 @@ export const findRelatedTool = tool('pubmed_find_related', {
     // Records WHY a non-primary provider answered, so the provenance notice can
     // distinguish an NCBI outage from references coverage for a non-PMC source.
     let fallbackKind: 'outage' | 'references_coverage' | undefined;
+    // Reference-coverage fallbacks that threw. NCBI answering successfully with
+    // an empty set is not the same fact as a provider never being reached, so a
+    // failure here is carried to the caller instead of logged and dropped.
+    const coverageFailures: CoverageFailure[] = [];
 
     // 1. NCBI (primary)
     try {
@@ -506,20 +603,43 @@ export const findRelatedTool = tool('pubmed_find_related', {
       // likely a transient NCBI issue, not a real "no references".
       if (input.relationship === 'references' && sourceSummary?.title) {
         let refFallback: ProviderResult | null = null;
-        const refAttempts: Array<() => Promise<ProviderResult>> = [
-          () => epmcProvider(input.pmid, 'references', input.offset, input.maxResults, ctx.signal),
-          () =>
-            openAlexProvider(input.pmid, 'references', input.offset + input.maxResults, ctx.signal),
+        // Providers that actually answered — the only ones a "no references"
+        // notice may claim to have checked.
+        const coverageChecked: ProviderName[] = ['ncbi'];
+        const refAttempts: Array<{
+          provider: 'europepmc' | 'openalex';
+          run: () => Promise<ProviderResult>;
+        }> = [
+          {
+            provider: 'europepmc',
+            run: () =>
+              epmcProvider(input.pmid, 'references', input.offset, input.maxResults, ctx.signal),
+          },
+          {
+            provider: 'openalex',
+            run: () =>
+              openAlexProvider(
+                input.pmid,
+                'references',
+                input.offset + input.maxResults,
+                ctx.signal,
+              ),
+          },
         ];
         for (const attempt of refAttempts) {
           try {
-            const result = await attempt();
+            const result = await attempt.run();
+            coverageChecked.push(attempt.provider);
             if (result.allPmids.length > 0) {
               refFallback = result;
               break;
             }
           } catch (err) {
-            ctx.log.warning('References fallback provider failed', { err: describeError(err) });
+            ctx.log.warning('References fallback provider failed', {
+              provider: attempt.provider,
+              err: describeError(err),
+            });
+            coverageFailures.push(coverageFailureFrom(attempt.provider, err));
           }
         }
 
@@ -529,11 +649,16 @@ export const findRelatedTool = tool('pubmed_find_related', {
         } else {
           ctx.enrich({ source: 'ncbi' });
           ctx.enrich.total(0);
+          if (coverageFailures.length > 0) ctx.enrich({ coverageFailures });
           const sourcePmcId = sourceSummary.pmcId;
+          const checked = joinWithOr(coverageChecked.map((p) => PROVIDER_LABELS[p]));
+          const noReferences = sourcePmcId
+            ? `No reference list found for PMID ${input.pmid} (PMCID ${sourcePmcId}) via ${checked}.`
+            : `No reference list available for PMID ${input.pmid} via ${checked}. Use pubmed_fetch_articles to inspect the article record, or try relationship: "similar" / "cited_by".`;
           ctx.enrich.notice(
-            sourcePmcId
-              ? `No reference list found for PMID ${input.pmid} (PMCID ${sourcePmcId}) via NCBI, Europe PMC, or OpenAlex.`
-              : `No reference list available for PMID ${input.pmid} via NCBI, Europe PMC, or OpenAlex. Use pubmed_fetch_articles to inspect the article record, or try relationship: "similar" / "cited_by".`,
+            coverageFailures.length > 0
+              ? `${noReferences} ${coverageIncompleteNotice(coverageFailures)}`
+              : noReferences,
           );
           return {
             sourcePmid: input.pmid,
@@ -560,6 +685,9 @@ export const findRelatedTool = tool('pubmed_find_related', {
     const { allPmids, totalCount, source, droppedNoPmid = 0, reachCapped = false } = providerResult;
     ctx.enrich({ source });
     ctx.enrich.total(totalCount);
+    // A provider that failed before another one answered still shapes how far
+    // this reference set was actually checked.
+    if (coverageFailures.length > 0) ctx.enrich({ coverageFailures });
 
     // For NCBI the full neighbor set is in memory; for EPMC/OpenAlex the provider
     // pre-fetched enough PMID-addressable rows to cover the window.
@@ -589,19 +717,33 @@ export const findRelatedTool = tool('pubmed_find_related', {
           : `NCBI eLink unavailable — related articles served by ${providerName} (${detail}).`,
       );
     }
-    // Europe PMC counts every upstream record, but only MED-source rows carry a
-    // PubMed PMID. Disclose the gap so an empty or short window reads as an
+    // Both fallbacks count every upstream record, but only some rows carry a
+    // PubMed PMID — Europe PMC's non-MED sources, OpenAlex works with no PubMed
+    // record. Disclose the gap so an empty or short window reads as an
     // excluded-rows effect rather than an exhausted result set.
     if (droppedNoPmid > 0) {
+      const excluded =
+        source === 'europepmc'
+          ? 'non-MED sources such as preprints'
+          : 'works OpenAlex indexes with no PubMed record';
       notices.push(
-        `Europe PMC served ${allPmids.length + droppedNoPmid} upstream rows for this request, ${droppedNoPmid} with no PubMed PMID (non-MED sources such as preprints); those rows cannot be returned here.`,
+        `${PROVIDER_LABELS[source]} served ${allPmids.length + droppedNoPmid} upstream rows for this request, ${droppedNoPmid} with no PubMed PMID (${excluded}); those rows cannot be returned here.`,
       );
     }
 
-    // The page cap bounds how far into Europe PMC's set one request can reach.
+    // The request cap bounds how far into a fallback's set one request can
+    // reach. It counts pages for Europe PMC and for OpenAlex's `cites:` filter,
+    // but OpenAlex serves `similar` and `references` from the source work's own
+    // ID list, which it resolves in batches — so the same cap names a different
+    // unit of work there.
     if (reachCapped) {
+      const cap = source === 'europepmc' ? EPMC_MAX_PAGES : OPENALEX_MAX_UPSTREAM_REQUESTS;
+      const walk =
+        source === 'europepmc' || input.relationship === 'cited_by'
+          ? `paging stopped after ${cap} pages`
+          : `ID resolution stopped after ${cap} batches`;
       notices.push(
-        `Europe PMC paging stopped after ${EPMC_MAX_PAGES} pages (${allPmids.length} PubMed-addressable rows) without reaching offset ${input.offset}; lower the offset.`,
+        `${PROVIDER_LABELS[source]} ${walk} (${allPmids.length} PubMed-addressable rows) without reaching offset ${input.offset}; lower the offset.`,
       );
     }
 

@@ -38,6 +38,7 @@ import { findAll, findOne, type JatsNodeList } from '@/services/ncbi/parsing/pmc
 import { ensureArray } from '@/services/ncbi/parsing/xml-helpers.js';
 import type {
   ParsedPmcArticle,
+  ParsedPmcAsset,
   ParsedPmcTable,
   XmlPubmedArticle,
   XmlPubmedArticleSet,
@@ -121,6 +122,7 @@ function matchedSectionTitles(sections: ParsedSection[], lowerFilter: string[]):
 }
 
 interface PmcFilterOptions {
+  includeAssets: boolean;
   includeReferences: boolean;
   includeTables: boolean;
   maxSections?: number | undefined;
@@ -196,19 +198,110 @@ function applyTableFilters(article: ParsedPmcArticle, filters: PmcFilterOptions)
   );
 }
 
+/** Anything carrying the optional asset list — the article, before or after filtering. */
+type WithAssets = { assets?: ParsedPmcAsset[] | undefined };
+
 /**
- * Apply the requested section/reference/table filters, then clamp the section
- * tree to the depth the output schema carries. All of it runs here so every path
+ * Replace an article's asset list, dropping the field entirely when nothing is
+ * left — the same rule {@link withTables} follows, and for the same reason: an
+ * empty array claims the article deposits no figures, which a filtered-to-nothing
+ * list does not mean.
+ */
+function withAssets<T extends WithAssets>(article: T, assets: ParsedPmcAsset[]): T {
+  const { assets: _replaced, ...rest } = article;
+  return (assets.length > 0 ? { ...rest, assets } : rest) as T;
+}
+
+/**
+ * The positional marker the parser leaves in section text where an asset was
+ * lifted out — `[Figure: Fig. 1]`, `[Supplementary: Table S3]`, or the bare
+ * `[Figure]` / `[Supplementary]` when the deposit carries no label.
+ *
+ * Mirrors `assetMarker` in `pmc-article-parser.ts`, which is the only producer.
+ * The two must stay byte-identical: this is what {@link stripAssetMarkers}
+ * removes, and a marker built any other way would leave the real one in place.
+ * Derived per asset rather than matched as a pattern, so prose that happens to
+ * carry a bracketed word is never touched. (#130)
+ */
+function assetMarkerText(asset: ParsedPmcAsset): string {
+  const kind = asset.assetType === 'figure' ? 'Figure' : 'Supplementary';
+  return asset.label ? `[${kind}: ${asset.label}]` : `[${kind}]`;
+}
+
+/**
+ * Remove every marker in `markers` from one text field and close the gap it
+ * leaves: trailing whitespace on a line the marker ended, and the blank line a
+ * marker that stood alone as its own block leaves behind.
+ */
+function stripAssetMarkers(text: string, markers: readonly string[]): string {
+  if (!text) return text;
+  let out = text;
+  for (const marker of markers) out = out.split(marker).join('');
+  if (out === text) return text;
+  return out
+    .split('\n')
+    .map((line) => line.replace(/[ \t]+$/, ''))
+    .join('\n')
+    .replace(/\n{3,}/g, '\n\n')
+    .trim();
+}
+
+/** Strip asset markers from a section and every subsection beneath it. */
+function sectionWithoutMarkers(section: ParsedSection, markers: readonly string[]): ParsedSection {
+  const text = stripAssetMarkers(section.text, markers);
+  const subsections = section.subsections?.map((sub) => sectionWithoutMarkers(sub, markers));
+  if (text === section.text && subsections === undefined) return section;
+  return { ...section, text, ...(subsections && { subsections }) };
+}
+
+/**
+ * Narrow the asset list to what the request asked for, mirroring {@link
+ * applyTableFilters}: `includeAssets: false` is the wholesale off switch, and an
+ * active `sections` filter keeps an asset whose named section survived while
+ * dropping one that names no section at all — a `<floats-group>` deposit — since
+ * the caller asked for named headings and it belongs to none.
+ *
+ * Where it goes beyond the table counterpart: turning assets off also removes the
+ * positional markers the parser left in the section text. The marker is the
+ * lift's anchor, and without the array to resolve it against it points at
+ * nothing. Prose-shaped blocks — lists, quotes, formulae — are section text
+ * rather than assets and this switch never touches them. (#130)
+ */
+function applyAssetFilters(article: ParsedPmcArticle, filters: PmcFilterOptions): ParsedPmcArticle {
+  const assets = article.assets;
+  if (!assets?.length) return article;
+
+  if (!filters.includeAssets) {
+    const markers = assets.map(assetMarkerText);
+    return withAssets(
+      { ...article, sections: article.sections.map((s) => sectionWithoutMarkers(s, markers)) },
+      [],
+    );
+  }
+  if (!filters.sections?.length) return article;
+
+  const surviving = matchedSectionTitles(article.sections, filters.sections.map(lowerCase));
+  return withAssets(
+    article,
+    assets.filter((a) => a.sectionTitle !== undefined && surviving.has(a.sectionTitle)),
+  );
+}
+
+/**
+ * Apply the requested section/reference/table/asset filters, then clamp the
+ * section tree to the depth the output schema carries. All of it runs here so every path
  * producing a `pmc` article — PMC EFetch and the Europe PMC stage — shares one
  * shape, and the budget helpers downstream count the text that will actually
  * survive validation. (#112)
  *
- * Order is load-bearing. Tables are matched against the section tree *after*
- * `filterSections` and the `maxSections` slice, so they narrow with exactly what
- * the response returns, and *before* `clampSectionDepth`, which folds sections
- * past {@link MAX_SECTION_DEPTH} into a parent's text — their titles vanish from
- * the output while a table still names them, so a title set built after the
- * clamp would drop tables that should have survived. (#111)
+ * Order is load-bearing. Tables and assets are matched against the section tree
+ * *after* `filterSections` and the `maxSections` slice, so they narrow with
+ * exactly what the response returns, and *before* `clampSectionDepth`, which
+ * folds sections past {@link MAX_SECTION_DEPTH} into a parent's text — their
+ * titles vanish from the output while a table or figure still names them, so a
+ * title set built after the clamp would drop entries that should have survived.
+ * Stripping the asset markers also has to precede the clamp, or a marker in a
+ * folded-away section survives in the text it was folded into. (#111, #130)
  */
 function applyPmcFilters(article: ParsedPmcArticle, filters: PmcFilterOptions): ParsedPmcArticle {
   let out = article;
@@ -223,6 +316,7 @@ function applyPmcFilters(article: ParsedPmcArticle, filters: PmcFilterOptions): 
     out = rest as ParsedPmcArticle;
   }
   out = applyTableFilters(out, filters);
+  out = applyAssetFilters(out, filters);
   return { ...out, sections: clampSectionDepth(out.sections) };
 }
 
@@ -420,6 +514,51 @@ const TableSchema = z
   })
   .describe('One table from the article, with its cells, caption, and owning section');
 
+/**
+ * One `<fig>` or `<supplementary-material>`, hung off the article beside
+ * {@link TableSchema} and for the same reason: a sixth of them sit in
+ * `<floats-group>`, `<back>` or an appendix with no `<sec>` to attach to, so an
+ * asset inside a section names it in {@link sectionTitle} rather than being
+ * placed by position.
+ *
+ * Scalar leaves only. `articles[]` → the article union → `assets[]` → a leaf is
+ * six of the eight hops the `format-parity` sentinel walker allows; a nested
+ * object here (a `files[]` list, say) spends the remaining two and leaves nothing
+ * for a later field. Re-run `bun run lint:mcp` after any change to this shape.
+ *
+ * There is no media-type field and no per-asset unextractable reason: `mimetype`
+ * appears on no observed deposit, and an uncaptioned supplement is still fully
+ * described by its `id` and `href`, unlike a table that promises cells and
+ * carries none. (#130)
+ */
+const AssetSchema = z
+  .object({
+    assetType: z
+      .enum(['figure', 'supplementary-material'])
+      .describe(
+        'Which captioned element this came from — `figure` for a `<fig>`, `supplementary-material` for a `<supplementary-material>` deposit',
+      ),
+    label: z.string().optional().describe('Display label as printed, e.g. `Fig. 1`'),
+    caption: z.string().optional().describe('Caption text, with the label excluded'),
+    id: z
+      .string()
+      .optional()
+      .describe('JATS `id` attribute — the target body-text cross-references point at'),
+    sectionTitle: z
+      .string()
+      .optional()
+      .describe(
+        'Title of the innermost section enclosing the asset, wherever that section sits — body, `<back>` matter, or an appendix all count. Absent for an asset inside no section at all, such as a `<floats-group>` deposit.',
+      ),
+    href: z
+      .string()
+      .optional()
+      .describe(
+        'The `<graphic>`/`<media>` `@xlink:href` exactly as deposited — a pointer into the PMC deposit (`MOL2-20-1253-g001.jpg`), not a fetchable URL. No absolute form of it resolves; read the rendered article at `pmcUrl` instead. Absent when the deposit names no file.',
+      ),
+  })
+  .describe('One figure or supplementary-material item, with its caption, pointer, and section');
+
 const PublicationDateSchema = z
   .object({
     year: z.string().optional().describe('Publication year'),
@@ -467,6 +606,12 @@ const PmcArticleSchema = z
       .optional()
       .describe(
         'Every `<table-wrap>` the article carries, in document order — from the body and from `<floats-group>`, `<back>` and appendices alike. Absent when the article deposits none, when `includeTables` is false, or when a `sections` filter left none standing.',
+      ),
+    assets: z
+      .array(AssetSchema)
+      .optional()
+      .describe(
+        'Every `<fig>` and `<supplementary-material>` the article carries, in document order — from the body and from `<floats-group>`, `<back>` and appendices alike. Each one lifted from the body leaves a `[Figure: <label>]` or `[Supplementary: <label>]` marker at its position in the section text, so reading order survives the lift. Absent when the article deposits none, when `includeAssets` is false, or when a `sections` filter left none standing.',
       ),
     references: z.array(ReferenceSchema).optional().describe('Reference list'),
     epmcId: z
@@ -550,13 +695,14 @@ const UnavailableReasonSchema = z
     'no-epmc-fulltext',
     'no-body',
     'no-doi',
+    'doi-lookup-failed',
     'no-oa',
     'fetch-failed',
     'parse-failed',
     'service-error',
   ])
   .describe(
-    'Why no full text was returned — the most specific signal any tier that answered reported. not-found: upstream returned no record for this ID. no-pmc-fallback-disabled: every tier was skipped (`triedTiers` is all `not-attempted`) — typically because EPMC (`EUROPEPMC_ENABLED`) and Unpaywall (`UNPAYWALL_EMAIL`) are not configured. no-epmc-fulltext: EPMC indexed the record but publishes no fullTextXML. no-body: the record was retrieved but carries front matter and abstract only, with no body sections — use `pubmed_fetch_articles` for the metadata. no-doi: no DOI to query Unpaywall. no-oa: Unpaywall has no OA copy. fetch-failed: download failed. parse-failed: extraction empty. service-error: upstream server failure (threw, timed out, or returned malformed data). A reason never means the chain ran to completion — read `unqueriedTiers` for that.',
+    'Why no full text was returned — the most specific signal any tier that answered reported. not-found: upstream returned no record for this ID. no-pmc-fallback-disabled: every tier was skipped (`triedTiers` is all `not-attempted`) — typically because EPMC (`EUROPEPMC_ENABLED`) and Unpaywall (`UNPAYWALL_EMAIL`) are not configured. no-epmc-fulltext: EPMC indexed the record but publishes no fullTextXML. no-body: the record was retrieved but carries front matter and abstract only, with no body sections — use `pubmed_fetch_articles` for the metadata. no-doi: the DOI lookup ran and this record has none, so Unpaywall could not be queried. doi-lookup-failed: the DOI lookup itself errored, so whether a DOI exists is unknown and Unpaywall was never reached — retry the request; unlike no-doi this is a transient failure, not a settled answer. no-oa: Unpaywall has no OA copy. fetch-failed: download failed. parse-failed: extraction empty. service-error: upstream server failure (threw, timed out, or returned malformed data). A reason never means the chain ran to completion — read `unqueriedTiers` for that.',
   );
 
 const UnqueriedTierSchema = z
@@ -570,13 +716,14 @@ const TierOutcomeSchema = z
     'no-fulltext',
     'no-body',
     'no-doi',
+    'doi-lookup-failed',
     'no-oa',
     'fetch-failed',
     'parse-failed',
     'service-error',
   ])
   .describe(
-    'Per-tier outcome. not-attempted: tier was skipped. miss: tier returned no record. no-fulltext: EPMC indexed the record but publishes no fullTextXML. no-body: the tier returned a record with front matter and abstract but no body sections, so the chain continued. no-doi: no DOI to query Unpaywall. no-oa: Unpaywall reports no open-access copy. fetch-failed: OA copy download failed. parse-failed: extraction produced empty content. service-error: tier service threw.',
+    'Per-tier outcome. not-attempted: tier was skipped. miss: tier returned no record. no-fulltext: EPMC indexed the record but publishes no fullTextXML. no-body: the tier returned a record with front matter and abstract but no body sections, so the chain continued. no-doi: the DOI lookup ran and this record has none, so Unpaywall could not be queried. doi-lookup-failed: the DOI lookup itself errored, so whether a DOI exists is unknown and Unpaywall was never reached — retry the request. no-oa: Unpaywall reports no open-access copy. fetch-failed: OA copy download failed. parse-failed: extraction produced empty content. service-error: tier service threw.',
   );
 
 const TriedTierSchema = z
@@ -661,6 +808,18 @@ const TruncatedArticleSchema = z
       .describe(
         "The dropped tables by name, in document order — each table's label, else its `id`, else `table <n>` for its position in the article. Names the tables a bare count only hints at, the way `deferred.ids` names deferred articles. Every table from the first that did not fit onward is here: admission stops at that table rather than skipping ahead to a smaller one, so these are contiguous. Absent when none were dropped.",
       ),
+    omittedAssets: z
+      .number()
+      .optional()
+      .describe(
+        'Figures and supplementary items this article dropped whole because the budget left no room once sections and tables were served. An asset is never returned with a truncated caption, so it is either returned complete or counted here. Absent when none were dropped.',
+      ),
+    omittedAssetNames: z
+      .array(z.string())
+      .optional()
+      .describe(
+        "The dropped assets by name, in document order — each asset's label, else its `id`, else `asset <n>` for its position in the article. Contiguous for the same reason `omittedTableNames` is: admission stops at the first asset that did not fit rather than skipping ahead to a smaller one. Absent when none were dropped.",
+      ),
   })
   .describe('Character accounting for one article the budget shortened');
 
@@ -690,6 +849,12 @@ const TruncationSchema = z
       .optional()
       .describe(
         'Tables dropped whole across every budgeted article, because the budget left no room once body sections were served. Absent when none were dropped. Re-request the affected articles with a higher `maxCharacters`, or with `sections` narrowed, to receive them.',
+      ),
+    omittedAssets: z
+      .number()
+      .optional()
+      .describe(
+        'Figures and supplementary items dropped whole across every budgeted article, because the budget left no room once body sections and tables were served. Absent when none were dropped. Re-request the affected articles with a higher `maxCharacters`, or with `sections` narrowed, to receive them.',
       ),
     articles: z
       .array(TruncatedArticleSchema)
@@ -779,37 +944,43 @@ function tableCharacters(table: ParsedPmcTable): number {
 }
 
 /**
- * Admit tables in document order until the allowance is spent, then drop the
- * rest whole and name them.
+ * Characters an asset costs the budget: the text it carries — label, caption,
+ * and the `href` pointer. Positional metadata is excluded, exactly as {@link
+ * tableCharacters} excludes `sectionTitle` and `id`: it places the asset rather
+ * than being content the caller asked for. An asset is admitted or dropped
+ * whole — a caption cut in half is a caption that says something else — so there
+ * is no partial measure to take. (#130)
+ */
+function assetCharacters(asset: ParsedPmcAsset): number {
+  return totalLength([asset.label, asset.caption, asset.href]);
+}
+
+/**
+ * Admit tables, then assets, in document order until the allowance is spent,
+ * then drop the rest whole and name them. The split is {@link fitWholeItems}'s
+ * prefix cut, the same one `maxResponseCharacters` applies to whole articles.
  *
- * Admission stops at the first table that does not fit rather than skipping past
+ * Admission stops at the first entry that does not fit rather than skipping past
  * it to a smaller one further down: the returned set stays a document-order
  * prefix, so a caller reading it knows where the response stopped instead of
- * receiving a late table with nothing saying the earlier ones exist. A table
- * that does not fit is never cut either — half a grid reads as a complete one
+ * receiving a late entry with nothing saying the earlier ones exist. An entry
+ * that does not fit is never cut either — half a grid reads as a complete table
  * carrying values that were never deposited, the defect the table extraction
- * exists to fix. Both mirror how `maxResponseCharacters` defers a whole article
- * rather than half-populating it. (#111)
+ * exists to fix, and half a caption says something the deposit does not.
+ * (#111, #130)
  */
-function fitTables(
-  tables: readonly ParsedPmcTable[],
+function fitWholeNamed<T>(
+  items: readonly T[],
   allowance: number,
-): { kept: ParsedPmcTable[]; omittedNames: string[]; spent: number } {
-  const kept: ParsedPmcTable[] = [];
-  let spent = 0;
-  for (const [index, table] of tables.entries()) {
-    const size = tableCharacters(table);
-    if (spent + size > allowance) {
-      return {
-        kept,
-        omittedNames: tables.slice(index).map((t, i) => tableDisplayName(t, index + i)),
-        spent,
-      };
-    }
-    kept.push(table);
-    spent += size;
-  }
-  return { kept, omittedNames: [], spent };
+  measure: (item: T) => number,
+  name: (item: T, index: number) => string,
+): { kept: T[]; omittedNames: string[]; spent: number } {
+  const fit = fitWholeItems(items, allowance, measure);
+  return {
+    kept: fit.kept,
+    omittedNames: fit.deferred.map((item, i) => name(item, fit.kept.length + i)),
+    spent: fit.keptCharacters,
+  };
 }
 
 /**
@@ -914,11 +1085,11 @@ function allotSectionBudgets(sizes: number[], budget: BudgetOptions): number[] {
  * or cut — the budget spends on body text and table content, keeping every
  * article citable.
  *
- * Body sections are served first and tables spend what `maxCharacters` leaves,
- * in document order: a table that does not fit is dropped whole and counted,
- * never truncated into a partial grid. With no `maxCharacters` — a bare
- * `maxCharactersPerSection` request — nothing bounds the tables and every one is
- * kept. (#111)
+ * Body sections are served first, then tables, then assets, each spending what
+ * `maxCharacters` has left, in document order: an item that does not fit is
+ * dropped whole and counted, never truncated into a partial grid or a caption cut
+ * short. With no `maxCharacters` — a bare `maxCharactersPerSection` request —
+ * nothing bounds either list and every entry is kept. (#111, #130)
  *
  * Returns the article untouched (same object identity) when no budget was
  * requested or nothing exceeded it. A section left with zero characters is
@@ -926,18 +1097,26 @@ function allotSectionBudgets(sizes: number[], budget: BudgetOptions): number[] {
  * heading-only entry. Dropped sections still appear in the accounting so the
  * caller can see which headings exist. (#81)
  */
-function applyPmcBudget<T extends { sections: ParsedPmcArticle['sections'] } & WithTables>(
+function applyPmcBudget<
+  T extends { sections: ParsedPmcArticle['sections'] } & WithTables & WithAssets,
+>(
   article: T,
   budget: BudgetOptions,
 ): { article: T; omittedSections: number; truncation?: UnkeyedTruncation } {
   const tables = article.tables ?? [];
-  if (!budgetRequested(budget) || (article.sections.length === 0 && tables.length === 0)) {
+  const assets = article.assets ?? [];
+  if (
+    !budgetRequested(budget) ||
+    (article.sections.length === 0 && tables.length === 0 && assets.length === 0)
+  ) {
     return { article, omittedSections: 0 };
   }
 
   const sizes = article.sections.map(sectionCharacters);
   const tablesOriginal = tables.reduce((sum, table) => sum + tableCharacters(table), 0);
-  const originalCharacters = sizes.reduce((sum, size) => sum + size, 0) + tablesOriginal;
+  const assetsOriginal = assets.reduce((sum, asset) => sum + assetCharacters(asset), 0);
+  const originalCharacters =
+    sizes.reduce((sum, size) => sum + size, 0) + tablesOriginal + assetsOriginal;
   const allowances = allotSectionBudgets(sizes, budget);
 
   const kept: ParsedPmcArticle['sections'] = [];
@@ -964,22 +1143,46 @@ function applyPmcBudget<T extends { sections: ParsedPmcArticle['sections'] } & W
     kept.push(withFittedTexts(section, fitted, { i: 0 }));
   });
 
-  // Sections are served first; the tables spend whatever `maxCharacters` has
-  // left. A bare per-section budget sets no total, so nothing bounds them.
-  const tableAllowance =
+  // Sections are served first, then tables, then assets — each spending whatever
+  // `maxCharacters` has left. A bare per-section budget sets no total, so nothing
+  // bounds either list.
+  const remainingAllowance = () =>
     budget.maxCharacters === undefined
       ? Number.POSITIVE_INFINITY
       : Math.max(budget.maxCharacters - returnedCharacters, 0);
-  const fittedTables = fitTables(tables, tableAllowance);
+
+  const fittedTables = fitWholeNamed(
+    tables,
+    remainingAllowance(),
+    tableCharacters,
+    tableDisplayName,
+  );
   returnedCharacters += fittedTables.spent;
   const omittedTables = fittedTables.omittedNames.length;
 
-  if (returnedCharacters === originalCharacters && omittedSections === 0 && omittedTables === 0) {
+  const fittedAssets = fitWholeNamed(
+    assets,
+    remainingAllowance(),
+    assetCharacters,
+    assetDisplayName,
+  );
+  returnedCharacters += fittedAssets.spent;
+  const omittedAssets = fittedAssets.omittedNames.length;
+
+  if (
+    returnedCharacters === originalCharacters &&
+    omittedSections === 0 &&
+    omittedTables === 0 &&
+    omittedAssets === 0
+  ) {
     return { article, omittedSections: 0 };
   }
 
   return {
-    article: withTables({ ...article, sections: kept }, fittedTables.kept),
+    article: withAssets(
+      withTables({ ...article, sections: kept }, fittedTables.kept),
+      fittedAssets.kept,
+    ),
     omittedSections,
     truncation: {
       originalCharacters,
@@ -988,6 +1191,10 @@ function applyPmcBudget<T extends { sections: ParsedPmcArticle['sections'] } & W
       ...(omittedTables > 0 && {
         omittedTables,
         omittedTableNames: fittedTables.omittedNames,
+      }),
+      ...(omittedAssets > 0 && {
+        omittedAssets,
+        omittedAssetNames: fittedAssets.omittedNames,
       }),
     },
   };
@@ -1034,6 +1241,14 @@ function tableDisplayName(
   index: number,
 ): string {
   return table.label ?? table.id ?? `table ${index + 1}`;
+}
+
+/** How an asset is named in a notice: its label, else its id, else its position. */
+function assetDisplayName(
+  asset: { id?: string | undefined; label?: string | undefined },
+  index: number,
+): string {
+  return asset.label ?? asset.id ?? `asset ${index + 1}`;
 }
 
 /**
@@ -1101,13 +1316,19 @@ function buildTruncationNotice(truncation: z.infer<typeof TruncationSchema>): st
   const omittedTables = truncation.omittedTables
     ? ` ${truncation.omittedTables} table(s) were dropped whole rather than cut mid-row: ${droppedNames.join(', ')}.`
     : '';
+  // Assets are admitted last and only whole — a caption cut in half says
+  // something the deposit does not — so name them on the same terms.
+  const droppedAssetNames = truncation.articles.flatMap((a) => a.omittedAssetNames ?? []);
+  const omittedAssets = truncation.omittedAssets
+    ? ` ${truncation.omittedAssets} figure/supplementary item(s) were dropped whole rather than returned with a shortened caption: ${droppedAssetNames.join(', ')}.`
+    : '';
   // Name only the budgets the request actually set — pointing at `maxCharacters`
   // when the caller only capped per-section sends them to a knob that is unset.
   const knobs = [
     truncation.maxCharacters !== undefined ? '`maxCharacters`' : undefined,
     truncation.maxCharactersPerSection !== undefined ? '`maxCharactersPerSection`' : undefined,
   ].filter((k): k is string => k !== undefined);
-  return `Full text was shortened to fit the requested character budget: ${truncation.returnedCharacters} of ${truncation.originalCharacters} body characters returned across ${subject} in ${truncation.mode} mode.${omitted}${omittedTables} See \`truncation\` for per-article and per-section counts, and raise ${knobs.join(' or ')} or narrow \`sections\` to retrieve more.`;
+  return `Full text was shortened to fit the requested character budget: ${truncation.returnedCharacters} of ${truncation.originalCharacters} body characters returned across ${subject} in ${truncation.mode} mode.${omitted}${omittedTables}${omittedAssets} See \`truncation\` for per-article and per-section counts, and raise ${knobs.join(' or ')} or narrow \`sections\` to retrieve more.`;
 }
 
 /**
@@ -1248,6 +1469,12 @@ export const fetchFulltextTool = tool('pubmed_fetch_fulltext', {
         .describe(
           "Include the article's tables — cells, captions, labels and footnotes. On by default because a dropped table takes its numbers with it. Table-dense articles pay for it: rendered tables typically add 12–17% to an article record and can more than double it. Set false to omit them, or cap the cost with `maxCharacters`, which drops tables it cannot fit whole. Applies to `source=pmc` results only.",
         ),
+      includeAssets: z
+        .boolean()
+        .default(true)
+        .describe(
+          "Include the article's figures and supplementary material — `assets[]`, each with its label, caption, enclosing section and deposit pointer. On by default because it is cheaper than tables: a median asset-bearing article grows about 10%, and the body prose already refers to these by label. Set false to omit them, which also removes the `[Figure: …]` / `[Supplementary: …]` markers from the section text, since without the array they point at nothing. Prose-shaped blocks — lists, definition lists, block quotes, boxed text, preformatted blocks, displayed formulae — are section text rather than assets and this switch never affects them. Applies to `source=pmc` results only.",
+        ),
       maxSections: z
         .number()
         .int()
@@ -1259,7 +1486,7 @@ export const fetchFulltextTool = tool('pubmed_fetch_fulltext', {
         .array(z.string())
         .optional()
         .describe(
-          'Filter to specific sections by title (e.g. ["Introduction", "Methods", "Results", "Discussion"]). A term matches a section or subsection title at any nesting depth, case-insensitively, as a substring — "resul" matches "Results". A section whose own title matches is returned whole; one kept only because a nested subsection matched keeps its heading as a breadcrumb, with its own text cleared and only the matching branch beneath it. Tables narrow with the filter: one whose section did not survive, or that names no section, is dropped. Applies to `source=pmc` results only.',
+          'Filter to specific sections by title (e.g. ["Introduction", "Methods", "Results", "Discussion"]). A term matches a section or subsection title at any nesting depth, case-insensitively, as a substring — "resul" matches "Results". A section whose own title matches is returned whole; one kept only because a nested subsection matched keeps its heading as a breadcrumb, with its own text cleared and only the matching branch beneath it. Tables and assets narrow with the filter: one whose section did not survive, or that names no section, is dropped. Applies to `source=pmc` results only.',
         ),
       maxCharacters: z
         .number()
@@ -1268,7 +1495,7 @@ export const fetchFulltextTool = tool('pubmed_fetch_fulltext', {
         .max(1_000_000)
         .optional()
         .describe(
-          'Per-article budget for body text, in characters. Counts `source=pmc` section and subsection text plus table label, caption, cell and footnote text, or the `source=unpaywall` `content` body; titles, abstracts, identifiers, and references are never counted or shortened. The counted unit is that text alone — the Markdown grid `content[]` renders around the cells (pipes, padding, the divider row, headings) is scaffolding this budget does not measure, so a table renders longer than it costs here. Sections are served first and tables spend what is left, in document order — admission stops at the first table that does not fit, and every table from there on is dropped whole rather than cut mid-row, counted in `truncation.omittedTables` and named in `truncation.articles[].omittedTableNames`. Applied after `sections`, `maxSections`, `includeReferences`, and `includeTables`, so semantic filtering is unaffected. This knob alone bounds only bodies: the response-wide ceiling it implies is this value times the number of articles returned, plus every uncounted field. Use `maxResponseCharacters` for a true whole-response ceiling. Omit for the full body.',
+          'Per-article budget for body text, in characters. Counts `source=pmc` section and subsection text — which carries the inline blocks the parser renders in place, such as lists, definition lists, block quotes, boxed text, preformatted blocks and displayed formulae — plus table label, caption, cell and footnote text and asset label, caption and `href` text; or the `source=unpaywall` `content` body. Titles, abstracts, identifiers, and references are never counted or shortened. The counted unit is that text alone — the Markdown grid `content[]` renders around the cells (pipes, padding, the divider row, headings) is scaffolding this budget does not measure, so a table renders longer than it costs here. Sections are served first, then tables, then assets, each spending what is left, in document order — admission stops at the first entry that does not fit, and every entry from there on is dropped whole rather than cut mid-row or returned with a shortened caption, counted in `truncation.omittedTables` / `truncation.omittedAssets` and named in `truncation.articles[].omittedTableNames` / `omittedAssetNames`. Applied after `sections`, `maxSections`, `includeReferences`, `includeTables`, and `includeAssets`, so semantic filtering is unaffected. This knob alone bounds only bodies: the response-wide ceiling it implies is this value times the number of articles returned, plus every uncounted field. Use `maxResponseCharacters` for a true whole-response ceiling. Omit for the full body.',
         ),
       maxCharactersPerSection: z
         .number()
@@ -1685,6 +1912,19 @@ export const fetchFulltextTool = tool('pubmed_fetch_fulltext', {
     const unpaywall = getUnpaywallService();
     const fallbackArticles: z.infer<typeof UnpaywallArticleSchema>[] = [];
 
+    // Detail of a DOI-backfill lookup that threw, per branch. A candidate still
+    // DOI-less after one of these is an unknown, not a settled absence: it
+    // reports `doi-lookup-failed` rather than `no-doi`. (#119)
+    let pmcidDoiLookupFailure: string | undefined;
+    let pmidDoiLookupFailure: string | undefined;
+
+    /** The Unpaywall tier entry for a candidate that reached the stage with no DOI. */
+    const doilessTierEntry = (failure: string | undefined): z.infer<typeof TriedTierSchema> => ({
+      tier: 'unpaywall',
+      outcome: failure ? 'doi-lookup-failed' : 'no-doi',
+      ...(failure && { detail: failure }),
+    });
+
     // `pmcids` input reaches Unpaywall on the DOI the chain already holds: the
     // EPMC stage searches by PMCID and its hit carries one, captured on non-hit
     // outcomes too. PMCIDs EPMC never resolved fall back to the PMC ID
@@ -1728,8 +1968,9 @@ export const fetchFulltextTool = tool('pubmed_fetch_fulltext', {
               return doi ? { ...c, doi } : c;
             });
           } catch (error: unknown) {
+            pmcidDoiLookupFailure = error instanceof Error ? error.message : String(error);
             ctx.log.warning('Failed to resolve PMCID → DOI for the Unpaywall fallback', {
-              error: error instanceof Error ? error.message : String(error),
+              error: pmcidDoiLookupFailure,
               pmcidCount: needDoi.length,
             });
           }
@@ -1745,13 +1986,15 @@ export const fetchFulltextTool = tool('pubmed_fetch_fulltext', {
               pmcId,
               result: candidate.doi
                 ? await resolveUnpaywall({ pmcId, doi: candidate.doi, budget }, unpaywall, ctx)
-                : ({ unavailable: { reason: 'no-doi' } } as FallbackOutcome),
+                : undefined,
             };
           }),
         );
         for (const { pmcId, result } of outcomes) {
           const inputId = pmcidToInputId.get(pmcId) ?? pmcId;
-          if ('article' in result) {
+          if (result === undefined) {
+            chainByInput.get(inputId)?.push(doilessTierEntry(pmcidDoiLookupFailure));
+          } else if ('article' in result) {
             fallbackArticles.push(result.article);
             inputIdByArticle.set(result.article, inputId);
             if (result.truncation) truncatedArticles.push(result.truncation);
@@ -1782,20 +2025,22 @@ export const fetchFulltextTool = tool('pubmed_fetch_fulltext', {
             return doi ? { ...c, doi } : c;
           });
         } catch (error: unknown) {
+          pmidDoiLookupFailure = error instanceof Error ? error.message : String(error);
           ctx.log.warning('Failed to batch-fetch DOIs from PubMed for Unpaywall fallback', {
-            error: error instanceof Error ? error.message : String(error),
+            error: pmidDoiLookupFailure,
             pmidCount: needDoi.length,
           });
         }
       }
 
       if (!unpaywall) {
-        // `fetchPubmedDois` has already run, so the DOI state is settled here.
-        // A candidate with no DOI could not have reached Unpaywall configured
-        // or not — that is `no-doi`, a real answer, not an incomplete search.
+        // `fetchPubmedDois` has already run, so a candidate with no DOI could
+        // not have reached Unpaywall configured or not — that is `no-doi`, a
+        // real answer, not an incomplete search. Unless the lookup itself
+        // threw, in which case the DOI state is unknown rather than absent.
         for (const c of pmidFallbackCandidates) {
           if (!c.doi) {
-            chainByInput.get(c.pmid)?.push({ tier: 'unpaywall', outcome: 'no-doi' });
+            chainByInput.get(c.pmid)?.push(doilessTierEntry(pmidDoiLookupFailure));
             continue;
           }
           chainByInput.get(c.pmid)?.push({
@@ -1815,11 +2060,13 @@ export const fetchFulltextTool = tool('pubmed_fetch_fulltext', {
                   unpaywall,
                   ctx,
                 )
-              : ({ unavailable: { reason: 'no-doi' } } as FallbackOutcome),
+              : undefined,
           })),
         );
         for (const { candidate, result } of outcomes) {
-          if ('article' in result) {
+          if (result === undefined) {
+            chainByInput.get(candidate.pmid)?.push(doilessTierEntry(pmidDoiLookupFailure));
+          } else if ('article' in result) {
             fallbackArticles.push(result.article);
             inputIdByArticle.set(result.article, candidate.pmid);
             if (result.truncation) truncatedArticles.push(result.truncation);
@@ -1939,6 +2186,7 @@ export const fetchFulltextTool = tool('pubmed_fetch_fulltext', {
     // stage, so a deferred article's dropped tables leave the roll-up together
     // with its entry when the splice above removes it. (#111)
     const omittedTables = truncatedArticles.reduce((n, a) => n + (a.omittedTables ?? 0), 0);
+    const omittedAssets = truncatedArticles.reduce((n, a) => n + (a.omittedAssets ?? 0), 0);
 
     // Rolled up only when the budget actually removed characters, so an
     // under-budget request returns exactly what it did before the budget
@@ -1955,6 +2203,7 @@ export const fetchFulltextTool = tool('pubmed_fetch_fulltext', {
             returnedCharacters: truncatedArticles.reduce((n, a) => n + a.returnedCharacters, 0),
             omittedSections,
             ...(omittedTables > 0 && { omittedTables }),
+            ...(omittedAssets > 0 && { omittedAssets }),
             articles: truncatedArticles,
           }
         : undefined;
@@ -2234,7 +2483,10 @@ async function runEpmcStage(
   for (const run of pmidResults) {
     pmidOutcomes.set(run.c.pmid, run.outcome);
     if (run.article) collectHit(run.c.pmid, { ...run, article: run.article });
-    else remainingPmid.push(run.c);
+    // A DOI the EPMC hit carried is evidence the next stage needs, whatever the
+    // fetch outcome was — merge it in like the pmcid branch below, so Unpaywall
+    // gets it without a redundant PubMed metadata round-trip. (#119)
+    else remainingPmid.push(run.doi && !run.c.doi ? { ...run.c, doi: run.doi } : run.c);
   }
   for (const run of pmcidResults) {
     pmcidOutcomes.set(run.c.normalized, run.outcome);
@@ -2614,6 +2866,7 @@ function unpaywallReasonToTierOutcome(
   switch (reason) {
     case 'no-body':
     case 'no-doi':
+    case 'doi-lookup-failed':
     case 'no-oa':
     case 'fetch-failed':
     case 'parse-failed':
@@ -2669,6 +2922,11 @@ function reasonFromChain(
       return 'no-body';
     case 'unpaywall:no-doi':
       return 'no-doi';
+    // Its own case, never folded into the `unpaywall:no-doi` → `not-found`
+    // collapse above: that collapse says record absence is the specific signal,
+    // and a lookup that never answered has established no absence at all. (#119)
+    case 'unpaywall:doi-lookup-failed':
+      return 'doi-lookup-failed';
     case 'unpaywall:no-oa':
       return 'no-oa';
     case 'unpaywall:fetch-failed':
@@ -2720,8 +2978,10 @@ function formatUnqueriedTiers(
 function formatTruncation(t: z.infer<typeof TruncationSchema>, lines: string[]): void {
   const tablesOmitted =
     t.omittedTables === undefined ? '' : `; ${t.omittedTables} table(s) omitted whole`;
+  const assetsOmitted =
+    t.omittedAssets === undefined ? '' : `; ${t.omittedAssets} asset(s) omitted whole`;
   lines.push(
-    `\n**Truncated (${t.mode} mode):** ${t.returnedCharacters} of ${t.originalCharacters} body characters returned across ${t.articles.length} article(s); ${t.omittedSections} section(s) omitted${tablesOmitted}`,
+    `\n**Truncated (${t.mode} mode):** ${t.returnedCharacters} of ${t.originalCharacters} body characters returned across ${t.articles.length} article(s); ${t.omittedSections} section(s) omitted${tablesOmitted}${assetsOmitted}`,
   );
   const budgets = [
     t.maxCharacters === undefined ? undefined : `maxCharacters ${t.maxCharacters}`,
@@ -2736,8 +2996,12 @@ function formatTruncation(t: z.infer<typeof TruncationSchema>, lines: string[]):
       a.omittedTables === undefined
         ? ''
         : `, ${a.omittedTables} table(s) dropped whole: ${(a.omittedTableNames ?? []).join(', ')}`;
+    const assetsDropped =
+      a.omittedAssets === undefined
+        ? ''
+        : `, ${a.omittedAssets} asset(s) dropped whole: ${(a.omittedAssetNames ?? []).join(', ')}`;
     lines.push(
-      `- ${a.id} (${a.source}): ${a.returnedCharacters} of ${a.originalCharacters} characters${tablesDropped}`,
+      `- ${a.id} (${a.source}): ${a.returnedCharacters} of ${a.originalCharacters} characters${tablesDropped}${assetsDropped}`,
     );
     for (const s of a.sections ?? []) {
       lines.push(
@@ -2805,6 +3069,8 @@ function formatPmcArticle(
 
   if (a.tables?.length) formatTables(a.tables, lines);
 
+  if (a.assets?.length) formatAssets(a.assets, lines);
+
   if (a.references?.length) {
     lines.push(`\n#### References (${a.references.length})`);
     for (const ref of a.references) {
@@ -2844,6 +3110,39 @@ function formatTables(tables: z.infer<typeof TableSchema>[], lines: string[]): v
     }
     if (table.rows.length > 0) lines.push(...renderTableGrid(table.rows, table.headerRowCount));
     if (table.footnotes) lines.push(`\nFootnotes: ${escapeMarkdownInline(table.footnotes)}`);
+  }
+}
+
+/**
+ * Render every figure and supplementary item, so a `content[]` reader gets the
+ * same caption, pointer and placement `structuredContent` carries rather than a
+ * count saying they exist. Each field of `AssetSchema` appears here — that is
+ * what `format-parity` verifies. (#130)
+ *
+ * Label, caption and `href` go through {@link escapeMarkdownInline}: the parser
+ * stores the raw upstream text, and a caption carrying `[`, `*` or a tag-shaped
+ * `<` would otherwise form a link, emphasis or raw HTML at the render boundary.
+ *
+ * The note about `href` is worth its line: the value is a filename inside the PMC
+ * deposit, and an agent that reads it as a URL will spend a request on a 404 for
+ * every figure in the article.
+ */
+function formatAssets(assets: z.infer<typeof AssetSchema>[], lines: string[]): void {
+  lines.push(`\n#### Assets (${assets.length})`);
+  lines.push(
+    `\n> \`file\` is the pointer exactly as deposited — a name inside the PMC deposit, not a fetchable URL. Open the article at the PMC link above to view it.`,
+  );
+  for (const asset of assets) {
+    const heading = [asset.label, asset.caption].filter(Boolean).join(' — ');
+    lines.push(`\n##### ${escapeMarkdownInline(heading || 'Asset')}`);
+
+    const meta = [
+      asset.assetType,
+      asset.sectionTitle ? `Section: ${escapeMarkdownInline(asset.sectionTitle)}` : undefined,
+      asset.id ? `id: ${escapeMarkdownInline(asset.id)}` : undefined,
+      asset.href ? `file: ${escapeMarkdownInline(asset.href)}` : undefined,
+    ].filter((part): part is string => part !== undefined);
+    lines.push(`*${meta.join(' · ')}*`);
   }
 }
 

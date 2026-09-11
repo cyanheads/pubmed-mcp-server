@@ -104,3 +104,54 @@ describe('fitWholeItems', () => {
     expect(fit.keptCharacters).toBe(one);
   });
 });
+
+describe('whole-response accounting over an asset-bearing article (issue #130)', () => {
+  /** A PMC record as `pubmed_fetch_fulltext` returns it, minus its figures. */
+  const withoutAssets = {
+    source: 'pmc',
+    viaSource: 'pmc',
+    pmcId: 'PMC11726426',
+    pmcUrl: 'https://www.ncbi.nlm.nih.gov/pmc/articles/PMC11726426/',
+    title: 'Figure-bearing Article',
+    sections: [{ title: 'METHODS', text: 'Methods body.' }],
+  };
+
+  /** The same record with the article-level `assets[]` the parser now lifts. */
+  const withAssets = {
+    ...withoutAssets,
+    assets: [
+      {
+        assetType: 'figure',
+        id: 'Fig1',
+        label: 'Fig. 1',
+        caption: 'Comparison of apparent resistivity and phase data',
+        sectionTitle: 'METHODS',
+        href: 'MOL2-20-1253-g001.jpg',
+      },
+    ],
+  };
+
+  it('counts the assets field, so an asset-bearing record measures larger', () => {
+    const bare = serializedCharacters(withoutAssets);
+    const laden = serializedCharacters(withAssets);
+
+    // `assets[]` is a field of the record like any other, so the ledger the
+    // response ceiling spends already covers it — nothing about it is exempt.
+    expect(laden).toBeGreaterThan(bare);
+    expect(laden - bare).toBe(
+      JSON.stringify(withAssets).length - JSON.stringify(withoutAssets).length,
+    );
+  });
+
+  it('defers the asset-bearing record at a ceiling the bare one clears', () => {
+    const ceiling = serializedCharacters(withoutAssets);
+    const fit = fitWholeItems([withAssets, withoutAssets], ceiling);
+
+    // The caption is the only difference between the two records, so it is what
+    // puts the first past the ceiling — and the cut is a prefix cut, so the
+    // smaller record behind it is deferred with it rather than promoted.
+    expect(fit.kept).toEqual([]);
+    expect(fit.deferred).toEqual([withAssets, withoutAssets]);
+    expect(fit.nextDeferredCharacters).toBe(serializedCharacters(withAssets));
+  });
+});

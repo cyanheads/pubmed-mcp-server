@@ -9,7 +9,12 @@ import { JsonRpcErrorCode, McpError, serviceUnavailable } from '@cyanheads/mcp-t
 import { fetchWithTimeout, logger, requestContextService } from '@cyanheads/mcp-ts-core/utils';
 
 import { recoveryFor } from '@/services/error-contracts.js';
-import { OPENALEX_API_BASE, type OpenAlexWork, type OpenAlexWorksResponse } from './types.js';
+import {
+  OPENALEX_API_BASE,
+  OPENALEX_MAX_PAGE_SIZE,
+  type OpenAlexWork,
+  type OpenAlexWorksResponse,
+} from './types.js';
 
 const USER_AGENT = 'pubmed-mcp-server (+https://github.com/cyanheads/pubmed-mcp-server)';
 
@@ -88,7 +93,12 @@ export class OpenAlexApiClient {
   /**
    * Batch-resolve a list of OpenAlex work IDs to their PMIDs.
    * Uses the filter=openalex:W1|W2|... endpoint with select=id,ids.
-   * Returns only records that carry a `pmid` field.
+   *
+   * One call resolves one batch: the OR-filter accepts at most
+   * `OPENALEX_MAX_FILTER_VALUES` values and the endpoint serves at most
+   * `OPENALEX_MAX_PAGE_SIZE` rows, so splitting a longer list is the caller's
+   * job (`OpenAlexService`). Results arrive in OpenAlex's order, not the
+   * requested one.
    */
   resolveOaIdsToPmids(oaIds: string[], signal?: AbortSignal): Promise<OpenAlexWork[]> {
     if (oaIds.length === 0) return Promise.resolve([]);
@@ -101,7 +111,7 @@ export class OpenAlexApiClient {
     const params = new URLSearchParams({
       filter: `openalex:${bareIds.join('|')}`,
       select: 'id,ids',
-      per_page: String(Math.min(oaIds.length, 200)),
+      per_page: String(Math.min(oaIds.length, OPENALEX_MAX_PAGE_SIZE)),
     });
     if (this.config.email) params.set('mailto', this.config.email);
 
@@ -110,12 +120,17 @@ export class OpenAlexApiClient {
   }
 
   /**
-   * Fetch works that cite a given OpenAlex work ID (the cited_by relationship).
-   * Returns up to `perPage` records with PMIDs.
+   * Fetch one page of works that cite a given OpenAlex work ID (the cited_by
+   * relationship). Returns up to `perPage` records plus OpenAlex's own total.
+   *
+   * `page` is 1-based. Basic paging is bounded by `page × per_page ≤ 10,000`;
+   * past that OpenAlex rejects the request and requires cursor paging, so the
+   * caller's page cap must keep the walk inside that ceiling.
    */
   async getCitedBy(
     oaId: string,
     perPage: number,
+    page: number,
     signal?: AbortSignal,
   ): Promise<{ works: OpenAlexWork[]; totalCount: number }> {
     // Strip full URL prefix if needed
@@ -126,14 +141,15 @@ export class OpenAlexApiClient {
     const params = new URLSearchParams({
       filter: `cites:${bareId}`,
       select: 'id,ids',
-      per_page: String(Math.min(perPage, 200)),
+      per_page: String(Math.min(perPage, OPENALEX_MAX_PAGE_SIZE)),
+      page: String(page),
     });
     if (this.config.email) params.set('mailto', this.config.email);
 
     const url = `${OPENALEX_API_BASE}/works?${params.toString()}`;
     const ctx = requestContextService.createRequestContext({
       operation: 'OpenAlexGetCitedBy',
-      additionalContext: { oaId: bareId },
+      additionalContext: { oaId: bareId, page },
     });
 
     let response: Response;
@@ -170,6 +186,7 @@ export class OpenAlexApiClient {
         operation: 'OpenAlexGetCitedByDone',
         additionalContext: {
           oaId: bareId,
+          page,
           totalCount: parsed.meta?.count,
           resultCount: parsed.results?.length,
         },

@@ -19,6 +19,7 @@
  * @module tests/mcp-server/tools/definitions/_fuzz-helpers
  */
 
+import { McpError } from '@cyanheads/mcp-ts-core/errors';
 import { createMockContext } from '@cyanheads/mcp-ts-core/testing';
 import {
   adversarialObjectArbitrary,
@@ -110,6 +111,19 @@ function withTimeout<T>(promise: Promise<T> | T, ms: number): Promise<T> {
   });
 }
 
+/**
+ * True when the thrown value is a failure the tool declares in its own error
+ * contract — an input the tool rejects on purpose, not one it crashed on. The
+ * arbitraries generate blank and degenerate strings freely, so a tool that
+ * validates its input beyond what Zod expresses would otherwise have its
+ * correct rejection reported as a crash.
+ */
+function isDeclaredFailure(def: AnyToolDefinition, err: unknown): boolean {
+  if (!(err instanceof McpError)) return false;
+  const { reason } = (err.data ?? {}) as { reason?: unknown };
+  return def.errors?.some((entry) => entry.reason === reason) ?? false;
+}
+
 function checkErrorLeaks(text: string): boolean {
   return (
     /\bat\s+\S+\s+\(/.test(text) ||
@@ -158,12 +172,12 @@ export async function fuzzToolStrict(
       report.totalRuns++;
       const parsed = def.input.safeParse(raw);
       if (!parsed.success) return; // Arbitrary missed a constraint; Zod rejected. Skip.
-      const ctx = createMockContext();
+      const ctx = createMockContext({ errors: def.errors });
       try {
         const result = await withTimeout(def.handler(parsed.data, ctx), timeoutMs);
         def.output.parse(result);
       } catch (err) {
-        report.crashes.push({ input: parsed.data, error: err });
+        if (!isDeclaredFailure(def, err)) report.crashes.push({ input: parsed.data, error: err });
       }
     }),
     fcParams,
@@ -176,7 +190,7 @@ export async function fuzzToolStrict(
       report.totalRuns++;
       const parsed = def.input.safeParse(raw);
       if (!parsed.success) return;
-      const ctx = createMockContext();
+      const ctx = createMockContext({ errors: def.errors });
       try {
         const result = await withTimeout(def.handler(parsed.data, ctx), timeoutMs);
         def.output.parse(result);
@@ -218,7 +232,7 @@ export async function fuzzToolStrict(
   try {
     const controller = new AbortController();
     controller.abort();
-    const ctx = createMockContext({ signal: controller.signal });
+    const ctx = createMockContext({ signal: controller.signal, errors: def.errors });
     const sample = def.input.safeParse(fc.sample(validArb, 1)[0]);
     if (sample.success) await withTimeout(def.handler(sample.data, ctx), timeoutMs);
   } catch {

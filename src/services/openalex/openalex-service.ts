@@ -5,7 +5,13 @@
  *   - `citedBy(pmid, n)`: cites:W<id> filter → PMIDs (mirrors pubmed_pubmed_citedin)
  *   - `references(pmid, n)`: referenced_works → PMIDs (mirrors pubmed_pubmed_refs)
  *
- * All three methods drop records with no PMID — never mints fake IDs.
+ * Each method returns at least `n` PubMed-addressable rows when OpenAlex has
+ * them: `citedBy` walks pages of the `cites:` filter, and the other two resolve
+ * the work's ID list in batches, both stopping once the window is covered,
+ * upstream runs out, or a cap is reached. Records with no PMID are dropped —
+ * never minted — and counted, so callers can disclose the shortfall instead of
+ * serving an unexplained empty window.
+ *
  * Uses the NCBI_ADMIN_EMAIL config (adminEmail) as the OpenAlex polite-pool
  * `mailto=` parameter when set; omits it when unset.
  *
@@ -19,7 +25,13 @@ import { getServerConfig } from '@/config/server-config.js';
 import { recoveryFor } from '@/services/error-contracts.js';
 import { isTransient } from '@/services/retry-policy.js';
 import { OpenAlexApiClient } from './api-client.js';
-import type { OpenAlexWork } from './types.js';
+import {
+  OPENALEX_MAX_FILTER_VALUES,
+  OPENALEX_MAX_PAGE_SIZE,
+  OPENALEX_MAX_UPSTREAM_REQUESTS,
+  type OpenAlexRelatedResult,
+  type OpenAlexWork,
+} from './types.js';
 
 /** Transient codes eligible for retry. */
 const RETRYABLE_CODES = new Set<JsonRpcErrorCode>([
@@ -29,6 +41,11 @@ const RETRYABLE_CODES = new Set<JsonRpcErrorCode>([
 ]);
 
 const MAX_BACKOFF_MS = 30_000;
+
+/** Strip the `https://openalex.org/` prefix an OA ID may carry. */
+function bareOaId(id: string): string {
+  return id.startsWith('https://openalex.org/') ? id.slice('https://openalex.org/'.length) : id;
+}
 
 function abortableSleep(ms: number, signal?: AbortSignal): Promise<void> {
   if (!signal) return new Promise((r) => setTimeout(r, ms));
@@ -59,6 +76,44 @@ function extractPmid(work: OpenAlexWork): string | null {
   return match?.[1] ?? null;
 }
 
+/**
+ * Nothing to page through: no source work, or an empty ID list. Built per call
+ * rather than shared — the `pmids` array escapes to the caller by identity, and
+ * one module-level instance would hand every empty answer the same array.
+ */
+function emptyResult(): OpenAlexRelatedResult {
+  return { pmids: [], totalCount: 0, droppedNoPmid: 0, reachCapped: false };
+}
+
+/**
+ * Accumulates PubMed-addressable rows across pages or batches: dedupes, drops
+ * the source work, and counts the rows that carry no PMID. Kept as one object
+ * so a multi-request walk cannot reset the `seen` set between requests and
+ * re-emit a PMID an earlier page already returned.
+ */
+class PmidCollector {
+  readonly pmids: string[] = [];
+  droppedNoPmid = 0;
+  private readonly seen = new Set<string>();
+
+  constructor(private readonly excludePmid: string) {}
+
+  /**
+   * Add one candidate row. `undefined` means OpenAlex returned nothing for a
+   * requested ID — unaddressable in PubMed exactly like a row with no PMID.
+   */
+  add(work: OpenAlexWork | undefined): void {
+    const pmid = work ? extractPmid(work) : null;
+    if (!pmid) {
+      this.droppedNoPmid++;
+      return;
+    }
+    if (pmid === this.excludePmid || this.seen.has(pmid)) return;
+    this.seen.add(pmid);
+    this.pmids.push(pmid);
+  }
+}
+
 /** Service facade over the OpenAlex API for the find-related provider chain. */
 export class OpenAlexService {
   constructor(
@@ -69,102 +124,146 @@ export class OpenAlexService {
   /**
    * Find works with similar content to the given PMID via OpenAlex `related_works`.
    * Returns PMIDs only; drops any record with no PMID.
-   * `n` is the number of PMIDs to return (OpenAlex caps related_works at ~10).
+   * `n` is the size of the window the caller needs covered.
    */
-  async similar(
-    pmid: string,
-    n: number,
-    signal?: AbortSignal,
-  ): Promise<{ pmids: string[]; totalCount: number }> {
-    const work = await this.withRetry(
-      () => this.client.getWorkByPmid(pmid, signal),
-      `getWorkByPmid(${pmid})`,
-      signal,
-    );
-    if (!work) return { pmids: [], totalCount: 0 };
+  async similar(pmid: string, n: number, signal?: AbortSignal): Promise<OpenAlexRelatedResult> {
+    const work = await this.fetchWork(pmid, signal);
+    if (!work) return emptyResult();
 
-    const relatedIds = (work.related_works ?? []).slice(0, Math.min(n * 3, 50));
-    if (relatedIds.length === 0) return { pmids: [], totalCount: 0 };
-
-    const resolved = await this.withRetry(
-      () => this.client.resolveOaIdsToPmids(relatedIds, signal),
+    return this.resolveIdsToPmids(
+      pmid,
+      work.related_works ?? [],
+      n,
       `resolveRelatedWorks(${pmid})`,
       signal,
     );
-
-    const pmids = this.extractPmids(resolved, pmid).slice(0, n);
-    return { pmids, totalCount: work.related_works?.length ?? 0 };
   }
 
   /**
    * Find works that cite the given PMID via OpenAlex `cites:W<id>` filter.
    * Returns PMIDs only; drops any record with no PMID.
+   *
+   * Pages are all one size and are pulled until the filtered array covers `n`,
+   * upstream runs out, or `OPENALEX_MAX_UPSTREAM_REQUESTS` is hit — the rows OpenAlex
+   * serves count every citing work, but only those with a PubMed PMID are
+   * addressable, so a single page sized on the raw window can under-fill it.
    */
-  async citedBy(
-    pmid: string,
-    n: number,
-    signal?: AbortSignal,
-  ): Promise<{ pmids: string[]; totalCount: number }> {
-    const work = await this.withRetry(
-      () => this.client.getWorkByPmid(pmid, signal),
-      `getWorkByPmid(${pmid})`,
-      signal,
-    );
-    if (!work) return { pmids: [], totalCount: 0 };
+  async citedBy(pmid: string, n: number, signal?: AbortSignal): Promise<OpenAlexRelatedResult> {
+    const work = await this.fetchWork(pmid, signal);
+    if (!work) return emptyResult();
 
-    const { works, totalCount } = await this.withRetry(
-      () => this.client.getCitedBy(work.id, n, signal),
-      `getCitedBy(${work.id})`,
-      signal,
-    );
+    const perPage = Math.min(n, OPENALEX_MAX_PAGE_SIZE);
+    const collector = new PmidCollector(pmid);
+    let upstreamCount = 0;
+    let exhausted = false;
 
-    const pmids = this.extractPmids(works, pmid);
-    return { pmids, totalCount };
+    for (
+      let page = 1;
+      page <= OPENALEX_MAX_UPSTREAM_REQUESTS && collector.pmids.length < n;
+      page++
+    ) {
+      const { works, totalCount } = await this.withRetry(
+        () => this.client.getCitedBy(work.id, perPage, page, signal),
+        `getCitedBy(${work.id}, page ${page})`,
+        signal,
+      );
+      upstreamCount = totalCount;
+      for (const w of works) collector.add(w);
+      if (works.length < perPage || page * perPage >= totalCount) {
+        exhausted = true;
+        break;
+      }
+    }
+
+    return this.finish(collector, exhausted, upstreamCount, n);
   }
 
   /**
    * Find works referenced by the given PMID via OpenAlex `referenced_works`.
    * Returns PMIDs only; drops any record with no PMID.
    */
-  async references(
-    pmid: string,
-    n: number,
-    signal?: AbortSignal,
-  ): Promise<{ pmids: string[]; totalCount: number }> {
-    const work = await this.withRetry(
+  async references(pmid: string, n: number, signal?: AbortSignal): Promise<OpenAlexRelatedResult> {
+    const work = await this.fetchWork(pmid, signal);
+    if (!work) return emptyResult();
+
+    return this.resolveIdsToPmids(
+      pmid,
+      work.referenced_works ?? [],
+      n,
+      `resolveReferencedWorks(${pmid})`,
+      signal,
+    );
+  }
+
+  /** Look up the source work by PMID; `null` when OpenAlex doesn't index it. */
+  private fetchWork(pmid: string, signal?: AbortSignal): Promise<OpenAlexWork | null> {
+    return this.withRetry(
       () => this.client.getWorkByPmid(pmid, signal),
       `getWorkByPmid(${pmid})`,
       signal,
     );
-    if (!work) return { pmids: [], totalCount: 0 };
-
-    const refIds = (work.referenced_works ?? []).slice(0, Math.min(n * 3, 200));
-    if (refIds.length === 0) return { pmids: [], totalCount: 0 };
-
-    const resolved = await this.withRetry(
-      () => this.client.resolveOaIdsToPmids(refIds, signal),
-      `resolveReferencedWorks(${pmid})`,
-      signal,
-    );
-
-    const pmids = this.extractPmids(resolved, pmid).slice(0, n);
-    return { pmids, totalCount: work.referenced_works?.length ?? 0 };
   }
 
   /**
-   * Extract unique numeric PMIDs from a list of works, excluding the source PMID.
-   * Any work with no PMID is silently dropped (never minted).
+   * Resolve an OpenAlex ID list (a work's references or related works) to PMIDs,
+   * in batches, until the window is covered, the list is exhausted, or the
+   * request cap is reached. The work record carries the whole list, so this
+   * paginates resolution rather than an upstream query.
+   *
+   * Each batch's rows are re-ordered to the requested IDs, so the result follows
+   * the source list — a window at any offset stays stable across calls, whatever
+   * order OpenAlex answers a batch in.
    */
-  private extractPmids(works: OpenAlexWork[], excludePmid: string): string[] {
-    const seen = new Set<string>();
-    const result: string[] = [];
-    for (const w of works) {
-      const pmid = extractPmid(w);
-      if (!pmid || pmid === excludePmid || seen.has(pmid)) continue;
-      seen.add(pmid);
-      result.push(pmid);
+  private async resolveIdsToPmids(
+    pmid: string,
+    oaIds: string[],
+    n: number,
+    label: string,
+    signal?: AbortSignal,
+  ): Promise<OpenAlexRelatedResult> {
+    if (oaIds.length === 0) return emptyResult();
+
+    const collector = new PmidCollector(pmid);
+    let consumed = 0;
+
+    for (
+      let batch = 0;
+      batch < OPENALEX_MAX_UPSTREAM_REQUESTS &&
+      consumed < oaIds.length &&
+      collector.pmids.length < n;
+      batch++
+    ) {
+      const ids = oaIds.slice(consumed, consumed + OPENALEX_MAX_FILTER_VALUES);
+      const resolved = await this.withRetry(
+        () => this.client.resolveOaIdsToPmids(ids, signal),
+        label,
+        signal,
+      );
+      const byId = new Map(resolved.map((w) => [bareOaId(w.id), w]));
+      for (const id of ids) collector.add(byId.get(bareOaId(id)));
+      consumed += ids.length;
     }
-    return result;
+
+    return this.finish(collector, consumed >= oaIds.length, oaIds.length, n);
+  }
+
+  /**
+   * Shape a walk's outcome. Exhausting the fetchable set makes the addressable
+   * count exact; short of that only OpenAlex's own total is known, and a window
+   * the walk never reached is flagged rather than served as a silent empty.
+   */
+  private finish(
+    collector: PmidCollector,
+    exhausted: boolean,
+    upstreamCount: number,
+    n: number,
+  ): OpenAlexRelatedResult {
+    return {
+      pmids: collector.pmids,
+      totalCount: exhausted ? collector.pmids.length : upstreamCount,
+      droppedNoPmid: collector.droppedNoPmid,
+      reachCapped: !exhausted && collector.pmids.length < n,
+    };
   }
 
   /** Retry wrapper for transient errors, mirroring the EPMC service pattern. */

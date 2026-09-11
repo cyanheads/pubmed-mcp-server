@@ -9,6 +9,7 @@ import { describe, expect, it } from 'vitest';
 import {
   extractBodySections,
   extractJatsAuthors,
+  extractPmcAssets,
   extractPmcTables,
   extractReferences,
   MAX_TABLE_COLUMNS,
@@ -247,6 +248,331 @@ describe('extractBodySections', () => {
     ]);
 
     expect(extractBodySections(body)).toEqual([{ title: 'Introduction', text: 'Intro text.' }]);
+  });
+
+  it('renders a def-list as a title line and one entry per def-item (#130)', () => {
+    // PMC12696417's ABBREVIATIONS: a <def-list> is the untitled <sec>'s only
+    // child, so reading <p> and <sec> alone dropped the section outright.
+    const body = el('body', [
+      el('sec', [
+        el('def-list', [
+          el('title', [t('ABBREVIATIONS')]),
+          el('def-item', [
+            el('term', [t('ANOVA')]),
+            el('def', [el('p', [t('analysis of variance')])]),
+          ]),
+          el('def-item', [el('term', [t('SNP')]), el('def', [el('p', [t('single nucleotide')])])]),
+        ]),
+      ]),
+    ]);
+
+    expect(extractBodySections(body)).toEqual([
+      {
+        text: 'ABBREVIATIONS\n- ANOVA — analysis of variance\n- SNP — single nucleotide',
+      },
+    ]);
+  });
+
+  it('renders each list type with its own item marker (#130)', () => {
+    const body = el('body', [
+      el('sec', [
+        el('title', [t('Findings')]),
+        el('list', [el('list-item', [el('p', [t('Bulleted.')])])], { '@_list-type': 'bullet' }),
+        el(
+          'list',
+          [el('list-item', [el('p', [t('First.')])]), el('list-item', [el('p', [t('Second.')])])],
+          { '@_list-type': 'order' },
+        ),
+        el('list', [el('list-item', [el('p', [t('Bare.')])])], { '@_list-type': 'simple' }),
+        el('list', [el('list-item', [el('p', [t('Untyped.')])])]),
+      ]),
+    ]);
+
+    expect(extractBodySections(body)[0]?.text).toBe(
+      '- Bulleted.\n\n1. First.\n2. Second.\n\nBare.\n\n- Untyped.',
+    );
+  });
+
+  it('renders a list title above its items and drops an empty list (#130)', () => {
+    const body = el('body', [
+      el('sec', [
+        el('title', [t('Findings')]),
+        el('p', [t('Prose.')]),
+        el('list', [el('title', [t('Key points')]), el('list-item', [el('p', [t('Point.')])])], {
+          '@_list-type': 'bullet',
+        }),
+        el('list', [], { '@_list-type': 'bullet' }),
+      ]),
+    ]);
+
+    expect(extractBodySections(body)[0]?.text).toBe('Prose.\n\nKey points\n- Point.');
+  });
+
+  it('indents a list or def-list nested inside a list-item two spaces per level (#130)', () => {
+    // list-item's JATS content model is (label?, title?, (p | def-list | list)+).
+    const body = el('body', [
+      el('sec', [
+        el('title', [t('Protocol')]),
+        el(
+          'list',
+          [
+            el('list-item', [
+              el('p', [t('Outer step.')]),
+              el(
+                'list',
+                [
+                  el('list-item', [
+                    el('p', [t('Inner step.')]),
+                    el('list', [el('list-item', [el('p', [t('Deepest step.')])])], {
+                      '@_list-type': 'bullet',
+                    }),
+                  ]),
+                ],
+                { '@_list-type': 'bullet' },
+              ),
+              el('def-list', [
+                el('def-item', [el('term', [t('CV')]), el('def', [el('p', [t('coefficient')])])]),
+              ]),
+            ]),
+          ],
+          { '@_list-type': 'bullet' },
+        ),
+      ]),
+    ]);
+
+    expect(extractBodySections(body)[0]?.text).toBe(
+      '- Outer step.\n  - Inner step.\n    - Deepest step.\n  - CV — coefficient',
+    );
+  });
+
+  it('quotes every disp-quote line and trails its attribution (#130)', () => {
+    // No record in the 68-record validation draw carried a <disp-quote>, so this
+    // is pinned against a fixture built from the JATS content model.
+    const body = el('body', [
+      el('sec', [
+        el('title', [t('Discussion')]),
+        el('disp-quote', [
+          el('p', [t('First quoted paragraph.')]),
+          el('p', [t('Second quoted paragraph.')]),
+          el('attrib', [t('Carson, 1962')]),
+        ]),
+      ]),
+    ]);
+
+    expect(extractBodySections(body)[0]?.text).toBe(
+      '> First quoted paragraph.\n> Second quoted paragraph.\n> — Carson, 1962',
+    );
+  });
+
+  it('flattens a boxed-text sec subtree with each heading on its own line (#130)', () => {
+    // PMC11726426's shape — the <boxed-text>'s only children are <sec>s, so
+    // rendering it as a caption plus paragraphs would drop the nested headings.
+    // PMC13528390 nests a bullet <list> in the same position.
+    const body = el('body', [
+      el('sec', [
+        el('title', [t('Introduction')]),
+        el('p', [t('Opening prose.')]),
+        el('boxed-text', [
+          el('sec', [el('title', [t('Core Ideas')]), el('p', [t('Boxed prose.')])]),
+          el('sec', [
+            el('title', [t('Implications')]),
+            el('list', [el('list-item', [el('p', [t('Testing can guide dosing.')])])], {
+              '@_list-type': 'bullet',
+            }),
+          ]),
+        ]),
+      ]),
+    ]);
+
+    expect(extractBodySections(body)[0]?.text).toBe(
+      'Opening prose.\n\nCore Ideas\nBoxed prose.\n\nImplications\n- Testing can guide dosing.',
+    );
+  });
+
+  it('returns a preformat-only body as one section, line breaks intact (#130)', () => {
+    // PMC9663051 / PMC9663116 / PMC5420876: the whole <body> is one
+    // <preformat preformat-type="pmc-ocr-text"> carrying the entire article, so
+    // the walk returned sections: [] and the tool layer reported no body at all.
+    const body = el('body', [
+      el('preformat', [t('\n\t\t\tCME  Infectious diseases - 1\nMalaria: treatment\n\t\t')], {
+        '@_preformat-type': 'pmc-ocr-text',
+      }),
+    ]);
+
+    const sections = extractBodySections(body);
+    expect(sections).toHaveLength(1);
+    expect(sections[0]?.text).toBe('```\nCME  Infectious diseases - 1\nMalaria: treatment\n```');
+    // The double space between "CME" and "Infectious" is OCR column spacing that
+    // textContent()'s whitespace collapse would have destroyed.
+    expect(sections[0]?.text).toContain('CME  Infectious');
+  });
+
+  it('renders a p-nested disp-formula at block position with its label (#130)', () => {
+    // PMC11711298: <disp-formula> sits inside a <p>, so its content ran straight
+    // into the sentence around it.
+    const body = el('body', [
+      el('sec', [
+        el('title', [t('Methods')]),
+        el('p', [
+          t('The model is '),
+          el('disp-formula', [
+            el('label', [t('(1)')]),
+            el('tex-math', [t('y = X\\beta + Zu + e')]),
+          ]),
+          t(' where u is random.'),
+        ]),
+      ]),
+    ]);
+
+    expect(extractBodySections(body)[0]?.text).toBe(
+      'The model is\n\n(1) y = X\\beta + Zu + e\n\nwhere u is random.',
+    );
+  });
+
+  it('prefers tex-math under alternatives and drops a graphic-only formula (#130)', () => {
+    const body = el('body', [
+      el('sec', [
+        el('title', [t('Methods')]),
+        el('disp-formula', [
+          el('label', [t('(1)')]),
+          el('alternatives', [
+            el('graphic', [], { '@_xlink:href': 'eq1.gif' }),
+            el('tex-math', [t('E = mc^2')]),
+          ]),
+        ]),
+        el('disp-formula', [
+          el('label', [t('(2)')]),
+          el('graphic', [], { '@_xlink:href': 'e2.gif' }),
+        ]),
+        el('p', [t('Trailing prose.')]),
+      ]),
+    ]);
+
+    // The graphic-only formula contributes nothing at all — not a bare label on
+    // an otherwise empty line.
+    expect(extractBodySections(body)[0]?.text).toBe('(1) E = mc^2\n\nTrailing prose.');
+  });
+
+  it('lifts a p-nested fig out of the sentence and leaves a marker (#130)', () => {
+    // PMC12715233: `warranted.Fig. 1Comparison` — a sentence terminator, a figure
+    // label and a caption's first word with nothing between them.
+    const body = el('body', [
+      el('p', [
+        t('…suggests that further scrutiny is warranted.'),
+        el(
+          'fig',
+          [
+            el('label', [t('Fig. 1')]),
+            el('caption', [el('p', [t('Comparison of apparent resistivity and phase data.')])]),
+            el('graphic', [], { '@_xlink:href': 'f0001.jpg' }),
+          ],
+          { '@_id': 'F1' },
+        ),
+      ]),
+    ]);
+
+    const text = extractBodySections(body)[0]?.text ?? '';
+    expect(text).toBe('…suggests that further scrutiny is warranted.\n\n[Figure: Fig. 1]');
+    expect(text).not.toContain('warranted.Fig. 1Comparison');
+    expect(text).not.toContain('Comparison of apparent resistivity');
+  });
+
+  it('emits a p-nested list and media at block position, never inside a sentence (#130)', () => {
+    const body = el('body', [
+      el('sec', [
+        el('title', [t('Methods')]),
+        el('p', [
+          t('Samples were prepared as follows.'),
+          el('list', [el('list-item', [el('p', [t('Rinse twice.')])])], {
+            '@_list-type': 'bullet',
+          }),
+          t('Then measured.'),
+          el('media', [], { '@_xlink:href': 'movie.mp4' }),
+        ]),
+      ]),
+    ]);
+
+    // <media> carries no text at all, so it contributes nothing — but it still
+    // splits the run rather than fusing the text on either side of it.
+    expect(extractBodySections(body)[0]?.text).toBe(
+      'Samples were prepared as follows.\n\n- Rinse twice.\n\nThen measured.',
+    );
+  });
+
+  it('keeps a section whose only child is a fig as a heading-only entry (#130)', () => {
+    // 16 such sections in the 68-record validation draw. The heading is what
+    // places the figure that names it, and a `sections` filter needs it to match.
+    const body = el('body', [
+      el('sec', [
+        el('title', [t('Figure 3 legend')]),
+        el('fig', [el('caption', [el('p', [t('Uncaptioned deposit.')])])], { '@_id': 'F3' }),
+      ]),
+      el('sec', [
+        el('title', [t('Supplement')]),
+        el('supplementary-material', [el('media', [], { '@_xlink:href': 's1.pdf' })], {
+          '@_id': 'S1',
+        }),
+      ]),
+    ]);
+
+    expect(extractBodySections(body)).toEqual([
+      { title: 'Figure 3 legend', text: '[Figure]' },
+      { title: 'Supplement', text: '[Supplementary]' },
+    ]);
+  });
+
+  it('interleaves paragraphs, blocks and subsections in document order (#130)', () => {
+    const body = el('body', [
+      el('sec', [
+        el('title', [t('Results')]),
+        el('p', [t('Before.')]),
+        el('list', [el('list-item', [el('p', [t('Item.')])])], { '@_list-type': 'bullet' }),
+        el('p', [t('After.')]),
+        el('sec', [el('title', [t('Detail')]), el('p', [t('Nested.')])]),
+        el('p', [t('Trailing.')]),
+      ]),
+    ]);
+
+    expect(extractBodySections(body)).toEqual([
+      {
+        title: 'Results',
+        text: 'Before.\n\n- Item.\n\nAfter.\n\nTrailing.',
+        subsections: [{ title: 'Detail', text: 'Nested.' }],
+      },
+    ]);
+  });
+
+  it('reads an <alternatives>-wrapped inline formula inside the sentence holding it (#130)', () => {
+    // PMC12816603's shape — <inline-formula><alternatives><tex-math/><mml:math/>
+    // </alternatives></inline-formula>, the standard Springer/Nature deposit,
+    // here inside a <p>. <alternatives> is a container for equivalent renderings
+    // of one object, so it takes the placement of whatever holds it; at this
+    // position that is the sentence, not a block of its own. It still emits
+    // every rendering it carries, exactly as it did at block position — only
+    // the placement changes.
+    const body = el('body', [
+      el('sec', [
+        el('title', [t('Methods')]),
+        el('p', [
+          t('Transport stalls once '),
+          el(
+            'inline-formula',
+            [
+              el('alternatives', [
+                el('tex-math', [t('\\eta_{crit}')]),
+                el('mml:math', [t('ηcrit')]),
+              ]),
+            ],
+            { '@_id': 'IEq1' },
+          ),
+          t(' is exceeded.'),
+        ]),
+      ]),
+    ]);
+
+    const text = extractBodySections(body)[0]?.text ?? '';
+    expect(text).toBe('Transport stalls once \\eta_{crit}ηcrit is exceeded.');
+    expect(text).not.toContain('\n\n');
   });
 
   it('preserves document order across mixed inline content (regression for issue #19)', () => {
@@ -701,6 +1027,35 @@ describe('extractPmcTables', () => {
     expect(JSON.stringify(article2.sections)).not.toContain('14.44');
   });
 
+  it('separates a table caption title from the paragraphs under it (regression #111)', () => {
+    // <caption> children carry no punctuation between them, so the concatenating
+    // read ran the title's last word into the first paragraph's first word.
+    const article = el('article', [
+      el('body', [
+        el('sec', [
+          el('title', [t('Results')]),
+          el(
+            'table-wrap',
+            [
+              el('label', [t('Table 1')]),
+              el('caption', [
+                el('title', [t('Baseline characteristics')]),
+                el('p', [t('Values are mean (SD).')]),
+                el('p', [t('Missing entries are left blank.')]),
+              ]),
+              el('table', [el('tbody', [el('tr', [el('td', [t('Age, years')])])])]),
+            ],
+            { '@_id': 'T1' },
+          ),
+        ]),
+      ]),
+    ]);
+
+    expect(extractPmcTables(article)[0]?.caption).toBe(
+      'Baseline characteristics Values are mean (SD). Missing entries are left blank.',
+    );
+  });
+
   it('omits tables entirely from an article that has none (regression #111)', () => {
     const article = el('article', [
       el('body', [el('sec', [el('title', [t('Results')]), el('p', [t('No tables here.')])])]),
@@ -708,6 +1063,341 @@ describe('extractPmcTables', () => {
 
     expect(extractPmcTables(article)).toEqual([]);
     expect('tables' in parsePmcArticle(article)).toBe(false);
+  });
+});
+
+describe('extractPmcAssets', () => {
+  /** `<fig>` in the shape every one of 258 in the validation draw carries. */
+  const fig = (id: string, label: string, caption: string, href: string) =>
+    el(
+      'fig',
+      [
+        el('label', [t(label)]),
+        el('caption', [el('p', [t(caption)])]),
+        el('graphic', [], { '@_xlink:href': href }),
+      ],
+      { '@_id': id },
+    );
+
+  it('returns empty for undefined', () => {
+    expect(extractPmcAssets(undefined)).toEqual([]);
+  });
+
+  it('returns a sec-hung figure with every field it deposits (#130)', () => {
+    const article = el('article', [
+      el('body', [
+        el('sec', [
+          el('title', [t('Results')]),
+          el('p', [t('Resistivity rose.')]),
+          fig('F1', 'Figure 1.', 'Apparent resistivity by interval.', 'g001.jpg'),
+        ]),
+      ]),
+    ]);
+
+    expect(extractPmcAssets(article)).toEqual([
+      {
+        assetType: 'figure',
+        id: 'F1',
+        label: 'Figure 1.',
+        caption: 'Apparent resistivity by interval.',
+        sectionTitle: 'Results',
+        href: 'g001.jpg',
+      },
+    ]);
+  });
+
+  it('reads a one-paragraph caption with its inline markup in place (#111)', () => {
+    // Characterization. Inline markup inside a caption paragraph is transparent
+    // and must stay so: splitting at every child boundary would read
+    // `Expression of NF1 across 12 tissues.` back as three spaced fragments.
+    const article = el('article', [
+      el('body', [
+        el('sec', [
+          el('title', [t('Results')]),
+          el(
+            'fig',
+            [
+              el('label', [t('Fig. 1')]),
+              el('caption', [
+                el('p', [t('Expression of '), el('italic', [t('NF1')]), t(' across 12 tissues.')]),
+              ]),
+            ],
+            { '@_id': 'F1' },
+          ),
+        ]),
+      ]),
+    ]);
+
+    expect(extractPmcAssets(article)[0]?.caption).toBe('Expression of NF1 across 12 tissues.');
+  });
+
+  it('walks the whole article in document order and inherits section titles (#130)', () => {
+    // 17% of figures and 23% of supplementary material sit outside <body>: a
+    // <floats-group> deposit (PMC10827061's eight figures), back matter, and the
+    // abstract in <front>. An untitled <sec> keeps its parent's title.
+    const article = el('article', [
+      el('front', [
+        el('article-meta', [
+          el('abstract', [fig('FA', 'Graphical abstract', 'Overview.', 'ga.jpg')]),
+        ]),
+      ]),
+      el('body', [
+        el('sec', [
+          el('title', [t('Results')]),
+          el('sec', [fig('F1', 'Figure 1.', 'In an untitled subsection.', 'g001.jpg')]),
+        ]),
+      ]),
+      el('floats-group', [fig('F2', 'Figure 2.', 'In floats-group.', 'g002.jpg')]),
+      el('back', [
+        el('sec', [
+          el('title', [t('Appendix A')]),
+          el('p', [
+            el(
+              'supplementary-material',
+              [
+                el('label', [t('Table S3')]),
+                el('caption', [el('p', [t('Raw measurements.')])]),
+                el('media', [], { '@_xlink:href': 's003.xlsx' }),
+              ],
+              { '@_id': 'S3' },
+            ),
+          ]),
+        ]),
+      ]),
+    ]);
+
+    expect(extractPmcAssets(article)).toEqual([
+      {
+        assetType: 'figure',
+        id: 'FA',
+        label: 'Graphical abstract',
+        caption: 'Overview.',
+        href: 'ga.jpg',
+      },
+      {
+        assetType: 'figure',
+        id: 'F1',
+        label: 'Figure 1.',
+        caption: 'In an untitled subsection.',
+        sectionTitle: 'Results',
+        href: 'g001.jpg',
+      },
+      {
+        assetType: 'figure',
+        id: 'F2',
+        label: 'Figure 2.',
+        caption: 'In floats-group.',
+        href: 'g002.jpg',
+      },
+      {
+        assetType: 'supplementary-material',
+        id: 'S3',
+        label: 'Table S3',
+        caption: 'Raw measurements.',
+        sectionTitle: 'Appendix A',
+        href: 's003.xlsx',
+      },
+    ]);
+  });
+
+  it('returns an unlabelled or pointerless asset rather than dropping it (#130)', () => {
+    // PMC13155148's two supplements carry a caption and a <media> but no <label>;
+    // 14 of 84 in the draw carry no pointer at all.
+    const article = el('article', [
+      el('body', [
+        el('sec', [
+          el('title', [t('Data availability')]),
+          el(
+            'supplementary-material',
+            [
+              el('caption', [el('p', [t('Fig. S1. Vector map.')])]),
+              el('media', [], { '@_xlink:href': 'MOL2-20-1253-s002.pdf' }),
+            ],
+            { '@_id': 'mol270153-supitem-0001' },
+          ),
+          el('supplementary-material', [], { '@_id': 'bare' }),
+          el('fig', [el('caption', [el('p', [t('Caption but no label.')])])]),
+        ]),
+      ]),
+    ]);
+
+    expect(extractPmcAssets(article)).toEqual([
+      {
+        assetType: 'supplementary-material',
+        id: 'mol270153-supitem-0001',
+        caption: 'Fig. S1. Vector map.',
+        sectionTitle: 'Data availability',
+        href: 'MOL2-20-1253-s002.pdf',
+      },
+      { assetType: 'supplementary-material', id: 'bare', sectionTitle: 'Data availability' },
+      {
+        assetType: 'figure',
+        caption: 'Caption but no label.',
+        sectionTitle: 'Data availability',
+      },
+    ]);
+  });
+
+  it('reads a label and caption the deposit hangs on the pointer element (#130)', () => {
+    // JATS puts `label?, caption?` in the content model of <media> and <graphic>
+    // as well as of <supplementary-material>, and a common deposit style uses it:
+    // 19 of the 68-record draw's supplementary items carry their caption there and
+    // nothing on the element itself. Reading only direct children returns an asset
+    // with an id and an href and no text at all.
+    const article = el('article', [
+      el('body', [
+        el('sec', [
+          el('title', [t('Supplementary information')]),
+          el(
+            'supplementary-material',
+            [
+              el(
+                'media',
+                [
+                  el('label', [t('Supplementary Information')]),
+                  el('caption', [el('p', [t('Supplementary Note, Figs. 1–24 and Tables 1–3.')])]),
+                ],
+                { '@_xlink:href': '41551_2025_1498_MOESM1_ESM.pdf' },
+              ),
+            ],
+            { '@_id': 'MOESM1' },
+          ),
+        ]),
+      ]),
+    ]);
+
+    expect(extractPmcAssets(article)).toEqual([
+      {
+        assetType: 'supplementary-material',
+        id: 'MOESM1',
+        label: 'Supplementary Information',
+        caption: 'Supplementary Note, Figs. 1–24 and Tables 1–3.',
+        sectionTitle: 'Supplementary information',
+        href: '41551_2025_1498_MOESM1_ESM.pdf',
+      },
+    ]);
+  });
+
+  it('names the in-text marker with the label the pointer carries (#130)', () => {
+    // The tool layer removes a marker by rebuilding it from `assets[].label`, so
+    // the marker the parser leaves has to resolve the label the same way the
+    // asset record does. A deposit that hangs its label on the <media> used to
+    // yield a bare `[Supplementary]` beside an asset labelled `Data S1`, and the
+    // marker survived `includeAssets: false` in the section text.
+    const body = el('body', [
+      el('sec', [
+        el('title', [t('Supplementary information')]),
+        el(
+          'supplementary-material',
+          [
+            el(
+              'media',
+              [el('label', [t('Data S1')]), el('caption', [el('p', [t('Raw measurements.')])])],
+              { '@_xlink:href': 's001.xlsx' },
+            ),
+          ],
+          { '@_id': 'sup1' },
+        ),
+      ]),
+    ]);
+
+    const asset = extractPmcAssets(el('article', [body]))[0];
+    expect(asset?.label).toBe('Data S1');
+    expect(extractBodySections(body)[0]?.text).toBe(`[Supplementary: ${asset?.label}]`);
+  });
+
+  it('prefers the asset element own label and caption over the pointer own (#130)', () => {
+    const article = el('article', [
+      el('body', [
+        el('sec', [
+          el('title', [t('Results')]),
+          el(
+            'fig',
+            [
+              el('label', [t('Fig. 1')]),
+              el('caption', [el('p', [t('The figure caption.')])]),
+              el('graphic', [el('caption', [el('p', [t('The graphic caption.')])])], {
+                '@_xlink:href': 'g001.jpg',
+              }),
+            ],
+            { '@_id': 'F1' },
+          ),
+        ]),
+      ]),
+    ]);
+
+    expect(extractPmcAssets(article)[0]).toEqual({
+      assetType: 'figure',
+      id: 'F1',
+      label: 'Fig. 1',
+      caption: 'The figure caption.',
+      sectionTitle: 'Results',
+      href: 'g001.jpg',
+    });
+  });
+
+  it('separates an asset caption title from the paragraphs under it (#111, #130)', () => {
+    // PMC12816603 Fig. 1 reads `…observational constraints6.Cloud susceptibilities…`
+    // today — a caption title's trailing citation superscript, then its first
+    // paragraph's first word, with nothing between them. 60 of 342 asset
+    // captions in a 68-record draw carry the defect.
+    const article = el('article', [
+      el('body', [
+        el('sec', [
+          el('title', [t('Results')]),
+          el(
+            'fig',
+            [
+              el('label', [t('Fig. 1')]),
+              el('caption', [
+                el('title', [t('Cloud susceptibilities from observational constraints')]),
+                el('p', [t('Susceptibilities are shown for each regime.')]),
+                el('p', [t('Shading marks the interquartile range.')]),
+              ]),
+              el('graphic', [], { '@_xlink:href': 'g001.jpg' }),
+            ],
+            { '@_id': 'F1' },
+          ),
+        ]),
+      ]),
+    ]);
+
+    expect(extractPmcAssets(article)[0]?.caption).toBe(
+      'Cloud susceptibilities from observational constraints Susceptibilities are shown for each regime. Shading marks the interquartile range.',
+    );
+  });
+
+  it('omits assets entirely from an article that has none (#130)', () => {
+    // PMC12753918 and PMC12696417 carry no <fig> and no <supplementary-material>.
+    // An empty array would read as "this article has no assets", which the absent
+    // field already says.
+    const article = el('article', [
+      el('body', [el('sec', [el('title', [t('Results')]), el('p', [t('No figures here.')])])]),
+    ]);
+
+    expect(extractPmcAssets(article)).toEqual([]);
+    expect('assets' in parsePmcArticle(article)).toBe(false);
+  });
+
+  it('lifts a p-nested figure exactly once, out of the prose and into assets[] (#130)', () => {
+    const article = el('article', [
+      el('body', [
+        el('p', [
+          t('…suggests that further scrutiny is warranted.'),
+          fig('F1', 'Fig. 1', 'Comparison of apparent resistivity and phase data.', 'f0001.jpg'),
+        ]),
+      ]),
+    ]);
+
+    const parsed = parsePmcArticle(article);
+    expect(parsed.assets).toHaveLength(1);
+    expect(parsed.assets?.[0]?.caption).toBe('Comparison of apparent resistivity and phase data.');
+    // A <p>-nested figure has no enclosing <sec>, so it names no section.
+    expect(parsed.assets?.[0]?.sectionTitle).toBeUndefined();
+    const sections = JSON.stringify(parsed.sections);
+    expect(sections).not.toContain('warranted.Fig. 1Comparison');
+    expect(sections).not.toContain('Comparison of apparent resistivity');
+    expect(sections).toContain('[Figure: Fig. 1]');
   });
 });
 
@@ -1237,6 +1927,32 @@ describe('parsePmcArticle', () => {
     expect(result.abstract).toBe('Candidates include NF1 and MED12, as well as NF2, CUL3.');
   });
 
+  it('joins abstract sections as "Title: text" blocks and paragraphs with one space (#134)', () => {
+    // Characterization. This is the shape every record with one untyped
+    // abstract already returns, and the selection rule must not disturb it:
+    // sibling paragraphs inside a section separate by a single space, sections
+    // by a blank line, and a section without a title contributes its prose bare.
+    const article = el('article', [
+      el('front', [
+        el('article-meta', [
+          el('article-id', [t('PMC900')], { '@_pub-id-type': 'pmcid' }),
+          el('abstract', [
+            el('sec', [
+              el('title', [t('Background')]),
+              el('p', [t('First paragraph.')]),
+              el('p', [t('Second paragraph.')]),
+            ]),
+            el('sec', [el('p', [t('Untitled section prose.')])]),
+          ]),
+        ]),
+      ]),
+    ]);
+
+    expect(parsePmcArticle(article).abstract).toBe(
+      'Background: First paragraph. Second paragraph.\n\nUntitled section prose.',
+    );
+  });
+
   it('falls back to print publication dates and direct abstract text', () => {
     const article = el('article', [
       el('front', [
@@ -1253,6 +1969,87 @@ describe('parsePmcArticle', () => {
     const result = parsePmcArticle(article);
     expect(result.publicationDate).toEqual({ year: '2022', month: '11', day: '05' });
     expect(result.abstract).toBe('Plain abstract text.');
+  });
+
+  it('prefers the untyped <abstract> over typed ones serialized before it (#134)', () => {
+    // PMC13131449 and PMC13539245 deposit `graphical`, `author-highlights` and
+    // the untyped abstract in that order, so reading the first one returned the
+    // graphical abstract's 18-character title as the article's abstract and the
+    // real one never reached the response.
+    const article = el('article', [
+      el('front', [
+        el('article-meta', [
+          el('article-id', [t('PMC13131449')], { '@_pub-id-type': 'pmcid' }),
+          el(
+            'abstract',
+            [
+              el('title', [t('Graphical abstract')]),
+              el('fig', [el('graphic', [], { '@_xlink:href': 'ga.jpg' })], { '@_id': 'ga' }),
+            ],
+            { '@_abstract-type': 'graphical' },
+          ),
+          el('abstract', [el('p', [t('Highlight one.')])], {
+            '@_abstract-type': 'author-highlights',
+          }),
+          el('abstract', [el('p', [t('The article’s own abstract.')])]),
+        ]),
+      ]),
+    ]);
+
+    expect(parsePmcArticle(article).abstract).toBe('The article’s own abstract.');
+  });
+
+  it('falls back to the first <abstract> when the record deposits no untyped one (#134)', () => {
+    const article = el('article', [
+      el('front', [
+        el('article-meta', [
+          el('article-id', [t('PMC901')], { '@_pub-id-type': 'pmcid' }),
+          el('abstract', [el('p', [t('Executive summary prose.')])], {
+            '@_abstract-type': 'executive-summary',
+          }),
+          el('abstract', [el('p', [t('Short form.')])], { '@_abstract-type': 'short' }),
+        ]),
+      ]),
+    ]);
+
+    expect(parsePmcArticle(article).abstract).toBe('Executive summary prose.');
+  });
+
+  it('lifts a <fig> and renders a <list> inside the chosen abstract (#134)', () => {
+    // PMC13316352's graphical abstract reaches the output today through a
+    // <p><fig><caption>, so the abstract arrives as a 453-character figure
+    // caption. Inside the selected element the body walk's rule applies: the
+    // caption belongs to assets[], and the figure leaves its marker behind.
+    const article = el('article', [
+      el('front', [
+        el('article-meta', [
+          el('article-id', [t('PMC13316352')], { '@_pub-id-type': 'pmcid' }),
+          el('abstract', [
+            el('p', [
+              t('Attachment is promoted by stress fibers.'),
+              el(
+                'fig',
+                [
+                  el('label', [t('Fig. 7')]),
+                  el('caption', [el('p', [t('STK11 facilitates influenza A virus attachment.')])]),
+                ],
+                { '@_id': 'fx1' },
+              ),
+            ]),
+            el('list', [el('list-item', [el('p', [t('Sialic acid clusters stay disordered.')])])], {
+              '@_list-type': 'bullet',
+            }),
+          ]),
+        ]),
+      ]),
+    ]);
+
+    const parsed = parsePmcArticle(article);
+    expect(parsed.abstract).toBe(
+      'Attachment is promoted by stress fibers.\n\n[Figure: Fig. 7] - Sialic acid clusters stay disordered.',
+    );
+    expect(parsed.abstract).not.toContain('STK11 facilitates');
+    expect(parsed.assets?.[0]?.caption).toBe('STK11 facilitates influenza A virus attachment.');
   });
 
   it('surfaces body-nested references without disturbing sections[] (regression #116)', () => {

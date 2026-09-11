@@ -577,6 +577,8 @@ export interface ParsedPmcArticle {
   abstract?: string;
   affiliations?: string[];
   articleType?: string;
+  /** Figures and supplementary material, in document order. Absent when the article carries none. */
+  assets?: ParsedPmcAsset[];
   authors?: ParsedPmcAuthor[];
   doi?: string;
   journal?: ParsedPmcJournal;
@@ -590,6 +592,49 @@ export interface ParsedPmcArticle {
   sections: ParsedPmcSection[];
   tables?: ParsedPmcTable[];
   title?: string;
+}
+
+/** Which captioned element an asset came from. */
+export type ParsedPmcAssetType = 'figure' | 'supplementary-material';
+
+/**
+ * A captioned asset lifted out of a PMC full-text article — a `<fig>` or a
+ * `<supplementary-material>`. Both are a caption plus a pointer that prose
+ * refers to by label, and a sixth of them sit outside `<body>` with no section
+ * to hang from, so they are reported at article level the way `tables[]` is,
+ * leaving a positional marker in the section text they were lifted from.
+ *
+ * Scalar leaves only: the tool-layer schema that renders these sits under the
+ * framework's `format-parity` walker depth cap.
+ *
+ * There is no per-asset unextractable reason, and deliberately so. A table
+ * promises cells, so a graphic-only deposit has to disclose that it has none; an
+ * asset promises a caption, and an uncaptioned supplement is still fully
+ * represented by its `id` and `href`, with no re-call that would produce more.
+ * There is no media-type field either — `mimetype`/`mime-subtype` are in the
+ * JATS model but appear zero times across a 68-record draw. (#130)
+ */
+export interface ParsedPmcAsset {
+  /** Which element this came from. */
+  assetType: ParsedPmcAssetType;
+  /** Caption text, without the label. */
+  caption?: string;
+  /**
+   * The `<graphic>`/`<media>` `@xlink:href`, verbatim. A deposit-relative
+   * filename (`MOL2-20-1253-g001.jpg`), not a fetchable URL — no absolute form
+   * of it resolves. Use `pmcUrl` for the rendered article.
+   */
+  href?: string;
+  /** The `id` attribute, when the deposit carries one. */
+  id?: string;
+  /** Display label, e.g. `Fig. 1`. */
+  label?: string;
+  /**
+   * Title of the innermost enclosing `<sec>` wherever it sits — body, back
+   * matter, or appendix. Absent for a `<floats-group>` deposit, which sits in no
+   * section at all.
+   */
+  sectionTitle?: string;
 }
 
 /** Parsed PMC author. */

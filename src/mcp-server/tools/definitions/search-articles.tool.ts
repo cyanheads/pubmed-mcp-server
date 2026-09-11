@@ -6,7 +6,7 @@
 
 import { tool, z } from '@cyanheads/mcp-ts-core';
 import { sanitization } from '@cyanheads/mcp-ts-core/utils';
-import { NCBI_SERVICE_ERRORS } from '@/services/error-contracts.js';
+import { NCBI_QUERY_INPUT_ERRORS, NCBI_SERVICE_ERRORS } from '@/services/error-contracts.js';
 import { getNcbiService } from '@/services/ncbi/ncbi-service.js';
 import { extractBriefSummaries } from '@/services/ncbi/parsing/esummary-parser.js';
 import type { ESearchErrorList, ESearchWarningList } from '@/services/ncbi/types.js';
@@ -156,10 +156,15 @@ export const searchArticlesTool = tool('pubmed_search_articles', {
   sourceUrl:
     'https://github.com/cyanheads/pubmed-mcp-server/blob/main/src/mcp-server/tools/definitions/search-articles.tool.ts',
 
-  errors: [...NCBI_SERVICE_ERRORS] as const,
+  errors: [...NCBI_SERVICE_ERRORS, ...NCBI_QUERY_INPUT_ERRORS] as const,
 
   input: z.object({
-    query: z.string().min(1).describe('PubMed search query (supports full NCBI syntax)'),
+    query: z
+      .string()
+      .min(1)
+      .describe(
+        'PubMed search query (supports full NCBI syntax). Must carry a search term: a value that is blank once markup is stripped is rejected rather than sent to PubMed as an empty term.',
+      ),
     maxResults: z.number().int().min(1).max(1000).default(20).describe('Maximum results to return'),
     offset: z
       .number()
@@ -306,6 +311,20 @@ export const searchArticlesTool = tool('pubmed_search_articles', {
     const ncbi = getNcbiService();
 
     let effectiveQuery = await sanitization.sanitizeString(input.query, { context: 'text' });
+
+    // `min(1)` counts whitespace, and the sanitizer reduces markup with no text
+    // content to an empty string, so both reach here as a blank term. NCBI
+    // answers a blank term with HTTP 200 and an embedded <ERROR> reading
+    // "Search is temporarily unavailable", which classifies as a retryable
+    // outage — the caller would spend the whole retry deadline on a
+    // deterministic input mistake. Reject before the call instead. (#122)
+    if (effectiveQuery.trim().length === 0) {
+      throw ctx.fail(
+        'blank_query',
+        'The `query` carries no search term — it is blank after markup is stripped.',
+        { ...ctx.recoveryFor('blank_query') },
+      );
+    }
 
     // Build filters — capture normalized values for both query construction and appliedFilters
     let normalizedDateRange:

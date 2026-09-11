@@ -3,7 +3,9 @@
  * @module tests/mcp-server/tools/definitions/search-articles.tool.test
  */
 
-import { createMockContext, getEnrichment } from '@cyanheads/mcp-ts-core/testing';
+import type { ContentBlock } from '@cyanheads/mcp-ts-core';
+import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
+import { createMockContext, getEnrichment, runToolContract } from '@cyanheads/mcp-ts-core/testing';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
 import type { ParsedBriefSummary } from '@/services/ncbi/types.js';
@@ -453,6 +455,71 @@ describe('searchArticlesTool', () => {
       },
       expect.objectContaining({ signal: expect.any(AbortSignal) }),
     );
+  });
+
+  describe('blank query rejection (issue #122)', () => {
+    // A blank term makes NCBI answer HTTP 200 with an embedded <ERROR> whose
+    // text reads "Search is temporarily unavailable", which the response
+    // handler classifies as a retryable outage. The rejection has to land
+    // before the call so a deterministic input mistake never enters retry.
+    it.each([
+      ['whitespace-only', '   '],
+      ['emptied by the sanitizer', '<b></b>'],
+    ])('rejects a %s query without calling NCBI', async (_label, query) => {
+      const ctx = createMockContext({ errors: searchArticlesTool.errors });
+      const input = searchArticlesTool.input.parse({ query });
+
+      const promise = searchArticlesTool.handler(input, ctx);
+      await expect(promise).rejects.toMatchObject({
+        code: JsonRpcErrorCode.ValidationError,
+        data: { reason: 'blank_query', recovery: { hint: expect.stringMatching(/nonblank/i) } },
+      });
+      expect(mockESearch).not.toHaveBeenCalled();
+    });
+
+    it('mirrors the reason and recovery hint onto both error surfaces', async () => {
+      const result = await runToolContract(searchArticlesTool, { query: '   ' });
+
+      expect(result.isError).toBe(true);
+      expect(result.structuredContent).toMatchObject({
+        error: { code: JsonRpcErrorCode.ValidationError, data: { reason: 'blank_query' } },
+      });
+      const text = textBlocks(result.content as ContentBlock[])
+        .map((b) => b.text)
+        .join('\n');
+      expect(text).toMatch(/Recovery:/);
+      expect(text).toMatch(/nonblank/i);
+    });
+
+    it('declares blank_query as a non-retryable input error', () => {
+      const entry = searchArticlesTool.errors?.find((e) => e.reason === 'blank_query');
+      expect(entry).toMatchObject({
+        code: JsonRpcErrorCode.ValidationError,
+        retryable: false,
+      });
+    });
+
+    it('still searches a legitimate query padded with whitespace', async () => {
+      mockESearch.mockResolvedValue({ count: 3, idList: ['1'], retmax: 20, retstart: 0 });
+      const ctx = createMockContext({ errors: searchArticlesTool.errors });
+      const input = searchArticlesTool.input.parse({ query: '  covid  ' });
+      const result = await searchArticlesTool.handler(input, ctx);
+
+      expect(mockESearch.mock.calls[0]?.[0]?.term).toContain('covid');
+      expect(result.pmids).toEqual(['1']);
+    });
+
+    it('still sends a bare boolean operator to NCBI as a normal zero-result search', async () => {
+      // NCBI answers `AND` with Count=0 and a WarningList, not an <ERROR> — a
+      // real (if unproductive) search the empty-result guidance already covers.
+      mockESearch.mockResolvedValue({ count: 0, idList: [], retmax: 20, retstart: 0 });
+      const ctx = createMockContext({ errors: searchArticlesTool.errors });
+      const input = searchArticlesTool.input.parse({ query: 'AND' });
+      await searchArticlesTool.handler(input, ctx);
+
+      expect(mockESearch.mock.calls[0]?.[0]?.term).toBe('AND');
+      expect(getEnrichment(ctx).notice).toContain('pubmed_spell_check');
+    });
   });
 
   describe('empty-result notice', () => {

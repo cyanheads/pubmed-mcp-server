@@ -6,7 +6,7 @@
  */
 
 import { tool, z } from '@cyanheads/mcp-ts-core';
-import { NCBI_SERVICE_ERRORS } from '@/services/error-contracts.js';
+import { NCBI_QUERY_INPUT_ERRORS, NCBI_SERVICE_ERRORS } from '@/services/error-contracts.js';
 import { getNcbiService } from '@/services/ncbi/ncbi-service.js';
 import { ensureArray, getText } from '@/services/ncbi/parsing/xml-helpers.js';
 import {
@@ -127,10 +127,15 @@ export const lookupMeshTool = tool('pubmed_lookup_mesh', {
   sourceUrl:
     'https://github.com/cyanheads/pubmed-mcp-server/blob/main/src/mcp-server/tools/definitions/lookup-mesh.tool.ts',
 
-  errors: [...NCBI_SERVICE_ERRORS] as const,
+  errors: [...NCBI_SERVICE_ERRORS, ...NCBI_QUERY_INPUT_ERRORS] as const,
 
   input: z.object({
-    query: z.string().min(1).describe('MeSH descriptor name or free-text term to look up'),
+    query: z
+      .string()
+      .min(1)
+      .describe(
+        'MeSH descriptor name or free-text term to look up. Must carry a term: a blank or whitespace-only value is rejected rather than searched.',
+      ),
     maxResults: z.number().int().min(1).max(50).default(10).describe('Maximum results'),
     offset: z
       .number()
@@ -203,6 +208,15 @@ export const lookupMeshTool = tool('pubmed_lookup_mesh', {
     const { query, maxResults, offset, includeDetails } = input;
     const ncbi = getNcbiService();
     ctx.log.debug('MeSH lookup started', { query, maxResults, offset, includeDetails });
+
+    // ESearch on db=mesh answers a blank term with Count=0 and a WarningList
+    // rather than an error, so the empty-result branch would report "no MeSH
+    // descriptors matched" for a term that was never really searched. (#133)
+    if (query.trim().length === 0) {
+      throw ctx.fail('blank_query', 'The `query` is blank — there is no term to look up.', {
+        ...ctx.recoveryFor('blank_query'),
+      });
+    }
 
     const hasFieldTag = /\[.+\]/.test(query);
     const callOpts = { signal: ctx.signal };

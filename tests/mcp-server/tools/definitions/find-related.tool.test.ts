@@ -829,6 +829,304 @@ describe('findRelatedTool', () => {
     });
   });
 
+  // ── OpenAlex window paging disclosure (#117) ───────────────────────────────
+
+  describe('OpenAlex window paging disclosure (issue #117)', () => {
+    beforeEach(() => {
+      mockELink.mockRejectedValue(
+        new McpError(JsonRpcErrorCode.ServiceUnavailable, 'NCBI down', {
+          reason: 'ncbi_unreachable',
+        }),
+      );
+      mockESummary.mockResolvedValue({ eSummaryResult: {} });
+      mockExtractBriefSummaries.mockResolvedValue([]);
+    });
+
+    it('names OpenAlex when its rows were excluded for carrying no PubMed PMID', async () => {
+      mockOaCitedBy.mockResolvedValue({
+        pmids: ['333', '444'],
+        totalCount: 2,
+        droppedNoPmid: 6,
+        reachCapped: false,
+      });
+
+      const result = await runToolContract(findRelatedTool, {
+        pmid: '12345',
+        relationship: 'cited_by',
+      });
+
+      const structured = result.structuredContent as { notice?: string };
+      expect(structured.notice).toContain('OpenAlex served 8 upstream rows for this request');
+      expect(structured.notice).toContain('6 with no PubMed PMID');
+      // Europe PMC's own exclusion wording must not be pinned on OpenAlex.
+      expect(structured.notice).not.toContain('non-MED');
+      const text = textBlocks(result.content as ContentBlock[])
+        .map((b) => b.text)
+        .join('\n');
+      expect(text).toContain('no PubMed PMID');
+    });
+
+    it('explains an empty OpenAlex window when the page cap is reached', async () => {
+      mockOaCitedBy.mockResolvedValue({
+        pmids: [],
+        totalCount: 17394,
+        droppedNoPmid: 1000,
+        reachCapped: true,
+      });
+
+      const result = await runToolContract(findRelatedTool, {
+        pmid: '22745249',
+        relationship: 'cited_by',
+        maxResults: 3,
+        offset: 200,
+      });
+
+      const structured = result.structuredContent as {
+        articles: unknown[];
+        notice?: string;
+        totalCount?: number;
+      };
+      expect(structured.articles).toEqual([]);
+      expect(structured.totalCount).toBe(17394);
+      expect(structured.notice).toContain('OpenAlex paging stopped after 10 pages');
+      expect(structured.notice).toContain('lower the offset');
+      const text = textBlocks(result.content as ContentBlock[])
+        .map((b) => b.text)
+        .join('\n');
+      expect(text).toContain('OpenAlex paging stopped after 10 pages');
+    });
+
+    it('serves a deep window OpenAlex reached, non-overlapping with the first page', async () => {
+      const pmids = Array.from({ length: 291 }, (_, i) => String(9000 + i));
+      mockOaCitedBy.mockResolvedValue({
+        pmids,
+        totalCount: 17394,
+        droppedNoPmid: 9,
+        reachCapped: false,
+      });
+
+      const deep = createMockContext({ errors: findRelatedTool.errors });
+      const deepResult = await findRelatedTool.handler(
+        findRelatedTool.input.parse({
+          pmid: '22745249',
+          relationship: 'cited_by',
+          maxResults: 3,
+          offset: 200,
+        }),
+        deep,
+      );
+      const firstPage = createMockContext({ errors: findRelatedTool.errors });
+      const firstResult = await findRelatedTool.handler(
+        findRelatedTool.input.parse({
+          pmid: '22745249',
+          relationship: 'cited_by',
+          maxResults: 50,
+          offset: 0,
+        }),
+        firstPage,
+      );
+
+      expect(deepResult.articles.map((a) => a.pmid)).toEqual(['9200', '9201', '9202']);
+      const covered = new Set(firstResult.articles.map((a) => a.pmid));
+      for (const a of deepResult.articles) expect(covered.has(a.pmid)).toBe(false);
+    });
+
+    it('reports the exact addressable total OpenAlex resolved for references', async () => {
+      mockELink.mockResolvedValue(eLinkResponse([], 'pubmed_pubmed_refs'));
+      mockESummary.mockResolvedValue({ eSummaryResult: {} });
+      mockExtractBriefSummaries
+        .mockResolvedValueOnce([{ pmid: '37952131', title: 'Non-PMC source' }])
+        .mockResolvedValueOnce([]);
+      mockEpmcReferences.mockResolvedValue({
+        pmids: [],
+        totalCount: 0,
+        hitCount: 0,
+        droppedNoPmid: 0,
+      });
+      mockOaReferences.mockResolvedValue({
+        pmids: Array.from({ length: 150 }, (_, i) => String(4000 + i)),
+        totalCount: 150,
+        droppedNoPmid: 12,
+        reachCapped: false,
+      });
+
+      const ctx = createMockContext({ errors: findRelatedTool.errors });
+      const input = findRelatedTool.input.parse({
+        pmid: '37952131',
+        relationship: 'references',
+        maxResults: 5,
+        offset: 140,
+      });
+      const result = await findRelatedTool.handler(input, ctx);
+
+      expect(mockOaReferences).toHaveBeenCalledWith('37952131', 145, expect.any(AbortSignal));
+      expect(result.articles.map((a) => a.pmid)).toEqual(['4140', '4141', '4142', '4143', '4144']);
+      expect(getEnrichment(ctx).totalCount).toBe(150);
+      expect(String(getEnrichment(ctx).notice)).toContain('12 with no PubMed PMID');
+    });
+  });
+
+  // ── Reference-coverage provider failures (#118) ────────────────────────────
+
+  describe('reference coverage failures (issue #118)', () => {
+    beforeEach(() => {
+      // NCBI answers successfully with an empty reference list for a valid,
+      // confirmed, non-PMC source — the only way into this branch.
+      mockELink.mockResolvedValue({ eLinkResult: [{ LinkSet: {} }] });
+      mockESummary.mockResolvedValue({ eSummaryResult: {} });
+      mockExtractBriefSummaries.mockResolvedValue([{ pmid: '39248309', title: 'Non-PMC source' }]);
+    });
+
+    const referencesInput = { pmid: '39248309', relationship: 'references' as const };
+
+    it('discloses that coverage could not be checked when both fallbacks throw', async () => {
+      mockEpmcReferences.mockRejectedValue(
+        new McpError(JsonRpcErrorCode.ServiceUnavailable, 'EPMC down', {
+          reason: 'europepmc_unreachable',
+        }),
+      );
+      mockOaReferences.mockRejectedValue(
+        new McpError(JsonRpcErrorCode.ServiceUnavailable, 'OA down', {
+          reason: 'openalex_unreachable',
+        }),
+      );
+
+      const result = await runToolContract(findRelatedTool, { ...referencesInput, maxResults: 3 });
+
+      const structured = result.structuredContent as {
+        articles: unknown[];
+        coverageFailures?: Array<{ provider: string; reason: string; retryable: boolean }>;
+        notice?: string;
+        source?: string;
+        totalCount?: number;
+      };
+      // NCBI answered, so the success shape is preserved exactly.
+      expect(structured.articles).toEqual([]);
+      expect(structured.source).toBe('ncbi');
+      expect(structured.totalCount).toBe(0);
+      expect(structured.coverageFailures).toEqual([
+        { provider: 'europepmc', reason: 'europepmc_unreachable', retryable: true },
+        { provider: 'openalex', reason: 'openalex_unreachable', retryable: true },
+      ]);
+      // Neither failed provider is described as having answered.
+      expect(structured.notice).toContain('via NCBI.');
+      expect(structured.notice).not.toContain('via NCBI, Europe PMC, or OpenAlex');
+      expect(structured.notice).toContain('Reference coverage could not be fully checked');
+      expect(structured.notice).toContain('Europe PMC (europepmc_unreachable)');
+      expect(structured.notice).toContain('OpenAlex (openalex_unreachable)');
+      expect(structured.notice).toContain('Retry after a brief delay');
+      const text = textBlocks(result.content as ContentBlock[])
+        .map((b) => b.text)
+        .join('\n');
+      expect(text).toContain('Reference coverage could not be fully checked');
+      expect(text).toContain('Coverage not checked:');
+      expect(text).toContain('OpenAlex (openalex_unreachable)');
+    });
+
+    it('separates the provider that answered empty from the one that failed', async () => {
+      mockEpmcReferences.mockResolvedValue({
+        pmids: [],
+        totalCount: 0,
+        hitCount: 0,
+        droppedNoPmid: 0,
+      });
+      mockOaReferences.mockRejectedValue(
+        new McpError(JsonRpcErrorCode.SerializationError, 'OA garbage', {
+          reason: 'openalex_invalid_response',
+        }),
+      );
+
+      const ctx = createMockContext({ errors: findRelatedTool.errors });
+      await findRelatedTool.handler(findRelatedTool.input.parse(referencesInput), ctx);
+
+      const enrichment = getEnrichment(ctx);
+      expect(enrichment.coverageFailures).toEqual([
+        { provider: 'openalex', reason: 'openalex_invalid_response', retryable: true },
+      ]);
+      const notice = String(enrichment.notice);
+      expect(notice).toContain('via NCBI or Europe PMC.');
+      expect(notice).toContain('OpenAlex (openalex_invalid_response) did not answer');
+    });
+
+    it('marks a configuration-disabled fallback as unrecoverable', async () => {
+      // EUROPEPMC_ENABLED=false — the accessor returns undefined.
+      mockGetEpmcService.mockReturnValue(undefined);
+      mockOaReferences.mockResolvedValue({
+        pmids: [],
+        totalCount: 0,
+        droppedNoPmid: 0,
+        reachCapped: false,
+      });
+
+      const ctx = createMockContext({ errors: findRelatedTool.errors });
+      await findRelatedTool.handler(findRelatedTool.input.parse(referencesInput), ctx);
+
+      const enrichment = getEnrichment(ctx);
+      expect(enrichment.coverageFailures).toEqual([
+        { provider: 'europepmc', reason: 'provider_disabled', retryable: false },
+      ]);
+      const notice = String(enrichment.notice);
+      expect(notice).toContain('via NCBI or OpenAlex.');
+      expect(notice).toContain('turned off by server configuration');
+      expect(notice).toContain('will not recover on retry');
+      // Nothing to retry, so no retry guidance is offered.
+      expect(notice).not.toContain('Retry after a brief delay');
+    });
+
+    it('keeps a failure on record when the other fallback serves references', async () => {
+      mockExtractBriefSummaries
+        .mockReset()
+        .mockResolvedValueOnce([{ pmid: '39248309', title: 'Non-PMC source' }])
+        .mockResolvedValueOnce([{ pmid: '888', title: 'Ref A' }]);
+      mockEpmcReferences.mockRejectedValue(
+        new McpError(JsonRpcErrorCode.ServiceUnavailable, 'EPMC down', {
+          reason: 'europepmc_unreachable',
+        }),
+      );
+      mockOaReferences.mockResolvedValue({
+        pmids: ['888'],
+        totalCount: 1,
+        droppedNoPmid: 0,
+        reachCapped: false,
+      });
+
+      const ctx = createMockContext({ errors: findRelatedTool.errors });
+      const result = await findRelatedTool.handler(
+        findRelatedTool.input.parse(referencesInput),
+        ctx,
+      );
+
+      expect(result.articles.map((a) => a.pmid)).toEqual(['888']);
+      expect(getEnrichment(ctx).source).toBe('openalex');
+      expect(getEnrichment(ctx).coverageFailures).toEqual([
+        { provider: 'europepmc', reason: 'europepmc_unreachable', retryable: true },
+      ]);
+      // References were found, so nothing claims the check came up short.
+      expect(String(getEnrichment(ctx).notice)).not.toContain('could not be fully checked');
+    });
+
+    it('reports an unclassified fallback failure without leaking its message', async () => {
+      mockEpmcReferences.mockRejectedValue(
+        new Error('connect ECONNREFUSED https://www.ebi.ac.uk/europepmc/webservices/rest?key=abc'),
+      );
+      mockOaReferences.mockRejectedValue(new Error('socket hang up'));
+
+      const result = await runToolContract(findRelatedTool, referencesInput);
+
+      const serialized = JSON.stringify(result);
+      expect(serialized).not.toContain('ECONNREFUSED');
+      expect(serialized).not.toContain('ebi.ac.uk');
+      expect(serialized).not.toContain('socket hang up');
+      const structured = result.structuredContent as {
+        coverageFailures?: Array<{ reason: string; retryable: boolean }>;
+      };
+      expect(structured.coverageFailures).toEqual([
+        { provider: 'europepmc', reason: 'unclassified_error', retryable: true },
+        { provider: 'openalex', reason: 'unclassified_error', retryable: true },
+      ]);
+    });
+  });
+
   // ── Existing behavior preserved ───────────────────────────────────────────
 
   it('returns empty without notice for valid source with no related articles', async () => {
@@ -1125,6 +1423,46 @@ describe('findRelatedTool', () => {
 
       expect(getEnrichment(ctx).notice).toBeDefined();
       expect(getEnrichment(ctx).notice).toContain('PMCID PMC12345');
+    });
+
+    /**
+     * Exact wording for the case where both fallbacks answer — not just throw-free
+     * but genuinely empty. Pinned verbatim: this is the string a failed provider
+     * must never be able to produce, so it has to stay stable while the failure
+     * path grows its own wording.
+     */
+    it('words a genuine double-empty answer identically for both source kinds', async () => {
+      mockELink.mockResolvedValue({ eLinkResult: [{ LinkSet: {} }] });
+      mockESummary.mockResolvedValue({ eSummaryResult: {} });
+      mockEpmcReferences.mockResolvedValue({
+        pmids: [],
+        totalCount: 0,
+        hitCount: 0,
+        droppedNoPmid: 0,
+      });
+      mockOaReferences.mockResolvedValue({ pmids: [], totalCount: 0 });
+
+      mockExtractBriefSummaries.mockResolvedValue([{ pmid: '37952131', title: 'Non-PMC source' }]);
+      const noPmcCtx = createMockContext({ errors: findRelatedTool.errors });
+      await findRelatedTool.handler(
+        findRelatedTool.input.parse({ pmid: '37952131', relationship: 'references' }),
+        noPmcCtx,
+      );
+      expect(getEnrichment(noPmcCtx).notice).toBe(
+        'No reference list available for PMID 37952131 via NCBI, Europe PMC, or OpenAlex. Use pubmed_fetch_articles to inspect the article record, or try relationship: "similar" / "cited_by".',
+      );
+
+      mockExtractBriefSummaries.mockResolvedValue([
+        { pmid: '12345', title: 'PMC source', pmcId: 'PMC12345' },
+      ]);
+      const pmcCtx = createMockContext({ errors: findRelatedTool.errors });
+      await findRelatedTool.handler(
+        findRelatedTool.input.parse({ pmid: '12345', relationship: 'references' }),
+        pmcCtx,
+      );
+      expect(getEnrichment(pmcCtx).notice).toBe(
+        'No reference list found for PMID 12345 (PMCID PMC12345) via NCBI, Europe PMC, or OpenAlex.',
+      );
     });
 
     it('omits notice for similar / cited_by empty results when source PMID is valid', async () => {

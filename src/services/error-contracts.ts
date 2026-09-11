@@ -1,6 +1,8 @@
 /**
- * @fileoverview Canonical service-layer error contracts. Single source of truth
- * for the failure modes both services throw and tools declare in `errors[]`.
+ * @fileoverview Canonical error contracts. Single source of truth for the
+ * failure modes services throw and tools declare in `errors[]`, plus the
+ * input rejections shared by the tools that forward a free-text query
+ * upstream.
  *
  * Service-layer code can't reach `ctx.recoveryFor` (no Context), so it spreads
  * `recoveryFor(reason)` from this module into the error factory's `data` arg.
@@ -56,6 +58,28 @@ export const NCBI_SERVICE_ERRORS = [
     when: 'NCBI returned a structured "not found" error for the requested ID(s).',
     recovery:
       'Verify the ID exists in PubMed; the resource was not found in NCBI and retrying will not help.',
+    retryable: false,
+  },
+] as const;
+
+/**
+ * Input failure the NCBI query tools reject before any call is made. Declared
+ * here rather than inside `NCBI_SERVICE_ERRORS` so only the tools that actually
+ * throw it advertise it — a tool that takes no free-text query can never
+ * produce it, and declaring it there would advertise a failure mode that
+ * cannot happen.
+ *
+ * Unlike the service arrays in this module, this one is thrown from a tool
+ * handler via `ctx.fail('blank_query', …)`, so its recovery hint resolves
+ * through `ctx.recoveryFor` and it stays out of {@link ServiceErrorReason}.
+ */
+export const NCBI_QUERY_INPUT_ERRORS = [
+  {
+    reason: 'blank_query',
+    code: JsonRpcErrorCode.ValidationError,
+    when: 'The query holds no search term once whitespace, and any markup the tool strips first, are removed — so NCBI would receive a blank term.',
+    recovery:
+      'Supply a nonblank search term; NCBI cannot search a blank term and retrying the same input will not help.',
     retryable: false,
   },
 ] as const;

@@ -3,7 +3,9 @@
  * @module tests/mcp-server/tools/definitions/lookup-mesh.tool.test
  */
 
-import { createMockContext, getEnrichment } from '@cyanheads/mcp-ts-core/testing';
+import type { ContentBlock } from '@cyanheads/mcp-ts-core';
+import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
+import { createMockContext, getEnrichment, runToolContract } from '@cyanheads/mcp-ts-core/testing';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { textBlocks } from '../../../_helpers.js';
@@ -602,6 +604,57 @@ describe('lookupMeshTool', () => {
       expect(getEnrichment(ctx).notice).toMatch(/Continue with offset 7/);
       // Not the overshoot guidance — there are more records to read.
       expect(getEnrichment(ctx).notice).not.toMatch(/Reset offset to 0/);
+    });
+  });
+
+  describe('blank query rejection (issue #133)', () => {
+    // ESearch on db=mesh answers a blank term with Count=0 and a WarningList,
+    // which the tool used to report as "no MeSH descriptors matched" — a
+    // result shape indistinguishable from a real term that matched nothing.
+    it('rejects a whitespace-only query without calling ESearch', async () => {
+      const ctx = createMockContext({ errors: lookupMeshTool.errors });
+      const input = lookupMeshTool.input.parse({ query: '   ' });
+
+      const promise = lookupMeshTool.handler(input, ctx);
+      await expect(promise).rejects.toMatchObject({
+        code: JsonRpcErrorCode.ValidationError,
+        data: { reason: 'blank_query', recovery: { hint: expect.stringMatching(/nonblank/i) } },
+      });
+      expect(mockESearch).not.toHaveBeenCalled();
+    });
+
+    it('mirrors the reason and recovery hint onto both error surfaces', async () => {
+      const result = await runToolContract(lookupMeshTool, { query: '   ' });
+
+      expect(result.isError).toBe(true);
+      expect(result.structuredContent).toMatchObject({
+        error: { code: JsonRpcErrorCode.ValidationError, data: { reason: 'blank_query' } },
+      });
+      const text = textBlocks(result.content as ContentBlock[])
+        .map((b) => b.text)
+        .join('\n');
+      expect(text).toMatch(/Recovery:/);
+      expect(text).toMatch(/nonblank/i);
+    });
+
+    it('declares blank_query as a non-retryable input error', () => {
+      expect(lookupMeshTool.errors?.find((e) => e.reason === 'blank_query')).toMatchObject({
+        code: JsonRpcErrorCode.ValidationError,
+        retryable: false,
+      });
+    });
+
+    it('still resolves a legitimate query padded with whitespace', async () => {
+      mockESearch.mockResolvedValue({ idList: ['68009369'], count: 1 });
+      mockESummary.mockResolvedValue(summaryFor(['68009369']));
+      const ctx = createMockContext({ errors: lookupMeshTool.errors });
+      const result = await lookupMeshTool.handler(
+        lookupMeshTool.input.parse({ query: '  covid  ' }),
+        ctx,
+      );
+
+      expect(mockESearch.mock.calls[0]?.[0]?.term).toBe('  covid  ');
+      expect(result.results).toHaveLength(1);
     });
   });
 

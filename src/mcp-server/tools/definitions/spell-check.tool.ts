@@ -5,7 +5,7 @@
  */
 
 import { tool, z } from '@cyanheads/mcp-ts-core';
-import { NCBI_SERVICE_ERRORS } from '@/services/error-contracts.js';
+import { NCBI_QUERY_INPUT_ERRORS, NCBI_SERVICE_ERRORS } from '@/services/error-contracts.js';
 import { getNcbiService } from '@/services/ncbi/ncbi-service.js';
 import { conceptMeta, SCHEMA_SEARCH_ACTION } from './_concepts.js';
 
@@ -17,10 +17,15 @@ export const spellCheckTool = tool('pubmed_spell_check', {
   sourceUrl:
     'https://github.com/cyanheads/pubmed-mcp-server/blob/main/src/mcp-server/tools/definitions/spell-check.tool.ts',
 
-  errors: [...NCBI_SERVICE_ERRORS] as const,
+  errors: [...NCBI_SERVICE_ERRORS, ...NCBI_QUERY_INPUT_ERRORS] as const,
 
   input: z.object({
-    query: z.string().min(2).describe('PubMed search query to spell-check'),
+    query: z
+      .string()
+      .min(2)
+      .describe(
+        'PubMed search query to spell-check. Must carry a term: a blank or whitespace-only value is rejected rather than sent to ESpell.',
+      ),
   }),
 
   output: z.object({
@@ -31,6 +36,15 @@ export const spellCheckTool = tool('pubmed_spell_check', {
 
   async handler(input, ctx) {
     ctx.log.info('Executing pubmed_spell_check tool', { query: input.query });
+    // `min(2)` counts the spaces, so a whitespace-only query passes the schema.
+    // ESpell answers a blank term with an empty `<ERROR/>` element the response
+    // handler does not detect, and the tool would report the blank input as
+    // spell-checked. Reject before the call. (#133)
+    if (input.query.trim().length === 0) {
+      throw ctx.fail('blank_query', 'The `query` is blank — there is nothing to spell-check.', {
+        ...ctx.recoveryFor('blank_query'),
+      });
+    }
     const result = await getNcbiService().eSpell(
       { db: 'pubmed', term: input.query },
       { signal: ctx.signal },

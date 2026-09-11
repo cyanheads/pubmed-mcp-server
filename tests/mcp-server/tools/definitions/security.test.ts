@@ -7,8 +7,10 @@
  */
 
 import { JsonRpcErrorCode, McpError } from '@cyanheads/mcp-ts-core/errors';
-import { createMockContext } from '@cyanheads/mcp-ts-core/testing';
+import { createMockContext, getEnrichment } from '@cyanheads/mcp-ts-core/testing';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+
+import type { ParsedBriefSummary } from '@/services/ncbi/types.js';
 
 import { textBlocks } from '../../../_helpers.js';
 
@@ -22,9 +24,10 @@ const mockELink = vi.fn();
 const mockEInfo = vi.fn();
 const mockECitMatch = vi.fn();
 const mockIdConvert = vi.fn();
-const mockExtractBriefSummaries = vi.fn(() => Promise.resolve([]));
+const mockExtractBriefSummaries = vi.fn((): Promise<ParsedBriefSummary[]> => Promise.resolve([]));
 const mockGetUnpaywallService = vi.fn(() => undefined);
-const mockGetEpmcService = vi.fn(() => undefined);
+/** Loosely typed so a test can model a Europe PMC service that throws, not only an absent one. */
+const mockGetEpmcService = vi.fn((): unknown => undefined);
 
 vi.mock('@/services/ncbi/ncbi-service.js', () => ({
   getNcbiService: () => ({
@@ -45,7 +48,7 @@ vi.mock('@/services/unpaywall/unpaywall-service.js', () => ({
   getUnpaywallService: mockGetUnpaywallService,
 }));
 vi.mock('@/services/europe-pmc/europe-pmc-service.js', () => ({
-  getEuropePmcService: mockGetEpmcService,
+  getEuropePmcService: () => mockGetEpmcService(),
 }));
 vi.mock('@cyanheads/mcp-ts-core/utils', async () => {
   const actual = await vi.importActual<Record<string, unknown>>('@cyanheads/mcp-ts-core/utils');
@@ -115,17 +118,31 @@ describe('search-articles injection', () => {
   });
 
   it('XSS-like content: sanitizeString strips HTML tags before passing to eSearch', async () => {
-    // sanitization.sanitizeString({context:'text'}) removes HTML markup.
-    // The eSearch term must NOT contain raw <script> tags.
+    // sanitization.sanitizeString({context:'text'}) removes HTML markup and
+    // keeps the text it wrapped. The eSearch term must NOT contain raw tags.
     mockESearch.mockResolvedValue({ count: 0, idList: [], retmax: 20, retstart: 0 });
     const ctx = createMockContext({ errors: searchArticlesTool.errors });
-    const xssPayload = '<script>alert(1)</script>';
-    const input = searchArticlesTool.input.parse({ query: xssPayload });
+    const input = searchArticlesTool.input.parse({ query: '<b onclick="alert(1)">cancer</b>' });
     await searchArticlesTool.handler(input, ctx);
     const calledTerm = mockESearch.mock.calls[0]?.[0]?.term as string;
-    // Sanitizer strips the <script> element tags; raw tags must not reach NCBI
-    expect(calledTerm).not.toContain('<script>');
-    expect(calledTerm).not.toContain('</script>');
+
+    expect(calledTerm).toContain('cancer');
+    expect(calledTerm).not.toContain('<b');
+    expect(calledTerm).not.toContain('onclick');
+  });
+
+  it('XSS-like content with no text of its own is rejected before NCBI is called', async () => {
+    // The sanitizer reduces markup carrying no text content to an empty string.
+    // That value is not a search term, so the blank-query contract rejects it
+    // rather than handing NCBI an empty term to retry on. (#122)
+    const ctx = createMockContext({ errors: searchArticlesTool.errors });
+    const input = searchArticlesTool.input.parse({ query: '<script>alert(1)</script>' });
+
+    await expect(searchArticlesTool.handler(input, ctx)).rejects.toMatchObject({
+      code: JsonRpcErrorCode.ValidationError,
+      data: { reason: 'blank_query' },
+    });
+    expect(mockESearch).not.toHaveBeenCalled();
   });
 
   it('rejects maxResults below 1', () => {
@@ -383,6 +400,38 @@ describe('no secret leaks in tool outputs', () => {
     expect(serialized).not.toMatch(/\/Users\//);
   });
 
+  it('find-related coverage-failure output does not contain the NCBI API key', async () => {
+    // NCBI answers with an empty reference list for a valid non-PMC source, then
+    // the Europe PMC coverage fallback throws. The failure is reported on a
+    // success payload, so it is a leak surface exactly like the failed-chain error.
+    mockELink.mockResolvedValue({ eLinkResult: [{ LinkSet: {} }] });
+    mockESummary.mockResolvedValue({ eSummaryResult: {} });
+    mockExtractBriefSummaries.mockResolvedValue([
+      { pmid: '39248309', title: 'Non-PMC source' } as ParsedBriefSummary,
+    ]);
+    mockGetEpmcService.mockReturnValue({
+      references: vi
+        .fn()
+        .mockRejectedValue(
+          new McpError(
+            JsonRpcErrorCode.ServiceUnavailable,
+            `Europe PMC request failed: https://www.ebi.ac.uk/europepmc/webservices/rest/MED/39248309/references?api_key=${SECRET_KEY}`,
+            { reason: 'europepmc_unreachable' },
+          ),
+        ),
+    });
+
+    const ctx = createMockContext({ errors: findRelatedTool.errors });
+    const input = findRelatedTool.input.parse({ pmid: '39248309', relationship: 'references' });
+    const result = await findRelatedTool.handler(input, ctx);
+
+    const serialized = `${JSON.stringify(result)} ${JSON.stringify(getEnrichment(ctx))}`;
+    expect(serialized).toContain('europepmc_unreachable');
+    expect(serialized).not.toContain(SECRET_KEY);
+    expect(serialized).not.toContain('ebi.ac.uk');
+    expect(serialized).not.toMatch(/\/Users\//);
+  });
+
   it('spell-check output does not contain the NCBI API key', async () => {
     mockESpell.mockResolvedValue({
       original: 'astma',
@@ -570,6 +619,48 @@ describe('format() output sanitization', () => {
       '## Full-Text Articles',
       '### # Injected \\[Click me\\](https://evil.test)',
     ]);
+  });
+
+  it('fetch-fulltext format() neutralizes Markdown markup in an asset label, caption, and href', () => {
+    const blocks = textBlocks(
+      fetchFulltextTool.format!({
+        articles: [
+          {
+            source: 'pmc',
+            viaSource: 'pmc',
+            pmcId: 'PMC1',
+            title: 'Asset-bearing article',
+            sections: [],
+            assets: [
+              {
+                assetType: 'figure',
+                label: '# Fig. 1',
+                caption: '[Click me](https://evil.test)\n## Injected heading',
+                id: '*Fig1*',
+                sectionTitle: '[METHODS](https://evil.test)',
+                href: 'bin/g001.jpg\n### Injected',
+              },
+            ],
+          },
+        ],
+        totalReturned: 1,
+      }),
+    );
+    const text = blocks[0]?.text ?? '';
+
+    // Every heading in the output is one the renderer wrote. A line break inside
+    // any asset field collapses to a space, so no upstream `#` reaches the start
+    // of a line and mints a heading of its own.
+    expect(text.split('\n').filter((line) => line.startsWith('#'))).toEqual([
+      '## Full-Text Articles',
+      '### Asset-bearing article',
+      '#### Assets (1)',
+      '##### # Fig. 1 — \\[Click me\\](https://evil.test) ## Injected heading',
+    ]);
+    // No clickable link forms from the caption, the section name, or the pointer.
+    expect(text).not.toMatch(/[^\\]\[Click me\]\(/);
+    expect(text).toContain('Section: \\[METHODS\\](https://evil.test)');
+    expect(text).toContain('file: bin/g001.jpg ### Injected');
   });
 });
 

@@ -1359,6 +1359,236 @@ describe('fetchFulltextTool', () => {
     });
   });
 
+  describe('DOI evidence and failed DOI lookups (issue #119)', () => {
+    function withEpmc() {
+      mockGetEpmcService.mockReturnValue({
+        search: mockEpmcSearch,
+        fullTextXml: mockEpmcFullTextXml,
+        parseFullTextXml: mockEpmcParseFullTextXml,
+      });
+    }
+
+    function withUnpaywall() {
+      mockGetUnpaywallService.mockReturnValue({
+        resolve: mockUnpaywallResolve,
+        fetchContent: mockUnpaywallFetchContent,
+      });
+    }
+
+    /** A MED-source EPMC hit carrying a DOI and no PMC counterpart. */
+    function medHit(pmid: string, doi: string) {
+      return { hits: [{ id: pmid, source: 'MED', pmid, doi }], hitCount: 1, cursorMark: '*' };
+    }
+
+    /** Whether the handler spent a PubMed metadata round-trip on DOI backfill. */
+    function pubmedDoiLookupRan(): boolean {
+      return mockEFetch.mock.calls.some((call) => (call[0] as { db?: string })?.db === 'pubmed');
+    }
+
+    it.each([
+      [
+        'a no-fulltext outcome',
+        () => mockEpmcFullTextXml.mockResolvedValue({ kind: 'not-available', reason: 'no XML' }),
+      ],
+      [
+        'a service-error outcome',
+        () => mockEpmcFullTextXml.mockRejectedValue(new Error('EPMC 503')),
+      ],
+    ])(
+      'carries an EPMC hit DOI onto the pmid fallback candidate on %s',
+      async (_label, arrange) => {
+        // The pmcid branch already merges the captured DOI back into the
+        // candidate; the pmid branch used to drop it, forcing a PubMed round-trip
+        // for a DOI Europe PMC had already supplied.
+        withEpmc();
+        mockGetUnpaywallService.mockReturnValue(undefined);
+        mockIdConvert.mockResolvedValue([{ 'requested-id': '39248309', pmid: '39248309' }]);
+        mockEFetchBy({ pubmedDois: {} });
+        mockEpmcSearch.mockResolvedValue(medHit('39248309', '10.1056/nejmoa2406673'));
+        arrange();
+
+        const ctx = createMockContext({ errors: fetchFulltextTool.errors });
+        const input = fetchFulltextTool.input.parse({ pmids: ['39248309'] });
+        const result = await fetchFulltextTool.handler(input, ctx);
+
+        expect(pubmedDoiLookupRan()).toBe(false);
+        const entry = result.unavailable?.[0];
+        // A DOI in hand means Unpaywall could have served this id, so the skipped
+        // tier is an incomplete search rather than the settled `no-doi` answer.
+        expect(entry?.triedTiers.at(-1)).toEqual({
+          tier: 'unpaywall',
+          outcome: 'not-attempted',
+          detail: 'UNPAYWALL_EMAIL is not set',
+        });
+        expect(entry?.unqueriedTiers).toEqual(['unpaywall']);
+      },
+    );
+
+    it('hands the EPMC-sourced DOI to a configured Unpaywall', async () => {
+      withEpmc();
+      withUnpaywall();
+      mockIdConvert.mockResolvedValue([{ 'requested-id': '39248309', pmid: '39248309' }]);
+      mockEFetchBy({ pubmedDois: {} });
+      mockEpmcSearch.mockResolvedValue(medHit('39248309', '10.1056/nejmoa2406673'));
+      mockEpmcFullTextXml.mockResolvedValue({ kind: 'not-available', reason: 'no XML' });
+      mockUnpaywallResolve.mockResolvedValue({ kind: 'no-oa', reason: 'no oa' });
+
+      const ctx = createMockContext({ errors: fetchFulltextTool.errors });
+      const input = fetchFulltextTool.input.parse({ pmids: ['39248309'] });
+      const result = await fetchFulltextTool.handler(input, ctx);
+
+      expect(mockUnpaywallResolve).toHaveBeenCalledWith(
+        '10.1056/nejmoa2406673',
+        expect.any(AbortSignal),
+      );
+      expect(pubmedDoiLookupRan()).toBe(false);
+      expect(result.unavailable?.[0]?.reason).toBe('no-oa');
+    });
+
+    it.each([
+      ['Unpaywall unconfigured', false],
+      ['Unpaywall configured', true],
+    ])(
+      'reports a thrown PubMed DOI lookup as doi-lookup-failed (%s)',
+      async (_label, configured) => {
+        mockGetEpmcService.mockReturnValue(undefined);
+        if (configured) withUnpaywall();
+        else mockGetUnpaywallService.mockReturnValue(undefined);
+        mockIdConvert.mockResolvedValue([{ 'requested-id': '42', pmid: '42' }]);
+        mockEFetch.mockRejectedValue(new Error('NCBI 503'));
+
+        const ctx = createMockContext({ errors: fetchFulltextTool.errors });
+        const input = fetchFulltextTool.input.parse({ pmids: ['42'] });
+        const result = await fetchFulltextTool.handler(input, ctx);
+
+        const entry = result.unavailable?.[0];
+        expect(entry?.reason).toBe('doi-lookup-failed');
+        expect(entry?.triedTiers.at(-1)).toMatchObject({
+          tier: 'unpaywall',
+          outcome: 'doi-lookup-failed',
+        });
+        expect(mockUnpaywallResolve).not.toHaveBeenCalled();
+      },
+    );
+
+    it('reports a thrown PMCID to DOI conversion as doi-lookup-failed', async () => {
+      mockGetEpmcService.mockReturnValue(undefined);
+      withUnpaywall();
+      mockEFetchBy({ pmc: [{ 'pmc-articleset': [] }] });
+      // On the pmcids branch the only idConvert call is the Unpaywall DOI backfill.
+      mockIdConvert.mockRejectedValue(new Error('ID Converter 503'));
+
+      const ctx = createMockContext({ errors: fetchFulltextTool.errors });
+      const input = fetchFulltextTool.input.parse({ pmcids: ['PMC123'] });
+      const result = await fetchFulltextTool.handler(input, ctx);
+
+      const entry = result.unavailable?.[0];
+      expect(entry?.id).toBe('PMC123');
+      expect(entry?.reason).toBe('doi-lookup-failed');
+      expect(entry?.triedTiers.at(-1)).toMatchObject({
+        tier: 'unpaywall',
+        outcome: 'doi-lookup-failed',
+      });
+      expect(mockUnpaywallResolve).not.toHaveBeenCalled();
+    });
+
+    it('keeps no-doi when the lookup ran and legitimately found none', async () => {
+      // The distinction the fix turns on: the same DOI-less end state, reached
+      // by a lookup that answered rather than one that threw.
+      mockGetEpmcService.mockReturnValue(undefined);
+      mockGetUnpaywallService.mockReturnValue(undefined);
+      mockIdConvert.mockResolvedValue([{ 'requested-id': '42', pmid: '42' }]);
+      mockEFetchBy({ pubmedDois: {} });
+
+      const ctx = createMockContext({ errors: fetchFulltextTool.errors });
+      const input = fetchFulltextTool.input.parse({ pmids: ['42'] });
+      const result = await fetchFulltextTool.handler(input, ctx);
+
+      expect(pubmedDoiLookupRan()).toBe(true);
+      expect(result.unavailable?.[0]?.reason).toBe('no-doi');
+      expect(result.unavailable?.[0]?.triedTiers.at(-1)).toEqual({
+        tier: 'unpaywall',
+        outcome: 'no-doi',
+      });
+    });
+
+    it('separates a DOI Europe PMC supplied from one whose lookup failed, in one batch', async () => {
+      withEpmc();
+      withUnpaywall();
+      mockIdConvert.mockResolvedValue([
+        { 'requested-id': '1', pmid: '1' },
+        { 'requested-id': '2', pmid: '2' },
+      ]);
+      mockEpmcSearch.mockImplementation(async ({ query }: { query: string }) =>
+        query.includes('EXT_ID:1')
+          ? medHit('1', '10.1/one')
+          : { hits: [], hitCount: 0, cursorMark: '*' },
+      );
+      mockEpmcFullTextXml.mockResolvedValue({ kind: 'not-available', reason: 'no XML' });
+      // Only PMID 2 still needs a DOI, and that lookup is the one that fails.
+      mockEFetch.mockRejectedValue(new Error('NCBI 503'));
+      mockUnpaywallResolve.mockResolvedValue({ kind: 'no-oa', reason: 'no oa' });
+
+      const ctx = createMockContext({ errors: fetchFulltextTool.errors });
+      const input = fetchFulltextTool.input.parse({ pmids: ['1', '2'] });
+      const result = await fetchFulltextTool.handler(input, ctx);
+
+      const byId = new Map(result.unavailable?.map((u) => [u.id, u]));
+      expect(mockUnpaywallResolve).toHaveBeenCalledTimes(1);
+      expect(mockUnpaywallResolve).toHaveBeenCalledWith('10.1/one', expect.any(AbortSignal));
+      expect(byId.get('1')?.reason).toBe('no-oa');
+      expect(byId.get('2')?.reason).toBe('doi-lookup-failed');
+    });
+
+    it('advertises doi-lookup-failed on both the reason and the tier-outcome enums', () => {
+      const parse = (entry: unknown) =>
+        fetchFulltextTool.output.safeParse({
+          articles: [],
+          totalReturned: 0,
+          unavailable: [entry],
+        });
+      const base = { id: '42', idType: 'pmid' as const };
+
+      expect(
+        parse({
+          ...base,
+          reason: 'doi-lookup-failed',
+          triedTiers: [{ tier: 'unpaywall', outcome: 'doi-lookup-failed' }],
+        }).success,
+      ).toBe(true);
+      expect(
+        parse({
+          ...base,
+          reason: 'no-doi',
+          triedTiers: [{ tier: 'unpaywall', outcome: 'doi-fail' }],
+        }).success,
+      ).toBe(false);
+    });
+
+    it('renders the failed lookup on the content[] surface', () => {
+      const text =
+        textBlocks(
+          fetchFulltextTool.format!({
+            articles: [],
+            totalReturned: 0,
+            unavailable: [
+              {
+                id: '42',
+                idType: 'pmid',
+                reason: 'doi-lookup-failed',
+                triedTiers: [
+                  { tier: 'unpaywall', outcome: 'doi-lookup-failed', detail: 'NCBI 503' },
+                ],
+              },
+            ],
+          }),
+        )[0]?.text ?? '';
+
+      expect(text).toContain('[pmid] 42 — doi-lookup-failed');
+      expect(text).toContain('chain: unpaywall:doi-lookup-failed (NCBI 503)');
+    });
+  });
+
   describe('dois input branch (issue #52)', () => {
     function withEpmcAndUnpaywall() {
       mockGetEpmcService.mockReturnValue({
@@ -4648,5 +4878,664 @@ describe('fetchFulltextTool nested sections filter (issue #126)', () => {
     const description = shape.shape.sections?.description ?? '';
     expect(description).toMatch(/subsection/i);
     expect(description).toMatch(/depth/i);
+  });
+});
+
+describe('fetchFulltextTool JATS assets (issue #130)', () => {
+  beforeEach(() => {
+    mockEFetch.mockReset();
+    mockIdConvert.mockReset();
+    mockParsePmcArticle.mockReset();
+    mockGetUnpaywallService.mockReset();
+    mockGetEpmcService.mockReset();
+    mockEpmcSearch.mockReset();
+    mockEpmcFullTextXml.mockReset();
+    mockEpmcParseFullTextXml.mockReset();
+    mockGetUnpaywallService.mockReturnValue(undefined);
+    mockGetEpmcService.mockReturnValue(undefined);
+  });
+
+  /** Reader-side view of one returned asset. */
+  interface ReadAsset {
+    assetType: 'figure' | 'supplementary-material';
+    caption?: string;
+    href?: string;
+    id?: string;
+    label?: string;
+    sectionTitle?: string;
+  }
+
+  /**
+   * The marker the parser leaves where it lifted an asset out of the prose.
+   * Duplicated from `assetMarker` in `pmc-article-parser.ts` on purpose: the
+   * tool rebuilds these strings from `assets[]` to strip them under
+   * `includeAssets: false`, and if the two formats ever diverge the strip
+   * silently stops working. Spelling them out here is what catches that.
+   */
+  const FIG_MARKER = '[Figure: Fig. 1]';
+  const SUPP_MARKER = '[Supplementary]';
+
+  /** A `<fig>` inside a section, with every field a real deposit carries. */
+  const FIGURE_IN_SECTION: ReadAsset = {
+    assetType: 'figure',
+    id: 'Fig1',
+    label: 'Fig. 1',
+    caption: 'Comparison of apparent resistivity and phase data from the four intervals',
+    sectionTitle: 'METHODS',
+    href: 'MOL2-20-1253-g001.jpg',
+  };
+
+  /** A `<floats-group>` deposit: no enclosing `<sec>`, so no section name. */
+  const FIGURE_NO_SECTION: ReadAsset = {
+    assetType: 'figure',
+    id: 'Fig8',
+    label: 'Fig. 8',
+    caption: 'Model resolution across the survey grid',
+    href: 'TPG2-18-e20549-g008.jpg',
+  };
+
+  /** 9% of supplementary deposits carry neither label nor caption. */
+  const SUPPLEMENT_BARE: ReadAsset = {
+    assetType: 'supplementary-material',
+    id: 'MOESM1',
+    sectionTitle: 'RESULTS',
+    href: '12345_2024_MOESM1_ESM.pdf',
+  };
+
+  /** Section text as the parser now emits it — markers at the lift positions. */
+  const MARKED_SECTIONS = [
+    { title: 'METHODS', text: `Methods body.\n\n${FIG_MARKER}\n\nMore methods.` },
+    { title: 'RESULTS', text: `Results body.\n\n${SUPP_MARKER}` },
+  ];
+
+  function stageArticle(article: Record<string, unknown>) {
+    mockParsePmcArticle.mockReturnValue({
+      pmcId: 'PMC11726426',
+      pmcUrl: 'https://www.ncbi.nlm.nih.gov/pmc/articles/PMC11726426/',
+      title: 'Figure-bearing Article',
+      sections: MARKED_SECTIONS,
+      ...article,
+    });
+    mockEFetch.mockResolvedValue([{ 'pmc-articleset': [{ article: [] }] }]);
+  }
+
+  function readAssets(call: { structuredContent?: unknown }): ReadAsset[] | undefined {
+    const structured = call.structuredContent as { articles: { assets?: ReadAsset[] }[] };
+    return structured.articles[0]?.assets;
+  }
+
+  function readSections(call: { structuredContent?: unknown }): DeepSection[] | undefined {
+    const structured = call.structuredContent as { articles: { sections: DeepSection[] }[] };
+    return structured.articles[0]?.sections;
+  }
+
+  function rendered(call: { content?: unknown }): string {
+    return (call.content as { type: string; text?: string }[]).map((b) => b.text ?? '').join('\n');
+  }
+
+  it('returns every asset on structuredContent and content[] with label, caption, section, id, and href', async () => {
+    stageArticle({ assets: [FIGURE_IN_SECTION, FIGURE_NO_SECTION, SUPPLEMENT_BARE] });
+
+    const call = await runToolContract(fetchFulltextTool, { pmcids: ['PMC11726426'] });
+
+    expect(readAssets(call)).toEqual([FIGURE_IN_SECTION, FIGURE_NO_SECTION, SUPPLEMENT_BARE]);
+
+    const text = rendered(call);
+    expect(text).toContain('#### Assets (3)');
+    expect(text).toContain(
+      '##### Fig. 1 — Comparison of apparent resistivity and phase data from the four intervals',
+    );
+    expect(text).toContain('*figure · Section: METHODS · id: Fig1 · file: MOL2-20-1253-g001.jpg*');
+    expect(text).toContain('*figure · id: Fig8 · file: TPG2-18-e20549-g008.jpg*');
+    // A deposit filename's underscores are intraword, so they cannot open
+    // emphasis and render legibly rather than backslashed.
+    expect(text).toContain(
+      '*supplementary-material · Section: RESULTS · id: MOESM1 · file: 12345_2024_MOESM1_ESM.pdf*',
+    );
+    // The pointer is named for what it is, so an agent does not spend a request
+    // resolving it as a URL.
+    expect(text).toMatch(/not a fetchable URL/);
+  });
+
+  it('renders an unlabelled, uncaptioned asset under a fallback heading rather than an empty one', async () => {
+    stageArticle({ assets: [SUPPLEMENT_BARE] });
+
+    const text = rendered(await runToolContract(fetchFulltextTool, { pmcids: ['PMC11726426'] }));
+
+    expect(text).toContain('##### Asset');
+    expect(text).toContain('id: MOESM1');
+    expect(text).toContain('file: 12345_2024_MOESM1_ESM.pdf');
+  });
+
+  it('omits the asset field entirely for an article that deposits none', async () => {
+    stageArticle({ sections: [{ title: 'METHODS', text: 'Methods body.' }] });
+
+    const call = await runToolContract(fetchFulltextTool, { pmcids: ['PMC12753918'] });
+
+    expect(readAssets(call)).toBeUndefined();
+    expect(rendered(call)).not.toContain('#### Assets');
+  });
+
+  it('drops the asset field and the inline markers under includeAssets: false', async () => {
+    stageArticle({ assets: [FIGURE_IN_SECTION, SUPPLEMENT_BARE] });
+
+    const call = await runToolContract(fetchFulltextTool, {
+      pmcids: ['PMC11726426'],
+      includeAssets: false,
+    });
+
+    expect(readAssets(call)).toBeUndefined();
+    // The marker is the lift's anchor; with no array to resolve it against it
+    // points at nothing, so it goes with the field.
+    expect(readSections(call)).toEqual([
+      { title: 'METHODS', text: 'Methods body.\n\nMore methods.' },
+      { title: 'RESULTS', text: 'Results body.' },
+    ]);
+
+    const text = rendered(call);
+    expect(text).not.toContain('#### Assets');
+    expect(text).not.toContain('[Figure');
+    expect(text).not.toContain('[Supplementary');
+  });
+
+  it('strips a marker from a subsection as well as a top-level section', async () => {
+    stageArticle({
+      assets: [FIGURE_IN_SECTION],
+      sections: [
+        {
+          title: 'RESULTS',
+          text: `Overview. ${FIG_MARKER}`,
+          subsections: [{ title: 'Imaging', text: `Imaging narrative.\n\n${FIG_MARKER}` }],
+        },
+      ],
+    });
+
+    const call = await runToolContract(fetchFulltextTool, {
+      pmcids: ['PMC11726426'],
+      includeAssets: false,
+    });
+
+    expect(readSections(call)).toEqual([
+      {
+        title: 'RESULTS',
+        text: 'Overview.',
+        subsections: [{ title: 'Imaging', text: 'Imaging narrative.' }],
+      },
+    ]);
+  });
+
+  it('leaves prose-shaped blocks untouched under includeAssets: false', async () => {
+    // Lists, definition lists, quotes and fenced blocks are section text, not
+    // assets — the switch has no claim on them.
+    const proseBlocks =
+      'Findings.\n\n- first item\n- second item\n\nTerm — definition\n\n> quoted line\n> — Attribution\n\n```\nOCR line one\n  OCR line two\n```';
+    stageArticle({
+      assets: [FIGURE_IN_SECTION],
+      sections: [{ title: 'RESULTS', text: `${proseBlocks}\n\n${FIG_MARKER}` }],
+    });
+
+    const call = await runToolContract(fetchFulltextTool, {
+      pmcids: ['PMC11726426'],
+      includeAssets: false,
+    });
+
+    expect(readSections(call)?.[0]?.text).toBe(proseBlocks);
+  });
+
+  it('returns a byte-identical response under includeAssets: false', async () => {
+    const base = {
+      pmcId: 'PMC11726426',
+      pmcUrl: 'https://www.ncbi.nlm.nih.gov/pmc/articles/PMC11726426/',
+      title: 'Figure-bearing Article',
+    };
+    // The pre-lift response for this input is exactly the response for the same
+    // article with no assets and no markers in its prose.
+    mockParsePmcArticle.mockReturnValue({
+      ...base,
+      sections: [
+        { title: 'METHODS', text: 'Methods body.\n\nMore methods.' },
+        { title: 'RESULTS', text: 'Results body.' },
+      ],
+    });
+    mockEFetch.mockResolvedValue([{ 'pmc-articleset': [{ article: [] }] }]);
+    const reference = await runToolContract(fetchFulltextTool, { pmcids: ['PMC11726426'] });
+
+    mockParsePmcArticle.mockReturnValue({
+      ...base,
+      sections: MARKED_SECTIONS,
+      assets: [FIGURE_IN_SECTION, SUPPLEMENT_BARE],
+    });
+    const suppressed = await runToolContract(fetchFulltextTool, {
+      pmcids: ['PMC11726426'],
+      includeAssets: false,
+    });
+
+    expect(JSON.stringify(suppressed.structuredContent)).toBe(
+      JSON.stringify(reference.structuredContent),
+    );
+    expect(rendered(suppressed)).toBe(rendered(reference));
+  });
+
+  it('keeps assets and markers when includeTables is off — the two switches are independent', async () => {
+    stageArticle({
+      assets: [FIGURE_IN_SECTION],
+      tables: [{ label: 'TABLE 1', headerRowCount: 0, rows: [['a']] }],
+    });
+
+    const call = await runToolContract(fetchFulltextTool, {
+      pmcids: ['PMC11726426'],
+      includeTables: false,
+    });
+
+    expect(readAssets(call)).toEqual([FIGURE_IN_SECTION]);
+    expect(readSections(call)?.[0]?.text).toContain(FIG_MARKER);
+  });
+
+  it('narrows assets with the sections filter, dropping sectionless assets and unmatched sections', async () => {
+    stageArticle({ assets: [FIGURE_IN_SECTION, FIGURE_NO_SECTION, SUPPLEMENT_BARE] });
+
+    const call = await runToolContract(fetchFulltextTool, {
+      pmcids: ['PMC11726426'],
+      sections: ['METHODS'],
+    });
+
+    expect(readAssets(call)).toEqual([FIGURE_IN_SECTION]);
+  });
+
+  it('drops the asset field when the sections filter leaves no matching section', async () => {
+    stageArticle({ assets: [FIGURE_IN_SECTION, FIGURE_NO_SECTION] });
+
+    const call = await runToolContract(fetchFulltextTool, {
+      pmcids: ['PMC11726426'],
+      sections: ['DISCUSSION'],
+    });
+
+    expect(readAssets(call)).toBeUndefined();
+  });
+
+  it('returns every asset when no sections filter is supplied', async () => {
+    stageArticle({ assets: [FIGURE_IN_SECTION, FIGURE_NO_SECTION, SUPPLEMENT_BARE] });
+
+    const call = await runToolContract(fetchFulltextTool, { pmcids: ['PMC11726426'] });
+
+    expect(readAssets(call)).toHaveLength(3);
+  });
+
+  it('counts asset text against maxCharacters and stops admitting at the first that does not fit', async () => {
+    // A small asset sits *after* the oversized one: scanning past the first
+    // non-fit would return it alone, with nothing saying the earlier ones exist.
+    const small = { assetType: 'figure' as const, label: 'Fig. 1', sectionTitle: 'METHODS' };
+    const big = {
+      assetType: 'figure' as const,
+      label: 'Fig. 2',
+      caption: 'C'.repeat(200),
+      sectionTitle: 'METHODS',
+    };
+    const tail = { assetType: 'figure' as const, id: 'Fig3', sectionTitle: 'METHODS' };
+    stageArticle({
+      sections: [{ title: 'METHODS', text: 'M'.repeat(20) }],
+      assets: [small, big, tail],
+    });
+
+    const call = await runToolContract(fetchFulltextTool, {
+      pmcids: ['PMC11726426'],
+      maxCharacters: 100,
+    });
+    const structured = call.structuredContent as {
+      articles: { assets?: ReadAsset[] }[];
+      notice?: string;
+      truncation?: {
+        originalCharacters: number;
+        returnedCharacters: number;
+        omittedAssets?: number;
+        articles: { omittedAssets?: number; omittedAssetNames?: string[] }[];
+      };
+    };
+
+    // Fig. 1 costs its label (6); Fig. 2 costs 6 + 200 and does not fit.
+    expect(structured.articles[0]?.assets).toEqual([small]);
+    expect(structured.truncation?.originalCharacters).toBe(20 + 6 + 206 + 0);
+    expect(structured.truncation?.returnedCharacters).toBe(20 + 6);
+    expect(structured.truncation?.omittedAssets).toBe(2);
+    // Named by label, then id — the third asset carries no label.
+    expect(structured.truncation?.articles[0]?.omittedAssetNames).toEqual(['Fig. 2', 'Fig3']);
+    expect(structured.notice).toContain('Fig. 2, Fig3');
+
+    const text = rendered(call);
+    expect(text).toContain('Fig. 2, Fig3');
+    // No shortened caption anywhere: a dropped asset contributes no text at all.
+    expect(text).not.toContain('CCCC');
+  });
+
+  it('admits an asset that exactly meets the remaining budget', async () => {
+    const exact = { assetType: 'figure' as const, label: 'Fig. 1', caption: 'C'.repeat(14) };
+    stageArticle({ sections: [{ title: 'METHODS', text: 'M'.repeat(30) }], assets: [exact] });
+
+    const call = await runToolContract(fetchFulltextTool, {
+      pmcids: ['PMC11726426'],
+      maxCharacters: 50,
+    });
+    const structured = call.structuredContent as {
+      articles: { assets?: ReadAsset[] }[];
+      truncation?: unknown;
+    };
+
+    // 30 section + 6 label + 14 caption = exactly 50.
+    expect(structured.articles[0]?.assets).toEqual([exact]);
+    expect(structured.truncation).toBeUndefined();
+  });
+
+  it('serves sections, then tables, then assets, in that order', async () => {
+    const table = { label: 'TABLE 1', sectionTitle: 'METHODS', headerRowCount: 0, rows: [['ab']] };
+    const asset = { assetType: 'figure' as const, label: 'Fig. 1', sectionTitle: 'METHODS' };
+    stageArticle({
+      sections: [{ title: 'METHODS', text: 'M'.repeat(20) }],
+      tables: [table],
+      assets: [asset],
+    });
+
+    // 20 section + 9 table (label 7 + cell 2) leaves 1 — under the asset's 6.
+    const tight = await runToolContract(fetchFulltextTool, {
+      pmcids: ['PMC11726426'],
+      maxCharacters: 30,
+    });
+    const tightStructured = tight.structuredContent as {
+      articles: { assets?: ReadAsset[]; tables?: { label?: string }[] }[];
+      truncation?: { omittedTables?: number; omittedAssets?: number };
+    };
+    expect(tightStructured.articles[0]?.tables).toEqual([table]);
+    expect(tightStructured.articles[0]?.assets).toBeUndefined();
+    expect(tightStructured.truncation?.omittedTables).toBeUndefined();
+    expect(tightStructured.truncation?.omittedAssets).toBe(1);
+
+    // One more character than the three need together and both lists survive.
+    const roomy = await runToolContract(fetchFulltextTool, {
+      pmcids: ['PMC11726426'],
+      maxCharacters: 35,
+    });
+    const roomyStructured = roomy.structuredContent as {
+      articles: { assets?: ReadAsset[]; tables?: unknown[] }[];
+      truncation?: unknown;
+    };
+    expect(roomyStructured.articles[0]?.assets).toEqual([asset]);
+    expect(roomyStructured.truncation).toBeUndefined();
+  });
+
+  it('leaves the truncation object free of asset keys when no asset was dropped', async () => {
+    stageArticle({
+      sections: [{ title: 'METHODS', text: 'M'.repeat(60) }],
+      assets: [{ assetType: 'figure' as const, label: 'Fig. 1' }],
+    });
+
+    // A bare per-section budget sets no total, so the section is shortened while
+    // nothing bounds the assets — a truncation object with no asset accounting
+    // in it. The existing budget cases assert their truncation object by exact
+    // equality, so an unconditional key here would break every one of them.
+    const call = await runToolContract(fetchFulltextTool, {
+      pmcids: ['PMC11726426'],
+      maxCharactersPerSection: 40,
+    });
+    const structured = call.structuredContent as {
+      articles: { assets?: ReadAsset[] }[];
+      truncation?: Record<string, unknown> & { articles?: Record<string, unknown>[] };
+    };
+
+    expect(structured.truncation).toBeDefined();
+    expect(structured.articles[0]?.assets).toEqual([{ assetType: 'figure', label: 'Fig. 1' }]);
+    expect(Object.hasOwn(structured.truncation ?? {}, 'omittedAssets')).toBe(false);
+    expect(Object.hasOwn(structured.truncation?.articles?.[0] ?? {}, 'omittedAssets')).toBe(false);
+    expect(Object.hasOwn(structured.truncation?.articles?.[0] ?? {}, 'omittedAssetNames')).toBe(
+      false,
+    );
+  });
+
+  it('admits one article assets and omits another in the same batch', async () => {
+    const cheap = { assetType: 'figure' as const, label: 'Fig. 1' };
+    const costly = { assetType: 'figure' as const, label: 'Fig. 9', caption: 'C'.repeat(300) };
+    mockParsePmcArticle
+      .mockReturnValueOnce({
+        pmcId: 'PMC11726426',
+        pmcUrl: 'https://www.ncbi.nlm.nih.gov/pmc/articles/PMC11726426/',
+        title: 'Cheap assets',
+        sections: [{ title: 'METHODS', text: 'M'.repeat(10) }],
+        assets: [cheap],
+      })
+      .mockReturnValueOnce({
+        pmcId: 'PMC10827061',
+        pmcUrl: 'https://www.ncbi.nlm.nih.gov/pmc/articles/PMC10827061/',
+        title: 'Costly assets',
+        sections: [{ title: 'METHODS', text: 'M'.repeat(10) }],
+        assets: [costly],
+      });
+    mockEFetch.mockResolvedValue([{ 'pmc-articleset': [{ article: [] }, { article: [] }] }]);
+
+    const call = await runToolContract(fetchFulltextTool, {
+      pmcids: ['PMC11726426', 'PMC10827061'],
+      maxCharacters: 50,
+    });
+    const structured = call.structuredContent as {
+      articles: { pmcId?: string; assets?: ReadAsset[] }[];
+      truncation?: { omittedAssets?: number; articles: { id: string; omittedAssets?: number }[] };
+    };
+
+    expect(structured.articles[0]?.assets).toEqual([cheap]);
+    expect(structured.articles[1]?.assets).toBeUndefined();
+    expect(structured.truncation?.omittedAssets).toBe(1);
+    expect(structured.truncation?.articles.map((a) => a.id)).toEqual(['PMC10827061']);
+  });
+
+  it('counts asset text in the whole-response ledger and defers the article carrying it', async () => {
+    const heavy = {
+      assetType: 'figure' as const,
+      label: 'Fig. 1',
+      caption: 'C'.repeat(400),
+      href: 'g001.jpg',
+    };
+    mockParsePmcArticle
+      .mockReturnValueOnce({
+        pmcId: 'PMC12753918',
+        pmcUrl: 'https://www.ncbi.nlm.nih.gov/pmc/articles/PMC12753918/',
+        title: 'No assets',
+        sections: [{ title: 'METHODS', text: 'Short.' }],
+      })
+      .mockReturnValueOnce({
+        pmcId: 'PMC11726426',
+        pmcUrl: 'https://www.ncbi.nlm.nih.gov/pmc/articles/PMC11726426/',
+        title: 'Asset-heavy',
+        sections: [{ title: 'METHODS', text: 'Short.' }],
+        assets: [heavy],
+      });
+    mockEFetch.mockResolvedValue([{ 'pmc-articleset': [{ article: [] }, { article: [] }] }]);
+
+    const call = await runToolContract(fetchFulltextTool, {
+      pmcids: ['PMC12753918', 'PMC11726426'],
+      maxResponseCharacters: 400,
+    });
+    const structured = call.structuredContent as {
+      articles: { pmcId?: string }[];
+      deferred?: { ids: string[]; nextDeferredCharacters: number };
+    };
+
+    // The second record is identical to the first but for `assets`, so the
+    // caption is the only thing that puts it past the ceiling.
+    expect(structured.articles.map((a) => a.pmcId)).toEqual(['PMC12753918']);
+    expect(structured.deferred?.ids).toEqual(['PMC11726426']);
+    expect(structured.deferred?.nextDeferredCharacters).toBeGreaterThan(400);
+  });
+
+  it('escapes a caption and href at render time without touching structuredContent', async () => {
+    const hostile: ReadAsset = {
+      assetType: 'figure',
+      label: 'Fig. 1',
+      caption: 'Rates | ratios *and* [links](https://evil.test) with a trailing \\',
+      href: 'bin/g001[1].jpg <img src=x>',
+      sectionTitle: 'METHODS',
+    };
+    stageArticle({ assets: [hostile] });
+
+    const call = await runToolContract(fetchFulltextTool, { pmcids: ['PMC11726426'] });
+    const text = rendered(call);
+
+    // No clickable link, no emphasis pair, and the source backslash cannot
+    // neutralize the escape after it.
+    expect(text).toContain('\\[links\\](https://evil.test)');
+    expect(text).toContain('\\*and\\*');
+    expect(text).toContain('\\\\');
+    // The pointer is upstream text too — a bracket pair in it cannot form a
+    // link and a tag-shaped `<` cannot open raw HTML.
+    expect(text).toContain('file: bin/g001\\[1\\].jpg \\<img src=x>');
+    // A pipe is an ordinary character outside a table cell and stays legible.
+    expect(text).toContain('Rates | ratios');
+    // Escaping is render-only — the plain-text value survives on the contract.
+    expect(readAssets(call)?.[0]).toEqual(hostile);
+  });
+
+  it('carries assets through the Europe PMC stage with the same filters', async () => {
+    mockGetEpmcService.mockReturnValue({
+      search: mockEpmcSearch,
+      fullTextXml: mockEpmcFullTextXml,
+      parseFullTextXml: mockEpmcParseFullTextXml,
+    });
+    mockIdConvert.mockResolvedValue([{ 'requested-id': '42', pmid: '42' }]);
+    mockEpmcSearch.mockResolvedValue({
+      hits: [{ id: '42', source: 'MED', pmid: '42', pmcid: 'PMC42', doi: '10.1/x' }],
+      hitCount: 1,
+      cursorMark: '*',
+    });
+    mockEpmcFullTextXml.mockResolvedValue({
+      kind: 'found',
+      xml: '<article/>',
+      epmcId: 'PMC42',
+      source: 'MED',
+    });
+    mockEpmcParseFullTextXml.mockReturnValue({ article: [{ body: [] }] });
+    mockParsePmcArticle.mockReturnValue({
+      pmcId: 'PMC42',
+      pmcUrl: 'https://www.ncbi.nlm.nih.gov/pmc/articles/PMC42/',
+      title: 'EPMC article with a figure',
+      sections: MARKED_SECTIONS,
+      assets: [FIGURE_IN_SECTION, FIGURE_NO_SECTION],
+    });
+
+    const call = await runToolContract(fetchFulltextTool, { pmids: ['42'] });
+    expect(readAssets(call)).toEqual([FIGURE_IN_SECTION, FIGURE_NO_SECTION]);
+    expect(rendered(call)).toContain('file: MOL2-20-1253-g001.jpg');
+
+    // The same sections filter narrows the EPMC-served list the same way.
+    const filtered = await runToolContract(fetchFulltextTool, {
+      pmids: ['42'],
+      sections: ['METHODS'],
+    });
+    expect(readAssets(filtered)).toEqual([FIGURE_IN_SECTION]);
+
+    // And the same switch strips its markers.
+    const suppressed = await runToolContract(fetchFulltextTool, {
+      pmids: ['42'],
+      includeAssets: false,
+    });
+    expect(readAssets(suppressed)).toBeUndefined();
+    expect(rendered(suppressed)).not.toContain('[Figure');
+  });
+
+  it('keeps an asset whose section is folded away by the depth clamp', async () => {
+    const deepAsset: ReadAsset = {
+      assetType: 'figure',
+      label: 'Fig. 4',
+      caption: 'Sequence parameters',
+      sectionTitle: 'MRI',
+      href: 'g004.jpg',
+    };
+    mockParsePmcArticle.mockReturnValue({
+      pmcId: 'PMC9575052',
+      pmcUrl: 'https://www.ncbi.nlm.nih.gov/pmc/articles/PMC9575052/',
+      title: 'Deeply Nested Article',
+      sections: [
+        {
+          title: 'RESULTS',
+          text: 'Results overview.',
+          subsections: [
+            {
+              title: 'Case reports of surgical patients',
+              text: '',
+              subsections: [
+                {
+                  title: 'Imaging',
+                  text: 'Imaging narrative.',
+                  subsections: [{ title: 'MRI', text: 'MRI narrative.' }],
+                },
+              ],
+            },
+          ],
+        },
+      ],
+      assets: [deepAsset],
+    });
+    mockEFetch.mockResolvedValue([{ 'pmc-articleset': [{ article: [] }] }]);
+
+    const unfiltered = await runToolContract(fetchFulltextTool, { pmcids: ['PMC9575052'] });
+    expect(readAssets(unfiltered)).toEqual([deepAsset]);
+
+    // The title set is collected before the clamp, so a filter matching an
+    // ancestor still keeps the asset its folded descendant owned.
+    const filtered = await runToolContract(fetchFulltextTool, {
+      pmcids: ['PMC9575052'],
+      sections: ['Case reports'],
+    });
+    expect(readAssets(filtered)).toEqual([deepAsset]);
+  });
+
+  /**
+   * The three legacy OCR deposits issue #130 names. `parsePmcArticle` is mocked
+   * at this layer, so these are the parser output the fenced-`<preformat>` walk
+   * now produces for those records, keyed to their PMCIDs — the tool-layer
+   * contract is exercised; the upstream records themselves are not fetched.
+   */
+  const OCR_PMCIDS = ['PMC9663051', 'PMC9663116', 'PMC5420876'] as const;
+
+  for (const pmcid of OCR_PMCIDS) {
+    it(`returns an article with the fenced OCR section for ${pmcid}, with no no-body reason`, async () => {
+      const ocr = '```\nTHE JOURNAL OF BIOLOGICAL CHEMISTRY\n   Vol. 247, No. 12\n```';
+      mockParsePmcArticle.mockReturnValue({
+        pmcId: pmcid,
+        pmcUrl: `https://www.ncbi.nlm.nih.gov/pmc/articles/${pmcid}/`,
+        title: 'Legacy OCR deposit',
+        sections: [{ text: ocr }],
+      });
+      mockEFetch.mockResolvedValue([{ 'pmc-articleset': [{ article: [] }] }]);
+
+      const ctx = createMockContext({ errors: fetchFulltextTool.errors });
+      const input = fetchFulltextTool.input.parse({ pmcids: [pmcid] });
+      const result = await fetchFulltextTool.handler(input, ctx);
+
+      // A `<preformat>`-only body is a body: the record is a hit, not a PMC miss
+      // routed to the fallback tiers and reported as metadata-only.
+      expect(result.totalReturned).toBe(1);
+      expect(result.unavailable).toBeUndefined();
+      expect(getEnrichment(ctx).notice).toBeUndefined();
+      expect(result.articles[0]?.source).toBe('pmc');
+
+      const text = textBlocks(fetchFulltextTool.format!(result))
+        .map((b) => b.text ?? '')
+        .join('\n');
+      expect(text).toContain('THE JOURNAL OF BIOLOGICAL CHEMISTRY');
+      expect(text).toContain('```');
+      expect(text).not.toContain('front matter and abstract only');
+    });
+  }
+
+  it('advertises includeAssets as a boolean defaulting to true', () => {
+    const parsed = fetchFulltextTool.input.parse({ pmcids: ['PMC11726426'] });
+    expect(parsed.includeAssets).toBe(true);
+    expect(
+      fetchFulltextTool.input.safeParse({ pmcids: ['PMC11726426'], includeAssets: 'no' }).success,
+    ).toBe(false);
+
+    const shape = fetchFulltextTool.input as unknown as {
+      shape: Record<string, { description?: string }>;
+    };
+    expect(shape.shape.includeAssets?.description).toMatch(/figures and supplementary material/i);
+    // The counted-text contract has to name what it now counts.
+    expect(shape.shape.maxCharacters?.description).toMatch(/asset label, caption and `href`/);
+    expect(shape.shape.maxCharacters?.description).toMatch(/inline blocks/);
   });
 });
