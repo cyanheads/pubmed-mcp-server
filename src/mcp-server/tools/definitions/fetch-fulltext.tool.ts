@@ -54,7 +54,7 @@ import {
 } from '@/services/unpaywall/unpaywall-service.js';
 import { fitWholeItems } from './_budget.js';
 import { conceptMeta, EDAM_DATA_RETRIEVAL, SCHEMA_SCHOLARLY_ARTICLE } from './_concepts.js';
-import { pmidStringSchema } from './_schemas.js';
+import { doiStringSchema, pmcidStringSchema, pmidStringSchema } from './_schemas.js';
 import { escapeMarkdownInline, escapeMarkdownTableCell, sliceCodeUnits } from './_text.js';
 
 function normalizePmcId(id: string): string {
@@ -452,6 +452,12 @@ const JournalSchema = z
     volume: z.string().optional().describe('Volume number'),
     issue: z.string().optional().describe('Issue number'),
     pages: z.string().optional().describe('Page range'),
+    elocationId: z
+      .string()
+      .optional()
+      .describe(
+        'Electronic article locator from JATS `<elocation-id>` — the publisher-assigned article number (e.g. "e20542"). Journals that assign article numbers deposit no `<fpage>`, so this is the only locator on roughly half of PMC records. Never a substitute for `pages`; JATS carries no type attribute, so there is no counterpart to the `elocationIdType` that `pubmed_fetch_articles` reports.',
+      ),
   })
   .describe('Journal information');
 
@@ -1429,14 +1435,7 @@ export const fetchFulltextTool = tool('pubmed_fetch_fulltext', {
   input: z
     .object({
       pmcids: z
-        .array(
-          z
-            .string()
-            .regex(
-              /^(?:PMC)?\d+$/i,
-              'PMC ID must be digits, optionally prefixed with "PMC" (e.g. "PMC9575052" or "9575052")',
-            ),
-        )
+        .array(pmcidStringSchema)
         .min(1)
         .max(10)
         .optional()
@@ -1452,12 +1451,12 @@ export const fetchFulltextTool = tool('pubmed_fetch_fulltext', {
           'PubMed IDs. Provide exactly one of `pmcids`, `pmids`, or `dois`. Articles in PMC are returned as structured JATS; articles not in PMC fall through to Europe PMC (when EPMC has a `fullTextXML`), then to Unpaywall when `UNPAYWALL_EMAIL` is set and a DOI is available.',
         ),
       dois: z
-        .array(z.string().min(3))
+        .array(doiStringSchema)
         .min(1)
         .max(10)
         .optional()
         .describe(
-          'DOIs to resolve (e.g. ["10.21203/rs.3.rs-9010375/v1"]). Provide exactly one of `pmcids`, `pmids`, or `dois`. Resolved to a PMCID via the PMC ID Converter and returned as structured JATS when the article is in PMC; DOIs with no PMC counterpart (preprints, EPMC-only OA) fall through to Europe PMC, then Unpaywall, when those layers are enabled.',
+          'DOIs to resolve (e.g. ["10.21203/rs.3.rs-9010375/v1"]), one per element. Provide exactly one of `pmcids`, `pmids`, or `dois`. Resolved to a PMCID via the PMC ID Converter and returned as structured JATS when the article is in PMC; DOIs with no PMC counterpart (preprints, EPMC-only OA) fall through to Europe PMC, then Unpaywall, when those layers are enabled.',
         ),
       includeReferences: z
         .boolean()
@@ -3046,6 +3045,7 @@ function formatPmcArticle(
     if (a.journal.volume)
       parts.push(`**${a.journal.volume}**${a.journal.issue ? `(${a.journal.issue})` : ''}`);
     if (a.journal.pages) parts.push(a.journal.pages);
+    if (a.journal.elocationId) parts.push(a.journal.elocationId);
     if (a.journal.issn) parts.push(`ISSN ${a.journal.issn}`);
     if (parts.length) lines.push(`\n**Journal:** ${parts.join(', ')}`);
   }

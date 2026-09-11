@@ -9,9 +9,14 @@ import { JsonRpcErrorCode, McpError } from '@cyanheads/mcp-ts-core/errors';
 import { createMockContext, getEnrichment, runToolContract } from '@cyanheads/mcp-ts-core/testing';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
-import type { ParsedBriefSummary } from '@/services/ncbi/types.js';
+import type { ESummaryResult, ParsedBriefSummary } from '@/services/ncbi/types.js';
 
 import { textBlocks } from '../../../_helpers.js';
+import {
+  BOOK_ESUMMARY_V1_XML,
+  BOOK_ESUMMARY_XML,
+  parseESummaryXml,
+} from '../../../services/ncbi/parsing/_book-fixtures.js';
 
 const mockELink = vi.fn();
 const mockESummary = vi.fn();
@@ -50,6 +55,14 @@ vi.mock('@/services/openalex/openalex-service.js', () => ({
 }));
 
 const { findRelatedTool } = await import('@/mcp-server/tools/definitions/find-related.tool.js');
+
+/**
+ * The real parser, reachable past the module mock above, so a test can drive an
+ * upstream ESummary body end to end instead of stubbing the parsed result.
+ */
+const { extractBriefSummaries: realExtractBriefSummaries } = await vi.importActual<
+  typeof import('@/services/ncbi/parsing/esummary-parser.js')
+>('@/services/ncbi/parsing/esummary-parser.js');
 
 /** Build a minimal NCBI eLink response with the given PMIDs. */
 function eLinkResponse(pmids: string[], linkName = 'pubmed_pubmed') {
@@ -1229,7 +1242,7 @@ describe('findRelatedTool', () => {
       expect.objectContaining({ signal: expect.any(AbortSignal) }),
     );
     expect(mockESummary).toHaveBeenCalledWith(
-      { db: 'pubmed', id: '222,111' },
+      { db: 'pubmed', version: '2.0', retmode: 'xml', id: '222,111' },
       expect.objectContaining({ signal: expect.any(AbortSignal) }),
     );
     expect(getEnrichment(ctx).totalCount).toBe(2);
@@ -1617,5 +1630,70 @@ describe('findRelatedTool', () => {
       expect(getEnrichment(ctx).totalCount).toBe(0);
       expect(getEnrichment(ctx).notice).toBeUndefined();
     });
+  });
+});
+
+describe('findRelatedTool Bookshelf summaries (issue #114)', () => {
+  beforeEach(() => {
+    mockELink.mockReset();
+    mockESummary.mockReset();
+    mockExtractBriefSummaries.mockReset();
+    mockGetEpmcService.mockReturnValue(epmcService);
+    mockGetOaService.mockReturnValue(oaService);
+  });
+
+  /**
+   * ESummary serves two wire formats, and only version 2.0 carries book
+   * metadata — the version 1 DocSum shape has no `BookTitle`, `PublisherName`
+   * or `DocType` element at all. Answering per `version` the way the endpoint
+   * does is what makes these tests fail when the tool asks for the wrong
+   * format, instead of only when the pass-through mapping breaks.
+   */
+  function esummaryByRequestedVersion(params: { version?: string }): Promise<ESummaryResult> {
+    return Promise.resolve(
+      parseESummaryXml(params.version === '2.0' ? BOOK_ESUMMARY_XML : BOOK_ESUMMARY_V1_XML),
+    );
+  }
+
+  it('carries the book venue and editors onto both consumption surfaces', async () => {
+    mockELink.mockResolvedValue(eLinkResponse(['20301425']));
+    mockESummary.mockImplementation(esummaryByRequestedVersion);
+    mockExtractBriefSummaries.mockImplementation(realExtractBriefSummaries);
+
+    const ctx = createMockContext({ errors: findRelatedTool.errors });
+    const input = findRelatedTool.input.parse({ pmid: '29262038', relationship: 'similar' });
+    const result = await findRelatedTool.handler(input, ctx);
+
+    expect(result.articles[0]).toMatchObject({
+      pmid: '20301425',
+      bookTitle: 'GeneReviews(®)',
+      publisherName: 'University of Washington, Seattle',
+      docType: 'chapter',
+      editors: ['Adam MP', 'Bick S', 'Mirzaa GM', 'Wallace SE', 'Amemiya A'],
+    });
+    // The series editors must not displace the chapter's own authors, and an
+    // empty upstream Source must be absent rather than an empty string.
+    expect(result.articles[0]?.authors).toBe('Petrucelli N, Daly MB, Pal T');
+    expect(result.articles[0]?.source).toBeUndefined();
+
+    const text = textBlocks(findRelatedTool.format!(result))[0]?.text ?? '';
+    expect(text).toContain('edited by Adam MP, Bick S, Mirzaa GM, Wallace SE, Amemiya A');
+    expect(text).toContain(
+      'GeneReviews(®) — University of Washington, Seattle, chapter, 1993-01-01',
+    );
+  });
+
+  it('requests the ESummary version that carries book metadata', async () => {
+    mockELink.mockResolvedValue(eLinkResponse(['20301425']));
+    mockESummary.mockImplementation(esummaryByRequestedVersion);
+    mockExtractBriefSummaries.mockImplementation(realExtractBriefSummaries);
+
+    const ctx = createMockContext({ errors: findRelatedTool.errors });
+    await findRelatedTool.handler(findRelatedTool.input.parse({ pmid: '29262038' }), ctx);
+
+    expect(mockESummary).toHaveBeenCalledWith(
+      expect.objectContaining({ db: 'pubmed', version: '2.0' }),
+      expect.anything(),
+    );
   });
 });

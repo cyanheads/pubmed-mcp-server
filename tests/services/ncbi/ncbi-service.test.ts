@@ -361,12 +361,20 @@ describe('NcbiService', () => {
   });
 });
 
+/**
+ * Mocked upstream responses carry the citation's 1-based position in the wire-key
+ * slot (field 6), not the caller's `key` — ecitmatch.cgi echoes back whatever the
+ * request put there, and `eCitMatch` submits positional tokens so the caller's
+ * label never reaches NCBI's field parsing. The caller's label is restored on the
+ * way out, so the asserted `key` on each result is still the one submitted.
+ * (#113, #125)
+ */
 describe('NcbiService.eCitMatch', () => {
   it('formats bdata and parses matched response', async () => {
     const { service, mockApiClient, mockResponseHandler } = createMockService();
     (mockApiClient.makeRequest as ReturnType<typeof vi.fn>).mockResolvedValue('<xml/>');
     (mockResponseHandler.parseAndHandleResponse as ReturnType<typeof vi.fn>).mockReturnValue(
-      'proc natl acad sci u s a|1991|88|3248|mann bj|ref1|8400044\r\n',
+      'proc natl acad sci u s a|1991|88|3248|mann bj|1|8400044\r\n',
     );
 
     const results = await service.eCitMatch([
@@ -387,7 +395,7 @@ describe('NcbiService.eCitMatch', () => {
     const { service, mockApiClient, mockResponseHandler } = createMockService();
     (mockApiClient.makeRequest as ReturnType<typeof vi.fn>).mockResolvedValue('<xml/>');
     (mockResponseHandler.parseAndHandleResponse as ReturnType<typeof vi.fn>).mockReturnValue(
-      'unknown|||||ref1|NOT_FOUND\r\n',
+      'unknown|||||1|NOT_FOUND\r\n',
     );
 
     const results = await service.eCitMatch([{ key: 'ref1', journal: 'unknown' }]);
@@ -400,7 +408,7 @@ describe('NcbiService.eCitMatch', () => {
     const { service, mockApiClient, mockResponseHandler } = createMockService();
     (mockApiClient.makeRequest as ReturnType<typeof vi.fn>).mockResolvedValue('<xml/>');
     (mockResponseHandler.parseAndHandleResponse as ReturnType<typeof vi.fn>).mockReturnValue(
-      '|2020||||ref1|AMBIGUOUS\r\n',
+      '|2020||||1|AMBIGUOUS\r\n',
     );
 
     const results = await service.eCitMatch([{ key: 'ref1', year: '2020' }]);
@@ -413,7 +421,7 @@ describe('NcbiService.eCitMatch', () => {
     const { service, mockApiClient, mockResponseHandler } = createMockService();
     (mockApiClient.makeRequest as ReturnType<typeof vi.fn>).mockResolvedValue('<xml/>');
     (mockResponseHandler.parseAndHandleResponse as ReturnType<typeof vi.fn>).mockReturnValue(
-      'nature|2020|||zhang f|ref1|AMBIGUOUS 33057196,32076266,32025019\r\n',
+      'nature|2020|||zhang f|1|AMBIGUOUS 33057196,32076266,32025019\r\n',
     );
 
     const results = await service.eCitMatch([
@@ -434,7 +442,7 @@ describe('NcbiService.eCitMatch', () => {
     const { service, mockApiClient, mockResponseHandler } = createMockService();
     (mockApiClient.makeRequest as ReturnType<typeof vi.fn>).mockResolvedValue('<xml/>');
     (mockResponseHandler.parseAndHandleResponse as ReturnType<typeof vi.fn>).mockReturnValue(
-      'nature|2020|||smith|ref1|12345\r\nscience|2021|||jones|ref2|NOT_FOUND\r\n',
+      'nature|2020|||smith|1|12345\r\nscience|2021|||jones|2|NOT_FOUND\r\n',
     );
 
     const results = await service.eCitMatch([
@@ -457,13 +465,14 @@ describe('NcbiService.eCitMatch', () => {
     const { service, mockApiClient, mockResponseHandler } = createMockService();
     (mockApiClient.makeRequest as ReturnType<typeof vi.fn>).mockResolvedValue('<xml/>');
     (mockResponseHandler.parseAndHandleResponse as ReturnType<typeof vi.fn>).mockReturnValue(
-      '||||smith|ref1|12345\r\n',
+      '||||smith|1|12345\r\n',
     );
 
     await service.eCitMatch([{ authorName: 'smith', key: 'ref1' }]);
 
+    // Field 6 is the wire key — the citation's position, not the caller's "ref1".
     const bdata = (mockApiClient.makeRequest as ReturnType<typeof vi.fn>).mock.calls[0]?.[1]?.bdata;
-    expect(bdata).toBe('||||smith|ref1|');
+    expect(bdata).toBe('||||smith|1|');
   });
 
   it('reconciles dropped upstream rows as not_found (issue #54)', async () => {
@@ -472,7 +481,7 @@ describe('NcbiService.eCitMatch', () => {
     const { service, mockApiClient, mockResponseHandler } = createMockService();
     (mockApiClient.makeRequest as ReturnType<typeof vi.fn>).mockResolvedValue('<xml/>');
     (mockResponseHandler.parseAndHandleResponse as ReturnType<typeof vi.fn>).mockReturnValue(
-      'nature|2020|||smith|ref1|12345\r\n',
+      'nature|2020|||smith|1|12345\r\n',
     );
 
     const results = await service.eCitMatch([
@@ -492,7 +501,7 @@ describe('NcbiService.eCitMatch', () => {
     const { service, mockApiClient, mockResponseHandler } = createMockService();
     (mockApiClient.makeRequest as ReturnType<typeof vi.fn>).mockResolvedValue('<xml/>');
     (mockResponseHandler.parseAndHandleResponse as ReturnType<typeof vi.fn>).mockReturnValue(
-      '|2020||||ref2|NOT_FOUND\r\n',
+      '|2020||||2|NOT_FOUND\r\n',
     );
 
     const results = await service.eCitMatch([
@@ -576,6 +585,52 @@ describe('NcbiService.eCitMatch', () => {
     );
     const wireKeys = bdata.split('\r').map((line) => line.split('|')[5]);
     expect(new Set(wireKeys).size).toBe(3);
+  });
+
+  it('matches a citation whose key contains a pipe (issue #125)', async () => {
+    const { service, mockApiClient, mockResponseHandler } = createMockService();
+    // Stand in for ecitmatch.cgi's own field parsing: it reads each submitted
+    // line as exactly six pipe-delimited fields and echoes those six back with
+    // the outcome appended. A seventh field created by a `|` inside one of them
+    // is consumed as the (ignored) PMID slot — the live shape recorded in #125.
+    (mockApiClient.makeRequest as ReturnType<typeof vi.fn>).mockImplementation(
+      async (_endpoint: string, params: { bdata?: string }) => params.bdata ?? '',
+    );
+    (mockResponseHandler.parseAndHandleResponse as ReturnType<typeof vi.fn>).mockImplementation(
+      (bdata: string) =>
+        bdata
+          .split('\r')
+          .map((line) => `${line.split('|').slice(0, 6).join('|')}|38407394`)
+          .join('\n'),
+    );
+
+    const results = await service.eCitMatch([
+      {
+        journal: 'N Engl J Med',
+        year: '2024',
+        volume: '390',
+        firstPage: '889',
+        authorName: 'Wood RA',
+        key: 'a|b',
+      },
+    ]);
+
+    expect(results).toEqual([{ key: 'a|b', matched: true, pmid: '38407394', status: 'matched' }]);
+  });
+
+  it('keeps the caller key off the wire entirely (issue #125)', async () => {
+    const { service, mockApiClient, mockResponseHandler } = createMockService();
+    mockEcitmatchEcho(mockApiClient, mockResponseHandler, {});
+
+    await service.eCitMatch([
+      { journal: 'nature', key: 'a|b' },
+      { journal: 'science', key: 'ref-2' },
+    ]);
+
+    const bdata = String(
+      (mockApiClient.makeRequest as ReturnType<typeof vi.fn>).mock.calls[0]?.[1]?.bdata,
+    );
+    expect(bdata).toBe('nature|||||1|\rscience|||||2|');
   });
 
   it('keeps a dropped row as not_found under colliding keys (issue #113)', async () => {
@@ -774,6 +829,28 @@ describe('NcbiService.idConvert', () => {
     const params = (mockApiClient.makeExternalRequest as ReturnType<typeof vi.fn>).mock
       .calls[0]?.[1];
     expect(params?.ids).toBe('23193287,12345');
+  });
+
+  it('rejects an element containing a comma before the request (#120)', async () => {
+    const { service, mockApiClient } = createIdConvertService();
+
+    await expect(service.idConvert(['39060015,38407394'], 'pmid')).rejects.toMatchObject({
+      code: JsonRpcErrorCode.ValidationError,
+      message: expect.stringContaining('39060015,38407394'),
+    });
+    expect(mockApiClient.makeExternalRequest).not.toHaveBeenCalled();
+  });
+
+  it('rejects a comma-bearing element for any id type, including unspecified (#120)', async () => {
+    const { service, mockApiClient } = createIdConvertService();
+
+    await expect(service.idConvert(['10.1002/a,b'], 'doi')).rejects.toMatchObject({
+      code: JsonRpcErrorCode.ValidationError,
+    });
+    await expect(service.idConvert(['PMC1,PMC2'])).rejects.toMatchObject({
+      code: JsonRpcErrorCode.ValidationError,
+    });
+    expect(mockApiClient.makeExternalRequest).not.toHaveBeenCalled();
   });
 });
 

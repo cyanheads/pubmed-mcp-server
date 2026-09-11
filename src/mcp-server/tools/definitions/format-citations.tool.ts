@@ -11,9 +11,7 @@ import {
   formatCitations,
 } from '@/services/ncbi/formatting/citation-formatter.js';
 import { getNcbiService } from '@/services/ncbi/ncbi-service.js';
-import { parseFullArticle } from '@/services/ncbi/parsing/article-parser.js';
-import { ensureArray } from '@/services/ncbi/parsing/xml-helpers.js';
-import type { XmlPubmedArticle } from '@/services/ncbi/types.js';
+import { parseArticleSet } from '@/services/ncbi/parsing/article-parser.js';
 import { conceptMeta, EDAM_DATA_FORMATTING, SCHEMA_CREATIVE_WORK } from './_concepts.js';
 import { pmidStringSchema } from './_schemas.js';
 
@@ -80,7 +78,9 @@ export const formatCitationsTool = tool('pubmed_format_citations', {
     unavailablePmids: z
       .array(z.string())
       .optional()
-      .describe('Requested PMIDs that did not return article metadata'),
+      .describe(
+        'PMIDs PubMed returned no record for, so nothing could be cited for them. That is all this reports: PubMed omits a PMID it does not recognize silently, with no error and no reason, so the absence says nothing about whether the PMID exists. Use `pubmed_search_articles` to find PMIDs that do resolve.',
+      ),
   }),
 
   // Recovery guidance when nothing could be formatted — agent-facing context, surfaced
@@ -104,23 +104,21 @@ export const formatCitationsTool = tool('pubmed_format_citations', {
       { db: 'pubmed', id: input.pmids.join(','), retmode: 'xml' },
       { retmode: 'xml', usePost: input.pmids.length >= 25, signal: ctx.signal },
     );
-    const xmlArticles: XmlPubmedArticle[] = ensureArray(raw?.PubmedArticleSet?.PubmedArticle);
-
-    const citations = xmlArticles.map((xmlArticle) => {
-      const parsed = parseFullArticle(xmlArticle);
-      return {
-        pmid: parsed.pmid,
-        title: parsed.title,
-        citations: formatCitations(parsed, formats),
-      };
-    });
+    // Reads both members of the set. Taking `PubmedArticleSet.PubmedArticle`
+    // alone discards every NCBI Bookshelf record, leaving a chapter or book
+    // uncitable and its PMID reported unavailable. (#114)
+    const citations = parseArticleSet(raw?.PubmedArticleSet).map((parsed) => ({
+      pmid: parsed.pmid,
+      title: parsed.title,
+      citations: formatCitations(parsed, formats),
+    }));
 
     const returnedPmids = new Set(citations.map((entry) => entry.pmid));
     const unavailablePmids = input.pmids.filter((pmid) => !returnedPmids.has(pmid));
 
     if (citations.length === 0) {
       ctx.enrich.notice(
-        'No articles were returned for the submitted PMIDs. They may be invalid, unpublished, or withdrawn. Try pubmed_search_articles to discover valid PMIDs, or pubmed_spell_check if these came from a noisy source.',
+        'No articles were returned: PubMed matched no record to any of the submitted PMIDs. It omits a PMID it does not recognize silently, without an error or a reason, so nothing more than that is known here. Try pubmed_search_articles to discover PMIDs that resolve, or pubmed_spell_check if these came from a noisy source.',
       );
     }
     return {

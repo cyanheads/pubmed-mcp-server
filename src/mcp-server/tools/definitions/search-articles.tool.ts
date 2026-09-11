@@ -235,8 +235,42 @@ export const searchArticlesTool = tool('pubmed_search_articles', {
           .object({
             pmid: z.string().describe('PubMed ID'),
             title: z.string().optional().describe('Article title'),
-            authors: z.string().optional().describe('Formatted author string'),
-            source: z.string().optional().describe('Journal source'),
+            authors: z
+              .string()
+              .optional()
+              .describe(
+                "Formatted author string — the first three of the record's own authors, then \"et al.\". On an NCBI Bookshelf chapter these are the chapter's authors; the book's editors are reported separately in `editors`.",
+              ),
+            source: z
+              .string()
+              .optional()
+              .describe(
+                'Journal the article appeared in. Absent on an NCBI Bookshelf record, which has no journal — its venue is in `bookTitle` and `publisherName` instead, and `docType` says which kind of record it is.',
+              ),
+            bookTitle: z
+              .string()
+              .optional()
+              .describe(
+                'Title of the book an NCBI Bookshelf record belongs to, e.g. "GeneReviews(®)". Present instead of `source` on a book record; absent on a journal article.',
+              ),
+            publisherName: z
+              .string()
+              .optional()
+              .describe(
+                'Publisher of the book an NCBI Bookshelf record belongs to. Present only on a book record; absent on a journal article.',
+              ),
+            docType: z
+              .string()
+              .optional()
+              .describe(
+                'What PubMed classifies this record as: "chapter" or "book" for an NCBI Bookshelf record, "citation" for an ordinary journal article. Absent when PubMed supplies none.',
+              ),
+            editors: z
+              .array(z.string().describe('One editor, "Surname Initials" as ESummary renders it'))
+              .optional()
+              .describe(
+                "Editors of the containing book, kept out of `authors` so they cannot displace the record's own authors. Absent on a journal article and on a book that credits no editors.",
+              ),
             pubDate: z.string().optional().describe('Publication date'),
             doi: z
               .string()
@@ -406,6 +440,10 @@ export const searchArticlesTool = tool('pubmed_search_articles', {
       title?: string | undefined;
       authors?: string | undefined;
       source?: string | undefined;
+      bookTitle?: string | undefined;
+      publisherName?: string | undefined;
+      docType?: string | undefined;
+      editors?: string[] | undefined;
       pubDate?: string | undefined;
       doi?: string | undefined;
       pmcId?: string | undefined;
@@ -436,6 +474,10 @@ export const searchArticlesTool = tool('pubmed_search_articles', {
           title: s.title,
           authors: s.authors,
           source: s.source,
+          bookTitle: s.bookTitle,
+          publisherName: s.publisherName,
+          docType: s.docType,
+          editors: s.editors,
           pubDate: s.pubDate,
           doi: s.doi,
           pmcId: s.pmcId,
@@ -511,7 +553,14 @@ export const searchArticlesTool = tool('pubmed_search_articles', {
         lines.push(`\n#### ${escapeMarkdownInline(s.title ?? s.pmid)}`);
         lines.push(`**PMID:** ${s.pmid}`);
         if (s.authors) lines.push(`**Authors:** ${s.authors}`);
+        if (s.editors?.length) lines.push(`**Editors:** ${s.editors.join(', ')}`);
         if (s.source) lines.push(`**Source:** ${s.source}`);
+        // A Bookshelf record has no journal, so its venue takes the Source
+        // slot rather than leaving the summary without one. (#114)
+        if (s.bookTitle || s.publisherName) {
+          lines.push(`**Book:** ${[s.bookTitle, s.publisherName].filter(Boolean).join(' — ')}`);
+        }
+        if (s.docType) lines.push(`**Doc Type:** ${s.docType}`);
         if (s.pubDate) lines.push(`**Published:** ${s.pubDate}`);
         if (s.doi) lines.push(`**DOI:** ${s.doi}`);
         if (s.pmcId) lines.push(`**PMCID:** ${s.pmcId}`);

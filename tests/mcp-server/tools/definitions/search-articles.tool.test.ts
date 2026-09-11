@@ -11,6 +11,10 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 import type { ParsedBriefSummary } from '@/services/ncbi/types.js';
 
 import { textBlocks } from '../../../_helpers.js';
+import {
+  BOOK_ESUMMARY_XML,
+  parseESummaryXml,
+} from '../../../services/ncbi/parsing/_book-fixtures.js';
 
 const mockESearch = vi.fn();
 const mockESummary = vi.fn();
@@ -21,6 +25,10 @@ vi.mock('@/services/ncbi/ncbi-service.js', () => ({
 vi.mock('@/services/ncbi/parsing/esummary-parser.js', () => ({
   extractBriefSummaries: mockExtractBriefSummaries,
 }));
+
+const { extractBriefSummaries: realExtractBriefSummaries } = await vi.importActual<
+  typeof import('@/services/ncbi/parsing/esummary-parser.js')
+>('@/services/ncbi/parsing/esummary-parser.js');
 
 const { searchArticlesTool } = await import(
   '@/mcp-server/tools/definitions/search-articles.tool.js'
@@ -995,5 +1003,66 @@ describe('searchArticlesTool format() heading escaping (issue #102)', () => {
 
   it('escapes the PMID fallback heading the same way when no title is present', () => {
     expect(render(undefined)).toContain('#### 42');
+  });
+});
+
+describe('searchArticlesTool Bookshelf summaries (issue #114)', () => {
+  beforeEach(() => {
+    mockESearch.mockReset();
+    mockESummary.mockReset();
+    mockExtractBriefSummaries.mockReset();
+    // The real parser, so the book fields are read from an upstream ESummary
+    // body rather than hand-built here.
+    mockExtractBriefSummaries.mockImplementation(realExtractBriefSummaries);
+    mockESearch.mockResolvedValue({
+      count: 2,
+      idList: ['20301425', '29262038'],
+      retmax: 20,
+      retstart: 0,
+      queryTranslation: 'BRCA1 AND booksdocs[filter]',
+    });
+    mockESummary.mockResolvedValue(parseESummaryXml(BOOK_ESUMMARY_XML));
+  });
+
+  const search = async () => {
+    const ctx = createMockContext({ errors: searchArticlesTool.errors });
+    const input = searchArticlesTool.input.parse({
+      query: 'BRCA1 AND booksdocs[filter]',
+      summaryCount: 2,
+    });
+    return { result: await searchArticlesTool.handler(input, ctx), ctx };
+  };
+
+  it('surfaces the book venue and the editor/author split a Bookshelf record carries', async () => {
+    const { result } = await search();
+
+    expect(result.summaries[0]).toMatchObject({
+      pmid: '20301425',
+      // ESummary leaves Source empty on a book record — the venue is the book.
+      bookTitle: 'GeneReviews(®)',
+      publisherName: 'University of Washington, Seattle',
+      docType: 'chapter',
+      authors: 'Petrucelli N, Daly MB, Pal T',
+      editors: ['Adam MP', 'Bick S', 'Mirzaa GM', 'Wallace SE', 'Amemiya A'],
+    });
+    expect(result.summaries[0]?.source).toBeUndefined();
+    expect(result.summaries[1]).toMatchObject({
+      pmid: '29262038',
+      bookTitle: 'StatPearls',
+      publisherName: 'StatPearls Publishing',
+      docType: 'chapter',
+    });
+    expect(result.summaries[1]?.editors).toBeUndefined();
+  });
+
+  it('renders a Book line in place of Source, with the editors and doc type', async () => {
+    const { result } = await search();
+    const text = textBlocks(searchArticlesTool.format!(result))[0]?.text ?? '';
+
+    expect(text).toContain('**Book:** GeneReviews(®) — University of Washington, Seattle');
+    expect(text).toContain('**Editors:** Adam MP, Bick S, Mirzaa GM, Wallace SE, Amemiya A');
+    expect(text).toContain('**Doc Type:** chapter');
+    expect(text).toContain('**Authors:** Petrucelli N, Daly MB, Pal T');
+    expect(text).not.toContain('**Source:**');
   });
 });

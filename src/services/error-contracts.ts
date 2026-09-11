@@ -85,6 +85,27 @@ export const NCBI_QUERY_INPUT_ERRORS = [
 ] as const;
 
 /**
+ * Input failure the identifier-conversion path rejects before any call is made.
+ * Separate from {@link NCBI_QUERY_INPUT_ERRORS} for the same reason that array
+ * is separate from the service contracts: only a tool that takes caller-supplied
+ * identifiers can produce it.
+ *
+ * Thrown from a tool handler via `ctx.fail('malformed_id', …)`, so its recovery
+ * hint resolves through `ctx.recoveryFor` and it stays out of
+ * {@link ServiceErrorReason}.
+ */
+export const NCBI_ID_INPUT_ERRORS = [
+  {
+    reason: 'malformed_id',
+    code: JsonRpcErrorCode.ValidationError,
+    when: 'An `ids` element does not match the declared `idType` — most often several identifiers packed into one element, which the comma-delimited upstream batch would split into extra records.',
+    recovery:
+      'Submit one identifier per `ids` element, in the declared idType format; the same packed value will be rejected again.',
+    retryable: false,
+  },
+] as const;
+
+/**
  * Failure modes the Unpaywall service layer can surface. Tools that consume
  * `getUnpaywallService()` (currently `pubmed_fetch_fulltext`) should spread
  * these into their `errors[]`.

@@ -8,6 +8,8 @@ import type {
   ParsedArticle,
   ParsedArticleAuthor,
   ParsedArticleDate,
+  ParsedBookEditor,
+  ParsedBookInfo,
   ParsedGrant,
   ParsedJournalInfo,
   ParsedMeshQualifier,
@@ -19,6 +21,7 @@ import type {
   XmlArticleIdList,
   XmlAuthor,
   XmlAuthorList,
+  XmlBookDocument,
   XmlGrant,
   XmlGrantList,
   XmlIdentifier,
@@ -28,9 +31,12 @@ import type {
   XmlMedlineCitation,
   XmlMeshHeading,
   XmlMeshHeadingList,
+  XmlPubDate,
   XmlPublicationType,
   XmlPublicationTypeList,
   XmlPubmedArticle,
+  XmlPubmedArticleSet,
+  XmlPubmedBookArticle,
 } from '../types.js';
 import { decodeHtmlEntities } from './text-helpers.js';
 import { ensureArray, getAttribute, getText } from './xml-helpers.js';
@@ -106,9 +112,34 @@ export function extractAuthors(authorListXml?: XmlAuthorList): ExtractedAuthors 
 }
 
 /**
+ * Picks the electronic article locator from an Article's `ELocationID` list —
+ * the publisher-assigned article number carried by journals that do not
+ * paginate (`<ELocationID EIdType="pii" ValidYN="Y">2400512</ELocationID>`).
+ *
+ * DOI-typed entries are skipped: the DOI has its own field and its own
+ * selection rules in {@link extractDoi}, and a DOI is not pagination. A locator
+ * explicitly marked `ValidYN="N"` is never surfaced, and a valid one wins over
+ * an entry with no `ValidYN` attribute at all.
+ * @param articleXml - The XML Article element.
+ * @returns The locator value and its `EIdType`, or undefined when none applies.
+ */
+function extractELocationId(articleXml?: XmlArticle): { value: string; type?: string } | undefined {
+  const candidates = ensureArray(articleXml?.ELocationID).filter(
+    (eloc) =>
+      getAttribute(eloc, 'EIdType') !== 'doi' &&
+      getAttribute(eloc, 'ValidYN') !== 'N' &&
+      getText(eloc, undefined),
+  );
+  const locator = candidates.find((eloc) => getAttribute(eloc, 'ValidYN') === 'Y') ?? candidates[0];
+  if (!locator) return;
+  const type = getAttribute(locator, 'EIdType', undefined);
+  return { value: getText(locator), ...(type && { type }) };
+}
+
+/**
  * Extracts and formats journal information from XML.
  * @param journalXml - The XML Journal element from an Article.
- * @param articleXml - The XML Article element (for Pagination).
+ * @param articleXml - The XML Article element (for Pagination and ELocationID).
  * @returns Formatted journal information.
  */
 export function extractJournalInfo(
@@ -130,6 +161,7 @@ export function extractJournalInfo(
   const month = getText(pubDate?.Month);
   const day = getText(pubDate?.Day);
   const medlineDate = getText(pubDate?.MedlineDate);
+  const locator = extractELocationId(articleXml);
 
   return {
     title: getText(journalXml.Title),
@@ -139,6 +171,8 @@ export function extractJournalInfo(
     volume: getText(journalXml.JournalIssue?.Volume),
     issue: getText(journalXml.JournalIssue?.Issue),
     pages: getText(articleXml?.Pagination?.MedlinePgn),
+    ...(locator && { elocationId: locator.value }),
+    ...(locator?.type && { elocationIdType: locator.type }),
     publicationDate: {
       ...(year && { year }),
       ...(month && { month }),
@@ -419,6 +453,7 @@ export function parseFullArticle(
   const grantList = includeGrants ? extractGrants(article?.GrantList) : undefined;
 
   return {
+    recordType: 'journal-article',
     pmid: extractPmid(medlineCitation) ?? '',
     title: getText(article?.ArticleTitle),
     ...(abstractText !== undefined && { abstractText }),
@@ -433,4 +468,211 @@ export function parseFullArticle(
     ...(pmcId !== undefined && { pmcId }),
     ...(articleDates.length > 0 && { articleDates }),
   };
+}
+
+// ─── Bookshelf records (PubmedBookArticle) ──────────────────────────────────
+
+/**
+ * Text of an XML element, with an absent or empty element reported as absent.
+ * `getText(x, undefined)` cannot do this: `undefined` triggers the parameter's
+ * own `''` default, so it returns the empty string for a missing element.
+ */
+function optionalText(element: unknown): string | undefined {
+  return getText(element) || undefined;
+}
+
+/** Year text from a `PubDate`-shaped element, falling back to a `MedlineDate` span. */
+function extractYear(dateXml?: XmlPubDate): string | undefined {
+  if (!dateXml) return;
+  return optionalText(dateXml.Year) ?? getText(dateXml.MedlineDate).match(/\d{4}/)?.[0];
+}
+
+/** First `ArticleId` of the given `IdType`, or undefined. */
+function findArticleId(
+  idListXml: XmlArticleIdList | undefined,
+  idType: string,
+): string | undefined {
+  for (const articleId of ensureArray(idListXml?.ArticleId)) {
+    if (getAttribute(articleId, 'IdType') === idType) {
+      const value = optionalText(articleId);
+      if (value) return value;
+    }
+  }
+  return;
+}
+
+/**
+ * Flatten repeatable `AuthorList` elements into the single list
+ * {@link extractAuthors} expects, so affiliation indices stay consistent across
+ * them instead of each list restarting its own numbering.
+ */
+function mergeAuthorLists(lists: XmlAuthorList[]): XmlAuthorList | undefined {
+  const authors = lists.flatMap((list) => ensureArray(list.Author));
+  return authors.length > 0 ? { Author: authors } : undefined;
+}
+
+/**
+ * Extract the containing book from a `BookDocument`.
+ *
+ * `Book/AuthorList` is split on its `Type` attribute: `editors` is the only
+ * value that makes a list editors, so an untyped list is read as authors —
+ * mislabelling real authors as editors would put them in the wrong slot of every
+ * citation style.
+ * @param bookDocumentXml - The XML BookDocument element.
+ * @returns The parsed book, with absent elements omitted rather than emptied.
+ */
+export function extractBookInfo(bookDocumentXml: XmlBookDocument): ParsedBookInfo {
+  const book = bookDocumentXml.Book;
+  const editorLists = ensureArray(book?.AuthorList).filter(
+    (list) => getAttribute(list, 'Type') === 'editors',
+  );
+  const editors: ParsedBookEditor[] = extractAuthors(mergeAuthorLists(editorLists)).authors.map(
+    ({ lastName, firstName, initials, collectiveName }) => ({
+      ...(lastName && { lastName }),
+      ...(firstName && { firstName }),
+      ...(initials && { initials }),
+      ...(collectiveName && { collectiveName }),
+    }),
+  );
+
+  const isbns = ensureArray(book?.Isbn)
+    .map(optionalText)
+    .filter((isbn): isbn is string => isbn !== undefined);
+  const bookDoi = ensureArray(book?.ELocationID)
+    .filter((eloc) => getAttribute(eloc, 'EIdType') === 'doi')
+    .map(optionalText)
+    .find(Boolean);
+
+  const title = optionalText(book?.BookTitle);
+  const publisher = optionalText(book?.Publisher?.PublisherName);
+  const publisherLocation = optionalText(book?.Publisher?.PublisherLocation);
+  const pubDate = extractYear(book?.PubDate);
+  const beginningDate = extractYear(book?.BeginningDate);
+  const endingDate = extractYear(book?.EndingDate);
+  const medium = optionalText(book?.Medium);
+  const edition = optionalText(book?.Edition);
+  const collectionTitle = optionalText(book?.CollectionTitle);
+  const accession = findArticleId(bookDocumentXml.ArticleIdList, 'bookaccession');
+
+  return {
+    ...(title && { title }),
+    ...(publisher && { publisher }),
+    ...(publisherLocation && { publisherLocation }),
+    ...(pubDate && { pubDate }),
+    ...(beginningDate && { beginningDate }),
+    ...(endingDate && { endingDate }),
+    ...(medium && { medium }),
+    ...(edition && { edition }),
+    ...(collectionTitle && { collectionTitle }),
+    ...(isbns.length > 0 && { isbns }),
+    ...(bookDoi && { doi: bookDoi }),
+    ...(editors.length > 0 && { editors }),
+    ...(accession && { accession }),
+  };
+}
+
+/**
+ * Parse a `PubmedBookArticle` — an NCBI Bookshelf record — into the same
+ * {@link ParsedArticle} shape a journal article produces.
+ *
+ * `ArticleTitle` is the discriminator: a record carrying one is a chapter, and
+ * one without it is the whole book, whose `title` then comes from `BookTitle`.
+ * `journalInfo` is never populated — a Bookshelf record has no journal, and
+ * promoting the book title into one would invent a venue that does not exist.
+ *
+ * Chapter authors come from `BookDocument/AuthorList`; a book-level author list
+ * stands in only when the chapter carries none of its own. `Sections`,
+ * `ReferenceList` and `ItemList` are not read — metadata and abstract only. (#114)
+ * @param xmlBookArticle - The raw XML PubmedBookArticle element.
+ * @returns A parsed record with `recordType` set to `book-chapter` or `book`.
+ */
+export function parseFullBookArticle(xmlBookArticle: XmlPubmedBookArticle): ParsedArticle {
+  const bookDocument = xmlBookArticle.BookDocument;
+  const book = extractBookInfo(bookDocument);
+
+  const chapterTitle = optionalText(bookDocument?.ArticleTitle);
+  const bookAuthorLists = ensureArray(bookDocument?.Book?.AuthorList).filter(
+    (list) => getAttribute(list, 'Type') !== 'editors',
+  );
+  const chapterAuthors = extractAuthors(mergeAuthorLists(ensureArray(bookDocument?.AuthorList)));
+  const { authors, affiliations } = chapterAuthors.authors.length
+    ? chapterAuthors
+    : extractAuthors(mergeAuthorLists(bookAuthorLists));
+
+  const abstractText = extractAbstractText(bookDocument?.Abstract);
+  const keywords = extractKeywords(bookDocument?.KeywordList);
+  const publicationTypes = ensureArray(bookDocument?.PublicationType)
+    .map((pubType) => getText(pubType))
+    .filter(Boolean);
+  const articleDates = (
+    [
+      ['ContributionDate', bookDocument?.ContributionDate],
+      ['DateRevised', bookDocument?.DateRevised],
+    ] as const
+  ).flatMap(([dateType, dateXml]): ParsedArticleDate[] =>
+    dateXml
+      ? [
+          {
+            dateType,
+            year: getText(dateXml.Year),
+            month: getText(dateXml.Month),
+            day: getText(dateXml.Day),
+          },
+        ]
+      : [],
+  );
+  const doi =
+    findArticleId(bookDocument?.ArticleIdList, 'doi') ??
+    findArticleId(xmlBookArticle.PubmedBookData?.ArticleIdList, 'doi');
+
+  const title = chapterTitle ?? book.title;
+
+  return {
+    recordType: chapterTitle ? 'book-chapter' : 'book',
+    pmid: getText(bookDocument?.PMID),
+    ...(title !== undefined && { title }),
+    ...(abstractText !== undefined && { abstractText }),
+    ...(affiliations.length > 0 && { affiliations }),
+    authors,
+    book,
+    ...(publicationTypes.length > 0 && { publicationTypes }),
+    ...(keywords.length > 0 && { keywords }),
+    ...(doi !== undefined && { doi }),
+    ...(articleDates.length > 0 && { articleDates }),
+  };
+}
+
+/**
+ * Parse a whole `PubmedArticleSet` — every `PubmedArticle` and every
+ * `PubmedBookArticle` — into one flat record list. This is the entry point every
+ * EFetch consumer should use: reading `PubmedArticleSet.PubmedArticle` alone
+ * silently discards Bookshelf records, whose PMIDs then look unavailable. (#114)
+ *
+ * Ordering: records of one kind keep their upstream order, and the two kinds
+ * appear in the order they first occur in the response. Exact interleaving is
+ * not recoverable — the flat XML parser groups siblings by element name, so a
+ * response alternating the two kinds collapses to two runs. A caller that needs
+ * records back in the order it asked for them should key on `pmid`.
+ * @param articleSet - The parsed `PubmedArticleSet` element.
+ * @param options - Options forwarded to journal-article parsing.
+ * @returns Parsed records; an empty array when the set holds none.
+ */
+export function parseArticleSet(
+  articleSet: XmlPubmedArticleSet | undefined,
+  options: ParseFullArticleOptions = {},
+): ParsedArticle[] {
+  if (!articleSet) return [];
+  const records: ParsedArticle[] = [];
+  for (const member of Object.keys(articleSet)) {
+    if (member === 'PubmedArticle') {
+      for (const xmlArticle of ensureArray(articleSet.PubmedArticle)) {
+        if (xmlArticle?.MedlineCitation) records.push(parseFullArticle(xmlArticle, options));
+      }
+    } else if (member === 'PubmedBookArticle') {
+      for (const xmlBookArticle of ensureArray(articleSet.PubmedBookArticle)) {
+        if (xmlBookArticle?.BookDocument) records.push(parseFullBookArticle(xmlBookArticle));
+      }
+    }
+  }
+  return records;
 }

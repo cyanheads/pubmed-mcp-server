@@ -7,6 +7,16 @@ import { createMockContext, getEnrichment } from '@cyanheads/mcp-ts-core/testing
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { textBlocks } from '../../../_helpers.js';
+import {
+  ADA_WHOLE_BOOK_XML,
+  articleSetXml,
+  GENEREVIEWS_CHAPTER_XML,
+  JOURNAL_ARTICLE_XML,
+  LACTMED_CHAPTER_XML,
+  NAP_WHOLE_BOOK_XML,
+  parseArticleSetXml,
+  STATPEARLS_CHAPTER_XML,
+} from '../../../services/ncbi/parsing/_book-fixtures.js';
 
 const mockEFetch = vi.fn();
 vi.mock('@/services/ncbi/ncbi-service.js', () => ({
@@ -212,6 +222,102 @@ describe('fetchArticlesTool', () => {
     expect(result.articles[0]?.pmcUrl).toContain('PMC24680');
   });
 
+  describe('electronic article locators (issue #121)', () => {
+    // PMID 39060015 as NCBI EFetch returns it: no Pagination, a pii locator and
+    // a doi locator side by side.
+    const eurRespirArticle = {
+      MedlineCitation: {
+        PMID: { '#text': '39060015' },
+        Article: {
+          ArticleTitle: { '#text': 'Benralizumab for allergic asthma.' },
+          Journal: {
+            ISSN: { '#text': '1399-3003', '@_IssnType': 'Electronic' },
+            JournalIssue: {
+              Volume: { '#text': '64' },
+              Issue: { '#text': '3' },
+              PubDate: { Year: { '#text': '2024' }, Month: { '#text': 'Sep' } },
+            },
+            Title: { '#text': 'The European respiratory journal' },
+            ISOAbbreviation: { '#text': 'Eur Respir J' },
+          },
+          ELocationID: [
+            { '#text': '2400512', '@_EIdType': 'pii', '@_ValidYN': 'Y' },
+            { '#text': '10.1183/13993003.00512-2024', '@_EIdType': 'doi', '@_ValidYN': 'Y' },
+          ],
+          PublicationTypeList: { PublicationType: { '#text': 'Journal Article' } },
+        },
+      },
+    };
+
+    it('carries the locator and its type in structuredContent, with pages unpopulated', async () => {
+      mockEFetch.mockResolvedValue({
+        PubmedArticleSet: { PubmedArticle: [eurRespirArticle] },
+      });
+      const ctx = createMockContext({ errors: fetchArticlesTool.errors });
+      const input = fetchArticlesTool.input.parse({ pmids: ['39060015'] });
+      const result = await fetchArticlesTool.handler(input, ctx);
+
+      const ji = result.articles[0]?.journalInfo;
+      expect(ji?.elocationId).toBe('2400512');
+      expect(ji?.elocationIdType).toBe('pii');
+      // Never backfilled from the locator — the record genuinely has no pages
+      expect(ji?.pages).toBe('');
+      // DOI extraction is unaffected — the two values live side by side
+      expect(result.articles[0]?.doi).toBe('10.1183/13993003.00512-2024');
+    });
+
+    it('renders the locator on the format() journal line', () => {
+      const blocks = textBlocks(
+        fetchArticlesTool.format!({
+          articles: [
+            {
+              recordType: 'journal-article' as const,
+              pmid: '39060015',
+              title: 'Benralizumab for allergic asthma.',
+              journalInfo: {
+                isoAbbreviation: 'Eur Respir J',
+                volume: '64',
+                issue: '3',
+                elocationId: '2400512',
+                elocationIdType: 'pii',
+                publicationDate: { year: '2024', month: 'Sep' },
+              },
+            },
+          ],
+          totalReturned: 1,
+        }),
+      );
+      expect(blocks[0]?.text).toContain(
+        '**Journal:** Eur Respir J, 2024 Sep, **64**(3), pii: 2400512',
+      );
+    });
+
+    it('omits both fields for a record whose only locator is invalid', async () => {
+      mockEFetch.mockResolvedValue({
+        PubmedArticleSet: {
+          PubmedArticle: [
+            {
+              ...eurRespirArticle,
+              MedlineCitation: {
+                ...eurRespirArticle.MedlineCitation,
+                Article: {
+                  ...eurRespirArticle.MedlineCitation.Article,
+                  ELocationID: [{ '#text': '2400512', '@_EIdType': 'pii', '@_ValidYN': 'N' }],
+                },
+              },
+            },
+          ],
+        },
+      });
+      const ctx = createMockContext({ errors: fetchArticlesTool.errors });
+      const input = fetchArticlesTool.input.parse({ pmids: ['39060015'] });
+      const result = await fetchArticlesTool.handler(input, ctx);
+
+      expect(result.articles[0]?.journalInfo?.elocationId).toBeUndefined();
+      expect(result.articles[0]?.journalInfo?.elocationIdType).toBeUndefined();
+    });
+  });
+
   it('uses POST for large PMID batches', async () => {
     const pmids = Array.from({ length: 100 }, (_, index) => String(index + 1));
     mockEFetch.mockResolvedValue({
@@ -248,6 +354,7 @@ describe('fetchArticlesTool', () => {
       fetchArticlesTool.format!({
         articles: [
           {
+            recordType: 'journal-article' as const,
             pmid: '12345',
             title: 'Test Article',
             abstractText: 'Abstract here.',
@@ -303,6 +410,7 @@ describe('fetchArticlesTool', () => {
 
   describe('format() content completeness (issue #26)', () => {
     const richArticle = {
+      recordType: 'journal-article' as const,
       pmid: '36813558',
       title: 'Ki67 Expression.',
       abstractText: 'Abstract body.',
@@ -423,6 +531,17 @@ describe('fetchArticlesTool', () => {
       expect(blocks[0]?.text).toContain('**Article Dates:** Electronic 2023-02-22');
     });
 
+    it('renders the whole journal line in field order', () => {
+      // Locked byte-for-byte: a record carrying real `pages` renders the same
+      // journal line regardless of electronic-article-locator handling.
+      const blocks = textBlocks(
+        fetchArticlesTool.format!({ articles: [richArticle], totalReturned: 1 }),
+      );
+      expect(blocks[0]?.text).toContain(
+        '**Journal:** J Clin Pathol, 2023 Jun 22, **76**(6), 357-364, ISSN 0021-9746, eISSN 1472-4146',
+      );
+    });
+
     it('includes the grant acronym alongside the grant ID', () => {
       const blocks = textBlocks(
         fetchArticlesTool.format!({ articles: [richArticle], totalReturned: 1 }),
@@ -510,7 +629,14 @@ describe('fetchArticlesTool format() heading escaping (issue #102)', () => {
   const render = (title: string) =>
     textBlocks(
       fetchArticlesTool.format!({
-        articles: [{ pmid: '42', title, pubmedUrl: 'https://pubmed.ncbi.nlm.nih.gov/42/' }],
+        articles: [
+          {
+            recordType: 'journal-article' as const,
+            pmid: '42',
+            title,
+            pubmedUrl: 'https://pubmed.ncbi.nlm.nih.gov/42/',
+          },
+        ],
         totalReturned: 1,
       }),
     )[0]?.text ?? '';
@@ -533,7 +659,13 @@ describe('fetchArticlesTool format() heading escaping (issue #102)', () => {
     const text =
       textBlocks(
         fetchArticlesTool.format!({
-          articles: [{ pmid: '42', pubmedUrl: 'https://pubmed.ncbi.nlm.nih.gov/42/' }],
+          articles: [
+            {
+              recordType: 'journal-article' as const,
+              pmid: '42',
+              pubmedUrl: 'https://pubmed.ncbi.nlm.nih.gov/42/',
+            },
+          ],
           totalReturned: 1,
         }),
       )[0]?.text ?? '';
@@ -612,7 +744,7 @@ describe('fetchArticlesTool whole-response budget (issue #99)', () => {
     const text = textBlocks(fetchArticlesTool.format!(result))[0]?.text ?? '';
 
     expect(JSON.stringify(result)).toBe(
-      '{"articles":[{"pmid":"111","title":"Article 111","abstractText":"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA","authors":[],"journalInfo":{"title":"J Budget","isoAbbreviation":"","volume":"","issue":"","pages":"","publicationDate":{}},"publicationTypes":["Journal Article"],"meshTerms":[{"descriptorName":"Topic 111","descriptorUi":"D111","qualifiers":[{"qualifierName":"therapy 111","qualifierUi":"Q111","isMajorTopic":false}],"isMajorTopic":true}],"pubmedUrl":"https://pubmed.ncbi.nlm.nih.gov/111/"},{"pmid":"222","title":"Article 222","abstractText":"BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB","authors":[],"journalInfo":{"title":"J Budget","isoAbbreviation":"","volume":"","issue":"","pages":"","publicationDate":{}},"publicationTypes":["Journal Article"],"pubmedUrl":"https://pubmed.ncbi.nlm.nih.gov/222/"}],"totalReturned":2,"unavailablePmids":["333"]}',
+      '{"articles":[{"recordType":"journal-article","pmid":"111","title":"Article 111","abstractText":"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA","authors":[],"journalInfo":{"title":"J Budget","isoAbbreviation":"","volume":"","issue":"","pages":"","publicationDate":{}},"publicationTypes":["Journal Article"],"meshTerms":[{"descriptorName":"Topic 111","descriptorUi":"D111","qualifiers":[{"qualifierName":"therapy 111","qualifierUi":"Q111","isMajorTopic":false}],"isMajorTopic":true}],"pubmedUrl":"https://pubmed.ncbi.nlm.nih.gov/111/"},{"recordType":"journal-article","pmid":"222","title":"Article 222","abstractText":"BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB","authors":[],"journalInfo":{"title":"J Budget","isoAbbreviation":"","volume":"","issue":"","pages":"","publicationDate":{}},"publicationTypes":["Journal Article"],"pubmedUrl":"https://pubmed.ncbi.nlm.nih.gov/222/"}],"totalReturned":2,"unavailablePmids":["333"]}',
     );
     expect(text).toBe(
       [
@@ -623,6 +755,7 @@ describe('fetchArticlesTool whole-response budget (issue #99)', () => {
         '### Article 111',
         '',
         '**Journal:** J Budget',
+        '**Record Type:** journal-article',
         '**Type:** Journal Article',
         '**PMID:** 111',
         '**PubMed:** https://pubmed.ncbi.nlm.nih.gov/111/',
@@ -636,6 +769,7 @@ describe('fetchArticlesTool whole-response budget (issue #99)', () => {
         '### Article 222',
         '',
         '**Journal:** J Budget',
+        '**Record Type:** journal-article',
         '**Type:** Journal Article',
         '**PMID:** 222',
         '**PubMed:** https://pubmed.ncbi.nlm.nih.gov/222/',
@@ -863,5 +997,191 @@ describe('fetchArticlesTool whole-response budget (issue #99)', () => {
     expect(
       fetchArticlesTool.input.safeParse({ pmids: ['111'], maxResponseCharacters: 1 }).success,
     ).toBe(true);
+  });
+});
+
+describe('fetchArticlesTool Bookshelf records (issue #114)', () => {
+  beforeEach(() => {
+    mockEFetch.mockReset();
+  });
+
+  /** Stage an EFetch body parsed through the production response handler. */
+  function stageSet(...records: string[]) {
+    mockEFetch.mockResolvedValue({
+      PubmedArticleSet: parseArticleSetXml(articleSetXml(...records)),
+    });
+  }
+
+  const run = async (pmids: string[], extra: Record<string, unknown> = {}) => {
+    const ctx = createMockContext({ errors: fetchArticlesTool.errors });
+    const input = fetchArticlesTool.input.parse({ pmids, ...extra });
+    return { result: await fetchArticlesTool.handler(input, ctx), ctx };
+  };
+
+  const render = (result: Parameters<NonNullable<typeof fetchArticlesTool.format>>[0]) =>
+    textBlocks(fetchArticlesTool.format!(result))[0]?.text ?? '';
+
+  it('returns a record for every Bookshelf PMID instead of reporting them unavailable', async () => {
+    stageSet(GENEREVIEWS_CHAPTER_XML, STATPEARLS_CHAPTER_XML);
+
+    const { result } = await run(['20301425', '29262038']);
+
+    expect(result.unavailablePmids).toBeUndefined();
+    expect(result.totalReturned).toBe(2);
+    expect(result.articles.map((a) => a.pmid)).toEqual(['20301425', '29262038']);
+  });
+
+  it('carries recordType, book metadata and an absent journalInfo across a mixed set', async () => {
+    stageSet(JOURNAL_ARTICLE_XML, GENEREVIEWS_CHAPTER_XML, ADA_WHOLE_BOOK_XML);
+
+    const { result } = await run(['42474064', '20301425', '42715368']);
+
+    expect(result.totalReturned).toBe(3);
+    expect(result.unavailablePmids).toBeUndefined();
+    expect(result.articles.map((a) => [a.pmid, a.recordType])).toEqual([
+      ['42474064', 'journal-article'],
+      ['20301425', 'book-chapter'],
+      ['42715368', 'book'],
+    ]);
+
+    const [journal, chapter, book] = result.articles;
+    expect(journal?.journalInfo?.title).toBe('Health technology assessment (Winchester, England)');
+    expect(journal?.book).toBeUndefined();
+
+    // A book record carries no journal — the book title is never promoted into one.
+    expect(chapter?.journalInfo).toBeUndefined();
+    expect(book?.journalInfo).toBeUndefined();
+
+    expect(chapter?.title).toBe('BRCA1- and BRCA2-Associated Hereditary Breast and Ovarian Cancer');
+    expect(chapter?.book).toMatchObject({
+      title: 'GeneReviews®',
+      publisher: 'University of Washington, Seattle',
+      publisherLocation: 'Seattle (WA)',
+      pubDate: '1993',
+      beginningDate: '1993',
+      endingDate: '2026',
+      medium: 'Internet',
+      accession: 'NBK1247',
+    });
+    // Chapter authors stay in `authors`; the series editors stay in `book.editors`.
+    expect(chapter?.authors?.map((au) => au.lastName)).toEqual(['Petrucelli', 'Daly', 'Pal']);
+    expect(chapter?.book?.editors?.map((ed) => ed.lastName)).toEqual([
+      'Adam',
+      'Bick',
+      'Mirzaa',
+      'Wallace',
+      'Amemiya',
+    ]);
+
+    expect(book?.book).toMatchObject({
+      collectionTitle: 'ADA Clinical Compendia Series',
+      doi: '10.2337/db20261',
+      accession: 'NBK624619',
+    });
+  });
+
+  it('renders the book venue in content[] for every record kind', async () => {
+    stageSet(JOURNAL_ARTICLE_XML, GENEREVIEWS_CHAPTER_XML, NAP_WHOLE_BOOK_XML);
+
+    const { result } = await run(['42474064', '20301425', '42691195']);
+    const text = render(result);
+
+    expect(text).toContain('**Record Type:** journal-article');
+    expect(text).toContain('**Record Type:** book-chapter');
+    expect(text).toContain('**Record Type:** book');
+
+    // Chapter — containing book, its medium, editors, imprint, date range, permalink.
+    expect(text).toContain('**Book:** GeneReviews® [Internet]');
+    expect(text).toContain('**Editors (5):**');
+    expect(text).toContain('- Margaret P Adam (MP)');
+    expect(text).toContain('**Publisher:** University of Washington, Seattle');
+    expect(text).toContain('**Publisher Location:** Seattle (WA)');
+    expect(text).toContain('**Published:** 1993–2026');
+    expect(text).toContain('**Bookshelf:** https://www.ncbi.nlm.nih.gov/books/NBK1247/');
+
+    // Whole book — both ISBNs, the series, the book DOI.
+    expect(text).toContain('**ISBN:** 9780309605397, 0309605393');
+    expect(text).toContain(
+      '**Collection:** The National Academies Collection: Reports funded by National Institutes of Health',
+    );
+    expect(text).toContain('**Book DOI:** 10.17226/29416');
+
+    // A book record never renders a journal line.
+    const journalLines = text.split('\n').filter((line) => line.startsWith('**Journal:**'));
+    expect(journalLines).toHaveLength(1);
+  });
+
+  it('renders a whole-book title once — as the heading, not again as the book line', async () => {
+    stageSet(ADA_WHOLE_BOOK_XML);
+
+    const { result } = await run(['42715368']);
+    const text = render(result);
+    const title =
+      'A Practical Guide to Hypoglycemia: New Approaches to Overcoming a Persistent Barrier to Optimal Glycemic Management';
+
+    expect(result.articles[0]?.title).toBe(title);
+    expect(result.articles[0]?.book?.title).toBe(title);
+    expect(text.split(title)).toHaveLength(2);
+    expect(text).not.toContain('**Book:**');
+  });
+
+  it('reports a chapter that credits neither authors nor editors without inventing either', async () => {
+    stageSet(LACTMED_CHAPTER_XML);
+
+    const { result } = await run(['29999637']);
+    const text = render(result);
+
+    expect(result.articles[0]?.authors).toEqual([]);
+    expect(result.articles[0]?.book?.editors).toBeUndefined();
+    expect(text).not.toContain('**Editors');
+    expect(text).not.toContain('**Authors');
+    // No closed range, so the single publication year stands alone.
+    expect(text).toContain('**Published:** 2006');
+    expect(text).not.toContain('2006–');
+  });
+
+  it('parses a single-book response that arrives as a scalar rather than an array', async () => {
+    const set = parseArticleSetXml(articleSetXml(STATPEARLS_CHAPTER_XML));
+    const single = Array.isArray(set.PubmedBookArticle)
+      ? set.PubmedBookArticle[0]
+      : set.PubmedBookArticle;
+    mockEFetch.mockResolvedValue({ PubmedArticleSet: { PubmedBookArticle: single } });
+
+    const { result } = await run(['29262038']);
+
+    expect(result.totalReturned).toBe(1);
+    expect(result.articles[0]?.recordType).toBe('book-chapter');
+    expect(result.articles[0]?.book?.title).toBe('StatPearls');
+  });
+
+  it('defers a book record whole under the response budget and lists it for re-request', async () => {
+    stageSet(STATPEARLS_CHAPTER_XML, NAP_WHOLE_BOOK_XML);
+
+    const baseline = (await run(['29262038', '42691195'])).result;
+    const firstSize = JSON.stringify(baseline.articles[0]).length;
+
+    const { result, ctx } = await run(['29262038', '42691195'], {
+      maxResponseCharacters: firstSize,
+    });
+
+    expect(result.totalReturned).toBe(1);
+    expect(result.articles[0]?.pmid).toBe('29262038');
+    expect(result.deferred?.ids).toEqual(['42691195']);
+    expect(result.deferred?.deferredCount).toBe(1);
+    expect(result.unavailablePmids).toBeUndefined();
+    expect(getEnrichment(ctx).truncated).toBe(true);
+    expect(render(result)).toContain('Re-call `pubmed_fetch_articles` with these PMIDs: 42691195');
+  });
+
+  it('states only that PubMed returned no record when a batch resolves nothing', async () => {
+    stageSet();
+
+    const { result, ctx } = await run(['99999999']);
+
+    expect(result.articles).toEqual([]);
+    expect(result.unavailablePmids).toEqual(['99999999']);
+    const notice = getEnrichment(ctx).notice ?? '';
+    expect(notice).toContain('pubmed_search_articles');
+    expect(notice).not.toMatch(/invalid, unpublished, or withdrawn/i);
   });
 });

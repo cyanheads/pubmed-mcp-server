@@ -13,6 +13,11 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { ParsedBriefSummary } from '@/services/ncbi/types.js';
 
 import { textBlocks } from '../../../_helpers.js';
+import {
+  articleSetXml,
+  GENEREVIEWS_CHAPTER_XML,
+  parseArticleSetXml,
+} from '../../../services/ncbi/parsing/_book-fixtures.js';
 
 // ─── Mocks ────────────────────────────────────────────────────────────────────
 
@@ -277,6 +282,23 @@ describe('fetch-fulltext input validation', () => {
     const result = fetchFulltextTool.input.safeParse({ dois: ['10'] });
     expect(result.success).toBe(false);
   });
+
+  it('rejects a DOI carrying a comma, which the ID Converter would split (#120)', () => {
+    const result = fetchFulltextTool.input.safeParse({ dois: ['10.1002/a,b'] });
+    expect(result.success).toBe(false);
+  });
+
+  it('rejects a DOI carrying whitespace', () => {
+    const result = fetchFulltextTool.input.safeParse({ dois: ['10.1093/nar /gks1195'] });
+    expect(result.success).toBe(false);
+  });
+
+  it('accepts a DOI whose suffix uses the full legal punctuation set (#120)', () => {
+    const result = fetchFulltextTool.input.safeParse({
+      dois: ['10.1002/(SICI)1097-0258(19980815/30)17:15/16<1661::AID-SIM968>3.0.CO;2-2'],
+    });
+    expect(result.success).toBe(true);
+  });
 });
 
 // ─── lookup-mesh: input validation ───────────────────────────────────────────
@@ -351,6 +373,9 @@ describe('no secret leaks in tool outputs', () => {
   });
 
   it('fetch-articles output does not contain the NCBI API key', async () => {
+    // A mixed set: an EFetch batch can return a journal article and an NCBI
+    // Bookshelf record side by side, and the book branch renders a different
+    // set of fields, so both belong in the leak surface. (#114)
     mockEFetch.mockResolvedValue({
       PubmedArticleSet: {
         PubmedArticle: [
@@ -364,13 +389,17 @@ describe('no secret leaks in tool outputs', () => {
             },
           },
         ],
+        PubmedBookArticle: parseArticleSetXml(articleSetXml(GENEREVIEWS_CHAPTER_XML))
+          .PubmedBookArticle,
       },
     });
     const ctx = createMockContext({ errors: fetchArticlesTool.errors });
-    const input = fetchArticlesTool.input.parse({ pmids: ['12345'] });
+    const input = fetchArticlesTool.input.parse({ pmids: ['12345', '20301425'] });
     const result = await fetchArticlesTool.handler(input, ctx);
-    const serialized = JSON.stringify(result);
-    expect(serialized).not.toContain(SECRET_KEY);
+
+    expect(result.articles.map((a) => a.recordType)).toEqual(['journal-article', 'book-chapter']);
+    expect(JSON.stringify(result)).not.toContain(SECRET_KEY);
+    expect(textBlocks(fetchArticlesTool.format!(result))[0]?.text).not.toContain(SECRET_KEY);
   });
 
   it('find-related all-providers-failed error does not contain the NCBI API key', async () => {
@@ -471,6 +500,7 @@ describe('format() output sanitization', () => {
       fetchArticlesTool.format!({
         articles: [
           {
+            recordType: 'journal-article' as const,
             pmid: '12345',
             title: 'Test Article',
             pubmedUrl: 'https://pubmed.ncbi.nlm.nih.gov/12345/',
@@ -559,6 +589,7 @@ describe('format() output sanitization', () => {
       fetchArticlesTool.format!({
         articles: [
           {
+            recordType: 'journal-article' as const,
             pmid: '12345',
             title: '# Injected\n[Click me](https://evil.test) <img src=x>',
             pubmedUrl: 'https://pubmed.ncbi.nlm.nih.gov/12345/',
@@ -709,6 +740,19 @@ describe('empty result edge cases', () => {
   it('fetch-articles handles PubmedArticleSet with empty array', async () => {
     mockEFetch.mockResolvedValue({
       PubmedArticleSet: { PubmedArticle: [] },
+    });
+    const ctx = createMockContext({ errors: fetchArticlesTool.errors });
+    const result = await fetchArticlesTool.handler(
+      fetchArticlesTool.input.parse({ pmids: ['99999'] }),
+      ctx,
+    );
+    expect(result.articles).toEqual([]);
+    expect(result.unavailablePmids).toEqual(['99999']);
+  });
+
+  it('fetch-articles handles a set whose book member is an empty array (#114)', async () => {
+    mockEFetch.mockResolvedValue({
+      PubmedArticleSet: { PubmedArticle: [], PubmedBookArticle: [] },
     });
     const ctx = createMockContext({ errors: fetchArticlesTool.errors });
     const result = await fetchArticlesTool.handler(

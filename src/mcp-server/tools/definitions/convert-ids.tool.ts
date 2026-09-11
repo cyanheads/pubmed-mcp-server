@@ -5,9 +5,10 @@
  */
 
 import { tool, z } from '@cyanheads/mcp-ts-core';
-import { NCBI_SERVICE_ERRORS } from '@/services/error-contracts.js';
+import { NCBI_ID_INPUT_ERRORS, NCBI_SERVICE_ERRORS } from '@/services/error-contracts.js';
 import { getNcbiService } from '@/services/ncbi/ncbi-service.js';
 import { conceptMeta, EDAM_ACCESSION, EDAM_ID_MAPPING } from './_concepts.js';
+import { doiStringSchema, pmcidStringSchema, pmidStringSchema } from './_schemas.js';
 
 /**
  * NCBI's PMC ID Converter returns this exact wording for any non-PMC ID — even
@@ -18,6 +19,24 @@ const PMC_NOT_FOUND_RE = /^identifier not found in pmc$/i;
 const PMC_NOT_FOUND_REWRITE =
   'Not in PMC ID Converter. Article may still exist in PubMed — try pubmed_fetch_articles (PMID → DOI) or pubmed_search_articles.';
 
+/**
+ * Per-`idType` element format, checked in the handler rather than the schema:
+ * a Zod `.regex()` on `ids` cannot branch on the sibling `idType` field.
+ *
+ * Every one of these rejects an element carrying a comma, which is what closes
+ * #120 — the converter reads a comma as its list delimiter, so a packed element
+ * comes back as several records and breaks the one-record-per-submitted-ID
+ * contract the counts are computed from.
+ */
+const ID_ELEMENT_SCHEMAS = {
+  doi: doiStringSchema,
+  pmcid: pmcidStringSchema,
+  pmid: pmidStringSchema,
+} as const;
+
+/** Cap the offending value echoed back so an oversized element can't bloat the error. */
+const MAX_ECHOED_ID_LENGTH = 120;
+
 export const convertIdsTool = tool('pubmed_convert_ids', {
   description: `Convert between article identifiers (DOI, PMID, PMCID). Accepts up to 50 IDs of a single type per request. Only resolves articles indexed in PubMed Central — for articles not in PMC, use pubmed_search_articles instead.`,
   annotations: { readOnlyHint: true, openWorldHint: true },
@@ -25,7 +44,7 @@ export const convertIdsTool = tool('pubmed_convert_ids', {
   sourceUrl:
     'https://github.com/cyanheads/pubmed-mcp-server/blob/main/src/mcp-server/tools/definitions/convert-ids.tool.ts',
 
-  errors: [...NCBI_SERVICE_ERRORS] as const,
+  errors: [...NCBI_SERVICE_ERRORS, ...NCBI_ID_INPUT_ERRORS] as const,
 
   input: z.object({
     ids: z
@@ -33,7 +52,7 @@ export const convertIdsTool = tool('pubmed_convert_ids', {
       .min(1)
       .max(50)
       .describe(
-        'Article identifiers to convert. All IDs must be the same type. DOIs: "10.1093/nar/gks1195", PMIDs: "23193287", PMCIDs: "PMC3531190" (the "PMC" prefix is optional — bare digits like "3531190" are also accepted).',
+        'Article identifiers to convert — one identifier per element, all of the same type. Each element is checked against `idType` before the request: `doi` starts with "10." and carries a "/" ("10.1093/nar/gks1195"); `pmid` is digits ("23193287"); `pmcid` is digits with an optional "PMC" prefix ("PMC3531190" or "3531190"). No element may contain a comma or whitespace — a packed value like "23193287,37952131" is rejected, so split it across elements.',
       ),
     idType: z
       .enum(['pmcid', 'pmid', 'doi'])
@@ -78,6 +97,18 @@ export const convertIdsTool = tool('pubmed_convert_ids', {
       count: input.ids.length,
       idType: input.idType,
     });
+
+    const elementSchema = ID_ELEMENT_SCHEMAS[input.idType];
+    for (const id of input.ids) {
+      const parsed = elementSchema.safeParse(id);
+      if (parsed.success) continue;
+      const shown = id.length > MAX_ECHOED_ID_LENGTH ? `${id.slice(0, MAX_ECHOED_ID_LENGTH)}…` : id;
+      throw ctx.fail(
+        'malformed_id',
+        `Invalid ${input.idType} element "${shown}". ${parsed.error.issues[0]?.message}`,
+        { ...ctx.recoveryFor('malformed_id') },
+      );
+    }
 
     const raw = await getNcbiService().idConvert(input.ids, input.idType, { signal: ctx.signal });
 

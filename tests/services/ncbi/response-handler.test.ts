@@ -482,6 +482,20 @@ describe('NcbiResponseHandler', () => {
       expect(flattenInlineMarkup('x<sub>foo</sub>')).toBe('x_foo');
     });
 
+    it('leaves an unmappable payload in the encoding it arrived in', () => {
+      // The fallback must not emit decoded text: this pass runs before the XML
+      // parser, so a decoded `&` would break the document.
+      expect(flattenInlineMarkup('AT<sup>&amp;T</sup>')).toBe('AT^&amp;T');
+    });
+
+    it('flattens an already-raised mark to itself, entity-encoded or not (#114)', () => {
+      // `<sup>` around ® is presentation, not content — and it reaches this pass
+      // as the entity, so a per-character lookup over `&#xae;` can only miss.
+      expect(flattenInlineMarkup('GeneReviews<sup>&#xae;</sup>')).toBe('GeneReviews®');
+      expect(flattenInlineMarkup('GeneReviews<sup>®</sup>')).toBe('GeneReviews®');
+      expect(flattenInlineMarkup('StatPearls<sup>&#x2122;</sup>')).toBe('StatPearls™');
+    });
+
     it('strips emphasis tags but keeps content', () => {
       expect(flattenInlineMarkup('<i>in vivo</i>')).toBe('in vivo');
       expect(flattenInlineMarkup('<b>bold</b>')).toBe('bold');
@@ -514,6 +528,41 @@ describe('NcbiResponseHandler', () => {
       // the JATS parser, but the input must reach it unmodified.
       const serialized = JSON.stringify(result);
       expect(serialized).toContain('"sup"');
+    });
+  });
+
+  describe('Bookshelf records (#114)', () => {
+    const bookSet = (body: string) =>
+      createHandler().parseAndHandleResponse<Record<string, Record<string, unknown>>>(
+        `<?xml version="1.0"?><PubmedArticleSet>${body}</PubmedArticleSet>`,
+        'efetch',
+        { retmode: 'xml' },
+      ).PubmedArticleSet as Record<string, unknown>;
+
+    it('parses a single PubmedBookArticle as an array', () => {
+      const set = bookSet(
+        '<PubmedBookArticle><BookDocument><PMID>20301425</PMID><Book><BookTitle>GeneReviews</BookTitle></Book></BookDocument></PubmedBookArticle>',
+      );
+      expect(Array.isArray(set.PubmedBookArticle)).toBe(true);
+      expect(set.PubmedBookArticle).toHaveLength(1);
+    });
+
+    it('keeps a leading-zero ISBN intact instead of coercing it to a number', () => {
+      const set = bookSet(
+        '<PubmedBookArticle><BookDocument><PMID>42691195</PMID><Book><Isbn>0309605393</Isbn></Book></BookDocument></PubmedBookArticle>',
+      );
+      const books = set.PubmedBookArticle as { BookDocument: { Book: { Isbn: unknown } } }[];
+      expect(books[0]?.BookDocument.Book.Isbn).toEqual(['0309605393']);
+    });
+
+    it('still coerces every other numeric tag value', () => {
+      const set = bookSet(
+        '<PubmedBookArticle><BookDocument><PMID>1</PMID><Book><PubDate><Year>1993</Year></PubDate></Book></BookDocument></PubmedBookArticle>',
+      );
+      const books = set.PubmedBookArticle as {
+        BookDocument: { Book: { PubDate: { Year: unknown } } };
+      }[];
+      expect(books[0]?.BookDocument.Book.PubDate.Year).toBe(1993);
     });
   });
 

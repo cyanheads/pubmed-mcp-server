@@ -17,6 +17,7 @@
  * @module tests/mcp-server/tools/definitions/tools.fuzz.test
  */
 
+import { createMockContext } from '@cyanheads/mcp-ts-core/testing';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import {
   createMockNcbiService,
@@ -62,6 +63,27 @@ function assertClean(report: Awaited<ReturnType<typeof fuzzToolStrict>>): void {
   expect(report.prototypePollution).toBe(false);
 }
 
+/**
+ * `pubmed_convert_ids` checks each `ids` element against the sibling `idType`
+ * in the handler, a pairing no arbitrary satisfies by chance — left raw, every
+ * generated id is rejected before the handler runs and the valid-input phase
+ * covers nothing but the rejection. Rewrite each element into a well-formed id
+ * of the drawn type, keeping the arbitrary's array length, `idType` choice and
+ * any extra keys it planted.
+ */
+function validConvertIds(raw: unknown): unknown {
+  if (typeof raw !== 'object' || raw === null) return raw;
+  const input = raw as { idType?: unknown; ids?: unknown };
+  if (!Array.isArray(input.ids)) return raw;
+
+  const ids = input.ids.map((_, i) => {
+    if (input.idType === 'doi') return `10.1093/nar/gks${1195 + i}`;
+    if (input.idType === 'pmcid') return `PMC${3531190 + i}`;
+    return String(23193287 + i);
+  });
+  return { ...input, ids };
+}
+
 describe('Tool fuzz coverage', () => {
   it('pubmed_spell_check survives fuzz', async () => {
     const report = await fuzzToolStrict(spellCheckTool, FUZZ_OPTIONS);
@@ -81,11 +103,24 @@ describe('Tool fuzz coverage', () => {
   it('pubmed_fetch_articles survives fuzz', async () => {
     const report = await fuzzToolStrict(fetchArticlesTool, FUZZ_OPTIONS);
     assertClean(report);
+    // The mixed EFetch set only covers the book branch while the book record
+    // actually reaches the handler — otherwise the phase fuzzes journal
+    // articles alone and reports clean for the wrong reason. (#114)
+    const ctx = createMockContext({ errors: fetchArticlesTool.errors });
+    const result = await fetchArticlesTool.handler(
+      fetchArticlesTool.input.parse({ pmids: ['20301425'] }),
+      ctx,
+    );
+    expect(result.articles.map((a) => a.recordType)).toContain('book-chapter');
   });
 
   it('pubmed_fetch_fulltext survives fuzz', async () => {
     const report = await fuzzToolStrict(fetchFulltextTool, FUZZ_OPTIONS);
     assertClean(report);
+    // The `dois` element pattern narrows what the arbitrary can produce; the
+    // phase is only worth anything while generated input still reaches the
+    // resolution chain.
+    expect(mockNcbi.idConvert).toHaveBeenCalled();
   });
 
   it('pubmed_find_related survives fuzz', async () => {
@@ -96,15 +131,33 @@ describe('Tool fuzz coverage', () => {
   it('pubmed_format_citations survives fuzz', async () => {
     const report = await fuzzToolStrict(formatCitationsTool, FUZZ_OPTIONS);
     assertClean(report);
+    // Same non-vacuity check: the book branch of every formatter is only
+    // exercised while a Bookshelf record reaches the handler. (#114)
+    const ctx = createMockContext({ errors: formatCitationsTool.errors });
+    const result = await formatCitationsTool.handler(
+      formatCitationsTool.input.parse({ pmids: ['20301425'], format: 'vancouver' }),
+      ctx,
+    );
+    expect(result.citations.map((c) => c.pmid)).toContain('20301425');
   });
 
   it('pubmed_lookup_citation survives fuzz', async () => {
     const report = await fuzzToolStrict(lookupCitationTool, FUZZ_OPTIONS);
     assertClean(report);
+    // The five bibliographic fields now advertise a `pattern` an arbitrary
+    // drawing arbitrary strings can fail. Reaching ECitMatch is what keeps the
+    // phase from degenerating into a run of schema rejections. (#125)
+    expect(mockNcbi.eCitMatch).toHaveBeenCalled();
   });
 
   it('pubmed_convert_ids survives fuzz', async () => {
-    const report = await fuzzToolStrict(convertIdsTool, FUZZ_OPTIONS);
+    const report = await fuzzToolStrict(convertIdsTool, {
+      ...FUZZ_OPTIONS,
+      mapInput: validConvertIds,
+    });
     assertClean(report);
+    // A run whose every input is rejected pre-flight says nothing about the
+    // handler. Reaching the service is what makes the phase non-vacuous.
+    expect(mockNcbi.idConvert).toHaveBeenCalled();
   });
 });

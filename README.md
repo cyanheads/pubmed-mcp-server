@@ -9,7 +9,7 @@
 
 
 
-[![Version](https://img.shields.io/badge/Version-2.10.10-blue.svg?style=flat-square)](./CHANGELOG.md) [![License](https://img.shields.io/badge/License-Apache%202.0-orange.svg?style=flat-square)](./LICENSE) [![Docker](https://img.shields.io/badge/Docker-ghcr.io-2496ED?style=flat-square&logo=docker&logoColor=white)](https://github.com/users/cyanheads/packages/container/package/pubmed-mcp-server) [![MCP SDK](https://img.shields.io/badge/MCP%20SDK-^2.0.0-green.svg?style=flat-square)](https://modelcontextprotocol.io/) [![npm](https://img.shields.io/npm/v/@cyanheads/pubmed-mcp-server?style=flat-square&logo=npm&logoColor=white)](https://www.npmjs.com/package/@cyanheads/pubmed-mcp-server) [![TypeScript](https://img.shields.io/badge/TypeScript-^7.0.2-3178C6.svg?style=flat-square)](https://www.typescriptlang.org/) [![Bun](https://img.shields.io/badge/Bun-v1.4.0-blueviolet.svg?style=flat-square)](https://bun.sh/)
+[![Version](https://img.shields.io/badge/Version-2.10.11-blue.svg?style=flat-square)](./CHANGELOG.md) [![License](https://img.shields.io/badge/License-Apache%202.0-orange.svg?style=flat-square)](./LICENSE) [![Docker](https://img.shields.io/badge/Docker-ghcr.io-2496ED?style=flat-square&logo=docker&logoColor=white)](https://github.com/users/cyanheads/packages/container/package/pubmed-mcp-server) [![MCP SDK](https://img.shields.io/badge/MCP%20SDK-^2.0.0-green.svg?style=flat-square)](https://modelcontextprotocol.io/) [![npm](https://img.shields.io/npm/v/@cyanheads/pubmed-mcp-server?style=flat-square&logo=npm&logoColor=white)](https://www.npmjs.com/package/@cyanheads/pubmed-mcp-server) [![TypeScript](https://img.shields.io/badge/TypeScript-^7.0.2-3178C6.svg?style=flat-square)](https://www.typescriptlang.org/) [![Bun](https://img.shields.io/badge/Bun-v1.4.0-blueviolet.svg?style=flat-square)](https://bun.sh/)
 
 </div>
 
@@ -59,6 +59,7 @@ Search PubMed with full NCBI query syntax and filters.
 - Sort by relevance, publication date, author, or journal
 - Pagination via offset for paging through large result sets
 - Optional brief summaries for top N results via ESummary
+- NCBI Bookshelf results carry their own venue — `bookTitle`, `publisherName`, and `docType` (`chapter`, `book`, or `citation`) — because PubMed leaves `source` empty on them; the book's editors are reported in `editors`, apart from the chapter's own authors
 - Returns the original query plus the fully applied PubMed query and normalized filter metadata
 
 ---
@@ -72,6 +73,8 @@ Fetch full article metadata by PubMed IDs.
 - Direct links to PubMed and PubMed Central (when available)
 - Optional MeSH terms, grant information, and publication types
 - Handles PubMed's inconsistent XML (structured abstracts, missing fields, varying date formats)
+- NCBI Bookshelf chapters and whole books are returned as first-class records, not reported unavailable: `recordType` (`journal-article`, `book-chapter`, `book`) tells them apart, and a `book` object carries the book title, publisher, place, dates, medium, edition, series, ISBNs, book DOI, editors, and Bookshelf accession. `journalInfo` is absent on those records — a book title is never reported as a journal
+- Journals that assign article numbers instead of page ranges often carry no pagination at all; the number is reported as `journalInfo.elocationId` with its `journalInfo.elocationIdType` (`pii`), never merged into `journalInfo.pages` and never confused with the DOI
 - Opt-in whole-response ceiling: `maxResponseCharacters` keeps complete article records in response order until the next one would cross it, then defers the rest whole and lists their PMIDs in `deferred.ids`. Re-call with those PMIDs to resume exactly where the response stopped — no article is split, skipped, or duplicated. Each article is measured as the JSON record it is returned as, so a ceiling under the first article returns zero articles, the full deferred list, and the size to clear
 
 ---
@@ -80,7 +83,7 @@ Fetch full article metadata by PubMed IDs.
 
 Fetch full-text articles via a three-stage chain: NCBI PMC EFetch → Europe PMC `fullTextXML` → Unpaywall.
 
-- Accepts exactly one of `pmcids` (direct PMC IDs), `pmids` (PubMed IDs, auto-resolved), or `dois` (auto-resolved to PMC via the ID Converter; preprints and EPMC-only OA fall through to Europe PMC / Unpaywall)
+- Accepts exactly one of `pmcids` (direct PMC IDs), `pmids` (PubMed IDs, auto-resolved), or `dois` (auto-resolved to PMC via the ID Converter; preprints and EPMC-only OA fall through to Europe PMC / Unpaywall). One identifier per element in every branch — a DOI carrying a comma or whitespace is rejected at the schema
 - NCBI PMC and Europe PMC both return structured JATS; output records origin via `viaSource: "pmc" | "europepmc" | "unpaywall"`
 - Europe PMC layer (enabled by default; disable with `EUROPEPMC_ENABLED=false`) recovers PMC-counterpart records that NCBI PMC EFetch missed, and resolves DOI input to PMC counterparts when one exists. EPMC's `fullTextXML` is PMC-keyed, so preprints (PPR), patents (PAT), and Agricola (AGR) are reachable via `pubmed_europepmc_search` for metadata but have no full text via this chain.
 - Unpaywall layer (enabled by setting `UNPAYWALL_EMAIL`) resolves DOIs to legal OA copies; extracts HTML landing pages to Markdown via Defuddle or PDFs to text via unpdf
@@ -127,6 +130,8 @@ Fetch complete Europe PMC records by `source` + `epmcId`, the detail counterpart
 Generate formatted citations for articles.
 
 - Five citation styles: APA 7th, MLA 9th, BibTeX, RIS, Vancouver (ICMJE/NLM)
+- NCBI Bookshelf chapters and whole books cite in their own form in every style — Vancouver's `In: … editors` contribution pattern, APA's chapter-in-edited-book, MLA's `edited by`, BibTeX `@incollection` / `@book`, RIS `CHAP` / `BOOK` — carrying the book title, editors, publisher, place, ISBNs and Bookshelf URL
+- An article with no page range cites by its electronic article locator in each style's own convention — Vancouver's trailing `pii:` note, APA's `Article <n>`, MLA's `art. <n>`, biblatex `eid`, RIS `C7` — rather than dropping it or writing it into a page field
 - Request multiple styles per article in a single call
 - Hand-rolled formatters — zero external dependencies, fully Workers-compatible
 - Up to 50 articles per request
@@ -139,7 +144,7 @@ Generate formatted citations for articles.
 Find articles related to a source article via ELink.
 
 - Three relationship types: `similar` (content similarity), `cited_by`, `references`
-- Results enriched with title, authors, publication date, and source via ESummary
+- Results enriched with title, authors, publication date, and source via ESummary — or, for an NCBI Bookshelf record, its book title, publisher, and doc type in place of the empty source
 - Results returned in NCBI's relevance order
 - Falls back to Europe PMC, then OpenAlex, when NCBI cannot answer; the response names which provider served it. A request no provider can answer fails with a typed `all_providers_failed` error instead of an empty result
 
@@ -170,6 +175,7 @@ Resolve partial bibliographic references to PubMed IDs via NCBI ECitMatch.
 
 - Match citations by journal, year, volume, first page, and/or author name
 - More fields = better match accuracy; at least one field required
+- Bibliographic fields cannot contain a pipe (`|`) or a line break — ECitMatch's wire format is pipe-delimited, so those characters are rejected at the schema; the free-form `key` label is exempt
 - Batch up to 25 citations per request
 - Deterministic matching — more reliable than free-text search for known references
 - Returns explicit `matched`, `not_found`, and `ambiguous` statuses with recovery detail
@@ -182,6 +188,7 @@ Convert between article identifiers (DOI, PMID, PMCID) using the PMC ID Converte
 
 - Batch up to 50 IDs per request
 - Accepts DOIs, PMIDs, or PMCIDs (all IDs must be the same type)
+- One identifier per array element, checked against `idType` before the request — a packed value like `"23193287,37952131"` is rejected rather than expanded into extra records, since a comma is the converter's list delimiter in any encoding
 - Only resolves articles indexed in PubMed Central
 - Per-ID success/error reporting — partial batches return resolved mappings alongside structured errors for unresolvable IDs, not a batch-level failure
 

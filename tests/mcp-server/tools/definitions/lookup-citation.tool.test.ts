@@ -499,6 +499,46 @@ describe('lookupCitationTool', () => {
       const text = textBlocks(lookupCitationTool.format!(result))[0]?.text ?? '';
       expect(text).toContain('39060015');
       expect(text).toContain('38407394');
+      // Both citations carry key "2", so the heading needs the submission index
+      // to tell the two rendered blocks apart. (#128)
+      expect(text).toContain('### 1 · 2');
+      expect(text).toContain('### 2 · 2');
+    });
+
+    it('renders distinct headings when a third key already ends in " (1)" (#128)', async () => {
+      mockECitMatch.mockResolvedValue([
+        { key: 'dup', matched: true, pmid: '39060015', status: 'matched' },
+        { key: 'dup', matched: true, pmid: '38407394', status: 'matched' },
+        { key: 'dup (1)', matched: true, pmid: '31189511', status: 'matched' },
+      ]);
+      mockExtractBriefSummaries.mockResolvedValue([
+        { pmid: '39060015', authors: 'Gauvreau GM', authorNames: ['Gauvreau GM'] },
+        { pmid: '38407394', authors: 'Wood RA', authorNames: ['Wood RA'] },
+        { pmid: '31189511', authors: 'Gerstein HC', authorNames: ['Gerstein HC'] },
+      ]);
+
+      const ctx = createMockContext({ errors: lookupCitationTool.errors });
+      const result = await lookupCitationTool.handler(
+        lookupCitationTool.input.parse({
+          citations: [
+            { journal: 'Eur Respir J', year: '2024', authorName: 'Gauvreau GM', key: 'dup' },
+            { journal: 'N Engl J Med', year: '2024', authorName: 'Wood RA', key: 'dup' },
+            { journal: 'Lancet', year: '2019', authorName: 'Gerstein HC', key: 'dup (1)' },
+          ],
+        }),
+        ctx,
+      );
+
+      // structuredContent keeps the caller's labels exactly as submitted.
+      expect(result.results.map((r) => r.key)).toEqual(['dup', 'dup', 'dup (1)']);
+      expect(result.results.map((r) => r.pmid)).toEqual(['39060015', '38407394', '31189511']);
+
+      const text = textBlocks(lookupCitationTool.format!(result))[0]?.text ?? '';
+      const headings = text.split('\n').filter((line) => line.startsWith('### '));
+      // A " (<n>)" suffix would render the first result as "dup (1)" — the third
+      // citation's own key — so the index leads instead.
+      expect(headings).toEqual(['### 1 · dup', '### 2 · dup', '### 3 · dup (1)']);
+      expect(new Set(headings).size).toBe(3);
     });
 
     it('attributes an author_mismatch warning to the citation that queried it', async () => {
@@ -560,6 +600,98 @@ describe('lookupCitationTool', () => {
       expect(result.results[1]?.warnings?.map((w) => w.code)).toEqual(['year_mismatch']);
       expect(result.results[1]?.warnings?.[0]?.message).toContain('"2020"');
       expect(result.totalWarnings).toBe(1);
+    });
+  });
+
+  describe('bdata-hazardous characters in interpolated fields (issue #125)', () => {
+    /**
+     * `journal`, `year`, `volume`, `firstPage`, and `authorName` are all
+     * interpolated into ECitMatch's pipe-delimited `bdata` line, and the
+     * citations of one request are joined with `\r`. A `|`, `\r`, or `\n` in any
+     * of them shifts the field layout, so each is rejected at the schema and the
+     * request never leaves the process.
+     */
+    it.each([
+      ['journal', { journal: 'N Engl|J Med', year: '2024' }],
+      ['authorName', { journal: 'N Engl J Med', year: '2024', authorName: 'Wood|RA' }],
+      ['volume', { journal: 'N Engl J Med', year: '2024', volume: '39|0' }],
+      ['year', { journal: 'N Engl J Med', year: '20|24' }],
+      ['firstPage', { journal: 'N Engl J Med', year: '2024', firstPage: '88|9' }],
+    ])('rejects a pipe in %s', async (field, citation) => {
+      const parsed = lookupCitationTool.input.safeParse({ citations: [citation] });
+
+      expect(parsed.success).toBe(false);
+      expect(parsed.error?.issues[0]?.path).toEqual(['citations', 0, field]);
+      expect(parsed.error?.issues[0]?.message).toMatch(/pipe/i);
+      expect(mockECitMatch).not.toHaveBeenCalled();
+    });
+
+    it.each([
+      ['carriage return', '\r'],
+      ['newline', '\n'],
+    ])('rejects a %s in authorName', async (_label, char) => {
+      const parsed = lookupCitationTool.input.safeParse({
+        citations: [{ journal: 'N Engl J Med', year: '2024', authorName: `Wood${char}RA` }],
+      });
+
+      expect(parsed.success).toBe(false);
+      expect(parsed.error?.issues[0]?.path).toEqual(['citations', 0, 'authorName']);
+      expect(parsed.error?.issues[0]?.message).toMatch(/line break/i);
+      expect(mockECitMatch).not.toHaveBeenCalled();
+    });
+
+    it.each([
+      ['carriage return', '\r'],
+      ['newline', '\n'],
+    ])('rejects a %s in journal', async (_label, char) => {
+      const parsed = lookupCitationTool.input.safeParse({
+        citations: [{ journal: `N Engl${char}J Med`, year: '2024' }],
+      });
+
+      expect(parsed.success).toBe(false);
+      expect(parsed.error?.issues[0]?.path).toEqual(['citations', 0, 'journal']);
+      expect(mockECitMatch).not.toHaveBeenCalled();
+    });
+
+    it('still accepts a pipe in the caller-supplied key', async () => {
+      mockECitMatch.mockResolvedValue([
+        { key: 'a|b', matched: true, pmid: '38407394', status: 'matched' },
+      ]);
+      mockExtractBriefSummaries.mockResolvedValue([
+        {
+          pmid: '38407394',
+          authors: 'Wood RA, Togias A',
+          authorNames: ['Wood RA', 'Togias A'],
+          pubDate: '2024 Mar 07',
+        },
+      ]);
+
+      const ctx = createMockContext({ errors: lookupCitationTool.errors });
+      const result = await lookupCitationTool.handler(
+        lookupCitationTool.input.parse({
+          citations: [
+            {
+              journal: 'N Engl J Med',
+              year: '2024',
+              volume: '390',
+              firstPage: '889',
+              authorName: 'Wood RA',
+              key: 'a|b',
+            },
+          ],
+        }),
+        ctx,
+      );
+
+      expect(result.results[0]).toMatchObject({
+        key: 'a|b',
+        matched: true,
+        pmid: '38407394',
+        status: 'matched',
+      });
+
+      const text = textBlocks(lookupCitationTool.format!(result))[0]?.text ?? '';
+      expect(text).toContain('### 1 · a|b');
     });
   });
 
@@ -670,7 +802,8 @@ describe('lookupCitationTool', () => {
     );
 
     expect(blocks[0]?.text).toContain('**Matched:** 1/1');
-    expect(blocks[0]?.text).toContain('### ref-1');
+    // The 1-based submission index leads every heading, collision or not. (#128)
+    expect(blocks[0]?.text).toContain('### 1 · ref-1');
     expect(blocks[0]?.text).toContain('**PMID:** 8400044');
     expect(blocks[0]?.text).toContain(
       'PMID is ready for downstream PubMed fetch or citation tools.',
@@ -791,5 +924,57 @@ describe('lookupCitationTool', () => {
     );
 
     expect(blocks[0]?.text).toContain('author_mismatch + year_mismatch detected');
+  });
+});
+
+describe('lookupCitationTool against a Bookshelf chapter (issue #114)', () => {
+  beforeEach(() => {
+    mockECitMatch.mockClear();
+    mockESummary.mockClear();
+    mockExtractBriefSummaries.mockClear();
+    mockESummary.mockResolvedValue({});
+    mockECitMatch.mockResolvedValue([
+      { key: 'gene-reviews', matched: true, pmid: '20301425', status: 'matched' },
+    ]);
+    // ESummary lists the book's editors ahead of the chapter's authors; the
+    // parser keeps them apart, so `authorNames` is the chapter roster alone.
+    mockExtractBriefSummaries.mockResolvedValue([
+      {
+        pmid: '20301425',
+        authors: 'Petrucelli N, Daly MB, Pal T',
+        authorNames: ['Petrucelli N', 'Daly MB', 'Pal T'],
+        editors: ['Adam MP', 'Bick S', 'Mirzaa GM', 'Wallace SE', 'Amemiya A'],
+        bookTitle: 'GeneReviews(®)',
+        docType: 'chapter',
+      },
+    ]);
+  });
+
+  const lookup = async (authorName: string) => {
+    const ctx = createMockContext({ errors: lookupCitationTool.errors });
+    const input = lookupCitationTool.input.parse({
+      citations: [{ journal: 'GeneReviews', year: '1993', authorName, key: 'gene-reviews' }],
+    });
+    return lookupCitationTool.handler(input, ctx);
+  };
+
+  it('does not warn when the queried author wrote the chapter', async () => {
+    const result = await lookup('petrucelli n');
+
+    expect(result.results[0]?.pmid).toBe('20301425');
+    expect(result.results[0]?.matchedFirstAuthor).toBe('Petrucelli N');
+    expect(result.results[0]?.warnings).toBeUndefined();
+    expect(result.totalWarnings).toBe(0);
+  });
+
+  it('warns when the queried name is only a book editor, without calling editors authors', async () => {
+    const result = await lookup('adam mp');
+
+    const warning = result.results[0]?.warnings?.[0];
+    expect(warning?.code).toBe('author_mismatch');
+    // The roster it reports is the chapter's, and the editors it excluded are
+    // never described as the article's authors.
+    expect(warning?.message).toContain('3-author roster (Petrucelli N, Daly MB, Pal T)');
+    expect(warning?.message).not.toContain('Adam MP');
   });
 });

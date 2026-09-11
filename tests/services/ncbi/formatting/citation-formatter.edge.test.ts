@@ -21,6 +21,7 @@ import type { ParsedArticle } from '@/services/ncbi/types.js';
 // ─── Shared fixture ───────────────────────────────────────────────────────────
 
 const baseArticle: ParsedArticle = {
+  recordType: 'journal-article',
   pmid: '12345678',
   title: 'Test Article',
   authors: [{ lastName: 'Smith', firstName: 'John', initials: 'J' }],
@@ -161,6 +162,7 @@ describe('formatApa — title edge cases', () => {
 describe('formatApa — date fallback to articleDates', () => {
   it('uses articleDates year when journalInfo publicationDate is absent', () => {
     const article: ParsedArticle = {
+      recordType: 'journal-article',
       pmid: '99',
       title: 'Preprint article',
       articleDates: [{ dateType: 'Electronic', year: '2025', month: '01', day: '15' }],
@@ -170,7 +172,11 @@ describe('formatApa — date fallback to articleDates', () => {
   });
 
   it('returns "n.d." when neither journalInfo date nor articleDates year is present', () => {
-    const article: ParsedArticle = { pmid: '99', title: 'Undated' };
+    const article: ParsedArticle = {
+      recordType: 'journal-article',
+      pmid: '99',
+      title: 'Undated',
+    };
     expect(formatApa(article)).toContain('(n.d.).');
   });
 });
@@ -468,7 +474,7 @@ describe('formatMla — edge cases', () => {
 // ─── Minimal article: no optional fields ─────────────────────────────────────
 
 describe('formatters — sparse article (only pmid)', () => {
-  const sparse: ParsedArticle = { pmid: '9999' };
+  const sparse: ParsedArticle = { recordType: 'journal-article', pmid: '9999' };
 
   it('formatApa returns valid citation with n.d. and no crash', () => {
     const citation = formatApa(sparse);

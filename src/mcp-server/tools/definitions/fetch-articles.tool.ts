@@ -8,9 +8,7 @@ import { tool, z } from '@cyanheads/mcp-ts-core';
 import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
 import { NCBI_SERVICE_ERRORS } from '@/services/error-contracts.js';
 import { getNcbiService } from '@/services/ncbi/ncbi-service.js';
-import { parseFullArticle } from '@/services/ncbi/parsing/article-parser.js';
-import { ensureArray } from '@/services/ncbi/parsing/xml-helpers.js';
-import type { XmlPubmedArticle } from '@/services/ncbi/types.js';
+import { parseArticleSet } from '@/services/ncbi/parsing/article-parser.js';
 import { fitWholeItems } from './_budget.js';
 import {
   conceptMeta,
@@ -53,9 +51,137 @@ const JournalInfoSchema = z
     volume: z.string().optional().describe('Volume number'),
     issue: z.string().optional().describe('Issue number'),
     pages: z.string().optional().describe('Page range (e.g. "48-55")'),
+    elocationId: z
+      .string()
+      .optional()
+      .describe(
+        'Electronic article locator from NCBI `ELocationID` — the publisher-assigned article number (e.g. "2400512"). Journals that assign article numbers instead of pages often omit pagination entirely, leaving this the only locator. Never a substitute for `pages`, and never the DOI: a DOI-typed `ELocationID` is reported in `doi` instead. Absent when the only locator NCBI supplies is marked invalid.',
+      ),
+    elocationIdType: z
+      .string()
+      .optional()
+      .describe(
+        'Type of `elocationId`, from NCBI\'s `EIdType` attribute — "pii" in practice. Free-form: NCBI does not close the set, so treat an unfamiliar value as opaque.',
+      ),
     publicationDate: JournalPublicationDateSchema.optional(),
   })
-  .describe('Journal information');
+  .describe(
+    'Journal information. Present on `journal-article` records only — absent on `book-chapter` and `book` records, because a Bookshelf record has no journal and its book title is never reported as one; read `book` for those. (#114)',
+  );
+
+const BookEditorSchema = z
+  .object({
+    lastName: z
+      .string()
+      .optional()
+      .describe(
+        'Editor surname, from the book\'s `Book/AuthorList Type="editors"` entry. Absent on a group editor, which carries `collectiveName` instead.',
+      ),
+    firstName: z
+      .string()
+      .optional()
+      .describe(
+        'Editor given name as NCBI supplies it (`ForeName`, often "Margaret P"). Absent when NCBI carries initials only, or on a group editor.',
+      ),
+    initials: z
+      .string()
+      .optional()
+      .describe(
+        'Editor initials with no separators (e.g. "MP"). Absent when NCBI supplies none, or on a group editor.',
+      ),
+    collectiveName: z
+      .string()
+      .optional()
+      .describe(
+        'Group or committee credited as editor, when the entry names an organization rather than a person. Mutually exclusive with the name-part fields.',
+      ),
+  })
+  .describe(
+    'One editor of the containing book. Name parts only — editors are a citation credit, not a contributor record, so no affiliations or ORCID are reported for them.',
+  );
+
+const BookInfoSchema = z
+  .object({
+    title: z
+      .string()
+      .optional()
+      .describe(
+        'Title of the containing book, from `Book/BookTitle` (e.g. "GeneReviews®"). On a `book` record this is the same value as the record\'s own `title`.',
+      ),
+    publisher: z
+      .string()
+      .optional()
+      .describe('Publisher of the book, from `Book/Publisher/PublisherName`.'),
+    publisherLocation: z
+      .string()
+      .optional()
+      .describe(
+        'Place of publication, from `Book/Publisher/PublisherLocation` (e.g. "Seattle (WA)"). Absent when NCBI supplies no place.',
+      ),
+    pubDate: z
+      .string()
+      .optional()
+      .describe(
+        "Publication year from `Book/PubDate`. Year only — NCBI's month and day are not reported, since no citation style uses them for a book.",
+      ),
+    beginningDate: z
+      .string()
+      .optional()
+      .describe(
+        'First year of a continuously-updated book, from `Book/BeginningDate` (GeneReviews runs from 1993). Absent on a book published once.',
+      ),
+    endingDate: z
+      .string()
+      .optional()
+      .describe(
+        'Last year of a closed date range, from `Book/EndingDate`. Absent while a book is still being updated, which leaves the range open-ended.',
+      ),
+    medium: z
+      .string()
+      .optional()
+      .describe(
+        'Medium the book is published in, from `Book/Medium` — "Internet" wherever NCBI supplies it. Absent when NCBI supplies none; it is never defaulted.',
+      ),
+    edition: z
+      .string()
+      .optional()
+      .describe(
+        'Edition statement from `Book/Edition`. Rare on Bookshelf titles — absent unless NCBI supplies one.',
+      ),
+    collectionTitle: z
+      .string()
+      .optional()
+      .describe(
+        'Series the book belongs to, from `Book/CollectionTitle` (e.g. "ADA Clinical Compendia Series"). Absent for a book outside a series.',
+      ),
+    isbns: z
+      .array(z.string().describe('One ISBN, verbatim as NCBI reports it — leading zeros intact'))
+      .optional()
+      .describe(
+        'Every `Book/Isbn` on the record. A book commonly carries a print and an electronic ISBN, so this is a list. Absent for a Bookshelf title with no ISBN, which is most of them.',
+      ),
+    doi: z
+      .string()
+      .optional()
+      .describe(
+        'The book\'s own DOI, from `Book/ELocationID` with `EIdType="doi"`. Distinct from the record-level `doi`, which is the chapter\'s: a chapter does not inherit this one.',
+      ),
+    editors: z
+      .array(BookEditorSchema)
+      .optional()
+      .describe(
+        'Editors of the containing book, from `Book/AuthorList` marked `Type="editors"`. Kept out of `authors`, which carries the chapter\'s own writers. Absent when the book credits no editors.',
+      ),
+    accession: z
+      .string()
+      .optional()
+      .describe(
+        'NCBI Bookshelf accession from `ArticleIdList` (`bookaccession`), e.g. "NBK1247". The record is readable at `https://www.ncbi.nlm.nih.gov/books/<accession>/`.',
+      ),
+  })
+  .describe(
+    'The containing book of a `book-chapter`, or the book itself on a `book` record. Present only on those two record types, and never a stand-in for `journalInfo`.',
+  );
 
 const MeshQualifierSchema = z
   .object({
@@ -94,12 +220,28 @@ const ArticleDateSchema = z
 
 const FetchedArticleSchema = z
   .object({
+    recordType: z
+      .enum(['journal-article', 'book-chapter', 'book'])
+      .describe(
+        'Which kind of PubMed record this is, set from the XML element it arrived in: `journal-article` for an ordinary article, `book-chapter` for an NCBI Bookshelf chapter, `book` for a whole Bookshelf book. Read this to tell the three apart — `publicationTypes` cannot, because PubMed labels a Bookshelf record "Review" or "Study Guide". `journalInfo` is present only on `journal-article`; `book` only on the other two.',
+      ),
     pmid: z.string().optional().describe('PubMed ID'),
-    title: z.string().optional().describe('Article title'),
+    title: z
+      .string()
+      .optional()
+      .describe(
+        'Article title — the chapter title on a `book-chapter`, and the book title on a `book` record, where it repeats `book.title`.',
+      ),
     abstractText: z.string().optional().describe('Abstract text'),
     affiliations: z.array(z.string()).optional().describe('Deduplicated author affiliations'),
-    authors: z.array(AuthorSchema).optional().describe('Author list'),
+    authors: z
+      .array(AuthorSchema)
+      .optional()
+      .describe(
+        "Author list. On a `book-chapter` these are the chapter's own authors, never the book's editors, which are in `book.editors`. Empty on a Bookshelf record that credits neither.",
+      ),
     journalInfo: JournalInfoSchema.optional(),
+    book: BookInfoSchema.optional(),
     doi: z
       .string()
       .optional()
@@ -188,7 +330,7 @@ export const fetchArticlesTool = tool('pubmed_fetch_articles', {
       .array(z.string())
       .optional()
       .describe(
-        'PMIDs that returned no article data. Reported in full regardless of where a `maxResponseCharacters` cutoff lands — these are misses, not deferrals, and re-requesting them returns nothing.',
+        'PMIDs PubMed returned no record for. That is all this reports: PubMed omits an unknown PMID silently, with no error and no reason, so the absence says nothing about whether the PMID exists. Reported in full regardless of where a `maxResponseCharacters` cutoff lands — these are misses, not deferrals. Use `pubmed_search_articles` to find PMIDs that do resolve.',
       ),
     deferred: DeferredSchema.optional(),
   }),
@@ -227,23 +369,19 @@ export const fetchArticlesTool = tool('pubmed_fetch_articles', {
       );
     }
 
-    const rawArticles = xmlData.PubmedArticleSet?.PubmedArticle;
-    const xmlArticles = rawArticles ? (ensureArray(rawArticles) as XmlPubmedArticle[]) : [];
-    const articles = xmlArticles
-      .filter((a) => a?.MedlineCitation)
-      .map((a) => {
-        const parsed = parseFullArticle(a, {
-          includeMesh: input.includeMesh,
-          includeGrants: input.includeGrants,
-        });
-        return {
-          ...parsed,
-          pubmedUrl: `https://pubmed.ncbi.nlm.nih.gov/${parsed.pmid}/`,
-          ...(parsed.pmcId && {
-            pmcUrl: `https://www.ncbi.nlm.nih.gov/pmc/articles/${parsed.pmcId}/`,
-          }),
-        };
-      });
+    // Reads both members of the set. Taking `PubmedArticleSet.PubmedArticle`
+    // alone discards every NCBI Bookshelf record, whose PMIDs then surface as
+    // unavailable even though PubMed returned them. (#114)
+    const articles = parseArticleSet(xmlData.PubmedArticleSet, {
+      includeMesh: input.includeMesh,
+      includeGrants: input.includeGrants,
+    }).map((parsed) => ({
+      ...parsed,
+      pubmedUrl: `https://pubmed.ncbi.nlm.nih.gov/${parsed.pmid}/`,
+      ...(parsed.pmcId && {
+        pmcUrl: `https://www.ncbi.nlm.nih.gov/pmc/articles/${parsed.pmcId}/`,
+      }),
+    }));
 
     const returnedPmids = new Set(articles.map((a) => a.pmid).filter(Boolean));
     const unavailable = input.pmids.filter((id) => !returnedPmids.has(id));
@@ -280,7 +418,7 @@ export const fetchArticlesTool = tool('pubmed_fetch_articles', {
     // small ceiling is a budget outcome, not a batch of invalid PMIDs.
     if (articles.length === 0) {
       ctx.enrich.notice(
-        'No articles were returned. These PMIDs may be invalid, unpublished, or withdrawn. Try pubmed_search_articles to discover valid PMIDs.',
+        'No articles were returned: PubMed matched no record to any of these PMIDs. It omits a PMID it does not recognize silently, without an error or a reason, so nothing more than that is known here. Try pubmed_search_articles to discover PMIDs that resolve.',
       );
     }
     if (deferred) {
@@ -337,11 +475,60 @@ export const fetchArticlesTool = tool('pubmed_fetch_articles', {
         if (pubDateStr) parts.push(pubDateStr);
         if (ji.volume) parts.push(`**${ji.volume}**${ji.issue ? `(${ji.issue})` : ''}`);
         if (ji.pages) parts.push(ji.pages);
+        if (ji.elocationId) {
+          parts.push(
+            ji.elocationIdType ? `${ji.elocationIdType}: ${ji.elocationId}` : ji.elocationId,
+          );
+        }
         if (ji.issn) parts.push(`ISSN ${ji.issn}`);
         if (ji.eIssn) parts.push(`eISSN ${ji.eIssn}`);
         if (parts.length) lines.push(`\n**Journal:** ${parts.join(', ')}`);
       }
 
+      // Venue block for a Bookshelf record. `journalInfo` is never set on one,
+      // so a book would otherwise render as a bare title with no publisher,
+      // date or permalink — the fields a citation actually needs. (#114)
+      const bk = a.book;
+      if (bk) {
+        const bookLines: string[] = [];
+        // On a whole-book record the heading above already is the book title;
+        // the medium marker then stands alone rather than repeating it.
+        if (a.recordType !== 'book' && bk.title) {
+          bookLines.push(`**Book:** ${bk.medium ? `${bk.title} [${bk.medium}]` : bk.title}`);
+        } else if (bk.medium) {
+          bookLines.push(`**Medium:** ${bk.medium}`);
+        }
+        if (bk.editors?.length) {
+          bookLines.push('', `**Editors (${bk.editors.length}):**`);
+          for (const ed of bk.editors) {
+            bookLines.push(`- ${formatAuthor(ed)}`);
+          }
+        }
+        if (bk.publisher) bookLines.push(`**Publisher:** ${bk.publisher}`);
+        if (bk.publisherLocation) bookLines.push(`**Publisher Location:** ${bk.publisherLocation}`);
+        // A book published over several years carries a closed range
+        // (GeneReviews 1993–2026); otherwise the single publication year. A
+        // publication year that differs from the range's start is kept beside it.
+        const range =
+          bk.beginningDate && bk.endingDate && bk.beginningDate !== bk.endingDate
+            ? `${bk.beginningDate}–${bk.endingDate}`
+            : undefined;
+        const bookDate =
+          range && bk.pubDate && bk.pubDate !== bk.beginningDate
+            ? `${bk.pubDate} (${range})`
+            : (range ?? bk.pubDate ?? bk.beginningDate ?? bk.endingDate);
+        if (bookDate) bookLines.push(`**Published:** ${bookDate}`);
+        if (bk.edition) bookLines.push(`**Edition:** ${bk.edition}`);
+        if (bk.collectionTitle) bookLines.push(`**Collection:** ${bk.collectionTitle}`);
+        if (bk.isbns?.length) bookLines.push(`**ISBN:** ${bk.isbns.join(', ')}`);
+        if (bk.doi) bookLines.push(`**Book DOI:** ${bk.doi}`);
+        if (bk.accession) {
+          bookLines.push(`**Bookshelf:** https://www.ncbi.nlm.nih.gov/books/${bk.accession}/`);
+        }
+        if (bookLines.length > 0) lines.push('', ...bookLines);
+      }
+
+      lines.push(`**Record Type:** ${a.recordType}`);
       if (a.publicationTypes?.length) lines.push(`**Type:** ${a.publicationTypes.join(', ')}`);
       if (a.pmid) lines.push(`**PMID:** ${a.pmid}`);
       if (a.doi) lines.push(`**DOI:** ${a.doi}`);

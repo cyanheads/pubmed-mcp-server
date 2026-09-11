@@ -249,6 +249,26 @@ function parseESummaryAuthorsFromDocumentSummary(
   return parsedAuthors.filter((author) => author.name);
 }
 
+/**
+ * Split an ESummary contributor list into the record's own authors and the
+ * containing book's editors.
+ *
+ * ESummary lists a book's editors ahead of the chapter's authors, so a display
+ * string built from the first few names credits the series editors instead of
+ * the people who wrote the chapter — PMID 20301425 reads "Adam MP, Bick S,
+ * Mirzaa GM, et al." where the authors are Petrucelli, Daly and Pal. A record
+ * whose only contributors are editors keeps them: they are the best attribution
+ * it has. (#114)
+ */
+function splitContributors(contributors: XmlESummaryAuthor[]): {
+  authors: XmlESummaryAuthor[];
+  editors: XmlESummaryAuthor[];
+} {
+  const editors = contributors.filter((c) => c.authtype?.toLowerCase() === 'editor');
+  const authors = contributors.filter((c) => c.authtype?.toLowerCase() !== 'editor');
+  return { authors: authors.length > 0 ? authors : contributors, editors };
+}
+
 function parseSingleDocumentSummary(docSummary: ESummaryDocumentSummary): Omit<
   ParsedBriefSummary,
   'pubDate' | 'epubDate'
@@ -257,7 +277,9 @@ function parseSingleDocumentSummary(docSummary: ESummaryDocumentSummary): Omit<
   rawEPubDate?: string;
 } {
   const pmid = docSummary['@_uid'];
-  const authorsArray = parseESummaryAuthorsFromDocumentSummary(docSummary);
+  const { authors: authorsArray, editors } = splitContributors(
+    parseESummaryAuthorsFromDocumentSummary(docSummary),
+  );
 
   let idsArray: ESummaryArticleId[] = [];
   const articleIdsProp = docSummary.ArticleIds;
@@ -289,13 +311,22 @@ function parseSingleDocumentSummary(docSummary: ESummaryDocumentSummary): Omit<
     getText(docSummary.Source) || getText(docSummary.FullJournalName) || getText(docSummary.SO);
   const rawPubDate = getText(docSummary.PubDate);
   const rawEPubDate = getText(docSummary.EPubDate);
+  // A Bookshelf record leaves Source and FullJournalName empty and carries its
+  // venue here instead, so without these a book summary renders with none. (#114)
+  const bookTitle = getText(docSummary.BookTitle);
+  const publisherName = getText(docSummary.PublisherName);
+  const docType = getText(docSummary.DocType);
 
   return {
     pmid: String(pmid),
     ...(title && { title }),
     authors: formatESummaryAuthors(authorsArray),
     authorNames: authorsArray.map((a) => a.name),
+    ...(editors.length > 0 && { editors: editors.map((e) => e.name) }),
     ...(source && { source }),
+    ...(bookTitle && { bookTitle }),
+    ...(publisherName && { publisherName }),
+    ...(docType && { docType }),
     ...(doiValue && { doi: doiValue }),
     ...(pmcIdValue && { pmcId: pmcIdValue }),
     ...(rawPubDate && { rawPubDate }),
@@ -432,7 +463,13 @@ export async function extractBriefSummaries(
         ...(rawSummary.title !== undefined && { title: rawSummary.title }),
         ...(rawSummary.authors !== undefined && { authors: rawSummary.authors }),
         ...(rawSummary.authorNames !== undefined && { authorNames: rawSummary.authorNames }),
+        ...(rawSummary.editors !== undefined && { editors: rawSummary.editors }),
         ...(rawSummary.source !== undefined && { source: rawSummary.source }),
+        ...(rawSummary.bookTitle !== undefined && { bookTitle: rawSummary.bookTitle }),
+        ...(rawSummary.publisherName !== undefined && {
+          publisherName: rawSummary.publisherName,
+        }),
+        ...(rawSummary.docType !== undefined && { docType: rawSummary.docType }),
         ...(rawSummary.doi !== undefined && { doi: rawSummary.doi }),
         ...(rawSummary.pmcId !== undefined && { pmcId: rawSummary.pmcId }),
         ...(pubDate !== undefined && { pubDate }),

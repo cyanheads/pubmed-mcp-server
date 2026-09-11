@@ -2149,4 +2149,51 @@ describe('parsePmcArticle', () => {
     });
     expect(result.doi).toBeUndefined();
   });
+
+  it('surfaces <elocation-id> for an article-meta with no <fpage>', () => {
+    // Shape of a real PMC deposit (The Plant Genome 18(1), e20542): article
+    // number only, no page range — roughly half of PMC full-text records.
+    const article = el('article', [
+      el('front', [
+        el('journal-meta', [
+          el('journal-title-group', [el('journal-title', [t('The Plant Genome')])]),
+        ]),
+        el('article-meta', [
+          el('article-id', [t('PMC11711121')], { '@_pub-id-type': 'pmcid' }),
+          el('title-group', [el('article-title', [t('Article Number Only')])]),
+          el('volume', [t('18')]),
+          el('issue', [t('1')]),
+          el('elocation-id', [t('e20542')]),
+        ]),
+      ]),
+      el('body', [el('p', [t('Opening body.')])]),
+    ]);
+
+    const result = parsePmcArticle(article);
+    expect(result.journal).toMatchObject({
+      title: 'The Plant Genome',
+      volume: '18',
+      issue: '1',
+      elocationId: 'e20542',
+    });
+    expect(result.journal?.pages).toBeUndefined();
+  });
+
+  it('carries both when an article-meta has <fpage> and <elocation-id>', () => {
+    const article = el('article', [
+      el('front', [
+        el('journal-meta', [el('journal-title-group', [el('journal-title', [t('PLoS One')])])]),
+        el('article-meta', [
+          el('volume', [t('19')]),
+          el('fpage', [t('e0300123')]),
+          el('elocation-id', [t('e0300123')]),
+        ]),
+      ]),
+      el('body', [el('p', [t('Opening body.')])]),
+    ]);
+
+    const result = parsePmcArticle(article);
+    expect(result.journal?.pages).toBe('e0300123');
+    expect(result.journal?.elocationId).toBe('e0300123');
+  });
 });

@@ -395,8 +395,42 @@ export const findRelatedTool = tool('pubmed_find_related', {
           .object({
             pmid: z.string().describe('PubMed ID'),
             title: z.string().optional().describe('Article title'),
-            authors: z.string().optional().describe('Author string'),
-            source: z.string().optional().describe('Journal source'),
+            authors: z
+              .string()
+              .optional()
+              .describe(
+                "Author string — the first three of the record's own authors, then \"et al.\". On an NCBI Bookshelf chapter these are the chapter's authors; the book's editors are in `editors`.",
+              ),
+            source: z
+              .string()
+              .optional()
+              .describe(
+                'Journal the article appeared in. Absent on an NCBI Bookshelf record, which has no journal — its venue is in `bookTitle` and `publisherName` instead, and `docType` says which kind of record it is.',
+              ),
+            bookTitle: z
+              .string()
+              .optional()
+              .describe(
+                'Title of the book an NCBI Bookshelf record belongs to. Present instead of `source` on a book record; absent on a journal article.',
+              ),
+            publisherName: z
+              .string()
+              .optional()
+              .describe(
+                'Publisher of the book an NCBI Bookshelf record belongs to. Present only on a book record; absent on a journal article.',
+              ),
+            docType: z
+              .string()
+              .optional()
+              .describe(
+                'What PubMed classifies this record as: "chapter" or "book" for an NCBI Bookshelf record, "citation" for an ordinary journal article. Absent when PubMed supplies none.',
+              ),
+            editors: z
+              .array(z.string().describe('One editor, "Surname Initials" as ESummary renders it'))
+              .optional()
+              .describe(
+                "Editors of the containing book, kept out of `authors` so they cannot displace the record's own authors. Absent on a journal article and on a book that credits no editors.",
+              ),
             pubDate: z.string().optional().describe('Publication date'),
           })
           .describe('Related article with enriched summary'),
@@ -762,8 +796,13 @@ export const findRelatedTool = tool('pubmed_find_related', {
     // (the article metadata fields are all optional) rather than failing the whole
     // request, so the chain's resilience survives the enrichment step.
     try {
+      // Version 2.0 is what carries a Bookshelf record's venue: the version 1
+      // DocSum format has no BookTitle, PublisherName or DocType element, and
+      // names editors without the AuthType that separates them from the
+      // record's own authors. On that older format a book row reports an empty
+      // Source and no book fields at all. (#114)
       const summaryResult = await ncbi.eSummary(
-        { db: 'pubmed', id: window.join(',') },
+        { db: 'pubmed', version: '2.0', retmode: 'xml', id: window.join(',') },
         { signal: ctx.signal },
       );
       const briefSummaries = await extractBriefSummaries(summaryResult);
@@ -775,6 +814,10 @@ export const findRelatedTool = tool('pubmed_find_related', {
           title: details?.title,
           authors: details?.authors,
           source: details?.source,
+          bookTitle: details?.bookTitle,
+          publisherName: details?.publisherName,
+          docType: details?.docType,
+          editors: details?.editors,
           pubDate: details?.pubDate,
         };
       });
@@ -816,7 +859,12 @@ export const findRelatedTool = tool('pubmed_find_related', {
         lines.push(`- **[PMID ${a.pmid}](https://pubmed.ncbi.nlm.nih.gov/${a.pmid}/)**`);
         if (a.title) lines.push(`  ${escapeMarkdownInline(a.title)}`);
         if (a.authors) lines.push(`  *${escapeMarkdownInline(a.authors)}*`);
-        const meta = [a.source, a.pubDate].filter(Boolean).join(', ');
+        if (a.editors?.length)
+          lines.push(`  edited by ${escapeMarkdownInline(a.editors.join(', '))}`);
+        // A Bookshelf record has no journal: its book and publisher stand in
+        // for the source so the row still names a venue. (#114)
+        const book = [a.bookTitle, a.publisherName].filter(Boolean).join(' — ');
+        const meta = [a.source, book, a.docType, a.pubDate].filter(Boolean).join(', ');
         if (meta) lines.push(`  ${meta}`);
       }
     }

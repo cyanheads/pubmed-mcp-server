@@ -23,6 +23,22 @@ function surname(name: string): string {
   return name.trim().split(/\s+/)[0]?.toLowerCase() ?? '';
 }
 
+/**
+ * ECitMatch reads each citation as six `|`-delimited fields, and the citations
+ * of one request are joined into a single payload with `\r`. Either character
+ * inside an interpolated field shifts that layout — NCBI mis-parses the line or
+ * splits one citation into two response rows, and the citation's real match is
+ * lost. Rejected at the schema so the constraint is advertised as a JSON-Schema
+ * `pattern` and a hazardous citation never reaches NCBI, rather than silently
+ * rewriting what the caller asked for. (#125)
+ *
+ * `key` is exempt: it is a label echoed onto the result and is never put on the
+ * wire (the service submits positional tokens instead), so it stays free-form.
+ */
+const BDATA_FIELD_RE = /^[^|\r\n]*$/;
+const BDATA_FIELD_HINT = 'Cannot contain a pipe ("|") or a line break.';
+const BDATA_FIELD_ERROR = `${BDATA_FIELD_HINT} Those characters shift ECitMatch's field layout — remove them or replace them with a space.`;
+
 export const lookupCitationTool = tool('pubmed_lookup_citation', {
   description: `Look up PubMed IDs from partial bibliographic citations. Useful when you have a reference (journal, year, volume, page, author) and need the PMID — deterministic citation matching, more reliable than free-text search for structured references. Each citation must include at least journal or year (ECitMatch primary-keys on journal+volume+page; author-only or volume-only inputs guarantee no match); more fields = better match accuracy.`,
   annotations: { readOnlyHint: true, openWorldHint: true },
@@ -39,20 +55,38 @@ export const lookupCitationTool = tool('pubmed_lookup_citation', {
           .object({
             journal: z
               .string()
+              .regex(BDATA_FIELD_RE, BDATA_FIELD_ERROR)
               .optional()
-              .describe('Journal title or ISO abbreviation (e.g., "proc natl acad sci u s a")'),
-            year: z.string().optional().describe('Publication year (e.g., "1991")'),
-            volume: z.string().optional().describe('Volume number'),
-            firstPage: z.string().optional().describe('First page number'),
+              .describe(
+                `Journal title or ISO abbreviation (e.g., "proc natl acad sci u s a"). ${BDATA_FIELD_HINT}`,
+              ),
+            year: z
+              .string()
+              .regex(BDATA_FIELD_RE, BDATA_FIELD_ERROR)
+              .optional()
+              .describe(`Publication year (e.g., "1991"). ${BDATA_FIELD_HINT}`),
+            volume: z
+              .string()
+              .regex(BDATA_FIELD_RE, BDATA_FIELD_ERROR)
+              .optional()
+              .describe(`Volume number. ${BDATA_FIELD_HINT}`),
+            firstPage: z
+              .string()
+              .regex(BDATA_FIELD_RE, BDATA_FIELD_ERROR)
+              .optional()
+              .describe(`First page number. ${BDATA_FIELD_HINT}`),
             authorName: z
               .string()
+              .regex(BDATA_FIELD_RE, BDATA_FIELD_ERROR)
               .optional()
-              .describe('Author name, typically "lastname initials" (e.g., "mann bj")'),
+              .describe(
+                `Author name, typically "lastname initials" (e.g., "mann bj"). ${BDATA_FIELD_HINT}`,
+              ),
             key: z
               .string()
               .optional()
               .describe(
-                'Arbitrary label to track this citation in results. Auto-assigned if omitted.',
+                'Arbitrary label to track this citation in results. Auto-assigned if omitted. Echoed back unchanged and never sent to NCBI, so any character is accepted here.',
               ),
           })
           .describe(
@@ -264,8 +298,13 @@ export const lookupCitationTool = tool('pubmed_lookup_citation', {
     if (result.totalWarnings > 0) {
       lines.push(`**Warnings:** ${result.totalWarnings}`);
     }
-    for (const r of result.results) {
-      lines.push(`\n### ${r.key}`);
+    // The heading leads with the citation's 1-based submission index, which is
+    // unique across the batch. `key` is a caller-supplied label that may repeat,
+    // and text-only clients read this markdown instead of structuredContent — so
+    // without the index two results can render under identical headings with no
+    // way to tell which block answers which submitted citation. (#128)
+    for (const [i, r] of result.results.entries()) {
+      lines.push(`\n### ${i + 1} · ${r.key}`);
       if (r.pmid) lines.push(`**PMID:** ${r.pmid}`);
       if (r.matchedFirstAuthor) lines.push(`**First Author:** ${r.matchedFirstAuthor}`);
       if (r.candidatePmids?.length) {

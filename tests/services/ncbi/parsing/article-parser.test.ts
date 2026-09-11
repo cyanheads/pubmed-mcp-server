@@ -16,8 +16,10 @@ import {
   extractPmcId,
   extractPmid,
   extractPublicationTypes,
+  parseArticleSet,
   parseFullArticle,
 } from '@/services/ncbi/parsing/article-parser.js';
+import { ensureArray } from '@/services/ncbi/parsing/xml-helpers.js';
 import type {
   XmlArticle,
   XmlArticleIdList,
@@ -29,6 +31,16 @@ import type {
   XmlPublicationTypeList,
   XmlPubmedArticle,
 } from '@/services/ncbi/types.js';
+import {
+  ADA_WHOLE_BOOK_XML,
+  articleSetXml,
+  GENEREVIEWS_CHAPTER_XML,
+  JOURNAL_ARTICLE_XML,
+  LACTMED_CHAPTER_XML,
+  NAP_WHOLE_BOOK_XML,
+  parseArticleSetXml,
+  STATPEARLS_CHAPTER_XML,
+} from './_book-fixtures.js';
 
 describe('extractAuthors', () => {
   it('returns empty for undefined input', () => {
@@ -141,6 +153,86 @@ describe('extractJournalInfo', () => {
     expect(result?.issue).toBe('3');
     expect(result?.pages).toBe('100-110');
     expect(result?.publicationDate?.year).toBe('2024');
+  });
+
+  describe('electronic article locators (ELocationID)', () => {
+    // Shape of PMID 39060015 as NCBI EFetch returns it: no Pagination element,
+    // a pii locator and a doi locator side by side, both ValidYN="Y".
+    const eurRespirJournal = {
+      ISSN: { '#text': '1399-3003', '@_IssnType': 'Electronic' },
+      JournalIssue: {
+        Volume: { '#text': '64' },
+        Issue: { '#text': '3' },
+        PubDate: { Year: { '#text': '2024' }, Month: { '#text': 'Sep' } },
+      },
+      Title: { '#text': 'The European respiratory journal' },
+      ISOAbbreviation: { '#text': 'Eur Respir J' },
+    };
+    const eurRespirArticle = {
+      ELocationID: [
+        { '#text': '2400512', '@_EIdType': 'pii', '@_ValidYN': 'Y' },
+        { '#text': '10.1183/13993003.00512-2024', '@_EIdType': 'doi', '@_ValidYN': 'Y' },
+      ],
+    } as XmlArticle;
+
+    it('surfaces the locator and its type for a record with no Pagination', () => {
+      const result = extractJournalInfo(eurRespirJournal, eurRespirArticle);
+      expect(result?.elocationId).toBe('2400512');
+      expect(result?.elocationIdType).toBe('pii');
+      // Never backfilled from the locator — the record genuinely has no pages
+      expect(result?.pages).toBe('');
+    });
+
+    it('leaves DOI extraction untouched — the two values live side by side', () => {
+      expect(extractDoi(eurRespirArticle)).toBe('10.1183/13993003.00512-2024');
+    });
+
+    it('never surfaces a DOI-typed ELocationID as the locator', () => {
+      const result = extractJournalInfo(eurRespirJournal, {
+        ELocationID: {
+          '#text': '10.1183/13993003.00512-2024',
+          '@_EIdType': 'doi',
+          '@_ValidYN': 'Y',
+        },
+      } as XmlArticle);
+      expect(result?.elocationId).toBeUndefined();
+      expect(result?.elocationIdType).toBeUndefined();
+    });
+
+    it('surfaces nothing when the only locator is marked ValidYN="N"', () => {
+      const result = extractJournalInfo(eurRespirJournal, {
+        ELocationID: { '#text': '2400512', '@_EIdType': 'pii', '@_ValidYN': 'N' },
+      } as XmlArticle);
+      expect(result?.elocationId).toBeUndefined();
+      expect(result?.elocationIdType).toBeUndefined();
+    });
+
+    it('prefers a ValidYN="Y" locator over an invalidated one', () => {
+      const result = extractJournalInfo(eurRespirJournal, {
+        ELocationID: [
+          { '#text': 'stale-locator', '@_EIdType': 'pii', '@_ValidYN': 'N' },
+          { '#text': '2400512', '@_EIdType': 'pii', '@_ValidYN': 'Y' },
+        ],
+      } as XmlArticle);
+      expect(result?.elocationId).toBe('2400512');
+    });
+
+    it('keeps both values when pagination duplicates the locator', () => {
+      const result = extractJournalInfo(eurRespirJournal, {
+        ELocationID: { '#text': 'e0300123', '@_EIdType': 'pii', '@_ValidYN': 'Y' },
+        Pagination: { MedlinePgn: { '#text': 'e0300123' } },
+      } as XmlArticle);
+      expect(result?.pages).toBe('e0300123');
+      expect(result?.elocationId).toBe('e0300123');
+    });
+
+    it('omits both fields for a record carrying no ELocationID', () => {
+      const result = extractJournalInfo(eurRespirJournal, {
+        Pagination: { MedlinePgn: { '#text': '100-110' } },
+      } as XmlArticle);
+      expect(result?.elocationId).toBeUndefined();
+      expect(result?.elocationIdType).toBeUndefined();
+    });
   });
 });
 
@@ -499,5 +591,174 @@ describe('parseFullArticle', () => {
       expect(result.meshTerms).toBeUndefined();
       expect(result.grantList).toBeUndefined();
     });
+  });
+});
+
+describe('Bookshelf records (#114)', () => {
+  const parseSet = (...records: string[]) =>
+    parseArticleSet(parseArticleSetXml(articleSetXml(...records)));
+
+  describe('the reproduction — PMIDs 20301425 and 29262038', () => {
+    const bookOnlySet = () =>
+      parseArticleSetXml(articleSetXml(GENEREVIEWS_CHAPTER_XML, STATPEARLS_CHAPTER_XML));
+
+    it('reading PubmedArticleSet.PubmedArticle alone still yields nothing', () => {
+      // The defect, pinned: the wrapper is present and no error is raised, so
+      // both PMIDs fall through to `unavailablePmids` with nothing to explain it.
+      expect(ensureArray(bookOnlySet().PubmedArticle)).toHaveLength(0);
+    });
+
+    it('parseArticleSet returns both records', () => {
+      expect(parseArticleSet(bookOnlySet()).map((r) => r.pmid)).toEqual(['20301425', '29262038']);
+    });
+  });
+
+  it('parses a single-book response, which upstream sends as a scalar', () => {
+    const records = parseSet(GENEREVIEWS_CHAPTER_XML);
+    expect(records).toHaveLength(1);
+    expect(records[0]?.pmid).toBe('20301425');
+  });
+
+  describe('chapter with book editors (GeneReviews, PMID 20301425)', () => {
+    const record = () => parseSet(GENEREVIEWS_CHAPTER_XML)[0];
+
+    it('is a book-chapter titled by its ArticleTitle', () => {
+      expect(record()?.recordType).toBe('book-chapter');
+      expect(record()?.title).toBe(
+        'BRCA1- and BRCA2-Associated Hereditary Breast and Ovarian Cancer',
+      );
+    });
+
+    it('puts the chapter authors in authors and the book editors in book.editors', () => {
+      expect(record()?.authors?.map((a) => a.lastName)).toEqual(['Petrucelli', 'Daly', 'Pal']);
+      expect(record()?.book?.editors?.map((e) => e.lastName)).toEqual([
+        'Adam',
+        'Bick',
+        'Mirzaa',
+        'Wallace',
+        'Amemiya',
+      ]);
+    });
+
+    it('carries editors as name parts only, never affiliations', () => {
+      expect(record()?.book?.editors?.[0]).toEqual({
+        lastName: 'Adam',
+        firstName: 'Margaret P',
+        initials: 'MP',
+      });
+    });
+
+    it('renders the BookTitle registered mark without the ASCII caret fallback', () => {
+      expect(record()?.book?.title).toBe('GeneReviews®');
+    });
+
+    it('carries the imprint, the date range, the medium and the Bookshelf accession', () => {
+      expect(record()?.book).toMatchObject({
+        publisher: 'University of Washington, Seattle',
+        publisherLocation: 'Seattle (WA)',
+        pubDate: '1993',
+        beginningDate: '1993',
+        endingDate: '2026',
+        medium: 'Internet',
+        accession: 'NBK1247',
+      });
+    });
+
+    it('never synthesizes a journal from the book', () => {
+      expect(record()?.journalInfo).toBeUndefined();
+    });
+
+    it('keeps chapter-author affiliations, the abstract, keywords and dates', () => {
+      expect(record()?.affiliations).toHaveLength(3);
+      expect(record()?.abstractText).toContain('CLINICAL CHARACTERISTICS:');
+      expect(record()?.keywords).toContain('BRCA1- and BRCA2-Associated HBOC');
+      expect(record()?.publicationTypes).toEqual(['Review']);
+      expect(record()?.articleDates).toEqual([
+        { dateType: 'ContributionDate', year: '1998', month: '9', day: '4' },
+        { dateType: 'DateRevised', year: '2026', month: '3', day: '25' },
+      ]);
+    });
+  });
+
+  describe('chapter with no authors and no editors (LactMed, PMID 29999637)', () => {
+    const record = () => parseSet(LACTMED_CHAPTER_XML)[0];
+
+    it('is still a book-chapter with a venue', () => {
+      expect(record()?.recordType).toBe('book-chapter');
+      expect(record()?.title).toBe('Carboplatin');
+      expect(record()?.book?.title).toBe('Drugs and Lactation Database (LactMed®)');
+    });
+
+    it('reports no authors and no editors rather than inventing either', () => {
+      expect(record()?.authors).toEqual([]);
+      expect(record()?.book?.editors).toBeUndefined();
+      expect(record()?.affiliations).toBeUndefined();
+    });
+  });
+
+  describe('whole-book record with no ArticleTitle (ADA, PMID 42715368)', () => {
+    const record = () => parseSet(ADA_WHOLE_BOOK_XML)[0];
+
+    it('is a book whose title falls back to BookTitle', () => {
+      expect(record()?.recordType).toBe('book');
+      expect(record()?.title).toBe(
+        'A Practical Guide to Hypoglycemia: New Approaches to Overcoming a Persistent Barrier to Optimal Glycemic Management',
+      );
+      expect(record()?.title).toBe(record()?.book?.title);
+    });
+
+    it('separates the book-level DOI from the record DOI and keeps the collection', () => {
+      expect(record()?.book?.doi).toBe('10.2337/db20261');
+      expect(record()?.doi).toBe('10.2337/db20261');
+      expect(record()?.book?.collectionTitle).toBe('ADA Clinical Compendia Series');
+      expect(record()?.book?.accession).toBe('NBK624619');
+    });
+
+    it('reports no authors, no editors and no medium rather than filling them in', () => {
+      expect(record()?.authors).toEqual([]);
+      expect(record()?.book?.editors).toBeUndefined();
+      expect(record()?.book?.medium).toBeUndefined();
+    });
+  });
+
+  describe('multi-ISBN whole-book record (National Academies, PMID 42691195)', () => {
+    const record = () => parseSet(NAP_WHOLE_BOOK_XML)[0];
+
+    it('keeps every ISBN verbatim, leading zero included', () => {
+      expect(record()?.book?.isbns).toEqual(['9780309605397', '0309605393']);
+    });
+
+    it('promotes a book-level author list when the record has no chapter authors', () => {
+      expect(record()?.authors?.[0]?.collectiveName).toContain('National Academies of Sciences');
+      expect(record()?.book?.editors).toBeUndefined();
+    });
+  });
+
+  describe('mixed PubmedArticle + PubmedBookArticle set', () => {
+    it('returns every record, each tagged with its own recordType', () => {
+      const records = parseSet(LACTMED_CHAPTER_XML, GENEREVIEWS_CHAPTER_XML, JOURNAL_ARTICLE_XML);
+      expect(records.map((r) => [r.pmid, r.recordType])).toEqual([
+        ['29999637', 'book-chapter'],
+        ['20301425', 'book-chapter'],
+        ['42474064', 'journal-article'],
+      ]);
+    });
+
+    it('leaves the journal record exactly as it was, apart from the discriminator', () => {
+      const journal = parseSet(JOURNAL_ARTICLE_XML, ADA_WHOLE_BOOK_XML)[0];
+      expect(journal?.recordType).toBe('journal-article');
+      expect(journal?.book).toBeUndefined();
+      expect(journal?.journalInfo?.title).toBe(
+        'Health technology assessment (Winchester, England)',
+      );
+      expect(journal?.journalInfo?.pages).toBe('1-32');
+      expect(journal?.doi).toBe('10.3310/KGTO6391');
+      expect(journal?.pmcId).toBe('PMC13403055');
+      expect(journal?.meshTerms).toHaveLength(2);
+    });
+  });
+
+  it('returns an empty list for an undefined set', () => {
+    expect(parseArticleSet(undefined)).toEqual([]);
   });
 });

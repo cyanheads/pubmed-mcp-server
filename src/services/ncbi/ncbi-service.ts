@@ -79,15 +79,16 @@ function normalizeDiagnosticList(
  * The tracking token each citation is submitted to ECitMatch under — echoed
  * back verbatim on that citation's response row, and unique within the request.
  *
- * `ECitMatchCitation.key` is a caller-supplied label and may repeat, so
- * reconciling response rows on it collapses two citations onto one row and
- * hands the second citation's PMID to the first (#113). Distinct caller keys
- * are used as-is, so a well-formed request is submitted exactly as before; any
- * repeat switches the whole request to positional tokens.
+ * Always the citation's 1-based position, never `ECitMatchCitation.key`. That
+ * label is caller-supplied, so reconciling response rows on it collapses two
+ * citations carrying the same label onto one row and hands the second
+ * citation's PMID to the first (#113); and a `|` inside it shifts the
+ * pipe-delimited field layout of the submitted line, so NCBI's echoed row no
+ * longer reconciles and a citation it matched comes back as not_found (#125).
+ * Keeping the label off the wire entirely removes both.
  */
 function wireKeysFor(citations: ECitMatchCitation[]): string[] {
-  const keys = citations.map((c) => c.key);
-  return new Set(keys).size === keys.length ? keys : citations.map((_, i) => String(i + 1));
+  return citations.map((_, i) => String(i + 1));
 }
 
 /** Sentinel reason used when the service-level deadline expires. */
@@ -227,8 +228,9 @@ export class NcbiService {
    *
    * Results come back one per submitted citation, in submission order, carrying
    * the caller's `key`. Correlation runs on the wire key (see
-   * {@link wireKeysFor}), never on `key` itself — that label is caller-supplied
-   * and may repeat. (#113)
+   * {@link wireKeysFor}), never on `key` itself — that label is caller-supplied,
+   * so it may repeat and may carry characters that break the wire format.
+   * (#113, #125)
    */
   async eCitMatch(
     citations: ECitMatchCitation[],
@@ -292,7 +294,7 @@ export class NcbiService {
     // one row can never stand in for a second citation — then restore the
     // caller's label on the way out. Every input gets a result row, so callers
     // can rely on results.length === citations.length and on results[i]
-    // describing citations[i]. (#54, #113)
+    // describing citations[i]. (#54, #113, #125)
     const parsedByWireKey = new Map(parsed.map((r) => [r.key, r]));
     return citations.map((c, i): ECitMatchResult => {
       const row = parsedByWireKey.get(wireKeys[i] ?? '');
@@ -311,6 +313,20 @@ export class NcbiService {
     idtype?: string,
     options?: NcbiCallOptions,
   ): Promise<IdConvertRecord[]> {
+    // A comma is the ID Converter's list delimiter in every encoding, so an
+    // element carrying one is indistinguishable from two submitted IDs: the
+    // upstream answers 200 with more records than were submitted and the
+    // one-record-per-input contract breaks. Reject at the service boundary so
+    // no caller can reach the splitting behavior, whichever tool built the
+    // input. (#120)
+    const packed = ids.find((id) => id.includes(','));
+    if (packed !== undefined) {
+      throw validationError(
+        `PMC ID Converter identifier "${packed}" contains a comma, which the API reads as a list delimiter. Submit one identifier per array element.`,
+        { idType: idtype, idCount: ids.length },
+      );
+    }
+
     // The PMC ID Converter rejects an entire batch (HTTP 400) when PMC-prefixed
     // and bare-digit PMCIDs are mixed, even though it accepts each form on its
     // own. Canonicalize bare digits to "PMC"+digits so every pmcid batch is

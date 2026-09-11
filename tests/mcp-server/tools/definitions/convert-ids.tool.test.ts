@@ -3,7 +3,9 @@
  * @module tests/mcp-server/tools/definitions/convert-ids.tool.test
  */
 
-import { createMockContext } from '@cyanheads/mcp-ts-core/testing';
+import type { ContentBlock } from '@cyanheads/mcp-ts-core';
+import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
+import { createMockContext, runToolContract } from '@cyanheads/mcp-ts-core/testing';
 import { describe, expect, it, vi } from 'vitest';
 
 import { textBlocks } from '../../../_helpers.js';
@@ -233,5 +235,135 @@ describe('convertIdsTool', () => {
     );
 
     expect(blocks[0]?.text).toContain('- |');
+  });
+
+  describe('per-element identifier validation (issue #120)', () => {
+    /** Every id that is one identifier, in a form its idType accepts. */
+    const ACCEPTED: ReadonlyArray<[idType: 'pmid' | 'pmcid' | 'doi', id: string]> = [
+      ['pmid', '39060015'],
+      ['pmcid', 'PMC7096777'],
+      ['pmcid', '7096777'],
+      ['doi', '10.1093/nar/gks1195'],
+      // The DOI Handbook's own worked example — parens, slashes, colons,
+      // angle brackets and a semicolon are all legal DOI characters upstream
+      // parses as one identifier.
+      ['doi', '10.1002/(SICI)1097-0258(19980815/30)17:15/16<1661::AID-SIM968>3.0.CO;2-2'],
+    ];
+
+    /** Elements that pack several identifiers into one array slot. */
+    const PACKED: ReadonlyArray<[idType: 'pmid' | 'pmcid' | 'doi', id: string]> = [
+      ['pmid', '39060015,38407394'],
+      ['pmcid', '7096777,7096778'],
+      ['doi', '10.1002/a,b'],
+    ];
+
+    it.each(PACKED)(
+      'rejects a comma-packed %s element before any upstream call',
+      async (idType, id) => {
+        mockIdConvert.mockClear();
+        const ctx = createMockContext({ errors: convertIdsTool.errors });
+        const input = convertIdsTool.input.parse({ ids: [id], idType });
+
+        await expect(convertIdsTool.handler(input, ctx)).rejects.toMatchObject({
+          code: JsonRpcErrorCode.ValidationError,
+          data: { reason: 'malformed_id' },
+        });
+        expect(mockIdConvert).not.toHaveBeenCalled();
+      },
+    );
+
+    it('names the offending element and the one-per-element rule on both error surfaces', async () => {
+      mockIdConvert.mockClear();
+      const result = await runToolContract(convertIdsTool, {
+        ids: ['39060015,38407394'],
+        idType: 'pmid',
+      });
+
+      expect(result.isError).toBe(true);
+      expect(result.structuredContent).toMatchObject({
+        error: { code: JsonRpcErrorCode.ValidationError, data: { reason: 'malformed_id' } },
+      });
+      expect(result.structuredContent).not.toHaveProperty('records');
+
+      const text = textBlocks(result.content as ContentBlock[])
+        .map((b) => b.text)
+        .join('\n');
+      expect(text).toContain('39060015,38407394');
+      expect(text).toMatch(/Recovery:/);
+      expect(text).toMatch(/one identifier per/i);
+      expect(mockIdConvert).not.toHaveBeenCalled();
+    });
+
+    it('declares malformed_id as a non-retryable validation error', () => {
+      expect(convertIdsTool.errors?.find((e) => e.reason === 'malformed_id')).toMatchObject({
+        code: JsonRpcErrorCode.ValidationError,
+        retryable: false,
+      });
+    });
+
+    it.each(ACCEPTED)(
+      'passes a well-formed %s element through to the service',
+      async (idType, id) => {
+        mockIdConvert.mockClear();
+        mockIdConvert.mockResolvedValue([{ 'requested-id': id, pmid: '1' }]);
+
+        const ctx = createMockContext({ errors: convertIdsTool.errors });
+        const input = convertIdsTool.input.parse({ ids: [id], idType });
+        const result = await convertIdsTool.handler(input, ctx);
+
+        expect(mockIdConvert).toHaveBeenCalledWith([id], idType, expect.anything());
+        expect(result.totalSubmitted).toBe(1);
+        expect(result.records).toHaveLength(1);
+      },
+    );
+
+    it('still submits a mixed PMC-prefixed and bare-digit PMCID batch (#73)', async () => {
+      mockIdConvert.mockClear();
+      mockIdConvert.mockResolvedValue([
+        { 'requested-id': 'PMC3531190', pmcid: 'PMC3531190', pmid: '23193287' },
+        { 'requested-id': 'PMC7925010', pmcid: 'PMC7925010', pmid: '33654060' },
+      ]);
+
+      const ctx = createMockContext({ errors: convertIdsTool.errors });
+      const input = convertIdsTool.input.parse({
+        ids: ['PMC3531190', '7925010'],
+        idType: 'pmcid',
+      });
+      const result = await convertIdsTool.handler(input, ctx);
+
+      expect(mockIdConvert).toHaveBeenCalledWith(
+        ['PMC3531190', '7925010'],
+        'pmcid',
+        expect.anything(),
+      );
+      expect(result.totalConverted).toBe(2);
+    });
+
+    it('holds records.length === totalSubmitted on a partially failing batch', async () => {
+      mockIdConvert.mockClear();
+      mockIdConvert.mockResolvedValue([
+        { 'requested-id': '23193287', pmid: '23193287', pmcid: 'PMC3531190' },
+        { 'requested-id': '37952131', pmid: '37952131', errmsg: 'Identifier not found in PMC' },
+      ]);
+
+      const result = await runToolContract(convertIdsTool, {
+        ids: ['23193287', '37952131'],
+        idType: 'pmid',
+      });
+
+      expect(result.isError).toBeFalsy();
+      expect(result.structuredContent).toMatchObject({
+        totalConverted: 1,
+        totalSubmitted: 2,
+      });
+      const structured = result.structuredContent as { records: unknown[] };
+      expect(structured.records).toHaveLength(2);
+
+      const text = textBlocks(result.content as ContentBlock[])
+        .map((b) => b.text)
+        .join('\n');
+      expect(text).toContain('**Converted:** 1/2');
+      expect(text).toContain('pubmed_fetch_articles');
+    });
   });
 });

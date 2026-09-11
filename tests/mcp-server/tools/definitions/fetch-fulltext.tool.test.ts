@@ -3,6 +3,7 @@
  * @module tests/mcp-server/tools/definitions/fetch-fulltext.tool.test
  */
 
+import { z } from '@cyanheads/mcp-ts-core';
 import { createMockContext, getEnrichment, runToolContract } from '@cyanheads/mcp-ts-core/testing';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
@@ -151,6 +152,18 @@ describe('fetchFulltextTool', () => {
       });
       expect(parsed.success).toBe(false);
     });
+
+    it('advertises the DOI constraint as a JSON-Schema pattern (issue #120)', () => {
+      const schema = z.toJSONSchema(fetchFulltextTool.input, { io: 'input' }) as unknown as {
+        properties: { dois: { items: { pattern?: string } } };
+      };
+      const pattern = schema.properties.dois.items.pattern;
+
+      expect(pattern).toBeTypeOf('string');
+      const advertised = new RegExp(pattern as string);
+      expect(advertised.test('10.1093/nar/gks1195')).toBe(true);
+      expect(advertised.test('10.1002/a,b')).toBe(false);
+    });
   });
 
   describe('buildFulltextDescription (config-aware tiers, issue #65)', () => {
@@ -226,6 +239,28 @@ describe('fetchFulltextTool', () => {
         expect(first.viaSource).toBe('pmc');
         expect(first.pmcId).toBe('PMC1234567');
         expect(first.title).toBe('Full Text Article');
+      }
+    });
+
+    it('carries the JATS electronic article locator through to structuredContent (issue #121)', async () => {
+      mockParsePmcArticle.mockReturnValue({
+        pmcId: 'PMC11711121',
+        pmcUrl: 'https://www.ncbi.nlm.nih.gov/pmc/articles/PMC11711121/',
+        title: 'Article Number Only',
+        journal: { title: 'The Plant Genome', volume: '18', issue: '1', elocationId: 'e20542' },
+        sections: [{ title: 'Introduction', text: 'Body text.' }],
+      });
+      mockEFetch.mockResolvedValue([{ 'pmc-articleset': [{ article: [] }] }]);
+
+      const ctx = createMockContext({ errors: fetchFulltextTool.errors });
+      const input = fetchFulltextTool.input.parse({ pmcids: ['PMC11711121'] });
+      const result = await fetchFulltextTool.handler(input, ctx);
+
+      const first = result.articles[0];
+      expect(first?.source).toBe('pmc');
+      if (first?.source === 'pmc') {
+        expect(first.journal?.elocationId).toBe('e20542');
+        expect(first.journal?.pages).toBeUndefined();
       }
     });
 
@@ -3433,6 +3468,26 @@ describe('fetchFulltextTool', () => {
         fetchFulltextTool.format!({ articles: [baseArticle], totalReturned: 1 }),
       );
       expect(blocks[0]?.text).toContain('ISSN 1476-4687');
+    });
+
+    it('renders the journal line unchanged for a paginated record', () => {
+      // Locked: an electronic article locator must not disturb the line for a
+      // record that carries a real page range.
+      const blocks = textBlocks(
+        fetchFulltextTool.format!({ articles: [baseArticle], totalReturned: 1 }),
+      );
+      expect(blocks[0]?.text).toContain('**Journal:** Nature, **12**(3), 45-52, ISSN 1476-4687');
+    });
+
+    it('renders the electronic article locator on the journal line (issue #121)', () => {
+      const locatorArticle = {
+        ...baseArticle,
+        journal: { title: 'The Plant Genome', volume: '18', issue: '1', elocationId: 'e20542' },
+      };
+      const blocks = textBlocks(
+        fetchFulltextTool.format!({ articles: [locatorArticle], totalReturned: 1 }),
+      );
+      expect(blocks[0]?.text).toContain('**Journal:** The Plant Genome, **18**(1), e20542');
     });
 
     it('prefixes section and subsection headings with the JATS label when present', () => {

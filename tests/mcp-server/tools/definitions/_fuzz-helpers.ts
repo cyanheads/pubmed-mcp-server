@@ -32,6 +32,23 @@ import fc from 'fast-check';
 import type { Mock } from 'vitest';
 import { vi } from 'vitest';
 
+import {
+  articleSetXml,
+  GENEREVIEWS_CHAPTER_XML,
+  JOURNAL_ARTICLE_XML,
+  parseArticleSetXml,
+} from '../../../services/ncbi/parsing/_book-fixtures.js';
+
+/**
+ * One journal article and one NCBI Bookshelf chapter, parsed through the
+ * production response handler. An EFetch batch can return both kinds side by
+ * side, and a mock carrying only `PubmedArticle` leaves the whole book branch —
+ * parse, output schema, `format()` — invisible to the fuzz runner. (#114)
+ */
+const MIXED_ARTICLE_SET = parseArticleSetXml(
+  articleSetXml(JOURNAL_ARTICLE_XML, GENEREVIEWS_CHAPTER_XML),
+);
+
 /** Mock NCBI service exposing every method the 9 tools call. */
 export interface MockNcbiService {
   eCitMatch: Mock;
@@ -51,8 +68,9 @@ export interface MockNcbiService {
  *
  * `eFetch` dispatches by `params.db`: `pmc` returns the JATS ordered-parser
  * shape (an array containing a single `pmc-articleset` element with no child
- * articles), everything else returns the regular-parser shape with an empty
- * `PubmedArticleSet`.
+ * articles), everything else returns a `PubmedArticleSet` holding one
+ * `PubmedArticle` and one `PubmedBookArticle`, the mixed shape a real EFetch
+ * batch can return.
  */
 export function createMockNcbiService(): MockNcbiService {
   return {
@@ -66,7 +84,7 @@ export function createMockNcbiService(): MockNcbiService {
     eSummary: vi.fn().mockResolvedValue({}),
     eFetch: vi.fn().mockImplementation(async (params: { db?: string } = {}) => {
       if (params.db === 'pmc') return [{ 'pmc-articleset': [] }];
-      return { PubmedArticleSet: { PubmedArticle: [] } };
+      return { PubmedArticleSet: MIXED_ARTICLE_SET };
     }),
     eLink: vi.fn().mockResolvedValue({ eLinkResult: [{}] }),
     eSpell: vi.fn().mockResolvedValue({
@@ -89,6 +107,17 @@ export const FUZZ_OPTIONS = {
 } as const;
 
 interface FuzzOptions {
+  /**
+   * Coerce a Phase 1 arbitrary into an input the tool accepts, for a tool whose
+   * accepted shape is narrower than its Zod schema can express — a per-element
+   * format that depends on a sibling field, say. Without it the valid-input
+   * phase degenerates: every generated input is rejected before the handler
+   * runs, and the phase asserts nothing about the handler at all.
+   *
+   * Phase 1 and the aborted-signal phase only. The adversarial phases keep
+   * their raw arbitraries — coercing those is the opposite of their purpose.
+   */
+  mapInput?: (raw: unknown) => unknown;
   numAdversarial?: number;
   numRuns?: number;
   seed?: number;
@@ -153,6 +182,7 @@ export async function fuzzToolStrict(
   const numAdversarial = options.numAdversarial ?? 30;
   const timeoutMs = options.timeout ?? 5000;
   const seed = options.seed;
+  const mapInput = options.mapInput ?? ((raw: unknown) => raw);
 
   const report: FuzzReport = {
     totalRuns: 0,
@@ -170,7 +200,7 @@ export async function fuzzToolStrict(
   await fc.assert(
     fc.asyncProperty(validArb, async (raw) => {
       report.totalRuns++;
-      const parsed = def.input.safeParse(raw);
+      const parsed = def.input.safeParse(mapInput(raw));
       if (!parsed.success) return; // Arbitrary missed a constraint; Zod rejected. Skip.
       const ctx = createMockContext({ errors: def.errors });
       try {
@@ -233,7 +263,7 @@ export async function fuzzToolStrict(
     const controller = new AbortController();
     controller.abort();
     const ctx = createMockContext({ signal: controller.signal, errors: def.errors });
-    const sample = def.input.safeParse(fc.sample(validArb, 1)[0]);
+    const sample = def.input.safeParse(mapInput(fc.sample(validArb, 1)[0]));
     if (sample.success) await withTimeout(def.handler(sample.data, ctx), timeoutMs);
   } catch {
     // Expected

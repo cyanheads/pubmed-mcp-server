@@ -5,10 +5,28 @@
  * @module src/services/ncbi/formatting/citation-formatter
  */
 
-import type { ParsedArticle, ParsedArticleAuthor } from '../types.js';
+import type {
+  ParsedArticle,
+  ParsedArticleAuthor,
+  ParsedBookEditor,
+  ParsedBookInfo,
+  ParsedJournalInfo,
+} from '../types.js';
 
 /** Supported citation output formats. */
 export type CitationStyle = 'apa' | 'mla' | 'bibtex' | 'ris' | 'vancouver';
+
+/** A Bookshelf record — a chapter or a whole book — with its book metadata. */
+type BookRecord = ParsedArticle & { book: ParsedBookInfo };
+
+/**
+ * Whether a record cites a book rather than a journal article. Dispatch is on
+ * `recordType`, never on `publicationTypes`: a Bookshelf record's publication
+ * type is `Review` or `Study Guide`, so type strings cannot tell the two apart.
+ */
+function isBookRecord(article: ParsedArticle): article is BookRecord {
+  return article.recordType !== 'journal-article' && article.book !== undefined;
+}
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -16,15 +34,80 @@ export type CitationStyle = 'apa' | 'mla' | 'bibtex' | 'ris' | 'vancouver';
 
 /**
  * Extract the publication year from a ParsedArticle.
- * Prefers `journalInfo.publicationDate.year`; falls back to the earliest
- * `articleDates` entry (typically the electronic pub date) before giving up.
- * Returns 'n.d.' (no date) when no year is available.
+ * Prefers `journalInfo.publicationDate.year`, then the containing book's own
+ * date, then the earliest `articleDates` entry (for a book, its contribution
+ * date) before giving up. Returns 'n.d.' (no date) when no year is available.
  */
 function getYear(article: ParsedArticle): string {
   const journalYear = article.journalInfo?.publicationDate?.year;
   if (journalYear) return journalYear;
+  const bookYear = article.book?.pubDate ?? article.book?.beginningDate ?? article.book?.endingDate;
+  if (bookYear) return bookYear;
   const articleYear = article.articleDates?.find((d) => d.year)?.year;
   return articleYear ?? 'n.d.';
+}
+
+/**
+ * The date NLM prints for a book: a closed range for a book published over
+ * several years (`1993-2026`), otherwise the single publication year.
+ */
+function bookDateSpan(book: ParsedBookInfo): string | undefined {
+  if (book.beginningDate && book.endingDate && book.beginningDate !== book.endingDate) {
+    return `${book.beginningDate}-${book.endingDate}`;
+  }
+  return book.pubDate ?? book.beginningDate ?? book.endingDate;
+}
+
+/** `Place: Publisher`, or whichever half the record carries. */
+function bookImprint(book: ParsedBookInfo): string | undefined {
+  if (book.publisherLocation && book.publisher) {
+    return `${book.publisherLocation}: ${book.publisher}`;
+  }
+  return book.publisher ?? book.publisherLocation;
+}
+
+/** Where the book is readable — the NCBI Bookshelf permalink. */
+function bookshelfUrl(book: ParsedBookInfo): string | undefined {
+  return book.accession ? `https://www.ncbi.nlm.nih.gov/books/${book.accession}/` : undefined;
+}
+
+/**
+ * The DOI a citation may carry — the record's own, and on a whole book the
+ * book-level `Book/ELocationID` as a fallback. A chapter never inherits the
+ * containing book's DOI: that identifier resolves to the book, so citing a
+ * chapter with it points a reader at the wrong work. (#114)
+ */
+function citableDoi(article: ParsedArticle): string | undefined {
+  if (article.doi) return article.doi;
+  return article.recordType === 'book' ? article.book?.doi : undefined;
+}
+
+/**
+ * The access URL for a book citation: the DOI when the record has one — APA and
+ * most style guides prefer it — and the Bookshelf permalink otherwise.
+ */
+function bookAccessUrl(article: BookRecord): string | undefined {
+  const doi = citableDoi(article);
+  return doi ? `https://doi.org/${doi}` : bookshelfUrl(article.book);
+}
+
+/** Book title with its medium marker, e.g. `GeneReviews® [Internet]`. */
+function bookTitleWithMedium(book: ParsedBookInfo): string | undefined {
+  if (!book.title) return;
+  return book.medium ? `${book.title} [${book.medium}]` : book.title;
+}
+
+/** Strip a single trailing period so the caller can add its own. */
+function stripTrailingPeriod(text: string): string {
+  return text.replace(/\.\s*$/, '');
+}
+
+/**
+ * End a segment with exactly one period. An author list already closing on
+ * "et al." or on an initial keeps the period it has rather than gaining a second.
+ */
+function terminate(text: string): string {
+  return text.endsWith('.') ? text : `${text}.`;
 }
 
 /**
@@ -45,6 +128,19 @@ function splitPages(pages?: string): { start?: string; end?: string } {
 }
 
 /**
+ * The electronic article locator that stands in for a page range, or undefined.
+ *
+ * Returns a value only when the record carries no pagination. Publishers that
+ * report the article number as both `Pagination` and `ELocationID` (PLoS ONE,
+ * Scientific Reports) are already covered by the `pages` rendering, and printing
+ * both would duplicate the number in every style.
+ */
+function articleLocator(journal?: ParsedJournalInfo): string | undefined {
+  if (journal?.pages) return;
+  return journal?.elocationId || undefined;
+}
+
+/**
  * Collapse internal whitespace (including embedded newlines from structured
  * abstracts) to single spaces. Strict RIS parsers treat blank lines as record
  * terminators, so abstract text must be flattened before emission.
@@ -53,17 +149,19 @@ function collapseWhitespace(text: string): string {
   return text.replace(/\s+/g, ' ').trim();
 }
 
-/** PubMed `PublicationType` → BibTeX entry type. Defaults to `article`. */
+/**
+ * PubMed `PublicationType` → BibTeX entry type. Defaults to `article`.
+ * Book records never reach this map — they dispatch on `recordType` instead,
+ * because PubMed labels a Bookshelf record `Review` or `Study Guide`.
+ */
 const BIBTEX_ENTRY_TYPE: Record<string, string> = {
   Book: 'book',
-  'Book Chapter': 'inbook',
   Preprint: 'misc',
 };
 
 /** PubMed `PublicationType` → RIS reference type. Defaults to `JOUR`. */
 const RIS_REFERENCE_TYPE: Record<string, string> = {
   Book: 'BOOK',
-  'Book Chapter': 'CHAP',
   Preprint: 'GEN',
 };
 
@@ -208,7 +306,83 @@ function formatAuthorBibtex(author: ParsedArticleAuthor): string {
  * Authors (Year). Title. *Journal*, *Volume*(Issue), Pages. https://doi.org/DOI
  * ```
  */
+/**
+ * Format an editor in APA's "In E. E. Editor (Ed.)," position: initials first,
+ * surname last — the inverse of the author position.
+ */
+function formatEditorApa(editor: ParsedBookEditor): string {
+  if (editor.collectiveName) return editor.collectiveName;
+  const initialsSource =
+    editor.initials ??
+    editor.firstName
+      ?.split(/[\s-]+/)
+      .filter(Boolean)
+      .map((part) => part[0])
+      .join('');
+  const initials = initialsSource
+    ? Array.from(initialsSource.replace(/[^\p{L}]/gu, ''))
+        .map((c) => `${c}.`)
+        .join(' ')
+    : '';
+  return [initials, editor.lastName].filter(Boolean).join(' ');
+}
+
+/** APA editor list: comma-separated, `& ` before the last name. */
+function formatEditorsApa(editors: ParsedBookEditor[]): string {
+  const names = editors.map(formatEditorApa).filter(Boolean);
+  if (names.length === 0) return '';
+  if (names.length === 1) return names[0] ?? '';
+  return `${names.slice(0, -1).join(', ')}, & ${names.at(-1)}`;
+}
+
+/**
+ * Format a Bookshelf record as an APA 7th edition citation.
+ *
+ * Chapter in an edited book (APA 7 §10.3):
+ * ```
+ * Authors (Year). Chapter title. In E. Editor (Ed.), *Book title*. Publisher. URL
+ * ```
+ * A whole-book record drops the `In …` clause and italicizes its own title.
+ */
+function formatApaBook(article: BookRecord): string {
+  const { book } = article;
+  const parts: string[] = [];
+
+  const authorStr = article.authors?.length ? formatAuthorsApa(article.authors) : '';
+  if (authorStr) {
+    parts.push(terminate(authorStr));
+  } else if (article.recordType === 'book' && book.editors?.length) {
+    // APA 7: an edited book with no authors of its own is cited from the editor
+    // position — `Last, F. M. (Ed.).` — rather than opening on the year.
+    parts.push(`${formatAuthorsApa(book.editors)} (${book.editors.length > 1 ? 'Eds.' : 'Ed.'}).`);
+  }
+
+  parts.push(`(${getYear(article)}).`);
+
+  if (article.recordType === 'book-chapter') {
+    if (article.title) parts.push(`${stripTrailingPeriod(article.title)}.`);
+    const editorStr = book.editors?.length ? formatEditorsApa(book.editors) : '';
+    const editorLabel = (book.editors?.length ?? 0) > 1 ? 'Eds.' : 'Ed.';
+    const container = book.title ? `*${stripTrailingPeriod(book.title)}*` : '';
+    if (container) {
+      parts.push(
+        editorStr ? `In ${editorStr} (${editorLabel}), ${container}.` : `In ${container}.`,
+      );
+    }
+  } else if (book.title) {
+    parts.push(`*${stripTrailingPeriod(book.title)}*.`);
+  }
+
+  if (book.publisher) parts.push(`${book.publisher}.`);
+
+  const url = bookAccessUrl(article);
+  if (url) parts.push(url);
+
+  return parts.join(' ');
+}
+
 export function formatApa(article: ParsedArticle): string {
+  if (isBookRecord(article)) return formatApaBook(article);
   const parts: string[] = [];
 
   // Authors — ensure trailing period (individual author initials end with '.',
@@ -216,7 +390,7 @@ export function formatApa(article: ParsedArticle): string {
   const authorStr = article.authors?.length ? formatAuthorsApa(article.authors) : '';
 
   if (authorStr) {
-    parts.push(authorStr.endsWith('.') ? authorStr : `${authorStr}.`);
+    parts.push(terminate(authorStr));
   }
 
   // Year
@@ -226,7 +400,7 @@ export function formatApa(article: ParsedArticle): string {
   // Title — use as-is from PubMed (sentence case already assumed)
   if (article.title) {
     // Strip trailing period from title if present; we add our own
-    const title = article.title.replace(/\.\s*$/, '');
+    const title = stripTrailingPeriod(article.title);
     parts.push(`${title}.`);
   }
 
@@ -242,6 +416,10 @@ export function formatApa(article: ParsedArticle): string {
     }
     if (journal.pages) {
       journalPart += `, ${journal.pages}`;
+    } else {
+      // APA 7 p. 294-295: an article number takes the page range's place
+      const locator = articleLocator(journal);
+      if (locator) journalPart += `, Article ${locator}`;
     }
     journalPart += '.';
     parts.push(journalPart);
@@ -267,7 +445,55 @@ export function formatApa(article: ParsedArticle): string {
  * Last, First, et al. "Title." *Journal*, vol. 12, no. 3, 2024, pp. 45-67. DOI.
  * ```
  */
+/** MLA renders editors first-name-first after `edited by`. */
+function formatEditorsMla(editors: ParsedBookEditor[]): string {
+  const names = editors
+    .map((editor) =>
+      editor.collectiveName
+        ? editor.collectiveName
+        : [editor.firstName, editor.lastName].filter(Boolean).join(' '),
+    )
+    .filter(Boolean);
+  if (names.length === 0) return '';
+  if (names.length === 1) return names[0] ?? '';
+  if (names.length === 2) return `${names[0]} and ${names[1]}`;
+  return `${names[0]}, et al.`;
+}
+
+/**
+ * Format a Bookshelf record as an MLA 9th edition citation.
+ *
+ * ```
+ * Author. "Chapter Title." *Book Title*, edited by E. Editor, Publisher, Year.
+ * ```
+ * A whole-book record italicizes its own title in place of the quoted chapter.
+ */
+function formatMlaBook(article: BookRecord): string {
+  const { book } = article;
+  const parts: string[] = [];
+
+  const authorStr = article.authors?.length ? formatAuthorsMla(article.authors) : '';
+  if (authorStr) parts.push(terminate(authorStr));
+
+  if (article.recordType === 'book-chapter' && article.title) {
+    parts.push(`"${stripTrailingPeriod(article.title)}."`);
+  }
+
+  const detailParts: string[] = [];
+  if (book.title) detailParts.push(`*${stripTrailingPeriod(book.title)}*`);
+  const editorStr = book.editors?.length ? formatEditorsMla(book.editors) : '';
+  if (editorStr) detailParts.push(`edited by ${editorStr}`);
+  if (book.edition) detailParts.push(book.edition);
+  if (book.publisher) detailParts.push(book.publisher);
+  const year = getYear(article);
+  if (year !== 'n.d.') detailParts.push(year);
+  if (detailParts.length) parts.push(`${detailParts.join(', ')}.`);
+
+  return parts.join(' ');
+}
+
 export function formatMla(article: ParsedArticle): string {
+  if (isBookRecord(article)) return formatMlaBook(article);
   const parts: string[] = [];
 
   // Authors
@@ -275,12 +501,12 @@ export function formatMla(article: ParsedArticle): string {
 
   if (authorStr) {
     // Ensure author string ends with period
-    parts.push(authorStr.endsWith('.') ? authorStr : `${authorStr}.`);
+    parts.push(terminate(authorStr));
   }
 
   // Title in quotes
   if (article.title) {
-    const title = article.title.replace(/\.\s*$/, '');
+    const title = stripTrailingPeriod(article.title);
     parts.push(`"${title}."`);
   }
 
@@ -306,6 +532,11 @@ export function formatMla(article: ParsedArticle): string {
       // MLA 9 §6.56: "p." for a single page, "pp." for a range
       const isRange = /[-\u2013\u2014]/.test(journal.pages);
       detailParts.push(`${isRange ? 'pp.' : 'p.'} ${journal.pages}`);
+    } else {
+      // MLA 9 codifies no article-number form; citation guides converge on
+      // "art. <value>" in the page position.
+      const locator = articleLocator(journal);
+      if (locator) detailParts.push(`art. ${locator}`);
     }
 
     parts.push(`${detailParts.join(', ')}.`);
@@ -338,7 +569,15 @@ export function formatMla(article: ParsedArticle): string {
  */
 export function formatBibtex(article: ParsedArticle): string {
   const key = `pmid${article.pmid}`;
-  const entryType = firstMappedType(article.publicationTypes, BIBTEX_ENTRY_TYPE, 'article');
+  const book = isBookRecord(article) ? article.book : undefined;
+  // `@incollection` is a chapter in a book gathered from several contributors;
+  // `@inbook` is a part attributed to the book's own author, which a Bookshelf
+  // chapter is not. A whole-book record is plainly `@book`.
+  const entryType = book
+    ? article.recordType === 'book'
+      ? 'book'
+      : 'incollection'
+    : firstMappedType(article.publicationTypes, BIBTEX_ENTRY_TYPE, 'article');
   const fields: [string, string][] = [];
 
   // Authors
@@ -347,17 +586,30 @@ export function formatBibtex(article: ParsedArticle): string {
     if (authorStr) fields.push(['author', authorStr]);
   }
 
-  // Title — strip trailing period; biblatex styles append their own
-  if (article.title) {
-    const title = article.title.replace(/\.\s*$/, '');
-    fields.push(['title', `{${escapeBibtex(title)}}`]);
+  // Title — strip trailing period; biblatex styles append their own.
+  // A whole-book record's own title is the book title, so it is not repeated
+  // as a `booktitle` below.
+  const title = book && article.recordType === 'book' ? book.title : article.title;
+  if (title) {
+    fields.push(['title', `{${escapeBibtex(stripTrailingPeriod(title))}}`]);
   }
 
-  // Journal
+  // Container — the journal, or the book a chapter sits in
   const journal = article.journalInfo;
   if (journal?.title) {
     fields.push(['journal', escapeBibtex(journal.title)]);
   }
+  if (book && article.recordType === 'book-chapter' && book.title) {
+    fields.push(['booktitle', escapeBibtex(book.title)]);
+  }
+  if (book?.editors?.length) {
+    const editorStr = book.editors.map(formatAuthorBibtex).filter(Boolean).join(' and ');
+    if (editorStr) fields.push(['editor', editorStr]);
+  }
+  if (book?.publisher) fields.push(['publisher', escapeBibtex(book.publisher)]);
+  if (book?.publisherLocation) fields.push(['address', escapeBibtex(book.publisherLocation)]);
+  if (book?.edition) fields.push(['edition', escapeBibtex(book.edition)]);
+  if (book?.collectionTitle) fields.push(['series', escapeBibtex(book.collectionTitle)]);
 
   // Year
   const year = getYear(article);
@@ -375,20 +627,30 @@ export function formatBibtex(article: ParsedArticle): string {
     fields.push(['number', escapeBibtex(journal.issue)]);
   }
 
-  // Pages
+  // Pages — or, with no pagination, biblatex's `eid` for the article number.
+  // Classic BibTeX has no article-number field and overloading `pages` is
+  // imprecise; `eid` is broadly supported (acmart included).
   if (journal?.pages) {
     fields.push(['pages', escapeBibtex(journal.pages)]);
+  } else if (!book) {
+    const locator = articleLocator(journal);
+    if (locator) fields.push(['eid', escapeBibtex(locator)]);
   }
 
-  // ISSN
+  // ISSN, or a book's ISBNs — a book commonly carries a print and an
+  // electronic one, and dropping either loses a real identifier
   const issn = journal?.issn ?? journal?.eIssn;
   if (issn) {
     fields.push(['issn', escapeBibtex(issn)]);
   }
+  if (book?.isbns?.length) {
+    fields.push(['isbn', book.isbns.map(escapeBibtex).join(', ')]);
+  }
 
   // DOI
-  if (article.doi) {
-    fields.push(['doi', article.doi]);
+  const doi = citableDoi(article);
+  if (doi) {
+    fields.push(['doi', doi]);
   }
 
   // PMID
@@ -397,6 +659,12 @@ export function formatBibtex(article: ParsedArticle): string {
   // PMCID
   if (article.pmcId) {
     fields.push(['pmcid', article.pmcId]);
+  }
+
+  // Bookshelf permalink — where the book is actually readable
+  if (book) {
+    const url = bookshelfUrl(book);
+    if (url) fields.push(['url', url]);
   }
 
   // Keywords — merge article keywords with MeSH descriptor names
@@ -437,8 +705,13 @@ export function formatRis(article: ParsedArticle): string {
     if (value) lines.push(`${code}  - ${value}`);
   };
 
-  // Type of reference — map from PubMed publication types
-  const refType = firstMappedType(article.publicationTypes, RIS_REFERENCE_TYPE, 'JOUR');
+  const book = isBookRecord(article) ? article.book : undefined;
+  // Type of reference — the record type for a book, else the publication types
+  const refType = book
+    ? article.recordType === 'book'
+      ? 'BOOK'
+      : 'CHAP'
+    : firstMappedType(article.publicationTypes, RIS_REFERENCE_TYPE, 'JOUR');
   lines.push(`TY  - ${refType}`);
 
   // Authors — one AU tag per author
@@ -459,13 +732,27 @@ export function formatRis(article: ParsedArticle): string {
   // Title
   tag('TI', article.title);
 
-  // Journal
+  // Container — the journal, or the book a chapter sits in. `BT` is the book
+  // title; on a whole-book record it would only repeat `TI`, so it is omitted.
   const journal = article.journalInfo;
   if (journal?.title) {
     tag('JF', journal.title);
   }
   if (journal?.isoAbbreviation) {
     tag('JO', journal.isoAbbreviation);
+  }
+  if (book) {
+    if (article.recordType === 'book-chapter') tag('BT', book.title);
+    for (const editor of book.editors ?? []) {
+      const last = editor.lastName ?? '';
+      const first = editor.firstName ?? '';
+      if (editor.collectiveName) tag('A2', editor.collectiveName);
+      else if (last || first) tag('A2', first ? `${last}, ${first}` : last);
+    }
+    tag('PB', book.publisher);
+    tag('CY', book.publisherLocation);
+    tag('ET', book.edition);
+    tag('T3', book.collectionTitle);
   }
 
   // Year
@@ -478,18 +765,24 @@ export function formatRis(article: ParsedArticle): string {
   tag('VL', journal?.volume);
   tag('IS', journal?.issue);
 
-  // Pages — split into start/end, expanding PubMed's truncated-end convention
+  // Pages — split into start/end, expanding PubMed's truncated-end convention.
+  // With no pagination, the article number goes on `C7` (the attested RIS
+  // convention for Article Number), never on SP/EP, which hold absolute pages.
   if (journal?.pages) {
     const { start, end } = splitPages(journal.pages);
     tag('SP', start);
     tag('EP', end);
+  } else if (!book) {
+    tag('C7', articleLocator(journal));
   }
 
-  // ISSN — prefer print ISSN, fall back to electronic
+  // SN carries the ISSN for a serial and the ISBN for a book; a book with both
+  // a print and an electronic ISBN gets one line each.
   tag('SN', journal?.issn ?? journal?.eIssn);
+  for (const isbn of book?.isbns ?? []) tag('SN', isbn);
 
   // DOI (without URL prefix — RIS DO tag holds the bare DOI)
-  tag('DO', article.doi);
+  tag('DO', citableDoi(article));
 
   // Accession number (PMID)
   tag('AN', article.pmid);
@@ -500,6 +793,12 @@ export function formatRis(article: ParsedArticle): string {
   // PMC URL (when available)
   if (article.pmcId) {
     lines.push(`UR  - https://pmc.ncbi.nlm.nih.gov/articles/${article.pmcId}/`);
+  }
+
+  // Bookshelf URL — where a book record is actually readable
+  if (book) {
+    const url = bookshelfUrl(book);
+    if (url) lines.push(`UR  - ${url}`);
   }
 
   // Keywords — merge article keywords with MeSH descriptor names
@@ -577,27 +876,70 @@ function formatAuthorsVancouver(authors: ParsedArticleAuthor[]): string {
  * ```
  * Journal name uses the NLM/ISO abbreviation when available; pages are used as
  * PubMed supplies them (often elided, e.g. "583-9"); the DOI carries no trailing
- * period so it stays copy-pasteable.
+ * period so it stays copy-pasteable. An article number replaces nothing — with
+ * no pagination it trails the source as an NLM note (`. pii: 2400512.`).
  */
+/**
+ * Format a Bookshelf record as a Vancouver (NLM) reference, following *Citing
+ * Medicine* 2e Ch. 22 §C, Contributions to Books on the Internet:
+ * ```
+ * Authors. Chapter title. In: Editors, editors. Book title [Internet].
+ * Place: Publisher; date. Available from: URL
+ * ```
+ * A whole-book record drops the contribution and the `In:`, taking the book
+ * title as its own. `[cited …]` and the extent (`[about 41 p.]`) are part of the
+ * NLM pattern but neither is derivable from an EFetch record, so both are
+ * omitted rather than invented. Editors stand in for absent authors on a whole
+ * book, which is the NLM form for an edited work.
+ */
+function formatVancouverBook(article: BookRecord): string {
+  const { book } = article;
+  const segments: string[] = [];
+  const authorStr = article.authors?.length ? formatAuthorsVancouver(article.authors) : '';
+  const editorStr = book.editors?.length ? formatAuthorsVancouver(book.editors) : '';
+
+  if (authorStr) segments.push(terminate(authorStr));
+
+  if (article.recordType === 'book-chapter') {
+    if (article.title) segments.push(`${stripTrailingPeriod(article.title)}.`);
+    segments.push(editorStr ? `In: ${editorStr}, editors.` : 'In:');
+  } else if (!authorStr && editorStr) {
+    segments.push(`${editorStr}, editors.`);
+  }
+
+  const container = bookTitleWithMedium(book);
+  if (container) segments.push(`${stripTrailingPeriod(container)}.`);
+
+  const source = [bookImprint(book), bookDateSpan(book)].filter(Boolean).join('; ');
+  if (source) segments.push(`${source}.`);
+
+  // No trailing period — it would be read as part of the URL
+  const url = bookshelfUrl(book);
+  if (url) segments.push(`Available from: ${url}`);
+
+  return segments.join(' ');
+}
+
 export function formatVancouver(article: ParsedArticle): string {
+  if (isBookRecord(article)) return formatVancouverBook(article);
   const segments: string[] = [];
 
   // Authors — terminate with a period unless the list already ends in "et al."
   const authorStr = article.authors?.length ? formatAuthorsVancouver(article.authors) : '';
   if (authorStr) {
-    segments.push(authorStr.endsWith('.') ? authorStr : `${authorStr}.`);
+    segments.push(terminate(authorStr));
   }
 
   // Title — sentence case as supplied, single terminating period
   if (article.title) {
-    segments.push(`${article.title.replace(/\.\s*$/, '')}.`);
+    segments.push(`${stripTrailingPeriod(article.title)}.`);
   }
 
   // Journal — NLM/ISO abbreviation preferred, full title as fallback
   const journal = article.journalInfo;
   const journalName = journal?.isoAbbreviation ?? journal?.title;
   if (journalName) {
-    segments.push(`${journalName.replace(/\.\s*$/, '')}.`);
+    segments.push(`${stripTrailingPeriod(journalName)}.`);
   }
 
   // Source — "Year;Volume(Issue):Pages."
@@ -611,6 +953,15 @@ export function formatVancouver(article: ParsedArticle): string {
     source += source ? `:${journal.pages}` : journal.pages;
   }
   if (source) segments.push(`${source}.`);
+
+  // Article number — NLM's note form for a publisher locator that is not
+  // pagination ("Euro Surveill. 2008 May 8;13(19). pii: 18863."): a trailing
+  // note after Year;Volume(Issue), never inside the colon slot.
+  const locator = articleLocator(journal);
+  if (locator) {
+    const label = journal?.elocationIdType;
+    segments.push(label ? `${label}: ${locator}.` : `${locator}.`);
+  }
 
   // DOI — NLM "doi: <doi>" form; no trailing period (would corrupt the DOI)
   if (article.doi) {

@@ -113,6 +113,11 @@ export interface XmlAuthor {
 
 export interface XmlAuthorList {
   '@_CompleteYN'?: 'Y' | 'N';
+  /**
+   * `authors` or `editors` — the DTD declares it `#IMPLIED`, and a `Book` can
+   * carry one list of each. Never infer the role from position: read this.
+   */
+  '@_Type'?: 'authors' | 'editors';
   Author?: XmlAuthor[] | XmlAuthor;
 }
 
@@ -257,11 +262,86 @@ export interface XmlPubmedArticle {
   };
 }
 
+// ─── Bookshelf Records (PubmedBookArticle) ──────────────────────────────────
+//
+// NCBI Bookshelf titles indexed in PubMed (GeneReviews, StatPearls, LactMed,
+// Endotext, NICE guidance, National Academies monographs, …) come back from
+// EFetch as `PubmedBookArticle`, a sibling of `PubmedArticle` under the same
+// `PubmedArticleSet` root:
+//   <!ELEMENT PubmedArticleSet ((PubmedArticle | PubmedBookArticle)+, DeleteCitation?)>
+// A single EFetch batch can return both kinds side by side. (#114)
+
+/** `Book/Publisher` — the citation's imprint. */
+export interface XmlPublisher {
+  PublisherLocation?: XmlTextElement;
+  PublisherName?: XmlTextElement;
+}
+
+/**
+ * `BookDocument/Book` — the containing book. `AuthorList` is repeatable and
+ * carries a `Type` attribute distinguishing the book's editors from its authors.
+ */
+export interface XmlBook {
+  AuthorList?: XmlAuthorList[] | XmlAuthorList;
+  BeginningDate?: XmlPubDate;
+  BookTitle?: XmlTextElement | string;
+  CollectionTitle?: XmlTextElement | string;
+  Edition?: XmlTextElement;
+  ELocationID?: XmlELocationID[] | XmlELocationID;
+  EndingDate?: XmlPubDate;
+  /** Repeatable — two ISBNs on one record is normal (print and electronic). */
+  Isbn?: XmlTextElement[] | XmlTextElement | string | string[];
+  Medium?: XmlTextElement; // 'Internet' in every observed occurrence
+  PubDate?: XmlPubDate;
+  Publisher?: XmlPublisher;
+  ReportNumber?: XmlTextElement;
+  Volume?: XmlTextElement;
+  VolumeTitle?: XmlTextElement;
+}
+
+/**
+ * `PubmedBookArticle/BookDocument` — one Bookshelf record. `ArticleTitle` is
+ * absent on a whole-book record, which is what separates it from a chapter.
+ * `PublicationType` sits directly on the document, not inside a
+ * `PublicationTypeList` as it does for a journal article.
+ *
+ * `Sections`, `ReferenceList` and `ItemList` are deliberately not declared:
+ * chapter body content is out of scope, metadata and abstract only.
+ */
+export interface XmlBookDocument {
+  Abstract?: XmlAbstract;
+  ArticleIdList?: XmlArticleIdList;
+  ArticleTitle?: XmlTextElement | string;
+  AuthorList?: XmlAuthorList[] | XmlAuthorList;
+  Book: XmlBook;
+  ContributionDate?: XmlArticleDate;
+  DateRevised?: XmlArticleDate;
+  KeywordList?: XmlKeywordList[] | XmlKeywordList;
+  Language?: XmlTextElement[] | XmlTextElement;
+  LocationLabel?: XmlTextElement[] | XmlTextElement;
+  Pagination?: XmlPagination;
+  PMID: XmlPMID;
+  PublicationType?: XmlPublicationType[] | XmlPublicationType;
+  VernacularTitle?: XmlTextElement;
+}
+
+export interface XmlPubmedBookArticle {
+  BookDocument: XmlBookDocument;
+  PubmedBookData?: {
+    ArticleIdList?: XmlArticleIdList;
+    History?: {
+      PubMedPubDate: (XmlArticleDate & { '@_PubStatus'?: string })[];
+    };
+    PublicationStatus?: XmlTextElement;
+  };
+}
+
 export interface XmlPubmedArticleSet {
   DeleteCitation?: {
     PMID: XmlPMID[] | XmlPMID;
   };
   PubmedArticle?: XmlPubmedArticle[] | XmlPubmedArticle;
+  PubmedBookArticle?: XmlPubmedBookArticle[] | XmlPubmedBookArticle;
   // Can also contain ErrorList or other elements if the request had issues
 }
 
@@ -292,6 +372,15 @@ export interface ParsedJournalPublicationDate {
 
 export interface ParsedJournalInfo {
   eIssn?: string;
+  /**
+   * Electronic article locator from `ELocationID` — the publisher-assigned
+   * article number carried by journals that do not paginate. Distinct from
+   * {@link pages} and never a substitute for it; DOI-typed `ELocationID`
+   * entries are excluded, since the DOI has its own field.
+   */
+  elocationId?: string;
+  /** `EIdType` of the locator (e.g. `pii`). Free-form — NCBI's DTD is open. */
+  elocationIdType?: string;
   isoAbbreviation?: string;
   issn?: string;
   issue?: string;
@@ -321,19 +410,86 @@ export interface ParsedGrant {
   grantId?: string;
 }
 
+/**
+ * Which kind of record a {@link ParsedArticle} came from. PubMed's own
+ * `publicationTypes` cannot carry this — a Bookshelf record's `PublicationType`
+ * is `Review` or `Study Guide`, never anything book-shaped — so the distinction
+ * is made here, at parse time, from the element the record arrived in. (#114)
+ *
+ * - `journal-article` — a `PubmedArticle`.
+ * - `book-chapter` — a `BookDocument` carrying its own `ArticleTitle`.
+ * - `book` — a `BookDocument` with no `ArticleTitle`: the whole book is the record.
+ */
+export type ParsedRecordType = 'journal-article' | 'book-chapter' | 'book';
+
+/**
+ * An editor of the containing book. Deliberately narrower than
+ * {@link ParsedArticleAuthor} — name parts only, no affiliations or ORCID.
+ * Editors are a citation credit, not a contributor record, and the framework's
+ * `format-parity` linter stops walking at depth 8: reusing the author shape
+ * would put `book.editors[].affiliationIndices[]` at exactly that limit, with no
+ * headroom for any later field. Assignable to {@link ParsedArticleAuthor}, so
+ * the citation formatters' author helpers take an editor unchanged.
+ */
+export interface ParsedBookEditor {
+  /** Group editor, e.g. a committee. Kept so such an entry is not silently dropped. */
+  collectiveName?: string;
+  firstName?: string;
+  initials?: string;
+  lastName?: string;
+}
+
+/**
+ * The containing book of a `book-chapter`, or the book itself for a `book`
+ * record. Present only on those two record types — never synthesized, and never
+ * a stand-in for {@link ParsedJournalInfo}.
+ */
+export interface ParsedBookInfo {
+  /** NCBI Bookshelf accession (`NBK1247`) — resolves at `ncbi.nlm.nih.gov/books/<accession>/`. */
+  accession?: string;
+  /** First year of a continuously-updated book (GeneReviews runs 1993 →). */
+  beginningDate?: string;
+  /** Series the book belongs to, e.g. "The National Academies Collection". */
+  collectionTitle?: string;
+  /** Book-level DOI from `Book/ELocationID`. Distinct from the record's own `doi`. */
+  doi?: string;
+  edition?: string;
+  editors?: ParsedBookEditor[];
+  /** Last year of a closed date range. Absent while a book is still being updated. */
+  endingDate?: string;
+  /** Every `Book/Isbn`, verbatim — leading zeros intact, print and electronic alike. */
+  isbns?: string[];
+  /** `Book/Medium` — `Internet` wherever NCBI supplies it. */
+  medium?: string;
+  /** Year from `Book/PubDate`. */
+  pubDate?: string;
+  publisher?: string;
+  publisherLocation?: string;
+  title?: string;
+}
+
 export interface ParsedArticle {
   abstractText?: string;
   affiliations?: string[];
   articleDates?: ParsedArticleDate[]; // Dates like 'received', 'accepted', 'revised'
   authors?: ParsedArticleAuthor[];
+  /** Set on `book-chapter` and `book` records only. */
+  book?: ParsedBookInfo;
   doi?: string;
   grantList?: ParsedGrant[];
+  /**
+   * Absent on `book-chapter` and `book` records — a Bookshelf record has no
+   * journal, and the book title is never promoted into one.
+   */
   journalInfo?: ParsedJournalInfo;
   keywords?: string[];
   meshTerms?: ParsedMeshTerm[];
   pmcId?: string;
   pmid: string;
   publicationTypes?: string[];
+  /** Discriminator — read this, never the title or `publicationTypes`. */
+  recordType: ParsedRecordType;
+  /** Chapter title, or the book title on a whole-book record. */
   title?: string;
   // Add other fields as needed, e.g., language, publication status
 }
@@ -419,7 +575,11 @@ export interface ESummaryDocumentSummary {
     | XmlESummaryAuthorRaw[] // Array of raw author entries
     | { Author: XmlESummaryAuthorRaw[] | XmlESummaryAuthorRaw } // Object containing raw author entries
     | string; // Or a simple string for authors
+  /** Containing book — present on a Bookshelf record, where `Source` is empty. */
+  BookTitle?: string;
   DOI?: string; // Sometimes directly available
+  /** `chapter`, `book`, or `citation` (an ordinary journal article). */
+  DocType?: string;
   EPubDate?: string;
   ESSN?: string;
   FullJournalName?: string;
@@ -430,6 +590,8 @@ export interface ESummaryDocumentSummary {
   LastAuthor?: string;
   Pages?: string;
   PubDate?: string;
+  /** Publisher of the containing book. Absent for journal records. */
+  PublisherName?: string;
   PubStatus?: string;
   PubType?: string[]; // Array of publication types
   RecordStatus?: string;
@@ -461,17 +623,34 @@ export interface ESummaryResponseContainer {
 // Parsed brief summary (application-level)
 export interface ParsedBriefSummary {
   /**
-   * Full, untruncated author roster from ESummary. `authors` collapses to three
-   * names for display, so any check that must consider every author (e.g.
+   * Full, untruncated author roster from ESummary — the same people `authors`
+   * collapses for display, so any check that must consider every author (e.g.
    * verifying a queried author appears on the article) reads this instead.
+   * Editors are not in it; they are in {@link editors}.
    */
   authorNames?: string[];
   authors?: string; // Display string — first 3 authors, then 'et al.'
+  /**
+   * Containing book title. ESummary leaves `Source` and `FullJournalName` empty
+   * on a Bookshelf record and carries the venue here instead, so a book record
+   * renders with a venue rather than none. (#114)
+   */
+  bookTitle?: string;
+  /** ESummary `DocType` — `chapter`, `book`, or `citation` (an ordinary article). */
+  docType?: string;
   doi?: string;
+  /**
+   * Book editors (`AuthType=Editor`). ESummary lists them ahead of the chapter's
+   * own authors, so they are split out rather than allowed to displace the
+   * authors in the display string.
+   */
+  editors?: string[];
   epubDate?: string; // Standardized YYYY-MM-DD
   pmcId?: string;
   pmid: string;
   pubDate?: string; // Standardized YYYY-MM-DD
+  /** Publisher of the containing book. Absent for journal records. */
+  publisherName?: string;
   source?: string;
   title?: string;
 }
@@ -646,6 +825,11 @@ export interface ParsedPmcAuthor {
 
 /** Parsed PMC journal info. */
 export interface ParsedPmcJournal {
+  /**
+   * Electronic article locator from JATS `<elocation-id>`. JATS carries no type
+   * attribute, so there is no counterpart to `ParsedJournalInfo.elocationIdType`.
+   */
+  elocationId?: string;
   issn?: string;
   issue?: string;
   pages?: string;

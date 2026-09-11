@@ -213,8 +213,13 @@ function extractJournal(
   const fpage = articleMeta ? textContent(findOne(articleMeta, 'fpage')) : '';
   const lpage = articleMeta ? textContent(findOne(articleMeta, 'lpage')) : '';
   const pages = fpage && lpage ? `${fpage}-${lpage}` : fpage || undefined;
+  // Article number for the roughly half of PMC deposits that carry
+  // <elocation-id> and no <fpage>. Distinct from pages, never a stand-in for it.
+  const elocationId = articleMeta
+    ? textContent(findOne(articleMeta, 'elocation-id')) || undefined
+    : undefined;
 
-  if (!title && !issn && !volume && !issue && !pages) return;
+  if (!title && !issn && !volume && !issue && !pages && !elocationId) return;
 
   return {
     ...(title && { title }),
@@ -222,6 +227,7 @@ function extractJournal(
     ...(volume && { volume }),
     ...(issue && { issue }),
     ...(pages && { pages }),
+    ...(elocationId && { elocationId }),
   };
 }
 

@@ -24,16 +24,28 @@ import {
   ORDERED_XML_PARSER_OPTIONS,
   XML_PROCESS_ENTITIES_OPTIONS,
 } from './parsing/ordered-xml-parser-options.js';
+import { decodeHtmlEntities } from './parsing/text-helpers.js';
 import type { NcbiRequestOptions } from './types.js';
 
 /**
  * jpaths that NCBI may return as either a single value or an array.
  * The `isArray` callback forces these to always parse as arrays for consistency.
+ *
+ * A jpath is the **full** dotted path from the document root, so only an entry
+ * that spells out every ancestor matches. Read sites still pass values through
+ * `ensureArray`, which is what makes the shorter, ancestor-less entries below
+ * harmless.
  */
 const NCBI_ARRAY_JPATHS = new Set([
   'IdList.Id',
   'eSearchResult.IdList.Id',
   'PubmedArticleSet.PubmedArticle',
+  'PubmedArticleSet.PubmedBookArticle',
+  'PubmedArticleSet.PubmedBookArticle.BookDocument.AuthorList',
+  'PubmedArticleSet.PubmedBookArticle.BookDocument.PublicationType',
+  'PubmedArticleSet.PubmedBookArticle.BookDocument.Book.AuthorList',
+  'PubmedArticleSet.PubmedBookArticle.BookDocument.Book.ELocationID',
+  'PubmedArticleSet.PubmedBookArticle.BookDocument.Book.Isbn',
   'PubmedArticleSet.DeleteCitation.PMID',
   'AuthorList.Author',
   'AffiliationInfo',
@@ -147,6 +159,11 @@ const ERROR_TAG_REGEX = /<ERROR(?:\s[^>]*)?>/;
  * Unicode superscript map. Covers digits, common operators, and the few
  * letters that have superscript codepoints (n, i). `−` (U+2212, the proper
  * minus) is normalized to U+207B alongside ASCII `-`.
+ *
+ * `®` and `™` map to themselves. They have no superscript codepoint because
+ * they need none — the glyphs are already raised, and the `<sup>` around them
+ * (`GeneReviews<sup>&#xae;</sup>`) is presentation, not content. Without an
+ * entry the `^` fallback fires and a book title renders `GeneReviews^®`. (#114)
  */
 const SUPERSCRIPT_MAP: Readonly<Record<string, string>> = {
   '0': '⁰',
@@ -167,6 +184,8 @@ const SUPERSCRIPT_MAP: Readonly<Record<string, string>> = {
   ')': '⁾',
   n: 'ⁿ',
   i: 'ⁱ',
+  '®': '®',
+  '™': '™',
 };
 
 /**
@@ -193,13 +212,23 @@ const SUBSCRIPT_MAP: Readonly<Record<string, string>> = {
   ')': '₎',
 };
 
+/**
+ * Map one `<sup>`/`<sub>` payload, or fall back to the ASCII prefix form.
+ *
+ * Lookup runs on the decoded text because this pass happens before the XML
+ * parser: a registered mark reaches it as `&#xae;`, not `®`, and a per-character
+ * lookup over the entity's own characters can only ever miss. The fallback
+ * returns the *original* content, so an unmappable payload keeps whatever
+ * encoding it arrived in and the string stays valid XML for the parser that
+ * follows — nothing in either table decodes to `&`, `<` or `>`.
+ */
 function mapInlineContent(
   content: string,
   table: Readonly<Record<string, string>>,
   asciiPrefix: string,
 ): string {
   let out = '';
-  for (const ch of content) {
+  for (const ch of decodeHtmlEntities(content)) {
     const mapped = table[ch];
     if (mapped === undefined) return `${asciiPrefix}${content}`;
     out += mapped;
@@ -233,6 +262,19 @@ export function flattenInlineMarkup(xml: string): string {
 }
 
 /**
+ * Keeps `Book/Isbn` out of fast-xml-parser's numeric coercion.
+ *
+ * An ISBN-10 can start with a zero (`0309605393`); coerced, it becomes the
+ * number 309605393 and the leading digit is gone before any read site sees it,
+ * so the record ships a wrong ISBN with no error anywhere. The processor's
+ * contract does the work: returning `undefined` leaves the raw text alone,
+ * while returning the value unchanged for every other tag keeps the existing
+ * coercion exactly as it was. (#114)
+ */
+const preserveIsbnText = (tagName: string, tagValue: string): string | undefined =>
+  tagName === 'Isbn' ? undefined : tagValue;
+
+/**
  * Parses NCBI E-utility responses (XML, JSON, text) and checks for NCBI-specific
  * error structures embedded in response bodies.
  */
@@ -264,6 +306,7 @@ export class NcbiResponseHandler {
       processEntities: XML_PROCESS_ENTITIES_OPTIONS,
       htmlEntities: true,
       isArray: (_name, jpath) => NCBI_ARRAY_JPATHS.has(jpath as string),
+      tagValueProcessor: preserveIsbnText,
     } satisfies X2jOptions;
 
     this.xmlParser = new FastXmlParser({ ...flatOptions, parseTagValue: true });

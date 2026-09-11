@@ -12,6 +12,7 @@ import {
   standardizeESummaryDate,
 } from '@/services/ncbi/parsing/esummary-parser.js';
 import type { ESummaryAuthor, ESummaryResult } from '@/services/ncbi/types.js';
+import { BOOK_ESUMMARY_XML, parseESummaryXml } from './_book-fixtures.js';
 
 describe('formatESummaryAuthors', () => {
   it('returns empty string for no authors', () => {
@@ -642,4 +643,75 @@ describe.skipIf(!LIVE)('NCBI API integration: date parsing', () => {
       ).toBeLessThanOrEqual(currentYear + 1);
     }
   }, 15_000);
+});
+
+/* -------------------------------------------------------------------------- */
+/*  Bookshelf records (#114)                                                  */
+/* -------------------------------------------------------------------------- */
+
+describe('Bookshelf records (#114)', () => {
+  const summaries = () => extractBriefSummaries(parseESummaryXml(BOOK_ESUMMARY_XML));
+  const geneReviews = async () => (await summaries()).find((s) => s.pmid === '20301425');
+  const statPearls = async () => (await summaries()).find((s) => s.pmid === '29262038');
+
+  it('builds the display string from the chapter authors, not the series editors', async () => {
+    // ESummary lists the five GeneReviews editors ahead of the chapter's own
+    // authors, so taking the first three names credits the wrong people.
+    expect((await geneReviews())?.authors).toBe('Petrucelli N, Daly MB, Pal T');
+  });
+
+  it('keeps the editors, separately from the authors', async () => {
+    expect((await geneReviews())?.editors).toEqual([
+      'Adam MP',
+      'Bick S',
+      'Mirzaa GM',
+      'Wallace SE',
+      'Amemiya A',
+    ]);
+    expect((await geneReviews())?.authorNames).toEqual(['Petrucelli N', 'Daly MB', 'Pal T']);
+  });
+
+  it('surfaces the book as the venue, which Source and FullJournalName leave empty', async () => {
+    const summary = await geneReviews();
+    expect(summary?.source).toBeUndefined();
+    expect(summary?.bookTitle).toBe('GeneReviews(®)');
+    expect(summary?.publisherName).toBe('University of Washington, Seattle');
+    expect(summary?.docType).toBe('chapter');
+  });
+
+  it('leaves a record with only authors unchanged', async () => {
+    const summary = await statPearls();
+    expect(summary?.authors).toBe('Casaubon JT, Kashyap S, Regan JP');
+    expect(summary?.editors).toBeUndefined();
+    expect(summary?.bookTitle).toBe('StatPearls');
+  });
+
+  it('still parses the title and the date', async () => {
+    const summary = await geneReviews();
+    expect(summary?.title).toBe(
+      'BRCA1- and BRCA2-Associated Hereditary Breast and Ovarian Cancer.',
+    );
+    expect(summary?.pubDate).toBe('1993-01-01');
+  });
+
+  it('adds no book fields to a journal summary', async () => {
+    const result: ESummaryResult = {
+      DocumentSummarySet: {
+        DocumentSummary: [
+          {
+            '@_uid': '12345',
+            Title: 'Test Article',
+            Source: 'Nature',
+            Authors: [{ Name: 'Smith J', AuthType: 'Author' }],
+          },
+        ],
+      },
+    };
+    const [summary] = await extractBriefSummaries(result);
+    expect(summary?.authors).toBe('Smith J');
+    expect(summary?.bookTitle).toBeUndefined();
+    expect(summary?.publisherName).toBeUndefined();
+    expect(summary?.docType).toBeUndefined();
+    expect(summary?.editors).toBeUndefined();
+  });
 });

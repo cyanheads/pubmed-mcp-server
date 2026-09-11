@@ -9,6 +9,15 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { toJSONSchema } from 'zod/v4/core';
 
 import { textBlocks } from '../../../_helpers.js';
+import {
+  ADA_WHOLE_BOOK_XML,
+  articleSetXml,
+  GENEREVIEWS_CHAPTER_XML,
+  JOURNAL_ARTICLE_XML,
+  NAP_WHOLE_BOOK_XML,
+  parseArticleSetXml,
+  STATPEARLS_CHAPTER_XML,
+} from '../../../services/ncbi/parsing/_book-fixtures.js';
 
 const CITATION_STYLES = ['apa', 'mla', 'bibtex', 'ris', 'vancouver'] as const;
 
@@ -292,6 +301,71 @@ describe('formatCitationsTool', () => {
     expect(vancouver).toContain('Nature. 2021;596(7873):583-589.');
   });
 
+  it('carries an electronic article locator into every style end to end (issue #121)', async () => {
+    // PMID 39060015: no Pagination element, pii locator, DOI alongside it.
+    mockEFetch.mockResolvedValue({
+      PubmedArticleSet: {
+        PubmedArticle: [
+          {
+            MedlineCitation: {
+              PMID: { '#text': '39060015' },
+              Article: {
+                ArticleTitle: { '#text': 'Benralizumab for allergic asthma.' },
+                AuthorList: {
+                  Author: [
+                    {
+                      LastName: { '#text': 'Sehmi' },
+                      ForeName: { '#text': 'Roma' },
+                      Initials: { '#text': 'R' },
+                    },
+                  ],
+                },
+                Journal: {
+                  Title: { '#text': 'The European respiratory journal' },
+                  ISOAbbreviation: { '#text': 'Eur Respir J' },
+                  JournalIssue: {
+                    Volume: { '#text': '64' },
+                    Issue: { '#text': '3' },
+                    PubDate: { Year: { '#text': '2024' }, Month: { '#text': 'Sep' } },
+                  },
+                },
+                ELocationID: [
+                  { '#text': '2400512', '@_EIdType': 'pii', '@_ValidYN': 'Y' },
+                  { '#text': '10.1183/13993003.00512-2024', '@_EIdType': 'doi', '@_ValidYN': 'Y' },
+                ],
+                PublicationTypeList: { PublicationType: { '#text': 'Journal Article' } },
+              },
+            },
+          },
+        ],
+      },
+    });
+
+    const ctx = createMockContext({ errors: formatCitationsTool.errors });
+    const input = formatCitationsTool.input.parse({
+      pmids: ['39060015'],
+      format: ['vancouver', 'apa', 'mla', 'bibtex', 'ris'],
+    });
+    const result = await formatCitationsTool.handler(input, ctx);
+    const citations = result.citations[0]?.citations ?? {};
+
+    expect(citations.vancouver).toContain(
+      'Eur Respir J. 2024;64(3). pii: 2400512. doi: 10.1183/13993003.00512-2024',
+    );
+    expect(citations.apa).toContain('*64*(3), Article 2400512.');
+    expect(citations.mla).toContain('art. 2400512');
+    // The tag matters as much as the value: the locator is not pagination, so
+    // `eid` has to carry it while `pages` / `SP` / `EP` stay unwritten. Matching
+    // the bare `{2400512}` would pass on exactly the output this forbids.
+    // Field names are padded to the widest in the entry, so match the tag
+    // rather than one entry's alignment.
+    expect(citations.bibtex).toMatch(/eid\s+= \{2400512\}/);
+    expect(citations.bibtex).not.toContain('pages');
+    expect(citations.ris).toContain('C7  - 2400512');
+    expect(citations.ris).not.toContain('SP  -');
+    expect(citations.ris).not.toContain('EP  -');
+  });
+
   it('reports unavailable PMIDs for partial batches', async () => {
     mockEFetch.mockResolvedValue({
       PubmedArticleSet: {
@@ -440,5 +514,112 @@ describe('formatCitationsTool', () => {
     const text = blocks[0]?.text ?? '';
     expect(text).toContain('```bibtex\n@article{pmid12345}\n```');
     expect(text).toContain('```ris\nTY  - JOUR\n```');
+  });
+});
+
+describe('formatCitationsTool Bookshelf records (issue #114)', () => {
+  beforeEach(() => {
+    mockEFetch.mockReset();
+  });
+
+  /** Stage an EFetch body parsed through the production response handler. */
+  function stageSet(...records: string[]) {
+    mockEFetch.mockResolvedValue({
+      PubmedArticleSet: parseArticleSetXml(articleSetXml(...records)),
+    });
+  }
+
+  const cite = async (pmids: string[]) => {
+    const ctx = createMockContext({ errors: formatCitationsTool.errors });
+    const input = formatCitationsTool.input.parse({ pmids, format: [...CITATION_STYLES] });
+    return { result: await formatCitationsTool.handler(input, ctx), ctx };
+  };
+
+  it('cites a Bookshelf chapter in all five styles', async () => {
+    stageSet(GENEREVIEWS_CHAPTER_XML);
+
+    const { result } = await cite(['20301425']);
+
+    expect(result.totalFormatted).toBe(1);
+    expect(result.unavailablePmids).toBeUndefined();
+    const entry = result.citations[0];
+    expect(entry?.pmid).toBe('20301425');
+    expect(Object.keys(entry?.citations ?? {})).toEqual([...CITATION_STYLES]);
+
+    expect(entry?.citations.apa).toBe(
+      'Petrucelli, N., Daly, M. B., & Pal, T. (1993). ' +
+        'BRCA1- and BRCA2-Associated Hereditary Breast and Ovarian Cancer. ' +
+        'In M. P. Adam, S. Bick, G. M. Mirzaa, S. E. Wallace, & A. Amemiya (Eds.), *GeneReviews®*. ' +
+        'University of Washington, Seattle. https://www.ncbi.nlm.nih.gov/books/NBK1247/',
+    );
+    expect(entry?.citations.mla).toBe(
+      'Petrucelli, Nancie, et al. "BRCA1- and BRCA2-Associated Hereditary Breast and Ovarian Cancer." ' +
+        '*GeneReviews®*, edited by Margaret P Adam, et al., University of Washington, Seattle, 1993.',
+    );
+    expect(entry?.citations.vancouver).toBe(
+      'Petrucelli N, Daly MB, Pal T. BRCA1- and BRCA2-Associated Hereditary Breast and Ovarian Cancer. ' +
+        'In: Adam MP, Bick S, Mirzaa GM, Wallace SE, Amemiya A, editors. GeneReviews® [Internet]. ' +
+        'Seattle (WA): University of Washington, Seattle; 1993-2026. ' +
+        'Available from: https://www.ncbi.nlm.nih.gov/books/NBK1247/',
+    );
+    expect(entry?.citations.bibtex).toContain('@incollection{pmid20301425,');
+    expect(entry?.citations.bibtex).toContain('booktitle = {GeneReviews®}');
+    expect(entry?.citations.ris).toContain('TY  - CHAP');
+    expect(entry?.citations.ris).toContain('BT  - GeneReviews®');
+    expect(entry?.citations.ris).toContain('A2  - Adam, Margaret P');
+  });
+
+  it('cites a whole Bookshelf book in all five styles', async () => {
+    stageSet(NAP_WHOLE_BOOK_XML);
+
+    const { result } = await cite(['42691195']);
+    const entry = result.citations[0];
+    const collective =
+      'National Academies of Sciences, Engineering, and Medicine; Center for Advancing Science ' +
+      'and Technology; Science and Technology Policy and Law Program Area';
+    const title =
+      'AI Infrastructure to Accelerate AI Convergence and Catalyze U.S. Scientific Innovation: ' +
+      'Proceedings of a Workshop—in Brief';
+
+    expect(entry?.title).toBe(title);
+    expect(entry?.citations.apa).toBe(
+      `${collective}. (2026). *${title}*. National Academies Press (US). https://doi.org/10.17226/29416`,
+    );
+    expect(entry?.citations.mla).toBe(
+      `${collective}. *${title}*, National Academies Press (US), 2026.`,
+    );
+    expect(entry?.citations.vancouver).toBe(
+      `${collective}. ${title}. Washington (DC): National Academies Press (US); 2026. ` +
+        'Available from: https://www.ncbi.nlm.nih.gov/books/NBK624538/',
+    );
+    expect(entry?.citations.bibtex).toContain('@book{pmid42691195,');
+    expect(entry?.citations.bibtex).toContain('isbn      = {9780309605397, 0309605393}');
+    expect(entry?.citations.ris).toContain('TY  - BOOK');
+    expect(entry?.citations.ris).toContain('SN  - 0309605393');
+  });
+
+  it('cites a mixed batch and reports no PMID unavailable', async () => {
+    stageSet(JOURNAL_ARTICLE_XML, STATPEARLS_CHAPTER_XML, ADA_WHOLE_BOOK_XML);
+
+    const { result } = await cite(['42474064', '29262038', '42715368']);
+
+    expect(result.totalFormatted).toBe(3);
+    expect(result.unavailablePmids).toBeUndefined();
+    expect(result.citations.map((c) => c.pmid)).toEqual(['42474064', '29262038', '42715368']);
+    expect(result.citations[0]?.citations.ris).toContain('TY  - JOUR');
+    expect(result.citations[1]?.citations.ris).toContain('TY  - CHAP');
+    expect(result.citations[2]?.citations.ris).toContain('TY  - BOOK');
+  });
+
+  it('states only that PubMed returned no record when nothing resolves', async () => {
+    stageSet();
+
+    const { result, ctx } = await cite(['99999999']);
+
+    expect(result.citations).toEqual([]);
+    expect(result.unavailablePmids).toEqual(['99999999']);
+    const notice = getEnrichment(ctx).notice ?? '';
+    expect(notice).toContain('pubmed_search_articles');
+    expect(notice).not.toMatch(/invalid, unpublished, or withdrawn/i);
   });
 });
