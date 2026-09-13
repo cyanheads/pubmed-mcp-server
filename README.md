@@ -29,9 +29,11 @@
 
 ---
 
-## Tools
+## Overview
 
-11 tools for working with PubMed, PubMed Central, and Europe PMC data:
+An MCP server over NCBI's E-utilities, PubMed Central, and Europe PMC. Search the biomedical literature, fetch metadata and full text, resolve identifiers and partial citations, format references, and ground queries in MeSH vocabulary. Runs as a stdio process, a local Streamable HTTP server, or the public hosted endpoint above.
+
+### Tools
 
 | Tool | Description |
 |:---|:---|
@@ -42,173 +44,139 @@
 | `pubmed_fetch_fulltext` | Fetch full-text articles via a chain: NCBI PMC EFetch → Europe PMC `fullTextXML` → Unpaywall. Accepts PMIDs, PMCIDs, or DOIs. |
 | `pubmed_format_citations` | Generate formatted citations in APA 7th, MLA 9th, BibTeX, RIS, or Vancouver (ICMJE/NLM) |
 | `pubmed_find_related` | Find similar articles, citing articles, or references for a given PMID |
-| `pubmed_spell_check` | Spell-check biomedical queries using NCBI's ESpell service |
-| `pubmed_lookup_mesh` | Search and explore MeSH vocabulary — tree numbers, scope notes, entry terms |
+| `pubmed_spell_check` | Spell-check a biomedical query via NCBI ESpell — returns the corrected query and whether a suggestion was found |
+| `pubmed_lookup_mesh` | Search MeSH by heading — tree numbers, scope notes, entry terms — for building controlled-vocabulary queries |
 | `pubmed_lookup_citation` | Resolve partial bibliographic references to PubMed IDs via ECitMatch |
 | `pubmed_convert_ids` | Convert between DOI, PMID, and PMCID using the PMC ID Converter API |
 
-### `pubmed_search_articles`
+### Resources
 
-Search PubMed with full NCBI query syntax and filters.
+| Resource | Description |
+|:---|:---|
+| `pubmed://database/info` | PubMed database metadata via EInfo (field list, record count, last update) |
 
-- Free-text queries with PubMed's full boolean and field-tag syntax
-- Field-specific filters: author, journal, MeSH terms, language, species
-- Common filters: has abstract, free full text
-- Date range filtering by publication, modification, or Entrez date
-- Publication type filtering (Review, Clinical Trial, Meta-Analysis, etc.)
-- Sort by relevance, publication date, author, or journal
-- Pagination via offset for paging through large result sets
-- Optional brief summaries for top N results via ESummary
-- NCBI Bookshelf results carry their own venue — `bookTitle`, `publisherName`, and `docType` (`chapter`, `book`, or `citation`) — because PubMed leaves `source` empty on them; the book's editors are reported in `editors`, apart from the chapter's own authors
-- Returns the original query plus the fully applied PubMed query and normalized filter metadata
+### Prompts
 
----
+| Prompt | Description |
+|:---|:---|
+| `research_plan` | Generate a structured 4-phase biomedical research plan outline |
 
-### `pubmed_fetch_articles`
+## Capability reference
 
-Fetch full article metadata by PubMed IDs.
+### `pubmed_search_articles` <sub>tool</sub>
 
-- Batch fetch up to 200 articles at once (auto-switches to POST for batches >= 100)
-- Returns structured data: title, abstract, authors with deduplicated affiliations, journal info, DOI
-- Direct links to PubMed and PubMed Central (when available)
-- Optional MeSH terms, grant information, and publication types
-- Handles PubMed's inconsistent XML (structured abstracts, missing fields, varying date formats)
-- NCBI Bookshelf chapters and whole books are returned as first-class records, not reported unavailable: `recordType` (`journal-article`, `book-chapter`, `book`) tells them apart, and a `book` object carries the book title, publisher, place, dates, medium, edition, series, ISBNs, book DOI, editors, and Bookshelf accession. `journalInfo` is absent on those records — a book title is never reported as a journal
-- Journals that assign article numbers instead of page ranges often carry no pagination at all; the number is reported as `journalInfo.elocationId` with its `journalInfo.elocationIdType` (`pii`), never merged into `journalInfo.pages` and never confused with the DOI
-- Opt-in whole-response ceiling: `maxResponseCharacters` keeps complete article records in response order until the next one would cross it, then defers the rest whole and lists their PMIDs in `deferred.ids`. Re-call with those PMIDs to resume exactly where the response stopped — no article is split, skipped, or duplicated. Each article is measured as the JSON record it is returned as, so a ceiling under the first article returns zero articles, the full deferred list, and the size to clear
+- Full PubMed boolean and field-tag syntax, plus structured filters: author, journal, MeSH terms, language, species, publication type, has-abstract, free-full-text
+- Date ranges by publication, modification, or Entrez date; sort by relevance, date, author, or journal; offset pagination
+- Optional brief summaries for the top N results via ESummary
+- NCBI Bookshelf hits carry `bookTitle`, `publisherName`, `docType`, and `editors` in place of the empty `source`
+- Echoes the original query, the fully applied PubMed query, and normalized filter metadata
 
 ---
 
-### `pubmed_fetch_fulltext`
+### `pubmed_fetch_articles` <sub>tool</sub>
 
-Fetch full-text articles via a three-stage chain: NCBI PMC EFetch → Europe PMC `fullTextXML` → Unpaywall.
-
-- Accepts exactly one of `pmcids` (direct PMC IDs), `pmids` (PubMed IDs, auto-resolved), or `dois` (auto-resolved to PMC via the ID Converter; preprints and EPMC-only OA fall through to Europe PMC / Unpaywall). One identifier per element in every branch — a DOI carrying a comma or whitespace is rejected at the schema
-- NCBI PMC and Europe PMC both return structured JATS; output records origin via `viaSource: "pmc" | "europepmc" | "unpaywall"`
-- Europe PMC layer (enabled by default; disable with `EUROPEPMC_ENABLED=false`) recovers PMC-counterpart records that NCBI PMC EFetch missed, and resolves DOI input to PMC counterparts when one exists. EPMC's `fullTextXML` is PMC-keyed, so preprints (PPR), patents (PAT), and Agricola (AGR) are reachable via `pubmed_europepmc_search` for metadata but have no full text via this chain.
-- Unpaywall layer (enabled by setting `UNPAYWALL_EMAIL`) resolves DOIs to legal OA copies; extracts HTML landing pages to Markdown via Defuddle or PDFs to text via unpdf
-- Discriminated output contract — `source: "pmc"` (structured sections, regardless of whether it came from PMC or EPMC) or `source: "unpaywall"` (best-effort body + `contentFormat`: `html-markdown` or `pdf-text`)
-- Structured unavailable reasons (`not-found`, `no-pmc-fallback-disabled`, `no-epmc-fulltext`, `no-body`, `no-doi`, `doi-lookup-failed`, `no-oa`, `fetch-failed`, `parse-failed`, `service-error`) so callers can retry or explain to users without parsing text. `no-doi` and `doi-lookup-failed` are the settled and unsettled halves of the same gap: the first means the DOI lookup ran and the record has none, the second that the lookup itself errored, so a DOI may well exist and the request is worth retrying
-- An `unavailable` entry also carries `unqueriedTiers` when the chain skipped a tier this deployment has not configured and that tier could have served the id — the search was incomplete, and a deployment with those tiers configured may still resolve it
-- Each `unavailable` entry carries `idType` (`pmid` / `pmcid` / `doi`) and `triedTiers` — per-tier outcomes (`not-attempted`, `miss`, `no-fulltext`, `service-error`, …) in execution order, so callers can see which stage failed and why
-- Section filtering by title (case-insensitive substring match at any nesting depth, e.g. `["methods", "results"]`) and configurable max sections apply to PMC output. A section that matches directly is returned whole; one kept only because a nested subsection matched keeps its heading as a breadcrumb with its own text cleared
-- Tables are returned as structured cells (`tables[]` on each PMC article — rows, caption, label, footnotes, and the enclosing section, named for back-matter and appendix tables as well as body ones), covering `<floats-group>`, `<back>` and appendix deposits alongside body tables. `colspan` and `rowspan` are expanded to one entry per grid column, so a value stays under the header it belongs to on both output surfaces; a cell spanning several columns or rows repeats across the cells it covers. A deposit with no readable markup comes back labelled with an `unextractableReason` rather than silently missing. Turn them off with `includeTables: false`
-- Figures and supplementary material come back as structured entries (`assets[]` on each PMC article — `assetType`, label, caption, the enclosing section, and the `<graphic>`/`<media>` pointer exactly as deposited, which is a name inside the PMC deposit rather than a fetchable URL), covering `<floats-group>`, `<back>` and appendix placements alongside body ones. Each one lifted out of the body leaves a `[Figure: <label>]` / `[Supplementary: <label>]` marker at its position, so reading order survives the lift. Turn them off with `includeAssets: false`, which removes the markers with them. Prose-shaped blocks — lists, definition lists, block quotes, boxed text, preformatted blocks, displayed formulae — render into the section text at their document position instead, and no block is ever concatenated into a neighbouring sentence
-- Character budgets keep context size predictable: `maxCharacters` caps body text per article (PMC sections and subsections, inline blocks included, plus table content — cell, caption, label and footnote text, not the Markdown grid rendered around it — and asset label, caption and pointer text; or the Unpaywall body), `maxCharactersPerSection` caps a single PMC section, and `overflowMode` picks between `truncate` (fill sections in document order) and `outline` (split the budget evenly so every heading survives with an excerpt). Sections are served first, then tables, then assets, each spending what is left in document order until one does not fit; that entry and the rest are dropped whole rather than cut mid-row or returned with a shortened caption, and named in `truncation.articles[].omittedTableNames` / `omittedAssetNames`. Budgets run after the semantic filters, and a `truncation` object reports per-article and per-section character counts whenever anything was shortened
-- `maxResponseCharacters` bounds the whole response instead of each body: every field of a returned record counts (abstract, references, metadata, body), one ledger across PMC-, Europe PMC-, and Unpaywall-served articles. Articles past the ceiling are deferred whole, with their ids — in the branch they were requested under — in `deferred.ids` for a follow-up call
-- Up to 10 articles per request
+- Up to 200 PMIDs per call (POST for batches of 100 or more)
+- Title, abstract, authors with deduplicated affiliations, journal info, DOI, PubMed/PMC links; optional MeSH terms, grants, and publication types
+- Tolerant of PubMed's inconsistent XML — structured abstracts, missing fields, varying date formats
+- Bookshelf chapters and books are first-class: `recordType` (`journal-article` / `book-chapter` / `book`) plus a `book` object (title, publisher, editors, ISBNs, Bookshelf accession); `journalInfo` is absent on them
+- Article-number journals report `journalInfo.elocationId` + `elocationIdType` rather than a page range
+- Opt-in `maxResponseCharacters` keeps whole records in order until the ceiling, then defers the rest to `deferred.ids` for a follow-up call
 
 ---
 
-### `pubmed_europepmc_search`
+### `pubmed_fetch_fulltext` <sub>tool</sub>
 
-Search Europe PMC (EBI/EMBL-EBI), a broader open-access biomedical corpus than PubMed alone.
-
-- Surfaces records PubMed search can't reach — preprints (`source: PPR`), patents (`source: PAT`), Agricola (`source: AGR`), plus everything in PubMed (`MED`) and PMC (`PMC`). On recent queries this can mean dozens of relevant hits with zero PubMed overlap.
-- Default sources `["MED", "PMC", "PPR"]`; pass `sources` to include `PAT` / `AGR`
-- Cursor-based pagination via `cursorMark` (unlike `pubmed_search_articles`, which uses offset) — `*` for the first page, return `nextCursorMark` for the next
-- Output discriminator on `source` plus optional `pmid` / `pmcId` / `doi` cross-walking
-- `abstractSnippet` is capped at 400 characters to keep a page bounded; `abstractTruncated` says whether it was cut, and `pubmed_europepmc_fetch` returns the whole abstract for the records worth reading in full
-- Disabled when `EUROPEPMC_ENABLED=false`; tool is not registered in that case
+- Exactly one of `pmcids`, `pmids`, or `dois` (one id per element), up to 10 per request
+- Three-tier chain: NCBI PMC EFetch → Europe PMC `fullTextXML` (`EUROPEPMC_ENABLED`, default on) → Unpaywall (needs `UNPAYWALL_EMAIL`); `viaSource` names which tier served each article
+- Preprints, patents, and Agricola records have metadata via `pubmed_europepmc_search` but no full text through this chain — Europe PMC's `fullTextXML` is PMC-keyed
+- `source: "pmc"` returns structured sections plus `tables[]` (cells, caption, label, footnotes) and `assets[]` (figures and supplementary material, with `[Figure: <label>]` markers left in the body); `source: "unpaywall"` returns a best-effort body with `contentFormat` (`html-markdown` / `pdf-text`)
+- Unavailable entries carry a typed `reason` (`not-found`, `no-doi`, `doi-lookup-failed`, `no-oa`, `service-error`, …), `idType`, `triedTiers` (per-tier outcome in execution order), and `unqueriedTiers` when an unconfigured tier could have served the id
+- Filters and budgets: `sections` (case-insensitive title match), `maxSections`, `includeTables`, `includeAssets`, `maxCharacters`, `maxCharactersPerSection`, `overflowMode` (`truncate` / `outline`), and `maxResponseCharacters`, which defers whole articles past the ceiling to `deferred.ids`; a `truncation` object reports what was shortened or omitted
 
 ---
 
-### `pubmed_europepmc_fetch`
+### `pubmed_europepmc_search` <sub>tool</sub>
 
-Fetch complete Europe PMC records by `source` + `epmcId`, the detail counterpart to `pubmed_europepmc_search`.
-
-- Returns the full, untruncated abstract as display-ready plain text — markup stripped, HTML entities decoded
-- Addressed by the `source` and `epmcId` of a search hit, the only identifier preprint (`PPR`), patent (`PAT`), and Agricola (`AGR`) records reliably carry — `pubmed_fetch_articles` needs a PMID and `pubmed_fetch_fulltext` needs a PMCID, PMID, or DOI
-- Up to 25 records per call, resolved in a single Europe PMC request
-- Pairs unresolved requests back to the caller in `notFound` instead of failing the batch
-- Disabled when `EUROPEPMC_ENABLED=false`; tool is not registered in that case
+- Reaches records PubMed can't: preprints (`PPR`), patents (`PAT`), Agricola (`AGR`), alongside `MED` and `PMC`; default `sources` is `["MED", "PMC", "PPR"]`
+- Cursor pagination via `cursorMark` — `*` for the first page, then `nextCursorMark`
+- Hits carry `source` plus `pmid` / `pmcId` / `doi` when known; `abstractSnippet` is capped at 400 characters, with `abstractTruncated` flagging the cut
+- Not registered when `EUROPEPMC_ENABLED=false`
 
 ---
 
-### `pubmed_format_citations`
+### `pubmed_europepmc_fetch` <sub>tool</sub>
 
-Generate formatted citations for articles.
-
-- Five citation styles: APA 7th, MLA 9th, BibTeX, RIS, Vancouver (ICMJE/NLM)
-- NCBI Bookshelf chapters and whole books cite in their own form in every style — Vancouver's `In: … editors` contribution pattern, APA's chapter-in-edited-book, MLA's `edited by`, BibTeX `@incollection` / `@book`, RIS `CHAP` / `BOOK` — carrying the book title, editors, publisher, place, ISBNs and Bookshelf URL
-- An article with no page range cites by its electronic article locator in each style's own convention — Vancouver's trailing `pii:` note, APA's `Article <n>`, MLA's `art. <n>`, biblatex `eid`, RIS `C7` — rather than dropping it or writing it into a page field
-- Request multiple styles per article in a single call
-- Hand-rolled formatters — zero external dependencies, fully Workers-compatible
-- Up to 50 articles per request
-- Reports formatted counts and unavailable PMIDs for partial-result handling
+- Full records with the untruncated plain-text abstract, addressed by `source` + `epmcId` — the only identifier preprint, patent, and Agricola records reliably carry
+- Up to 25 per call in one Europe PMC request; unresolved ids come back in `notFound` rather than failing the batch
+- Not registered when `EUROPEPMC_ENABLED=false`
 
 ---
 
-### `pubmed_find_related`
+### `pubmed_format_citations` <sub>tool</sub>
 
-Find articles related to a source article via ELink.
-
-- Three relationship types: `similar` (content similarity), `cited_by`, `references`
-- Results enriched with title, authors, publication date, and source via ESummary — or, for an NCBI Bookshelf record, its book title, publisher, and doc type in place of the empty source
-- Results returned in NCBI's relevance order
-- Falls back to Europe PMC, then OpenAlex, when NCBI cannot answer; the response names which provider served it. A request no provider can answer fails with a typed `all_providers_failed` error instead of an empty result
+- APA 7th, MLA 9th, BibTeX, RIS, Vancouver (ICMJE/NLM); several styles per article in one call, up to 50 articles
+- Bookshelf chapters and books cite in each style's edited-book form; articles without a page range cite by electronic locator in each style's convention
+- Hand-rolled formatters — zero dependencies, Workers-compatible
+- Reports formatted counts and unavailable PMIDs
 
 ---
 
-### `pubmed_spell_check`
+### `pubmed_find_related` <sub>tool</sub>
 
-Spell-check a biomedical query using NCBI's ESpell.
-
-- Returns the original query, corrected query, and whether a suggestion was found
-- Useful for query refinement before searching
+- `similar`, `cited_by`, or `references` for a PMID, in NCBI relevance order, enriched with title, authors, date, and source (or Bookshelf book title and publisher)
+- Falls back to Europe PMC, then OpenAlex, when NCBI can't answer; the response names the provider. Fails with a typed `all_providers_failed` error rather than an empty result
 
 ---
 
-### `pubmed_lookup_mesh`
+### `pubmed_spell_check` <sub>tool</sub>
 
-Search and explore the MeSH (Medical Subject Headings) vocabulary.
-
-- Search MeSH terms by name with exact-heading matching
-- Detailed records with tree numbers, scope notes, and entry terms by default
-- Useful for building precise PubMed queries with controlled vocabulary
+- Runs a query through NCBI ESpell and returns `original`, `corrected`, and `hasSuggestion`
+- A blank or whitespace-only query is rejected rather than sent upstream
 
 ---
 
-### `pubmed_lookup_citation`
+### `pubmed_lookup_mesh` <sub>tool</sub>
 
-Resolve partial bibliographic references to PubMed IDs via NCBI ECitMatch.
-
-- Match citations by journal, year, volume, first page, and/or author name
-- More fields = better match accuracy; at least one field required
-- Bibliographic fields cannot contain a pipe (`|`) or a line break — ECitMatch's wire format is pipe-delimited, so those characters are rejected at the schema; the free-form `key` label is exempt
-- Batch up to 25 citations per request
-- Deterministic matching — more reliable than free-text search for known references
-- Returns explicit `matched`, `not_found`, and `ambiguous` statuses with recovery detail
+- Looks up MeSH descriptors by name or free-text term, pinning the exact-heading match to the top of the first page
+- Records carry `meshId` (DescriptorUI), `entrezUid`, and, with `includeDetails` (default on), tree numbers, scope notes, and entry terms
+- `maxResults` up to 50 with offset pagination via `nextOffset`; `totalCount` reports the upstream match count
 
 ---
 
-### `pubmed_convert_ids`
+### `pubmed_lookup_citation` <sub>tool</sub>
 
-Convert between article identifiers (DOI, PMID, PMCID) using the PMC ID Converter API.
+- Match on journal, year, volume, first page, and/or author — at least one field, more fields for better precision; up to 25 per call
+- Pipes and line breaks are rejected at the schema (ECitMatch's wire format is pipe-delimited); the free-form `key` label is exempt
+- Explicit `matched`, `not_found`, and `ambiguous` statuses with recovery detail
 
-- Batch up to 50 IDs per request
-- Accepts DOIs, PMIDs, or PMCIDs (all IDs must be the same type)
-- One identifier per array element, checked against `idType` before the request — a packed value like `"23193287,37952131"` is rejected rather than expanded into extra records, since a comma is the converter's list delimiter in any encoding
-- Only resolves articles indexed in PubMed Central
-- Per-ID success/error reporting — partial batches return resolved mappings alongside structured errors for unresolvable IDs, not a batch-level failure
+---
 
-## Resource and prompt
+### `pubmed_convert_ids` <sub>tool</sub>
 
-| Type | Name | Description |
-|:---|:---|:---|
-| Resource | `pubmed://database/info` | PubMed database metadata via EInfo (field list, record count, last update) |
-| Prompt | `research_plan` | Generate a structured 4-phase biomedical research plan outline |
+- Up to 50 DOIs, PMIDs, or PMCIDs per call, all one type; only PMC-indexed articles resolve
+- One id per element — a packed `"23193287,37952131"` is rejected rather than expanded
+- Per-id success/error rows; a partial batch never fails as a whole
+
+---
+
+### `pubmed://database/info` <sub>resource</sub>
+
+- Live EInfo call for the `pubmed` database, returned as `application/json`
+- `dbName`, `description`, `count`, `lastUpdate`, and `fields[]` — each field's short `name` (the tag usable in `pubmed_search_articles` queries), `fullName`, and `description`
+- No parameters
+
+---
+
+### `research_plan` <sub>prompt</sub>
+
+- Arguments: `title`, `goal`, `keywords` (comma-separated) required; `organism` and `includeAgentPrompts` (`"true"` / `"false"`) optional
+- Returns two messages: an assistant framing message (biomedical research planning assistant, grounds recommendations in the PubMed tools when available) and a user message carrying the plan
+- The plan walks four phases — Conception & Planning, Data Collection & Processing, Analysis & Interpretation, Dissemination — with sub-steps under each
+- `includeAgentPrompts: "true"` adds an agent-guidance block under each sub-step, several of which point at `pubmed_search_articles` and `pubmed_lookup_mesh`
 
 ## Features
 
-Built on [`@cyanheads/mcp-ts-core`](https://github.com/cyanheads/mcp-ts-core):
-
-- Declarative tool definitions — single file per tool, framework handles registration and validation
-- Unified error handling across all tools
-- Pluggable auth (`none`, `jwt`, `oauth`)
-- Swappable storage backends: `in-memory`, `filesystem`, `Supabase`, `Cloudflare KV/R2/D1`
-- Structured logging with optional OpenTelemetry tracing
-- Runs locally (stdio/HTTP) or on Cloudflare Workers from the same codebase
+Built on [`@cyanheads/mcp-ts-core`](https://github.com/cyanheads/mcp-ts-core): stdio and Streamable HTTP transports (Cloudflare Workers from the same codebase), pluggable auth (`none` / `jwt` / `oauth`), swappable storage (`in-memory`, `filesystem`, `Supabase`, `Cloudflare KV/R2/D1`), structured logging with optional OpenTelemetry tracing.
 
 PubMed-specific:
 
@@ -403,7 +371,7 @@ See [`CLAUDE.md`](./CLAUDE.md) for development guidelines and architectural rule
 
 ## Contributing
 
-Issues and pull requests are welcome. Run checks and tests before submitting:
+Issues are welcome. Run checks and tests before submitting:
 
 ```sh
 bun run devcheck
