@@ -71,6 +71,32 @@ describe('getServerConfig', () => {
     expect(config.europepmcEmail).toBeUndefined();
   });
 
+  it('reads set-but-empty optional env vars as unset', async () => {
+    vi.stubEnv('NCBI_API_KEY', '');
+    vi.stubEnv('NCBI_ADMIN_EMAIL', '');
+    vi.stubEnv('UNPAYWALL_EMAIL', '');
+    vi.stubEnv('EUROPEPMC_EMAIL', '');
+
+    const getServerConfig = await loadModule();
+    const config = getServerConfig();
+
+    expect(config.apiKey).toBeUndefined();
+    expect(config.adminEmail).toBeUndefined();
+    expect(config.unpaywallEmail).toBeUndefined();
+    expect(config.europepmcEmail).toBeUndefined();
+  });
+
+  it('keeps a value that only contains a placeholder sequence', async () => {
+    const field = 'ncbi_api_key';
+    const value = `key-\${user_config.${field}}-suffix`;
+    vi.stubEnv('NCBI_API_KEY', value);
+
+    const getServerConfig = await loadModule();
+    const config = getServerConfig();
+
+    expect(config.apiKey).toBe(value);
+  });
+
   it('picks up env vars when set', async () => {
     vi.stubEnv('NCBI_API_KEY', 'test-key-123');
     vi.stubEnv('NCBI_TOOL_IDENTIFIER', 'my-tool');
@@ -97,6 +123,16 @@ describe('getServerConfig', () => {
     delete process.env.NCBI_REQUEST_DELAY_MS;
     delete process.env.NCBI_MAX_RETRIES;
     delete process.env.NCBI_TIMEOUT_MS;
+
+    const getServerConfig = await loadModule();
+    const config = getServerConfig();
+
+    expect(config.requestDelayMs).toBe(100);
+  });
+
+  it('uses lower delay when API key is present and the delay is set but empty', async () => {
+    vi.stubEnv('NCBI_API_KEY', 'test-key');
+    vi.stubEnv('NCBI_REQUEST_DELAY_MS', '');
 
     const getServerConfig = await loadModule();
     const config = getServerConfig();
