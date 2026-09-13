@@ -1,22 +1,47 @@
 {
+  "$schema": "https://json.schemastore.org/claude-code-plugin-manifest.json",
   "name": "pubmed-mcp-server",
   "version": "2.10.12",
   "description": "Search PubMed/Europe PMC, fetch articles and full text (PMC/EPMC/Unpaywall), citations, MeSH terms.",
   "author": {
-    "name": "cyanheads"
+    "name": "cyanheads",
+    "email": "casey@caseyjhand.com",
+    "url": "https://github.com/cyanheads"
   },
   "homepage": "https://github.com/cyanheads/pubmed-mcp-server#readme",
   "repository": "https://github.com/cyanheads/pubmed-mcp-server",
   "license": "Apache-2.0",
+  "keywords": ["mcp", "mcp-server", "model-context-protocol", "pubmed", "ncbi", "biomedical"],
+  "userConfig": {
+    "ncbi_api_key": {
+      "type": "string",
+      "title": "NCBI API key",
+      "description": "Optional NCBI API key for higher rate limits (10 req/s vs 3 req/s). Generate one at ncbi.nlm.nih.gov/account/settings.",
+      "sensitive": true,
+      "default": ""
+    },
+    "ncbi_admin_email": {
+      "type": "string",
+      "title": "NCBI admin email",
+      "description": "Optional. Contact email sent with NCBI requests (recommended by NCBI).",
+      "default": ""
+    },
+    "unpaywall_email": {
+      "type": "string",
+      "title": "Unpaywall email",
+      "description": "Optional. Contact email for Unpaywall. When set, pubmed_fetch_fulltext falls back to Unpaywall open-access copies for DOIs not in PMC.",
+      "default": ""
+    }
+  },
   "mcpServers": {
     "pubmed-mcp-server": {
       "command": "npx",
       "args": ["-y", "@cyanheads/pubmed-mcp-server"],
       "env": {
         "MCP_TRANSPORT_TYPE": "stdio",
-        "NCBI_API_KEY": "",
-        "NCBI_ADMIN_EMAIL": "",
-        "UNPAYWALL_EMAIL": ""
+        "NCBI_API_KEY": "${user_config.ncbi_api_key}",
+        "NCBI_ADMIN_EMAIL": "${user_config.ncbi_admin_email}",
+        "UNPAYWALL_EMAIL": "${user_config.unpaywall_email}"
       }
     }
   }

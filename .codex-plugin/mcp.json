@@ -3,10 +3,8 @@
     "command": "npx",
     "args": ["-y", "@cyanheads/pubmed-mcp-server"],
     "env": {
-      "MCP_TRANSPORT_TYPE": "stdio",
-      "NCBI_API_KEY": "",
-      "NCBI_ADMIN_EMAIL": "",
-      "UNPAYWALL_EMAIL": ""
-    }
+      "MCP_TRANSPORT_TYPE": "stdio"
+    },
+    "env_vars": ["NCBI_API_KEY", "NCBI_ADMIN_EMAIL", "UNPAYWALL_EMAIL"]
   }
 }
