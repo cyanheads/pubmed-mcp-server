@@ -5,7 +5,12 @@
  * @module src/services/ncbi/response-handler
  */
 
-import { notFound, serializationError, serviceUnavailable } from '@cyanheads/mcp-ts-core/errors';
+import {
+  McpError,
+  notFound,
+  serializationError,
+  serviceUnavailable,
+} from '@cyanheads/mcp-ts-core/errors';
 import { logger, requestContextService } from '@cyanheads/mcp-ts-core/utils';
 /**
  * fast-xml-parser 5.8.0 marks the in-tree `XMLValidator` as `@deprecated` in
@@ -108,9 +113,51 @@ const ERROR_PATHS = [
   'eLinkResult.ERROR',
   'eSearchResult.ERROR',
   'eSummaryResult.ERROR',
+  'eFetchResult.ERROR',
   'PubmedArticleSet.ErrorList.CannotRetrievePMID',
   'ERROR',
 ];
+
+/**
+ * NCBI `<ERROR>` messages describing a backend failure rather than the request.
+ * EFetch sends the viewer-timeout envelope under HTTP 200 and HTTP 400 alike, so
+ * the status cannot tell it from a malformed request; the message can. (#153)
+ */
+const NCBI_TRANSIENT_ERROR_PATTERNS: RegExp[] = [/External viewer error/i, /Status:\s*Timeout/i];
+
+/** Captures the text of each uppercase `<ERROR>` element in a raw response body. */
+const ERROR_TEXT_REGEX = /<ERROR(?:\s[^>]*)?>([^<]*)<\/ERROR>/g;
+
+/**
+ * Reclassifies an HTTP error from a eutils request whose captured body is an NCBI
+ * `<ERROR>` envelope reporting a backend failure. The status-derived code reads such a
+ * response as caller error (400 → InvalidParams), which the retry gate never retries.
+ * Any other error — including a genuine invalid-parameter 400 — is returned unchanged.
+ * Matches the body text rather than parsing it, since the framework captures only a
+ * bounded prefix. (#153)
+ */
+export function reclassifyNcbiHttpError(error: unknown, endpoint: string): unknown {
+  if (!(error instanceof McpError) || typeof error.data?.body !== 'string') return error;
+
+  const ncbiErrors = [...error.data.body.matchAll(ERROR_TEXT_REGEX)].map((match) =>
+    decodeHtmlEntities(match[1] ?? '').trim(),
+  );
+  if (!ncbiErrors.some((msg) => NCBI_TRANSIENT_ERROR_PATTERNS.some((p) => p.test(msg)))) {
+    return error;
+  }
+
+  return serviceUnavailable(
+    `NCBI API Error: ${ncbiErrors.join('; ')}`,
+    {
+      reason: 'ncbi_unreachable',
+      endpoint,
+      status: error.data.status,
+      ncbiErrors,
+      ...recoveryFor('ncbi_unreachable'),
+    },
+    { cause: error },
+  );
+}
 
 /**
  * NCBI error messages indicating the requested record doesn't exist (permanent

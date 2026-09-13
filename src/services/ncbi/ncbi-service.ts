@@ -20,7 +20,7 @@ import { recoveryFor } from '@/services/error-contracts.js';
 import { isTransient } from '@/services/retry-policy.js';
 import { NcbiApiClient } from './api-client.js';
 import { NcbiRequestQueue } from './request-queue.js';
-import { NcbiResponseHandler } from './response-handler.js';
+import { NcbiResponseHandler, reclassifyNcbiHttpError } from './response-handler.js';
 import {
   type ECitMatchCitation,
   type ECitMatchResult,
@@ -493,6 +493,7 @@ export class NcbiService {
         // and `queue_full` are stamped at their own throw sites.
         const reason =
           error.code === JsonRpcErrorCode.ServiceUnavailable ? 'ncbi_unreachable' : undefined;
+        const ncbiErrors = error.data?.ncbiErrors;
         throw new McpError(
           error.code,
           `${msg} (failed after ${attempts} attempts)`,
@@ -500,6 +501,7 @@ export class NcbiService {
             ...(reason && { reason, ...recoveryFor(reason) }),
             endpoint: label,
             attempts,
+            ...(ncbiErrors !== undefined && { ncbiErrors }),
           },
           { cause: error },
         );
@@ -533,10 +535,11 @@ export class NcbiService {
           () =>
             this.withRetry(
               async () => {
-                const text = await this.apiClient.makeRequest(endpoint, params, {
-                  ...options,
-                  signal,
-                });
+                const text = await this.apiClient
+                  .makeRequest(endpoint, params, { ...options, signal })
+                  .catch((error: unknown) => {
+                    throw reclassifyNcbiHttpError(error, endpoint);
+                  });
                 return this.responseHandler.parseAndHandleResponse<T>(text, endpoint, options);
               },
               endpoint,
