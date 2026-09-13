@@ -31,7 +31,7 @@
 
 ## Overview
 
-An MCP server over NCBI's E-utilities, PubMed Central, and Europe PMC. Search the biomedical literature, fetch metadata and full text, resolve identifiers and partial citations, format references, and ground queries in MeSH vocabulary. Runs as a stdio process, a local Streamable HTTP server, or the public hosted endpoint above.
+The biomedical literature via NCBI's E-utilities, PubMed Central, and Europe PMC. Search it, fetch metadata and full text, resolve identifiers and partial citations, format references, and ground queries in MeSH vocabulary. Runs as a stdio process, a local Streamable HTTP server, or the public hosted endpoint above.
 
 ### Tools
 
@@ -271,7 +271,7 @@ MCP_TRANSPORT_TYPE=http MCP_HTTP_PORT=3010 bun run start:http
 
 ### Prerequisites
 
-- [Bun v1.3.2](https://bun.sh/) or higher.
+- [Bun v1.4.0](https://bun.sh/) or higher.
 - Optional: [NCBI API key](https://www.ncbi.nlm.nih.gov/account/settings/) for higher rate limits (10 req/s vs 3 req/s).
 
 ### Installation
@@ -296,7 +296,7 @@ bun install
 
 ## Configuration
 
-All configuration is validated at startup via Zod schemas in `src/config/server-config.ts`. Key environment variables:
+Key environment variables:
 
 | Variable | Description | Default |
 |:---|:---|:---|
