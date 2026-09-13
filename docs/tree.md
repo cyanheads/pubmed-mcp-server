@@ -1,6 +1,6 @@
 # pubmed-mcp-server - Directory Structure
 
-Generated on: 2026-09-11 05:18:59
+Generated on: 2026-09-13 18:06:48
 
 ```text
 pubmed-mcp-server/
@@ -14,6 +14,8 @@ pubmed-mcp-server/
 │   │   ├── bug_report.yml
 │   │   ├── config.yml
 │   │   └── feature_request.yml
+│   ├── CODE_OF_CONDUCT.md
+│   ├── CONTRIBUTING.md
 │   ├── FUNDING.yml
 │   └── SECURITY.md
 ├── .vscode/
@@ -35,32 +37,7 @@ pubmed-mcp-server/
 ├── docs/
 │   ├── design.md
 │   └── mcpmed-pr-draft.md
-├── schemas/
-│   └── ncbi-dtd/
-│       ├── eInfo_020511.dtd
-│       ├── eLink_020511.dtd
-│       ├── ePost_020511.dtd
-│       ├── eSearch_020511.dtd
-│       ├── eSpell.dtd
-│       ├── eSummary_041029.dtd
-│       └── pubmed_250101.dtd
-├── scripts/
-│   ├── build-changelog.ts
-│   ├── build.ts
-│   ├── check-dependency-specifiers.ts
-│   ├── check-docs-sync.ts
-│   ├── check-framework-antipatterns.ts
-│   ├── check-skill-versions.ts
-│   ├── check-skills-sync.ts
-│   ├── clean-mcpb.ts
-│   ├── clean.ts
-│   ├── devcheck.ts
-│   ├── lint-mcp.ts
-│   ├── lint-packaging.ts
-│   ├── list-skills.ts
-│   ├── release-github.ts
-│   └── tree.ts
-├── skills/
+├── framework-skills/
 │   ├── add-app-tool/
 │   │   └── SKILL.md
 │   ├── add-prompt/
@@ -147,6 +124,31 @@ pubmed-mcp-server/
 │   │   └── SKILL.md
 │   └── tool-defs-analysis/
 │       └── SKILL.md
+├── schemas/
+│   └── ncbi-dtd/
+│       ├── eInfo_020511.dtd
+│       ├── eLink_020511.dtd
+│       ├── ePost_020511.dtd
+│       ├── eSearch_020511.dtd
+│       ├── eSpell.dtd
+│       ├── eSummary_041029.dtd
+│       └── pubmed_250101.dtd
+├── scripts/
+│   ├── build-changelog.ts
+│   ├── build.ts
+│   ├── check-dependency-specifiers.ts
+│   ├── check-docs-sync.ts
+│   ├── check-framework-antipatterns.ts
+│   ├── check-skill-versions.ts
+│   ├── check-skills-sync.ts
+│   ├── clean-mcpb.ts
+│   ├── clean.ts
+│   ├── devcheck.ts
+│   ├── lint-mcp.ts
+│   ├── lint-packaging.ts
+│   ├── list-skills.ts
+│   ├── release-github.ts
+│   └── tree.ts
 ├── src/
 │   ├── config/
 │   │   └── server-config.ts
@@ -250,6 +252,7 @@ pubmed-mcp-server/
 │   │   │   │   ├── text-helpers.test.ts
 │   │   │   │   └── xml-helpers.test.ts
 │   │   │   ├── api-client.test.ts
+│   │   │   ├── efetch-timeout-retry.test.ts
 │   │   │   ├── ncbi-service.test.ts
 │   │   │   ├── request-queue.test.ts
 │   │   │   ├── response-handler.test.ts

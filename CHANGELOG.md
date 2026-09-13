@@ -2,6 +2,10 @@
 
 All notable changes to this project. Each entry links to its full per-version file in [changelog/](changelog/).
 
+## [2.10.13](changelog/2.10.x/2.10.13.md) — 2026-09-13
+
+NCBI EFetch backend-timeout envelopes now retry instead of failing as invalid input. Adopts mcp-ts-core 0.13.0: the skill tree moves to framework-skills/, and blank/placeholder env values read as unset without a per-field guard.
+
 ## [2.10.12](changelog/2.10.x/2.10.12.md) — 2026-09-11
 
 pubmed_fetch_fulltext no longer emits LaTeX preambles or duplicate renderings for <alternatives>-wrapped formulas, APA citations for authorless records open on the title instead of the year, and internal NCBI response-parsing helpers are hardened against defects that were silently inert until now.
