@@ -2,6 +2,10 @@
 
 All notable changes to this project. Each entry links to its full per-version file in [changelog/](changelog/).
 
+## [2.10.14](changelog/2.10.x/2.10.14.md) — 2026-09-18 · 🛡️ Security
+
+Adopts mcp-ts-core 0.13.4: argument rejections carry a Recovery hint, a mistyped key or JSON-stringified array is repaired before validation, and tool-argument copying is hardened against __proto__ injection.
+
 ## [2.10.13](changelog/2.10.x/2.10.13.md) — 2026-09-13
 
 NCBI EFetch backend-timeout envelopes now retry instead of failing as invalid input. Adopts mcp-ts-core 0.13.0: the skill tree moves to framework-skills/, and blank/placeholder env values read as unset without a per-field guard.

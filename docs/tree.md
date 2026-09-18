@@ -1,6 +1,6 @@
 # pubmed-mcp-server - Directory Structure
 
-Generated on: 2026-09-13 18:06:48
+Generated on: 2026-09-18 11:13:48
 
 ```text
 pubmed-mcp-server/
@@ -14,6 +14,8 @@ pubmed-mcp-server/
 │   │   ├── bug_report.yml
 │   │   ├── config.yml
 │   │   └── feature_request.yml
+│   ├── workflows/
+│   │   └── codeql.yml
 │   ├── CODE_OF_CONDUCT.md
 │   ├── CONTRIBUTING.md
 │   ├── FUNDING.yml
@@ -205,8 +207,7 @@ pubmed-mcp-server/
 │   │   ├── unpaywall/
 │   │   │   ├── types.ts
 │   │   │   └── unpaywall-service.ts
-│   │   ├── error-contracts.ts
-│   │   └── retry-policy.ts
+│   │   └── error-contracts.ts
 │   └── index.ts
 ├── tests/
 │   ├── config/
@@ -262,7 +263,7 @@ pubmed-mcp-server/
 │   │   ├── unpaywall/
 │   │   │   └── unpaywall-service.test.ts
 │   │   ├── error-contracts.test.ts
-│   │   └── retry-policy.test.ts
+│   │   └── retry-gate.test.ts
 │   ├── tools/
 │   ├── _helpers.ts
 │   └── index.test.ts
