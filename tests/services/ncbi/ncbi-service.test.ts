@@ -10,7 +10,10 @@ import { NcbiService } from '@/services/ncbi/ncbi-service.js';
 import type { NcbiRequestQueue } from '@/services/ncbi/request-queue.js';
 import { NcbiResponseHandler } from '@/services/ncbi/response-handler.js';
 
-vi.mock('@cyanheads/mcp-ts-core/utils', () => ({
+vi.mock('@cyanheads/mcp-ts-core/utils', async (importOriginal) => ({
+  // The retry gate's transience verdict stays real — it is behavior under test.
+  defaultIsTransient: (await importOriginal<typeof import('@cyanheads/mcp-ts-core/utils')>())
+    .defaultIsTransient,
   logger: { debug: vi.fn(), info: vi.fn(), notice: vi.fn(), warning: vi.fn(), error: vi.fn() },
   requestContextService: {
     createRequestContext: vi.fn(() => ({ requestId: 'test' })),

@@ -18,12 +18,11 @@
  * @module src/services/openalex/openalex-service
  */
 
-import { internalError, JsonRpcErrorCode, McpError } from '@cyanheads/mcp-ts-core/errors';
-import { logger, requestContextService } from '@cyanheads/mcp-ts-core/utils';
+import { internalError, McpError } from '@cyanheads/mcp-ts-core/errors';
+import { defaultIsTransient, logger, requestContextService } from '@cyanheads/mcp-ts-core/utils';
 
 import { getServerConfig } from '@/config/server-config.js';
 import { recoveryFor } from '@/services/error-contracts.js';
-import { isTransient } from '@/services/retry-policy.js';
 import { OpenAlexApiClient } from './api-client.js';
 import {
   OPENALEX_MAX_FILTER_VALUES,
@@ -32,13 +31,6 @@ import {
   type OpenAlexRelatedResult,
   type OpenAlexWork,
 } from './types.js';
-
-/** Transient codes eligible for retry. */
-const RETRYABLE_CODES = new Set<JsonRpcErrorCode>([
-  JsonRpcErrorCode.ServiceUnavailable,
-  JsonRpcErrorCode.Timeout,
-  JsonRpcErrorCode.RateLimited,
-]);
 
 const MAX_BACKOFF_MS = 30_000;
 
@@ -280,7 +272,7 @@ export class OpenAlexService {
       } catch (error: unknown) {
         if (signal?.aborted) throw signal.reason;
         if (!(error instanceof McpError)) throw error;
-        if (!isTransient(error, RETRYABLE_CODES)) throw error;
+        if (!defaultIsTransient(error)) throw error;
 
         if (attempt < this.maxRetries) {
           const baseDelay = Math.min(1000 * 2 ** attempt, MAX_BACKOFF_MS);

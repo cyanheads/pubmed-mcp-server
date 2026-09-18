@@ -1,13 +1,12 @@
 /**
  * @fileoverview Retry-gate regression for the three hand-rolled service retry loops
- * (NCBI, OpenAlex, Europe PMC). Each decides transience from the error code alone, so
- * each must also honor the framework's in-band `data.retryable === false` opt-out the
- * way `withRetry`'s `defaultIsTransient` does: an upstream 501 classifies as
- * ServiceUnavailable — a transient code — but can never succeed on retry.
+ * (NCBI, OpenAlex, Europe PMC). Each gates on the framework's `defaultIsTransient`, so
+ * each must honor its in-band `data.retryable === false` opt-out: an upstream 501
+ * classifies as ServiceUnavailable — a transient code — but can never succeed on retry.
  *
  * Every case asserts the upstream attempt count, not just the surfaced code: a gate
  * that burned its full budget before failing would still throw the same code.
- * @module tests/services/retry-policy.test
+ * @module tests/services/retry-gate.test
  */
 
 import { JsonRpcErrorCode, McpError } from '@cyanheads/mcp-ts-core/errors';

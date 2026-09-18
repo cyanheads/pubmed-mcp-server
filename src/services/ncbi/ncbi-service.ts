@@ -13,11 +13,10 @@ import {
   timeout,
   validationError,
 } from '@cyanheads/mcp-ts-core/errors';
-import { logger, requestContextService } from '@cyanheads/mcp-ts-core/utils';
+import { defaultIsTransient, logger, requestContextService } from '@cyanheads/mcp-ts-core/utils';
 
 import { getServerConfig } from '@/config/server-config.js';
 import { recoveryFor } from '@/services/error-contracts.js';
-import { isTransient } from '@/services/retry-policy.js';
 import { NcbiApiClient } from './api-client.js';
 import { NcbiRequestQueue } from './request-queue.js';
 import { NcbiResponseHandler, reclassifyNcbiHttpError } from './response-handler.js';
@@ -393,13 +392,6 @@ export class NcbiService {
     return (parsed as IdConvertResponse).records ?? [];
   }
 
-  /** Error codes that are transient and worth retrying with backoff. */
-  private static readonly RETRYABLE_CODES = new Set([
-    JsonRpcErrorCode.ServiceUnavailable,
-    JsonRpcErrorCode.Timeout,
-    JsonRpcErrorCode.RateLimited,
-  ]);
-
   /** Maximum backoff delay per retry (prevents exponential explosion at high retry counts). */
   private static readonly MAX_BACKOFF_MS = 30_000;
 
@@ -466,7 +458,7 @@ export class NcbiService {
           throw error;
         }
 
-        if (!isTransient(error, NcbiService.RETRYABLE_CODES)) {
+        if (!defaultIsTransient(error)) {
           throw error;
         }
 

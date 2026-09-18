@@ -92,8 +92,7 @@ describe('formatCitationsTool', () => {
     const text = textBlocks(result.content as ContentBlock[])
       .map((b) => b.text)
       .join('\n');
-    expect(text).toContain('at format');
-    expect(text).toMatch(/>=\s*1 items/);
+    expect(text).toMatch(/\bformat\b.*>=\s*1 items/);
   });
 
   it('keeps the structured issue path on format for an invalid value (issue #109)', async () => {

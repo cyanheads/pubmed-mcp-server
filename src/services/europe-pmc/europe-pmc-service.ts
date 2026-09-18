@@ -16,12 +16,11 @@
 
 import {
   internalError,
-  JsonRpcErrorCode,
   McpError,
   serializationError,
   validationError,
 } from '@cyanheads/mcp-ts-core/errors';
-import { logger, requestContextService } from '@cyanheads/mcp-ts-core/utils';
+import { defaultIsTransient, logger, requestContextService } from '@cyanheads/mcp-ts-core/utils';
 // biome-ignore lint/suspicious/noDeprecatedImports: staying on in-tree XMLValidator — see ncbi/response-handler.ts
 import { XMLParser, XMLValidator } from 'fast-xml-parser';
 
@@ -30,7 +29,6 @@ import { recoveryFor } from '@/services/error-contracts.js';
 import { ORDERED_XML_PARSER_OPTIONS } from '@/services/ncbi/parsing/ordered-xml-parser-options.js';
 import type { JatsNode, JatsNodeList } from '@/services/ncbi/parsing/pmc-xml-helpers.js';
 import { ensureArray } from '@/services/ncbi/parsing/xml-helpers.js';
-import { isTransient } from '@/services/retry-policy.js';
 import { EuropePmcApiClient } from './api-client.js';
 import { EuropePmcRequestQueue } from './request-queue.js';
 import type {
@@ -45,13 +43,6 @@ import type {
   EuropePmcSearchResult,
   EuropePmcSource,
 } from './types.js';
-
-/** Retryable transient codes — same set NCBI uses. */
-const RETRYABLE_CODES = new Set<JsonRpcErrorCode>([
-  JsonRpcErrorCode.ServiceUnavailable,
-  JsonRpcErrorCode.Timeout,
-  JsonRpcErrorCode.RateLimited,
-]);
 
 const MAX_BACKOFF_MS = 30_000;
 
@@ -460,7 +451,7 @@ export class EuropePmcService {
       } catch (error: unknown) {
         if (signal?.aborted) throw signal.reason;
         if (!(error instanceof McpError)) throw error;
-        if (!isTransient(error, RETRYABLE_CODES)) throw error;
+        if (!defaultIsTransient(error)) throw error;
 
         if (attempt < this.maxRetries) {
           const baseDelay = Math.min(1000 * 2 ** attempt, MAX_BACKOFF_MS);

@@ -41,6 +41,7 @@ const tools = [
 await createApp({
   name: 'pubmed-mcp-server',
   title: 'pubmed-mcp-server',
+  sessionMode: 'stateless',
   tools,
   resources: [databaseInfoResource],
   prompts: [researchPlanPrompt],
