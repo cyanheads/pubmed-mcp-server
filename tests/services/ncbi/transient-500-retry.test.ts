@@ -7,10 +7,10 @@
  */
 
 import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
+import { createPacer } from '@cyanheads/mcp-ts-core/utils';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { NcbiApiClient } from '@/services/ncbi/api-client.js';
 import { NcbiService } from '@/services/ncbi/ncbi-service.js';
-import type { NcbiRequestQueue } from '@/services/ncbi/request-queue.js';
 import { NcbiResponseHandler } from '@/services/ncbi/response-handler.js';
 
 // Keep httpErrorFromResponse real (it is what classifies the status); silence logging only.
@@ -53,9 +53,8 @@ afterEach(() => {
 
 function buildService(maxRetries: number): NcbiService {
   const apiClient = new NcbiApiClient({ toolIdentifier: 'test', timeoutMs: 5000 });
-  const queue = {
-    enqueue: vi.fn(async (task: () => Promise<unknown>) => task()),
-  } as unknown as NcbiRequestQueue;
+  // A real pacer with no limits: every attempt starts at once and no timer is armed.
+  const queue = createPacer({ name: 'ncbi-test' });
   return new NcbiService(apiClient, queue, new NcbiResponseHandler(), maxRetries, 60_000);
 }
 

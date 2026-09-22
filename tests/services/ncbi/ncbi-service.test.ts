@@ -4,33 +4,70 @@
  */
 
 import { JsonRpcErrorCode, McpError } from '@cyanheads/mcp-ts-core/errors';
+import {
+  createPacer,
+  logger,
+  type Pacer,
+  type PacerRunOptions,
+  requestContextService,
+} from '@cyanheads/mcp-ts-core/utils';
 import { afterEach, beforeEach, describe, expect, it, type MockInstance, vi } from 'vitest';
 import type { NcbiApiClient } from '@/services/ncbi/api-client.js';
 import { NcbiService } from '@/services/ncbi/ncbi-service.js';
-import type { NcbiRequestQueue } from '@/services/ncbi/request-queue.js';
+import { createNcbiRequestQueue } from '@/services/ncbi/request-queue.js';
 import { NcbiResponseHandler } from '@/services/ncbi/response-handler.js';
 
-vi.mock('@cyanheads/mcp-ts-core/utils', async (importOriginal) => ({
-  // The retry gate's transience verdict stays real — it is behavior under test.
-  defaultIsTransient: (await importOriginal<typeof import('@cyanheads/mcp-ts-core/utils')>())
-    .defaultIsTransient,
-  logger: { debug: vi.fn(), info: vi.fn(), notice: vi.fn(), warning: vi.fn(), error: vi.fn() },
-  requestContextService: {
-    createRequestContext: vi.fn(() => ({ requestId: 'test' })),
-  },
-}));
+vi.mock('@cyanheads/mcp-ts-core/utils', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('@cyanheads/mcp-ts-core/utils')>();
+  return {
+    // Retry, pacing, and the transience verdict stay real — they are behavior under test.
+    createPacer: actual.createPacer,
+    defaultIsTransient: actual.defaultIsTransient,
+    withRetry: actual.withRetry,
+    logger: { debug: vi.fn(), info: vi.fn(), notice: vi.fn(), warning: vi.fn(), error: vi.fn() },
+    requestContextService: {
+      createRequestContext: vi.fn(() => ({ requestId: 'test' })),
+    },
+  };
+});
 
 /** Tests use a generous deadline so only explicit deadline tests hit it. */
 const TEST_DEADLINE_MS = 60_000;
+
+/**
+ * A real pacer with no limits — it starts every task at once and arms no timer, as
+ * the NCBI queue does when idle — so suites that fire timers synchronously still run.
+ */
+function idleQueue(): Pacer {
+  return createPacer({ name: 'ncbi-test' });
+}
+
+/**
+ * A queue whose worker never frees up: every task waits until its signal aborts, then
+ * rejects with the signal's reason, as a real queue does for a caller still waiting.
+ */
+function saturatedQueue(): Pacer {
+  return {
+    run: vi.fn(
+      (_task: unknown, options?: PacerRunOptions) =>
+        new Promise((_, reject) => {
+          const signal = options?.signal;
+          if (signal?.aborted) {
+            reject(signal.reason);
+            return;
+          }
+          signal?.addEventListener('abort', () => reject(signal.reason), { once: true });
+        }),
+    ),
+  } as unknown as Pacer;
+}
 
 function createMockService(deadlineMs = TEST_DEADLINE_MS) {
   const mockApiClient = {
     makeRequest: vi.fn(),
   } as unknown as NcbiApiClient;
 
-  const mockQueue = {
-    enqueue: vi.fn(async (task: () => Promise<unknown>) => task()),
-  } as unknown as NcbiRequestQueue;
+  const mockQueue = idleQueue();
 
   const mockResponseHandler = {
     parseAndHandleResponse: vi.fn(),
@@ -282,9 +319,7 @@ describe('NcbiService', () => {
       const mockApiClient = {
         makeRequest: vi.fn(),
       } as unknown as NcbiApiClient;
-      const mockQueue = {
-        enqueue: vi.fn(async (task: () => Promise<unknown>) => task()),
-      } as unknown as NcbiRequestQueue;
+      const mockQueue = idleQueue();
       const service = new NcbiService(
         mockApiClient,
         mockQueue,
@@ -663,9 +698,7 @@ describe('NcbiService.idConvert', () => {
       makeExternalRequest: vi.fn(),
     } as unknown as NcbiApiClient;
 
-    const mockQueue = {
-      enqueue: vi.fn(async (task: () => Promise<unknown>) => task()),
-    } as unknown as NcbiRequestQueue;
+    const mockQueue = idleQueue();
 
     const service = new NcbiService(
       mockApiClient,
@@ -889,9 +922,7 @@ describe('NcbiService retry behavior', () => {
       makeRequest: vi.fn(),
     } as unknown as NcbiApiClient;
 
-    const mockQueue = {
-      enqueue: vi.fn(async (task: () => Promise<unknown>) => task()),
-    } as unknown as NcbiRequestQueue;
+    const mockQueue = idleQueue();
 
     const mockResponseHandler = {
       parseAndHandleResponse: vi.fn(),
@@ -1249,9 +1280,7 @@ describe('NcbiService signal wiring during backoff sleep', () => {
       makeExternalRequest: vi.fn(),
     } as unknown as NcbiApiClient;
 
-    const mockQueue = {
-      enqueue: vi.fn(async (task: () => Promise<unknown>) => task()),
-    } as unknown as NcbiRequestQueue;
+    const mockQueue = idleQueue();
 
     const mockResponseHandler = {
       parseAndHandleResponse: vi.fn(),
@@ -1332,18 +1361,7 @@ describe('NcbiService signal wiring during backoff sleep', () => {
     const mockApiClient = {
       makeRequest: vi.fn(),
     } as unknown as NcbiApiClient;
-    const mockQueue = {
-      enqueue: vi.fn(
-        (_task: () => unknown, _ep: string, _params: unknown, signal?: AbortSignal) =>
-          new Promise((_, reject) => {
-            if (signal?.aborted) {
-              reject(signal.reason);
-              return;
-            }
-            signal?.addEventListener('abort', () => reject(signal.reason), { once: true });
-          }),
-      ),
-    } as unknown as NcbiRequestQueue;
+    const mockQueue = saturatedQueue();
     const mockResponseHandler = {
       parseAndHandleResponse: vi.fn(),
     } as unknown as NcbiResponseHandler;
@@ -1358,13 +1376,12 @@ describe('NcbiService signal wiring during backoff sleep', () => {
     expect(mockApiClient.makeRequest).not.toHaveBeenCalled();
   }, 2000);
 
-  it('passes a deadline-aware AbortSignal as the fourth argument to queue.enqueue', async () => {
+  it('hands the queue a live deadline-aware signal and the time left as its wait budget', async () => {
     const mockApiClient = {
       makeRequest: vi.fn().mockResolvedValue('<xml/>'),
     } as unknown as NcbiApiClient;
-    const mockQueue = {
-      enqueue: vi.fn(async (task: () => Promise<unknown>) => task()),
-    } as unknown as NcbiRequestQueue;
+    const mockQueue = idleQueue();
+    const run = vi.spyOn(mockQueue, 'run');
     const mockResponseHandler = {
       parseAndHandleResponse: vi.fn().mockReturnValue({
         eSearchResult: { Count: '0', RetMax: '0', RetStart: '0', QueryTranslation: '' },
@@ -1374,35 +1391,44 @@ describe('NcbiService signal wiring during backoff sleep', () => {
 
     await service.eSearch({ db: 'pubmed', term: 'test' });
 
-    const enqueueCalls = (mockQueue.enqueue as ReturnType<typeof vi.fn>).mock.calls;
-    expect(enqueueCalls).toHaveLength(1);
-    const signalArg = enqueueCalls[0]?.[3];
-    expect(signalArg).toBeInstanceOf(AbortSignal);
-    expect((signalArg as AbortSignal).aborted).toBe(false);
+    expect(run).toHaveBeenCalledTimes(1);
+    const options = run.mock.calls[0]?.[1];
+    expect(options?.signal).toBeInstanceOf(AbortSignal);
+    expect(options?.signal?.aborted).toBe(false);
+    // The whole deadline is left on a first attempt, plus the margin that leaves
+    // expiry of a still-queued call to the deadline.
+    expect(options?.maxWaitMs).toBeGreaterThan(59_000);
+    expect(options?.maxWaitMs).toBeLessThanOrEqual(60_001);
   });
 
-  it('passes endpoint and params to queue.enqueue for telemetry', async () => {
+  it('logs a failed attempt with its endpoint and attempt number', async () => {
     const mockApiClient = {
-      makeRequest: vi.fn().mockResolvedValue('<xml/>'),
+      makeRequest: vi
+        .fn()
+        .mockRejectedValue(new McpError(JsonRpcErrorCode.ServiceUnavailable, 'down')),
     } as unknown as NcbiApiClient;
-    const mockQueue = {
-      enqueue: vi.fn(async (task: () => Promise<unknown>) => task()),
-    } as unknown as NcbiRequestQueue;
-    const mockResponseHandler = {
-      parseAndHandleResponse: vi.fn().mockReturnValue({
-        eSearchResult: { Count: '0', RetMax: '0', RetStart: '0', QueryTranslation: '' },
-      }),
-    } as unknown as NcbiResponseHandler;
-    const service = new NcbiService(mockApiClient, mockQueue, mockResponseHandler, 0, 60_000);
-
-    await service.eSearch({ db: 'pubmed', term: 'cancer' });
-
-    expect(mockQueue.enqueue).toHaveBeenCalledWith(
-      expect.any(Function),
-      'esearch',
-      expect.objectContaining({ term: 'cancer', db: 'pubmed' }),
-      expect.any(AbortSignal),
+    const service = new NcbiService(
+      mockApiClient,
+      idleQueue(),
+      { parseAndHandleResponse: vi.fn() } as unknown as NcbiResponseHandler,
+      1,
+      200,
     );
+    vi.mocked(logger.warning).mockClear();
+
+    // The 1s backoff cannot fit a 200ms deadline, so the call fails after one attempt.
+    await expect(service.eSearch({ db: 'pubmed', term: 'cancer' })).rejects.toMatchObject({
+      data: { reason: 'ncbi_deadline_exceeded' },
+    });
+
+    expect(logger.warning).toHaveBeenCalledWith(
+      expect.stringContaining('esearch'),
+      expect.anything(),
+    );
+    expect(requestContextService.createRequestContext).toHaveBeenCalledWith({
+      operation: 'NcbiRetry',
+      additionalContext: expect.objectContaining({ endpoint: 'esearch', attempt: 1 }),
+    });
   });
 
   it('idConvert throws Timeout when deadline expires while waiting in the queue', async () => {
@@ -1410,18 +1436,7 @@ describe('NcbiService signal wiring during backoff sleep', () => {
       makeRequest: vi.fn(),
       makeExternalRequest: vi.fn(),
     } as unknown as NcbiApiClient;
-    const mockQueue = {
-      enqueue: vi.fn(
-        (_task: () => unknown, _ep: string, _params: unknown, signal?: AbortSignal) =>
-          new Promise((_, reject) => {
-            if (signal?.aborted) {
-              reject(signal.reason);
-              return;
-            }
-            signal?.addEventListener('abort', () => reject(signal.reason), { once: true });
-          }),
-      ),
-    } as unknown as NcbiRequestQueue;
+    const mockQueue = saturatedQueue();
     const service = new NcbiService(
       mockApiClient,
       mockQueue,
@@ -1445,18 +1460,7 @@ describe('NcbiService signal wiring during backoff sleep', () => {
       makeRequest: vi.fn(),
       makeExternalRequest: vi.fn(),
     } as unknown as NcbiApiClient;
-    const mockQueue = {
-      enqueue: vi.fn(
-        (_task: () => unknown, _ep: string, _params: unknown, signal?: AbortSignal) =>
-          new Promise((_, reject) => {
-            if (signal?.aborted) {
-              reject(signal.reason);
-              return;
-            }
-            signal?.addEventListener('abort', () => reject(signal.reason), { once: true });
-          }),
-      ),
-    } as unknown as NcbiRequestQueue;
+    const mockQueue = saturatedQueue();
     const service = new NcbiService(
       mockApiClient,
       mockQueue,
@@ -1481,18 +1485,7 @@ describe('NcbiService signal wiring during backoff sleep', () => {
     const mockApiClient = {
       makeRequest: vi.fn(),
     } as unknown as NcbiApiClient;
-    const mockQueue = {
-      enqueue: vi.fn(
-        (_task: () => unknown, _ep: string, _params: unknown, signal?: AbortSignal) =>
-          new Promise((_, reject) => {
-            if (signal?.aborted) {
-              reject(signal.reason);
-              return;
-            }
-            signal?.addEventListener('abort', () => reject(signal.reason), { once: true });
-          }),
-      ),
-    } as unknown as NcbiRequestQueue;
+    const mockQueue = saturatedQueue();
     const mockResponseHandler = {
       parseAndHandleResponse: vi.fn(),
     } as unknown as NcbiResponseHandler;
@@ -1564,9 +1557,7 @@ describe('NcbiService deadline timer cleanup', () => {
     const mockApiClient = {
       makeRequest: vi.fn(),
     } as unknown as NcbiApiClient;
-    const mockQueue = {
-      enqueue: vi.fn(async (task: () => Promise<unknown>) => task()),
-    } as unknown as NcbiRequestQueue;
+    const mockQueue = idleQueue();
     const mockResponseHandler = {
       parseAndHandleResponse: vi.fn(),
     } as unknown as NcbiResponseHandler;
@@ -1621,17 +1612,19 @@ describe('NcbiService deadline timer cleanup', () => {
 });
 
 /**
- * Integration suite: real `NcbiRequestQueue` paired with a mock `NcbiApiClient`.
- * Exercises the full enqueue → deadline → retry → execute chain to lock in the
- * fixes from #50 (queue wait counts toward the deadline; concurrent calls don't
- * serialize behind a single worker).
+ * Integration suite: the real NCBI request queue paired with a mock `NcbiApiClient`.
+ * Exercises the full deadline → retry → queue → execute chain to lock in the fixes
+ * from #50 (queue wait counts toward the deadline; concurrent calls don't serialize
+ * behind a single worker) and #157 (a shed surfaces as `queue_full`).
  */
 describe('NcbiService integration with real queue', () => {
-  // Local import — `NcbiRequestQueue` is otherwise type-only in this file.
-  let NcbiRequestQueueCtor: typeof import('@/services/ncbi/request-queue.js').NcbiRequestQueue;
-  beforeEach(async () => {
-    ({ NcbiRequestQueue: NcbiRequestQueueCtor } = await import('@/services/ncbi/request-queue.js'));
-  });
+  function realQueue(minStartGapMs: number, maxConcurrent: number, maxQueueDepth?: number) {
+    return createNcbiRequestQueue({
+      minStartGapMs,
+      maxConcurrent,
+      ...(maxQueueDepth !== undefined && { maxQueueDepth }),
+    });
+  }
 
   function createService(opts: {
     maxConcurrent: number;
@@ -1648,7 +1641,6 @@ describe('NcbiService integration with real queue', () => {
         ),
       makeExternalRequest: vi.fn(),
     } as unknown as NcbiApiClient;
-    const realQueue = new NcbiRequestQueueCtor(opts.requestDelayMs ?? 0, opts.maxConcurrent);
     const mockResponseHandler = {
       parseAndHandleResponse: vi.fn().mockReturnValue({
         eSearchResult: { Count: '0', RetMax: '0', RetStart: '0', QueryTranslation: '' },
@@ -1656,7 +1648,7 @@ describe('NcbiService integration with real queue', () => {
     } as unknown as NcbiResponseHandler;
     const service = new NcbiService(
       mockApiClient,
-      realQueue,
+      realQueue(opts.requestDelayMs ?? 0, opts.maxConcurrent),
       mockResponseHandler,
       opts.maxRetries ?? 0,
       opts.deadlineMs,
@@ -1722,13 +1714,12 @@ describe('NcbiService integration with real queue', () => {
         .mockImplementation(() => Promise.resolve('<xml/>')),
       makeExternalRequest: vi.fn(),
     } as unknown as NcbiApiClient;
-    const realQueue = new NcbiRequestQueueCtor(0, 2);
     const mockResponseHandler = {
       parseAndHandleResponse: vi.fn().mockReturnValue({
         eSearchResult: { Count: '0', RetMax: '0', RetStart: '0', QueryTranslation: '' },
       }),
     } as unknown as NcbiResponseHandler;
-    const service = new NcbiService(mockApiClient, realQueue, mockResponseHandler, 0, 60_000);
+    const service = new NcbiService(mockApiClient, realQueue(0, 2), mockResponseHandler, 0, 60_000);
 
     const slowStarted = Date.now();
     const slow = service.eSearch({ db: 'pubmed', term: 'slow' });
@@ -1798,28 +1789,43 @@ describe('NcbiService integration with real queue', () => {
     expect(offsets[2] as number).toBeGreaterThanOrEqual(150);
   }, 2000);
 
-  it('queue_full when load exceeds maxQueueSize + maxConcurrent', async () => {
+  it('queue_full when load exceeds the queue depth + maxConcurrent', async () => {
     const mockApiClient = {
       makeRequest: vi
         .fn()
         .mockImplementation(() => new Promise<string>((r) => setTimeout(() => r('<xml/>'), 100))),
       makeExternalRequest: vi.fn(),
     } as unknown as NcbiApiClient;
-    // 1 in-flight + 1 waiting = capacity of 2. The 3rd call overflows.
-    const realQueue = new NcbiRequestQueueCtor(0, 1, 1);
     const mockResponseHandler = {
       parseAndHandleResponse: vi.fn().mockReturnValue({
         eSearchResult: { Count: '0', RetMax: '0', RetStart: '0', QueryTranslation: '' },
       }),
     } as unknown as NcbiResponseHandler;
-    const service = new NcbiService(mockApiClient, realQueue, mockResponseHandler, 0, 60_000);
+    // 1 in-flight + 1 waiting = capacity of 2. The 3rd call overflows.
+    const service = new NcbiService(
+      mockApiClient,
+      realQueue(0, 1, 1),
+      mockResponseHandler,
+      3,
+      60_000,
+    );
 
     const p1 = service.eSearch({ db: 'pubmed', term: 'a' });
     const p2 = service.eSearch({ db: 'pubmed', term: 'b' });
     await expect(service.eSearch({ db: 'pubmed', term: 'c' })).rejects.toMatchObject({
       code: JsonRpcErrorCode.RateLimited,
-      data: { reason: 'queue_full' },
+      message: expect.stringContaining('queue is full'),
+      data: {
+        reason: 'queue_full',
+        endpoint: 'esearch',
+        queueSize: 1,
+        retryAfter: expect.any(Number),
+        recovery: { hint: expect.stringContaining('retryAfter') },
+      },
     });
+    // Rejected at the queue: the overflowing call never reached the upstream, and
+    // three retries left did not send it back into the queue.
+    expect(mockApiClient.makeRequest).toHaveBeenCalledTimes(1);
 
     await Promise.all([p1, p2]);
   }, 2000);
@@ -1831,13 +1837,12 @@ describe('NcbiService integration with real queue', () => {
         .mockImplementation(() => new Promise<string>((r) => setTimeout(() => r('<xml/>'), 80))),
       makeExternalRequest: vi.fn(),
     } as unknown as NcbiApiClient;
-    const realQueue = new NcbiRequestQueueCtor(0, 1);
     const mockResponseHandler = {
       parseAndHandleResponse: vi.fn().mockReturnValue({
         eSearchResult: { Count: '0', RetMax: '0', RetStart: '0', QueryTranslation: '' },
       }),
     } as unknown as NcbiResponseHandler;
-    const service = new NcbiService(mockApiClient, realQueue, mockResponseHandler, 0, 60_000);
+    const service = new NcbiService(mockApiClient, realQueue(0, 1), mockResponseHandler, 0, 60_000);
 
     const blocker = service.eSearch({ db: 'pubmed', term: 'blocker' });
 

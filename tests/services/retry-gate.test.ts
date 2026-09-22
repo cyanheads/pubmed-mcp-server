@@ -1,7 +1,8 @@
 /**
- * @fileoverview Retry-gate regression for the three hand-rolled service retry loops
- * (NCBI, OpenAlex, Europe PMC). Each gates on the framework's `defaultIsTransient`, so
- * each must honor its in-band `data.retryable === false` opt-out: an upstream 501
+ * @fileoverview Retry-gate regression for the three service retry loops — NCBI's on the
+ * framework `withRetry`, OpenAlex's and Europe PMC's hand-rolled. Each gates on the
+ * framework's `defaultIsTransient`, so each must honor its in-band
+ * `data.retryable === false` opt-out: an upstream 501
  * classifies as ServiceUnavailable — a transient code — but can never succeed on retry.
  *
  * Every case asserts the upstream attempt count, not just the surfaced code: a gate
@@ -27,7 +28,7 @@ vi.mock('@cyanheads/mcp-ts-core/utils', async () => {
   };
 });
 
-const { httpErrorFromResponse } = await import('@cyanheads/mcp-ts-core/utils');
+const { createPacer, httpErrorFromResponse } = await import('@cyanheads/mcp-ts-core/utils');
 const { NcbiApiClient } = await import('@/services/ncbi/api-client.js');
 const { NcbiService } = await import('@/services/ncbi/ncbi-service.js');
 const { NcbiResponseHandler } = await import('@/services/ncbi/response-handler.js');
@@ -36,8 +37,6 @@ const { EuropePmcRequestQueue } = await import('@/services/europe-pmc/request-qu
 const { EuropePmcService } = await import('@/services/europe-pmc/europe-pmc-service.js');
 const { OpenAlexApiClient } = await import('@/services/openalex/api-client.js');
 const { OpenAlexService } = await import('@/services/openalex/openalex-service.js');
-
-type NcbiRequestQueue = import('@/services/ncbi/request-queue.js').NcbiRequestQueue;
 
 /** Two retries after the initial call — an unfiltered gate makes three upstream attempts. */
 const MAX_RETRIES = 2;
@@ -86,9 +85,8 @@ afterEach(() => {
 
 function buildNcbiService() {
   const apiClient = new NcbiApiClient({ toolIdentifier: 'test', timeoutMs: 5000 });
-  const queue = {
-    enqueue: vi.fn(async (task: () => Promise<unknown>) => task()),
-  } as unknown as NcbiRequestQueue;
+  // A real pacer with no limits: every attempt starts at once and no timer is armed.
+  const queue = createPacer({ name: 'ncbi-test' });
   return new NcbiService(apiClient, queue, new NcbiResponseHandler(), MAX_RETRIES, 60_000);
 }
 

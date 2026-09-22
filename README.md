@@ -181,7 +181,7 @@ Built on [`@cyanheads/mcp-ts-core`](https://github.com/cyanheads/mcp-ts-core): s
 PubMed-specific:
 
 - Complete NCBI E-utilities integration (ESearch, EFetch, ESummary, ELink, ESpell, EInfo, ECitMatch) plus PMC ID Converter
-- Sequential request queue with configurable delay for NCBI rate limit compliance
+- Shared NCBI request queue — paced request starts, capped concurrency, a cooldown that holds every caller after an NCBI 429, and one deadline covering queue wait and retries
 - NCBI-specific XML parser with `isArray` hints for PubMed's inconsistent XML structure
 - Hand-rolled citation formatters (APA, MLA, BibTeX, RIS, Vancouver) — zero deps, Workers-compatible
 
@@ -316,7 +316,7 @@ Key environment variables:
 | `NCBI_MAX_CONCURRENT` | Max concurrent in-flight NCBI requests | `8` |
 | `NCBI_MAX_RETRIES` | Retry attempts for failed NCBI requests | 6 |
 | `NCBI_TIMEOUT_MS` | Per-request HTTP timeout in ms | `30000` |
-| `NCBI_TOTAL_DEADLINE_MS` | Total deadline across all retry attempts for one NCBI call, in ms | `60000` |
+| `NCBI_TOTAL_DEADLINE_MS` | Total deadline for one NCBI call — queue wait, retry attempts, and backoff — in ms. A call the queue cannot start before it is rejected at once | `60000` |
 | `UNPAYWALL_EMAIL` | Contact email for Unpaywall. When set, `pubmed_fetch_fulltext` falls back to Unpaywall open-access copies for non-PMC DOIs | none |
 | `UNPAYWALL_TIMEOUT_MS` | Per-request HTTP timeout for Unpaywall lookups and content fetches, in ms | `20000` |
 | `EUROPEPMC_ENABLED` | Enable Europe PMC search tool and the `pubmed_fetch_fulltext` JATS fallback chain. Set `false` to disable all EPMC calls and skip tool registration. | `true` |

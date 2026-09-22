@@ -1,25 +1,37 @@
 /**
  * @fileoverview High-level service for interacting with NCBI E-utilities.
  * Orchestrates the API client, request queue, and response handler to provide
- * typed methods for each E-utility endpoint. Uses init/accessor pattern.
+ * typed methods for each E-utility endpoint. Every call runs as a retry loop around
+ * the shared request queue — each attempt re-queued and re-paced — under one total
+ * deadline that covers queue wait, attempts, and backoff. Uses init/accessor pattern.
  * @module src/services/ncbi/ncbi-service
  */
 
 import {
-  internalError,
   JsonRpcErrorCode,
   McpError,
+  rateLimited,
   serializationError,
   timeout,
   validationError,
 } from '@cyanheads/mcp-ts-core/errors';
-import { defaultIsTransient, logger, requestContextService } from '@cyanheads/mcp-ts-core/utils';
+import {
+  defaultIsTransient,
+  logger,
+  type Pacer,
+  requestContextService,
+  withRetry,
+} from '@cyanheads/mcp-ts-core/utils';
 
 import { getServerConfig } from '@/config/server-config.js';
 import { recoveryFor } from '@/services/error-contracts.js';
 import { NcbiApiClient } from './api-client.js';
-import { NcbiRequestQueue } from './request-queue.js';
-import { NcbiResponseHandler, reclassifyNcbiHttpError } from './response-handler.js';
+import { createNcbiRequestQueue } from './request-queue.js';
+import {
+  emptyEFetchResultFor,
+  NcbiResponseHandler,
+  reclassifyNcbiHttpError,
+} from './response-handler.js';
 import {
   type ECitMatchCitation,
   type ECitMatchResult,
@@ -90,32 +102,79 @@ function wireKeysFor(citations: ECitMatchCitation[]): string[] {
   return citations.map((_, i) => String(i + 1));
 }
 
-/** Sentinel reason used when the service-level deadline expires. */
-class NcbiDeadlineExceeded extends Error {
-  constructor(deadlineMs: number) {
-    super(`NCBI request deadline (${deadlineMs}ms) exceeded`);
-    this.name = 'NcbiDeadlineExceeded';
-  }
-}
+/** Ceiling on one backoff sleep, so a high retry count cannot grow it without bound. */
+const MAX_BACKOFF_MS = 30_000;
 
 /**
- * Sleep that resolves after `ms`, or rejects immediately if `signal` aborts.
- * Cleans up both timer and listener when either side wins.
+ * Margin added to the time left on the deadline when it is offered to the queue as a
+ * wait budget. The queue sheds an arrival whose projected wait exceeds the budget, and
+ * separately times out a caller still waiting when the budget runs out; that second
+ * timer would otherwise land on the same instant as the deadline itself. Setting it just
+ * past the deadline leaves expiry to the deadline, so a call still queued when its time
+ * is up always reports `ncbi_deadline_exceeded`, never `queue_full`.
  */
-function abortableSleep(ms: number, signal?: AbortSignal): Promise<void> {
-  if (!signal) return new Promise((r) => setTimeout(r, ms));
-  if (signal.aborted) return Promise.reject(signal.reason);
-  return new Promise<void>((resolve, reject) => {
-    const onAbort = () => {
-      clearTimeout(timer);
-      reject(signal.reason);
-    };
-    const timer = setTimeout(() => {
-      signal.removeEventListener('abort', onAbort);
-      resolve();
-    }, ms);
-    signal.addEventListener('abort', onAbort, { once: true });
-  });
+const QUEUE_WAIT_MARGIN_MS = 1;
+
+/**
+ * Retry gate: the framework's transient set, narrowed to `McpError`s. The client and
+ * response handler classify every upstream failure, so a plain `Error` reaching the
+ * loop is a defect or a response that cannot parse — retrying it only repeats it.
+ */
+const isTransient = (error: unknown): boolean =>
+  error instanceof McpError && defaultIsTransient(error);
+
+/**
+ * Maps what the retry loop throws onto this service's declared failure reasons. Runs
+ * outside the loop, so the loop itself still sees the framework's `pacer_shed` — which
+ * it never retries — and `retry_deadline_exceeded`.
+ *
+ * - `pacer_shed` → `queue_full` (RateLimited), keeping the shed's `retryAfter`.
+ * - `retry_deadline_exceeded` → `ncbi_deadline_exceeded` (Timeout).
+ * - Retries exhausted → the last attempt's code and message with `endpoint` and
+ *   `attempts`; a ServiceUnavailable is stamped `ncbi_unreachable`.
+ * - Anything else — a failure that was never retried — passes through unchanged.
+ */
+function toServiceError(error: unknown, endpoint: string, deadlineMs: number): unknown {
+  if (!(error instanceof McpError)) return error;
+  const data = error.data ?? {};
+
+  if (data.reason === 'pacer_shed') {
+    return rateLimited(
+      `NCBI request queue is full or cannot start this call before its deadline (${String(data.queueDepth)} requests waiting).`,
+      {
+        reason: 'queue_full',
+        endpoint,
+        queueSize: data.queueDepth,
+        retryAfter: data.retryAfter,
+        ...recoveryFor('queue_full'),
+      },
+      { cause: error },
+    );
+  }
+
+  if (data.reason === 'retry_deadline_exceeded') {
+    return timeout(
+      `NCBI request deadline (${deadlineMs}ms) exceeded`,
+      { reason: 'ncbi_deadline_exceeded', deadlineMs, ...recoveryFor('ncbi_deadline_exceeded') },
+      { cause: error },
+    );
+  }
+
+  if (typeof data.retryAttempts !== 'number') return error;
+  // Other retryable codes (Timeout, RateLimited) keep their code with no reason.
+  const reason =
+    error.code === JsonRpcErrorCode.ServiceUnavailable ? 'ncbi_unreachable' : undefined;
+  return new McpError(
+    error.code,
+    error.message,
+    {
+      ...(reason && { reason, ...recoveryFor(reason) }),
+      endpoint,
+      attempts: data.retryAttempts,
+      ...(data.ncbiErrors !== undefined && { ncbiErrors: data.ncbiErrors }),
+    },
+    { cause: error.cause ?? error },
+  );
 }
 
 /**
@@ -125,7 +184,7 @@ function abortableSleep(ms: number, signal?: AbortSignal): Promise<void> {
 export class NcbiService {
   constructor(
     private readonly apiClient: NcbiApiClient,
-    private readonly queue: NcbiRequestQueue,
+    private readonly queue: Pacer,
     private readonly responseHandler: NcbiResponseHandler,
     private readonly maxRetries: number,
     private readonly totalDeadlineMs: number,
@@ -345,20 +404,8 @@ export class NcbiService {
 
     let text: string;
     try {
-      text = await this.runWithDeadline(
-        (signal) =>
-          this.queue.enqueue(
-            () =>
-              this.withRetry(
-                () => this.apiClient.makeExternalRequest(NCBI_PMC_IDCONV_URL, params, signal),
-                'idconv',
-                signal,
-              ),
-            'idconv',
-            params,
-            signal,
-          ),
-        options?.signal,
+      text = await this.runPaced('idconv', options?.signal, (signal) =>
+        this.apiClient.makeExternalRequest(NCBI_PMC_IDCONV_URL, params, signal),
       );
     } catch (error: unknown) {
       // PMC ID Converter returns 400 (InvalidParams) for malformed inputs and
@@ -392,157 +439,81 @@ export class NcbiService {
     return (parsed as IdConvertResponse).records ?? [];
   }
 
-  /** Maximum backoff delay per retry (prevents exponential explosion at high retry counts). */
-  private static readonly MAX_BACKOFF_MS = 30_000;
-
   /**
-   * Wraps a task with a service-level deadline. Returns a combined AbortSignal
-   * (internal deadline OR'd with the caller's `ctx.signal`, if any) that the
-   * task must forward to both the HTTP call and any backoff sleep so cancellation
-   * interrupts the full retry chain — not just the next attempt.
-   */
-  private async runWithDeadline<T>(
-    task: (signal: AbortSignal) => Promise<T>,
-    callerSignal?: AbortSignal,
-  ): Promise<T> {
-    const deadlineController = new AbortController();
-    const deadlineTimer = setTimeout(
-      () => deadlineController.abort(new NcbiDeadlineExceeded(this.totalDeadlineMs)),
-      this.totalDeadlineMs,
-    );
-
-    const signal = callerSignal
-      ? AbortSignal.any([deadlineController.signal, callerSignal])
-      : deadlineController.signal;
-
-    try {
-      return await task(signal);
-    } catch (error: unknown) {
-      if (error instanceof NcbiDeadlineExceeded) {
-        throw timeout(
-          error.message,
-          {
-            reason: 'ncbi_deadline_exceeded',
-            deadlineMs: this.totalDeadlineMs,
-            ...recoveryFor('ncbi_deadline_exceeded'),
-          },
-          { cause: error },
-        );
-      }
-      throw error;
-    } finally {
-      clearTimeout(deadlineTimer);
-    }
-  }
-
-  /**
-   * Retry wrapper for transient NCBI errors (ServiceUnavailable, Timeout, RateLimited).
-   * Non-transient McpErrors and unexpected plain Errors fail immediately.
-   * Uses capped exponential backoff with jitter. Backoff sleep is abortable via
-   * `signal`, so deadline expiration or caller cancel short-circuits the chain.
-   */
-  private async withRetry<T>(
-    execute: () => Promise<T>,
-    label: string,
-    signal?: AbortSignal,
-  ): Promise<T> {
-    for (let attempt = 0; attempt <= this.maxRetries; attempt++) {
-      if (signal?.aborted) throw signal.reason;
-
-      try {
-        return await execute();
-      } catch (error: unknown) {
-        if (signal?.aborted) throw signal.reason;
-
-        if (!(error instanceof McpError)) {
-          throw error;
-        }
-
-        if (!defaultIsTransient(error)) {
-          throw error;
-        }
-
-        if (attempt < this.maxRetries) {
-          const baseDelay = Math.min(1000 * 2 ** attempt, NcbiService.MAX_BACKOFF_MS);
-          const jitter = baseDelay * (0.75 + 0.5 * Math.random()); // ±25%
-          const retryDelay = Math.round(jitter);
-          logger.warning(
-            `NCBI request to ${label} failed. Retrying (${attempt + 1}/${this.maxRetries}) in ${retryDelay}ms.`,
-            requestContextService.createRequestContext({
-              operation: 'NcbiRetry',
-              additionalContext: { endpoint: label, attempt: attempt + 1, retryDelay },
-            }),
-          );
-          await abortableSleep(retryDelay, signal);
-          continue;
-        }
-
-        const attempts = this.maxRetries + 1;
-        const msg = error instanceof Error ? error.message : String(error);
-        // Tag transient ServiceUnavailable retries-exhausted with `ncbi_unreachable` so
-        // tool callers can switch on a stable reason. Other retryable codes (Timeout,
-        // RateLimited) keep their original code with no reason — `ncbi_deadline_exceeded`
-        // and `queue_full` are stamped at their own throw sites.
-        const reason =
-          error.code === JsonRpcErrorCode.ServiceUnavailable ? 'ncbi_unreachable' : undefined;
-        const ncbiErrors = error.data?.ncbiErrors;
-        throw new McpError(
-          error.code,
-          `${msg} (failed after ${attempts} attempts)`,
-          {
-            ...(reason && { reason, ...recoveryFor(reason) }),
-            endpoint: label,
-            attempts,
-            ...(ncbiErrors !== undefined && { ncbiErrors }),
-          },
-          { cause: error },
-        );
-      }
-    }
-
-    throw internalError('Request failed after all retries.', {
-      reason: 'ncbi_unreachable',
-      endpoint: label,
-      ...recoveryFor('ncbi_unreachable'),
-    });
-  }
-
-  /**
-   * Runs a request under a service-level deadline that bounds queue wait time
-   * + retry chain + HTTP execution. The deadline is constructed *outside* the
-   * queue so a backlog can't burn a request's budget before it even dispatches.
+   * Runs one NCBI call: a retry loop around the shared request queue, so every
+   * attempt re-queues and is re-paced (and a 429 closes the gate for all callers,
+   * not just this one). One deadline covers queue wait, attempts, and backoff. Its
+   * signal — joined with the caller's — reaches the queue wait, the backoff sleep,
+   * and the HTTP request, and each attempt offers the queue only the time left, so
+   * a call that cannot start in time is shed at once instead of waiting it out.
    *
-   * The combined deadline+caller signal is threaded into the queue (cancels a
-   * still-waiting task), the retry chain (cancels pending backoff sleeps),
-   * and the HTTP fetch (cancels wedged requests).
+   * A caller abort rethrows the caller's own reason; every other failure is mapped
+   * onto this service's reasons by {@link toServiceError}, after the loop.
+   */
+  private async runPaced<T>(
+    endpoint: string,
+    callerSignal: AbortSignal | undefined,
+    execute: (signal: AbortSignal) => Promise<T>,
+  ): Promise<T> {
+    let attempt = 0;
+    try {
+      return await withRetry(
+        ({ signal, remainingMs }) => {
+          attempt += 1;
+          return this.queue
+            .run(execute, { signal, maxWaitMs: remainingMs + QUEUE_WAIT_MARGIN_MS })
+            .catch((error: unknown) => {
+              if (attempt <= this.maxRetries && isTransient(error)) {
+                logger.warning(
+                  `NCBI request to ${endpoint} failed on attempt ${attempt} of ${this.maxRetries + 1}.`,
+                  requestContextService.createRequestContext({
+                    operation: 'NcbiRetry',
+                    additionalContext: {
+                      endpoint,
+                      attempt,
+                      error: error instanceof Error ? error.message : String(error),
+                    },
+                  }),
+                );
+              }
+              throw error;
+            });
+        },
+        {
+          maxRetries: this.maxRetries,
+          maxDelayMs: MAX_BACKOFF_MS,
+          deadlineMs: this.totalDeadlineMs,
+          isTransient,
+          operation: `NCBI ${endpoint}`,
+          ...(callerSignal && { signal: callerSignal }),
+        },
+      );
+    } catch (error: unknown) {
+      if (callerSignal?.aborted) throw callerSignal.reason;
+      throw toServiceError(error, endpoint, this.totalDeadlineMs);
+    }
+  }
+
+  /**
+   * One eutils request through {@link runPaced}: fetch, classify, parse. EFetch's
+   * all-invalid-ID rejection resolves as the empty set NCBI returns for an unknown
+   * ID, and a backend-failure envelope is reclassified as transient so it retries.
    */
   private performRequest<T>(
     endpoint: string,
     params: NcbiRequestParams,
     options?: NcbiRequestOptions,
   ): Promise<T> {
-    return this.runWithDeadline(
-      (signal) =>
-        this.queue.enqueue(
-          () =>
-            this.withRetry(
-              async () => {
-                const text = await this.apiClient
-                  .makeRequest(endpoint, params, { ...options, signal })
-                  .catch((error: unknown) => {
-                    throw reclassifyNcbiHttpError(error, endpoint);
-                  });
-                return this.responseHandler.parseAndHandleResponse<T>(text, endpoint, options);
-              },
-              endpoint,
-              signal,
-            ),
-          endpoint,
-          params,
-          signal,
-        ),
-      options?.signal,
-    );
+    return this.runPaced(endpoint, options?.signal, async (signal) => {
+      const text = await this.apiClient
+        .makeRequest(endpoint, params, { ...options, signal })
+        .catch((error: unknown) => {
+          const empty = emptyEFetchResultFor(error, endpoint, params.db);
+          if (empty !== undefined) return empty;
+          throw reclassifyNcbiHttpError(error, endpoint);
+        });
+      return this.responseHandler.parseAndHandleResponse<T>(text, endpoint, options);
+    });
   }
 }
 
@@ -559,7 +530,10 @@ export function initNcbiService(): void {
     ...(config.apiKey && { apiKey: config.apiKey }),
     ...(config.adminEmail && { adminEmail: config.adminEmail }),
   });
-  const queue = new NcbiRequestQueue(config.requestDelayMs, config.maxConcurrent);
+  const queue = createNcbiRequestQueue({
+    minStartGapMs: config.requestDelayMs,
+    maxConcurrent: config.maxConcurrent,
+  });
   const responseHandler = new NcbiResponseHandler();
   _service = new NcbiService(
     apiClient,

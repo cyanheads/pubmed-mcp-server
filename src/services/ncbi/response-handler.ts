@@ -2,6 +2,9 @@
  * @fileoverview Handles parsing of NCBI E-utility responses and NCBI-specific error extraction.
  * Creates an NCBI-specific XMLParser instance with `isArray` callback support for handling
  * NCBI's inconsistent XML structures where single-element lists are collapsed to scalars.
+ * Also reads the `<ERROR>` envelope of a failed eutils response: a backend failure is
+ * reclassified as transient, and EFetch's all-invalid-ID rejection becomes the empty set
+ * NCBI returns for an unknown ID.
  * @module src/services/ncbi/response-handler
  */
 
@@ -122,11 +125,73 @@ const ERROR_PATHS = [
  * NCBI `<ERROR>` messages describing a backend failure rather than the request.
  * EFetch sends the viewer-timeout envelope under HTTP 200 and HTTP 400 alike, so
  * the status cannot tell it from a malformed request; the message can. (#153)
+ *
+ * `proxy_stream()` is the EFetch front end's own backend-proxy method: it prefixes
+ * every failure relayed from the service behind it (a 502 page, "Failed to connect
+ * to PubOne service"), so a client-side 400 cannot carry it. (#155)
  */
-const NCBI_TRANSIENT_ERROR_PATTERNS: RegExp[] = [/External viewer error/i, /Status:\s*Timeout/i];
+const NCBI_TRANSIENT_ERROR_PATTERNS: RegExp[] = [
+  /External viewer error/i,
+  /Status:\s*Timeout/i,
+  /proxy_stream\(\)/,
+];
 
-/** Captures the text of each uppercase `<ERROR>` element in a raw response body. */
-const ERROR_TEXT_REGEX = /<ERROR(?:\s[^>]*)?>([^<]*)<\/ERROR>/g;
+/**
+ * Captures the text of each uppercase `<ERROR>` element in a raw response body. The
+ * framework keeps only the first 500 bytes of an error body, so an envelope relaying a
+ * backend page is cut before its `</ERROR>`: an unterminated element runs to the end of
+ * the capture. Content may hold markup, raw or entity-escaped.
+ */
+const ERROR_TEXT_REGEX = /<ERROR(?:\s[^>]*)?>([\s\S]*?)(?:<\/ERROR>|$)/g;
+
+/** NCBI's whole-list rejection when not one supplied ID is a real UID. (#155) */
+const EMPTY_ID_LIST_PATTERN = /^ID list is empty\b/i;
+
+/**
+ * What EFetch answers, HTTP 200, when every requested ID is well-formed but unknown —
+ * an empty set in the database's own wrapper. Keyed by `db`; a database missing here
+ * keeps the rejection as an error.
+ */
+const EMPTY_EFETCH_RESULTS: Readonly<Record<string, string>> = {
+  pubmed:
+    '<?xml version="1.0" ?>\n<!DOCTYPE PubmedArticleSet PUBLIC "-//NLM//DTD PubMedArticle, 1st January 2025//EN" "https://dtd.nlm.nih.gov/ncbi/pubmed/out/pubmed_250101.dtd">\n<PubmedArticleSet></PubmedArticleSet>\n',
+  pmc: '<?xml version="1.0" ?>\n<!DOCTYPE pmc-articleset PUBLIC "-//NLM//DTD ARTICLE SET 2.0//EN" "https://dtd.nlm.nih.gov/ncbi/pmc/articleset/nlm-articleset-2.0.dtd">\n<pmc-articleset></pmc-articleset>\n',
+};
+
+/**
+ * The `<ERROR>` messages in the captured body of a non-2xx eutils response, as plain
+ * text: entities decoded, markup dropped (including a tag the capture cut in half),
+ * whitespace collapsed. `undefined` when the error carries no captured body.
+ */
+function ncbiErrorTexts(error: unknown): string[] | undefined {
+  if (!(error instanceof McpError) || typeof error.data?.body !== 'string') return;
+  return [...error.data.body.matchAll(ERROR_TEXT_REGEX)].map((match) =>
+    decodeHtmlEntities(match[1] ?? '')
+      .replace(/<\/?[a-z!][^>]*(?:>|$)/gi, ' ')
+      .replace(/\s+/g, ' ')
+      .trim(),
+  );
+}
+
+/**
+ * The response NCBI would have sent had it answered an all-invalid EFetch ID list the
+ * way it answers an unknown well-formed one. EFetch rejects a list in which no ID is a
+ * real UID (`id=00000000`) with an HTTP 400 `ID list is empty!` envelope, but answers an
+ * unassigned UID (`id=99999999`) with HTTP 200 and an empty set, so the same question —
+ * "which of these exist?" — would otherwise split into an error and an answer depending
+ * on the ID's spelling. Returns the empty-set document to parse in place of the error,
+ * or `undefined` when the error is anything else. (#155)
+ */
+export function emptyEFetchResultFor(
+  error: unknown,
+  endpoint: string,
+  db: unknown,
+): string | undefined {
+  if (endpoint !== 'efetch' || typeof db !== 'string') return;
+  const empty = EMPTY_EFETCH_RESULTS[db];
+  if (empty === undefined) return;
+  return ncbiErrorTexts(error)?.some((msg) => EMPTY_ID_LIST_PATTERN.test(msg)) ? empty : undefined;
+}
 
 /**
  * Reclassifies an HTTP error from a eutils request whose captured body is an NCBI
@@ -134,15 +199,14 @@ const ERROR_TEXT_REGEX = /<ERROR(?:\s[^>]*)?>([^<]*)<\/ERROR>/g;
  * response as caller error (400 → InvalidParams), which the retry gate never retries.
  * Any other error — including a genuine invalid-parameter 400 — is returned unchanged.
  * Matches the body text rather than parsing it, since the framework captures only a
- * bounded prefix. (#153)
+ * bounded prefix. (#153, #155)
  */
 export function reclassifyNcbiHttpError(error: unknown, endpoint: string): unknown {
-  if (!(error instanceof McpError) || typeof error.data?.body !== 'string') return error;
-
-  const ncbiErrors = [...error.data.body.matchAll(ERROR_TEXT_REGEX)].map((match) =>
-    decodeHtmlEntities(match[1] ?? '').trim(),
-  );
-  if (!ncbiErrors.some((msg) => NCBI_TRANSIENT_ERROR_PATTERNS.some((p) => p.test(msg)))) {
+  const ncbiErrors = ncbiErrorTexts(error);
+  if (
+    !(error instanceof McpError) ||
+    !ncbiErrors?.some((msg) => NCBI_TRANSIENT_ERROR_PATTERNS.some((p) => p.test(msg)))
+  ) {
     return error;
   }
 
@@ -151,7 +215,7 @@ export function reclassifyNcbiHttpError(error: unknown, endpoint: string): unkno
     {
       reason: 'ncbi_unreachable',
       endpoint,
-      status: error.data.status,
+      status: error.data?.status,
       ncbiErrors,
       ...recoveryFor('ncbi_unreachable'),
     },
