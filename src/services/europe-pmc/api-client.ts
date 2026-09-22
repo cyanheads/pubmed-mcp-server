@@ -1,7 +1,9 @@
 /**
  * @fileoverview Low-level HTTP client for Europe PMC's REST API. Builds URLs,
- * injects the optional contact email, and exposes single-attempt search and
- * fullTextXML calls. Retry logic lives in `EuropePmcService`.
+ * injects the optional contact email, and exposes single-attempt search,
+ * fullTextXML, and citation-link calls. Classifies each endpoint's HTTP
+ * failures — a failed search as `europepmc_unreachable`, a missing fullTextXML
+ * as `not-available` — while retry logic lives in `EuropePmcService`.
  * @module src/services/europe-pmc/api-client
  */
 
@@ -42,6 +44,16 @@ export class EuropePmcApiClient {
    * Execute a search. Returns the raw JSON response body as a string so
    * `EuropePmcService` can parse and surface SerializationError consistently
    * when the body is malformed.
+   *
+   * A failed `/search` is an outage, never "no match" — a genuine zero-hit
+   * query is HTTP 200 with `hitCount: 0`. A 404 is reclassified from its
+   * status-mapped `NotFound` to `ServiceUnavailable` so the service retries it.
+   * A retryable 5xx keeps its code, so a 504 stays `Timeout`. Only a failure
+   * that ends up `ServiceUnavailable` carries `europepmc_unreachable` and its
+   * recovery hint, the one code that reason is declared for. An upstream
+   * `retryAfter` is kept. A 429 and every other 4xx pass through unchanged, as
+   * does a 501, whose `data.retryable: false` keeps it out of the retry loop.
+   * (#152)
    */
   async search(params: EuropePmcSearchParams): Promise<string> {
     const url = this.buildSearchUrl(params);
@@ -57,7 +69,27 @@ export class EuropePmcApiClient {
         ...(params.signal && { signal: params.signal }),
       });
     } catch (error: unknown) {
-      if (error instanceof McpError) throw error;
+      if (error instanceof McpError) {
+        const status = error.data?.status;
+        const isOutage =
+          status === 404 ||
+          (typeof status === 'number' && status >= 500 && error.data?.retryable !== false);
+        if (!isOutage) throw error;
+        const code = status === 404 ? JsonRpcErrorCode.ServiceUnavailable : error.code;
+        throw new McpError(
+          code,
+          `Europe PMC search request failed: ${error.message}`,
+          {
+            ...(code === JsonRpcErrorCode.ServiceUnavailable && {
+              reason: 'europepmc_unreachable',
+              ...recoveryFor('europepmc_unreachable'),
+            }),
+            status,
+            ...(error.data?.retryAfter !== undefined && { retryAfter: error.data.retryAfter }),
+          },
+          { cause: error },
+        );
+      }
       const msg = error instanceof Error ? error.message : String(error);
       throw serviceUnavailable(
         `Europe PMC search request failed: ${msg}`,

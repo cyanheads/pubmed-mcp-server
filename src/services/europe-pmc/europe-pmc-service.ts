@@ -7,6 +7,10 @@
  * from the same `ORDERED_XML_PARSER_OPTIONS` NCBI's ordered parser uses, so
  * `parsePmcArticle` consumes the result without modification.
  *
+ * A search's retry boundary covers fetch and response classification, so
+ * Europe PMC's intermittent empty `{ version }` envelope is retried like an
+ * HTTP outage; only a sort or cursor that explains it is reported as bad input.
+ *
  * Optional service: only constructed when `EUROPEPMC_ENABLED=true` (the
  * default). `getEuropePmcService()` returns `undefined` when disabled so
  * callers can skip the chain step gracefully.
@@ -16,8 +20,10 @@
 
 import {
   internalError,
+  JsonRpcErrorCode,
   McpError,
   serializationError,
+  serviceUnavailable,
   validationError,
 } from '@cyanheads/mcp-ts-core/errors';
 import { defaultIsTransient, logger, requestContextService } from '@cyanheads/mcp-ts-core/utils';
@@ -85,6 +91,32 @@ function recordLookupQuery({ epmcId, source }: EuropePmcRecordRef): string {
   return source === 'PMC' ? `${extIdClause} OR (PMCID:${epmcId})` : extIdClause;
 }
 
+/** The sort fields Europe PMC documents. */
+const DOCUMENTED_SORT_FIELDS = new Set(['P_PDATE_D', 'CITED', 'AUTH_FIRST', 'PUB_YEAR']);
+
+/**
+ * Whether a sort is the likely cause of an empty `{ version }` envelope: one of
+ * its comma-separated keys has a field outside the documented set, or lacks an
+ * `asc`/`desc` direction. Europe PMC answers those shapes with the envelope on
+ * every request, and orders by every key of a valid list (`PUB_YEAR desc, CITED
+ * desc`). Field and direction compare case-insensitively and tolerate extra
+ * whitespace, matching Europe PMC's own parsing.
+ *
+ * Classification only, never a local allowlist: the request always goes out.
+ * Europe PMC honors some undocumented fields (`ID asc` reorders results) and
+ * silently ignores others (`SCORE desc`), so only the envelope itself decides.
+ */
+function sortExplainsEnvelope(sort: string): boolean {
+  return sort.split(',').some((key) => {
+    const [field = '', direction = '', ...rest] = key.trim().split(/\s+/);
+    return (
+      rest.length > 0 ||
+      !DOCUMENTED_SORT_FIELDS.has(field.toUpperCase()) ||
+      !/^(asc|desc)$/i.test(direction)
+    );
+  });
+}
+
 /**
  * Facade over the Europe PMC REST API:
  *   - `search()` — keyword search across MED/PMC/PPR/PAT/AGR.
@@ -114,13 +146,34 @@ export class EuropePmcService {
   /**
    * Search Europe PMC. Cursor-based pagination — pass `cursorMark: '*'` (or
    * omit) for the first page; pass the returned `nextCursorMark` for the next.
+   *
+   * The retry boundary covers the fetch and the response classification
+   * together, so an empty envelope retries like any other transient failure
+   * rather than surfacing after the loop has already returned. (#159)
    */
-  async search(params: EuropePmcSearchParams): Promise<EuropePmcSearchResult> {
-    const text = await this.queue.enqueue(
-      () => this.withRetry(() => this.client.search(params), 'search', params.signal),
+  search(params: EuropePmcSearchParams): Promise<EuropePmcSearchResult> {
+    return this.queue.enqueue(
+      () =>
+        this.withRetry(
+          (attempt) => this.searchOnce(params, attempt === this.maxRetries),
+          'search',
+          params.signal,
+        ),
       'search',
       params.signal,
     );
+  }
+
+  /**
+   * One search attempt: fetch, parse, and classify the body. `isLastAttempt`
+   * lets an empty envelope that has persisted through the whole retry budget
+   * be attributed to a caller-supplied cursor.
+   */
+  private async searchOnce(
+    params: EuropePmcSearchParams,
+    isLastAttempt: boolean,
+  ): Promise<EuropePmcSearchResult> {
+    const text = await this.client.search(params);
 
     let parsed: EuropePmcSearchResponse;
     try {
@@ -153,39 +206,63 @@ export class EuropePmcService {
     }
 
     /**
-     * EPMC silently returns a `{ version }`-only envelope (no `hitCount`, no
-     * `request` echo, no `resultList`) when it rejects a parameter — most
-     * commonly an undocumented `sort` field. Without this guard the response
-     * normalizes to a fake 0-hit success and the caller never learns the sort
-     * was rejected. Route to ValidationError (non-retryable) since retrying
-     * the same input will be rejected again.
+     * EPMC answers some requests with a `{ version }`-only envelope — no
+     * `hitCount`, no `request` echo, no `resultList`. Without this guard the
+     * response normalizes to a fake 0-hit success. Every cause produces the
+     * byte-identical body, so it is classified by its likely cause:
+     *
+     * - A sort that EPMC rejects every time (see `sortExplainsEnvelope`) fails
+     *   fast as non-retryable input — retrying only adds backoff.
+     * - A non-default cursor that draws it on every attempt is most likely
+     *   invalid or expired; EPMC rejects a malformed cursor every time.
+     * - Otherwise it is intermittent upstream noise — valid requests, with or
+     *   without a documented sort, draw it on a fraction of calls and succeed
+     *   when repeated — so it is thrown as a transient `europepmc_unreachable`
+     *   for the retry loop, and never names the caller's input. (#159)
+     *
+     * Each throw keeps the diagnosis (message) apart from the next step
+     * (recovery hint): the framework mirrors `data.recovery.hint` into
+     * `content[]`, and one string passed as both renders byte-identical
+     * Error:/Recovery: blocks. (#75)
      */
     if (
       parsed.hitCount === undefined &&
       parsed.request === undefined &&
       parsed.resultList === undefined
     ) {
-      // Split the diagnosis (message) from the actionable next step (recovery
-      // hint). The framework mirrors data.recovery.hint into content[], so
-      // passing one string as both renders byte-identical Error:/Recovery:
-      // blocks — the same distinct message-vs-hint shape as the errMsg throw
-      // ~20 lines up. (#75)
-      const { message, hint } = params.sort
-        ? {
-            message: `Europe PMC silently rejected the request — most likely the invalid sort field "${params.sort}".`,
-            hint: 'Use a documented sort (`P_PDATE_D desc`, `CITED desc`, `AUTH_FIRST asc`, or `PUB_YEAR desc`), or omit `sort` for relevance ranking.',
-          }
-        : {
-            message: 'Europe PMC silently rejected the request — empty envelope with no hitCount.',
-            hint: 'Verify the query syntax, sort field, and cursorMark, then retry.',
-          };
-      throw validationError(message, {
-        reason: 'europepmc_invalid_input',
-        ...(params.sort && { sort: params.sort }),
-        ...(params.cursorMark && params.cursorMark !== '*' && { cursorMark: params.cursorMark }),
-        responseSnippet: text.substring(0, 200),
-        recovery: { hint },
-      });
+      const cursorMark =
+        params.cursorMark && params.cursorMark !== '*' ? params.cursorMark : undefined;
+      if (params.sort && sortExplainsEnvelope(params.sort)) {
+        throw validationError(
+          `Europe PMC silently rejected the request — most likely the sort "${params.sort}", which needs a documented field and an asc/desc direction.`,
+          {
+            reason: 'europepmc_invalid_input',
+            sort: params.sort,
+            ...(cursorMark && { cursorMark }),
+            responseSnippet: text.substring(0, 200),
+            recovery: {
+              hint: 'Use a documented sort (`P_PDATE_D desc`, `CITED desc`, `AUTH_FIRST asc`, or `PUB_YEAR desc`), or omit `sort` for relevance ranking.',
+            },
+          },
+        );
+      }
+      if (cursorMark && isLastAttempt) {
+        throw validationError(
+          `Europe PMC answered every attempt for cursorMark "${cursorMark}" with an empty response — the cursor is most likely invalid or expired.`,
+          {
+            reason: 'europepmc_invalid_input',
+            cursorMark,
+            responseSnippet: text.substring(0, 200),
+            recovery: {
+              hint: 'Restart from the first page with `cursorMark: "*"`, or pass the exact `nextCursorMark` from the previous response.',
+            },
+          },
+        );
+      }
+      throw serviceUnavailable(
+        'Europe PMC returned an empty response with no hit count or result list.',
+        { reason: 'europepmc_unreachable', ...recoveryFor('europepmc_unreachable') },
+      );
     }
 
     const hits = ensureArray<EuropePmcSearchHit>(parsed.resultList?.result);
@@ -436,10 +513,15 @@ export class EuropePmcService {
   /**
    * Retry wrapper for transient errors. Mirrors NCBI's `withRetry` minus the
    * service-level deadline — EPMC requests are cheaper individually and the
-   * caller (typically `ctx.signal`) bounds the total chain.
+   * caller (typically `ctx.signal`) bounds the total chain. `execute` receives
+   * the zero-based attempt index. On exhaustion the last error keeps its code
+   * and an upstream `retryAfter`, so a 429 still tells the caller how long to
+   * wait. Only a `ServiceUnavailable` gains `europepmc_unreachable` and its hint;
+   * a `Timeout` or `RateLimited` keeps its code with no reason, as the NCBI
+   * service reports them.
    */
   private async withRetry<T>(
-    execute: () => Promise<T>,
+    execute: (attempt: number) => Promise<T>,
     label: string,
     signal?: AbortSignal,
   ): Promise<T> {
@@ -447,7 +529,7 @@ export class EuropePmcService {
       if (signal?.aborted) throw signal.reason;
 
       try {
-        return await execute();
+        return await execute(attempt);
       } catch (error: unknown) {
         if (signal?.aborted) throw signal.reason;
         if (!(error instanceof McpError)) throw error;
@@ -469,26 +551,24 @@ export class EuropePmcService {
         }
 
         const attempts = this.maxRetries + 1;
-        const msg = error instanceof Error ? error.message : String(error);
         throw new McpError(
           error.code,
-          `${msg} (failed after ${attempts} attempts)`,
+          `${error.message} (failed after ${attempts} attempts)`,
           {
-            reason: 'europepmc_unreachable',
+            ...(error.code === JsonRpcErrorCode.ServiceUnavailable && {
+              reason: 'europepmc_unreachable',
+              ...recoveryFor('europepmc_unreachable'),
+            }),
             label,
             attempts,
-            ...recoveryFor('europepmc_unreachable'),
+            ...(error.data?.retryAfter !== undefined && { retryAfter: error.data.retryAfter }),
           },
           { cause: error },
         );
       }
     }
 
-    throw internalError('Europe PMC request failed after all retries.', {
-      reason: 'europepmc_unreachable',
-      label,
-      ...recoveryFor('europepmc_unreachable'),
-    });
+    throw internalError('Europe PMC request failed after all retries.', { label });
   }
 }
 

@@ -16,6 +16,7 @@ vi.mock('@cyanheads/mcp-ts-core/utils', async () => {
   };
 });
 
+const { defaultIsTransient } = await import('@cyanheads/mcp-ts-core/utils');
 const { EuropePmcApiClient } = await import('@/services/europe-pmc/api-client.js');
 const { EuropePmcRequestQueue } = await import('@/services/europe-pmc/request-queue.js');
 const { EuropePmcService } = await import('@/services/europe-pmc/europe-pmc-service.js');
@@ -44,13 +45,19 @@ function xmlResponse(body: string, init: ResponseInit = {}) {
  * severity. Mocking a resolved 404/503 `Response` models a state the real helper
  * cannot produce, and certifies branches that never execute. (#90)
  */
-function httpErrorRejection(status: number, code: JsonRpcErrorCode, body = '') {
+function httpErrorRejection(
+  status: number,
+  code: JsonRpcErrorCode,
+  body = '',
+  retryAfter?: string,
+) {
   return new McpError(code, `Fetch failed for <upstream>. Status: ${status}`, {
     status,
     statusText: '',
     body,
     statusCode: status,
     responseBody: body,
+    ...(retryAfter !== undefined && { retryAfter }),
     errorSource: 'FetchHttpError',
   });
 }
@@ -198,7 +205,7 @@ describe('EuropePmcService.search', () => {
     expect(err.data.recovery.hint).not.toBe(err.message);
   });
 
-  it('splits diagnosis from recovery hint on the no-sort empty envelope (#75)', async () => {
+  it('splits diagnosis from recovery hint when a cursorMark draws the envelope on every attempt (#75)', async () => {
     mockFetchWithTimeout.mockResolvedValue(jsonResponse({ version: '6.10' }));
     const service = makeService();
     const err = (await service
@@ -210,7 +217,7 @@ describe('EuropePmcService.search', () => {
 
     expect(err.data.reason).toBe('europepmc_invalid_input');
     expect(err.data.cursorMark).toBe('BAD_CURSOR');
-    expect(err.message).toContain('silently rejected');
+    expect(err.message).toContain('BAD_CURSOR');
     expect(err.data.recovery.hint).toContain('cursorMark');
     expect(err.data.recovery.hint).not.toBe(err.message);
   });
@@ -278,6 +285,319 @@ describe('EuropePmcService.search', () => {
         reason: 'europepmc_unreachable',
         recovery: { hint: expect.stringContaining('Europe PMC was unreachable') },
       },
+    });
+  });
+});
+
+/**
+ * Upstream failures (#152) and the empty `{ version }` envelope (#159) both run
+ * inside the service's retry loop. These drive the real client, queue, and retry
+ * loop with a stubbed `fetchWithTimeout` and zero-delay backoff, and count the
+ * upstream requests — a classification that skipped or burned the retry budget
+ * would still surface the same code.
+ */
+describe('EuropePmcService.search — upstream failures and empty envelopes (#152, #159)', () => {
+  const MAX_RETRIES = 3;
+  const EXHAUSTED = MAX_RETRIES + 1;
+  const UNREACHABLE_HINT =
+    'Retry after a brief delay; Europe PMC was unreachable. NCBI PMC and Unpaywall remain available.';
+
+  const envelope = () => jsonResponse({ version: '6.9' });
+  const results = () =>
+    jsonResponse({
+      hitCount: 1,
+      request: { queryString: 'CRISPR', cursorMark: '*' },
+      resultList: { result: [{ id: '1', source: 'MED' }] },
+    });
+
+  let setTimeoutSpy: ReturnType<typeof vi.spyOn>;
+
+  beforeEach(() => {
+    mockFetchWithTimeout.mockReset();
+    // Fire backoff sleeps at once so an exhausted retry chain doesn't actually wait.
+    setTimeoutSpy = vi.spyOn(globalThis, 'setTimeout').mockImplementation(((fn: () => void) => {
+      fn();
+      return 0 as unknown as ReturnType<typeof setTimeout>;
+    }) as unknown as typeof setTimeout);
+  });
+
+  afterEach(() => {
+    setTimeoutSpy.mockRestore();
+  });
+
+  const service = () => makeService({ maxRetries: MAX_RETRIES });
+
+  describe('HTTP failures on /search (#152)', () => {
+    it('retries a 404 and ends as europepmc_unreachable, never a bare NotFound', async () => {
+      mockFetchWithTimeout.mockRejectedValue(
+        httpErrorRejection(404, JsonRpcErrorCode.NotFound, 'nope'),
+      );
+      await expect(service().search({ query: 'cancer', pageSize: 1 })).rejects.toMatchObject({
+        code: JsonRpcErrorCode.ServiceUnavailable,
+        message: expect.stringMatching(
+          new RegExp(`Status: 404.*\\(failed after ${EXHAUSTED} attempts\\)$`),
+        ),
+        data: { reason: 'europepmc_unreachable', recovery: { hint: UNREACHABLE_HINT } },
+      });
+      expect(mockFetchWithTimeout).toHaveBeenCalledTimes(EXHAUSTED);
+    });
+
+    it('returns results when a 404 clears on the next attempt', async () => {
+      mockFetchWithTimeout
+        .mockRejectedValueOnce(httpErrorRejection(404, JsonRpcErrorCode.NotFound))
+        .mockResolvedValueOnce(results());
+      const result = await service().search({ query: 'CRISPR' });
+      expect(result.hitCount).toBe(1);
+      expect(mockFetchWithTimeout).toHaveBeenCalledTimes(2);
+    });
+
+    it.each([500, 503])(
+      'retries a %i and ends as europepmc_unreachable with the hint',
+      async (status) => {
+        mockFetchWithTimeout.mockRejectedValue(
+          httpErrorRejection(status, JsonRpcErrorCode.ServiceUnavailable, 'down'),
+        );
+        await expect(service().search({ query: 'cancer' })).rejects.toMatchObject({
+          code: JsonRpcErrorCode.ServiceUnavailable,
+          message: expect.stringMatching(
+            new RegExp(`Status: ${status}.*\\(failed after ${EXHAUSTED} attempts\\)$`),
+          ),
+          data: { reason: 'europepmc_unreachable', recovery: { hint: UNREACHABLE_HINT } },
+        });
+        expect(mockFetchWithTimeout).toHaveBeenCalledTimes(EXHAUSTED);
+      },
+    );
+
+    it('carries a 503 Retry-After through to the terminal error', async () => {
+      mockFetchWithTimeout.mockRejectedValue(
+        httpErrorRejection(503, JsonRpcErrorCode.ServiceUnavailable, 'down', '9'),
+      );
+      await expect(service().search({ query: 'cancer' })).rejects.toMatchObject({
+        code: JsonRpcErrorCode.ServiceUnavailable,
+        data: { reason: 'europepmc_unreachable', retryAfter: '9' },
+      });
+    });
+
+    /**
+     * `europepmc_unreachable` is declared for `ServiceUnavailable` only. A failure
+     * that keeps another transient code says what it is through that code and its
+     * message, the way the NCBI service reports an exhausted Timeout or RateLimited.
+     */
+    const expectNoUnreachableReason = (err: McpError) => {
+      expect(err.data?.reason).toBeUndefined();
+      expect(err.data?.recovery).toBeUndefined();
+      expect(err.data?.attempts).toBe(EXHAUSTED);
+      expect(err.message).toMatch(new RegExp(`\\(failed after ${EXHAUSTED} attempts\\)$`));
+    };
+
+    it('retries a 504 and keeps Timeout, without the unreachable reason', async () => {
+      mockFetchWithTimeout.mockRejectedValue(
+        httpErrorRejection(504, JsonRpcErrorCode.Timeout, 'gateway timeout'),
+      );
+      const err = (await service()
+        .search({ query: 'cancer' })
+        .catch((e: unknown) => e)) as McpError;
+      expect(err.code).toBe(JsonRpcErrorCode.Timeout);
+      expect(err.message).toContain('Status: 504');
+      expectNoUnreachableReason(err);
+      expect(mockFetchWithTimeout).toHaveBeenCalledTimes(EXHAUSTED);
+    });
+
+    it('keeps a 429 RateLimited with its retryAfter and without the unreachable reason', async () => {
+      mockFetchWithTimeout.mockRejectedValue(
+        httpErrorRejection(429, JsonRpcErrorCode.RateLimited, '', '7'),
+      );
+      const err = (await service()
+        .search({ query: 'cancer' })
+        .catch((e: unknown) => e)) as McpError;
+      expect(err.code).toBe(JsonRpcErrorCode.RateLimited);
+      expect(err.data?.retryAfter).toBe('7');
+      expectNoUnreachableReason(err);
+      expect(mockFetchWithTimeout).toHaveBeenCalledTimes(EXHAUSTED);
+    });
+
+    it('keeps an exhausted request timeout on another endpoint as Timeout, without the reason', async () => {
+      mockFetchWithTimeout.mockRejectedValue(
+        new McpError(JsonRpcErrorCode.Timeout, 'Request timed out after 20000ms.', {
+          errorSource: 'FetchTimeout',
+        }),
+      );
+      const err = (await service()
+        .citations('31295471', 25, 1)
+        .catch((e: unknown) => e)) as McpError;
+      expect(err.code).toBe(JsonRpcErrorCode.Timeout);
+      expectNoUnreachableReason(err);
+      expect(mockFetchWithTimeout).toHaveBeenCalledTimes(EXHAUSTED);
+    });
+
+    it('keeps another 4xx at its own code, unretried and without the unreachable reason', async () => {
+      mockFetchWithTimeout.mockRejectedValue(
+        httpErrorRejection(400, JsonRpcErrorCode.InvalidParams, 'bad'),
+      );
+      const err = await service()
+        .search({ query: 'cancer' })
+        .then(
+          () => undefined,
+          (e: unknown) => e as McpError,
+        );
+      expect(err?.code).toBe(JsonRpcErrorCode.InvalidParams);
+      expect(err?.data?.reason).toBeUndefined();
+      expect(mockFetchWithTimeout).toHaveBeenCalledTimes(1);
+    });
+
+    it('still converts a fullTextXML 404 to `not-available` without retrying (#90)', async () => {
+      mockFetchWithTimeout.mockRejectedValue(
+        httpErrorRejection(404, JsonRpcErrorCode.NotFound, 'nope'),
+      );
+      const result = await service().fullTextXml('PPR404', 'PPR');
+      expect(result.kind).toBe('not-available');
+      expect(mockFetchWithTimeout).toHaveBeenCalledTimes(1);
+    });
+  });
+
+  describe('empty { version } envelope (#159)', () => {
+    it('retries an envelope on attempt 1 and returns the results of attempt 2', async () => {
+      mockFetchWithTimeout.mockResolvedValueOnce(envelope()).mockResolvedValueOnce(results());
+      const result = await service().search({ query: 'CRISPR', sort: 'CITED desc' });
+      expect(result.hits).toHaveLength(1);
+      expect(mockFetchWithTimeout).toHaveBeenCalledTimes(2);
+    });
+
+    it('recovers from an envelope on every attempt but the last', async () => {
+      mockFetchWithTimeout
+        .mockResolvedValueOnce(envelope())
+        .mockResolvedValueOnce(envelope())
+        .mockResolvedValueOnce(envelope())
+        .mockResolvedValueOnce(results());
+      const result = await service().search({ query: 'CRISPR' });
+      expect(result.hitCount).toBe(1);
+      expect(mockFetchWithTimeout).toHaveBeenCalledTimes(EXHAUSTED);
+    });
+
+    it.each([
+      ['no sort', undefined],
+      ['CITED desc', 'CITED desc'],
+      ['a documented field in any case and spacing', '  cited   DESC '],
+      ['AUTH_FIRST asc', 'AUTH_FIRST asc'],
+      ['comma-separated documented keys', 'PUB_YEAR desc, CITED desc'],
+      ['comma-separated documented keys without a space', 'pub_year desc,cited DESC'],
+    ])(
+      'ends a persistent envelope with %s as retryable europepmc_unreachable',
+      async (_label, sort) => {
+        mockFetchWithTimeout.mockImplementation(() => Promise.resolve(envelope()));
+        const err = (await service()
+          .search({ query: 'CRISPR base editing', ...(sort && { sort }) })
+          .then(
+            () => undefined,
+            (e: unknown) => e,
+          )) as McpError;
+
+        expect(err).toBeInstanceOf(McpError);
+        expect(err.code).toBe(JsonRpcErrorCode.ServiceUnavailable);
+        expect(err.data?.reason).toBe('europepmc_unreachable');
+        expect(err.data?.recovery).toEqual({ hint: UNREACHABLE_HINT });
+        expect(err.message).toMatch(new RegExp(`\\(failed after ${EXHAUSTED} attempts\\)$`));
+        // Upstream noise — never blame the caller's input.
+        expect(err.message).not.toMatch(/sort|CITED|AUTH_FIRST|CRISPR|query/i);
+        expect(err.data?.sort).toBeUndefined();
+        // #75: the diagnosis and the next step stay distinct.
+        expect(err.data?.recovery).not.toEqual({ hint: err.message });
+        expect(defaultIsTransient(err)).toBe(true);
+        expect(mockFetchWithTimeout).toHaveBeenCalledTimes(EXHAUSTED);
+      },
+    );
+
+    it.each([
+      ['an undocumented field', 'BOGUSFIELD desc'],
+      ['a documented field with no direction', 'CITED'],
+      ['an honored undocumented field', 'ID asc'],
+      ['a direction that is not asc/desc', 'CITED down'],
+      ['a key list with one undocumented field', 'CITED desc, BOGUSFIELD asc'],
+      ['keys joined by a semicolon', 'CITED desc; PUB_YEAR asc'],
+    ])('fails fast on an envelope for %s, naming the sort', async (_label, sort) => {
+      mockFetchWithTimeout.mockImplementation(() => Promise.resolve(envelope()));
+      const err = (await service()
+        .search({ query: 'CRISPR', sort })
+        .then(
+          () => undefined,
+          (e: unknown) => e,
+        )) as McpError;
+
+      expect(err).toBeInstanceOf(McpError);
+      expect(err.code).toBe(JsonRpcErrorCode.ValidationError);
+      expect(err.data?.reason).toBe('europepmc_invalid_input');
+      expect(err.data?.sort).toBe(sort);
+      expect(err.message).toContain(`"${sort}"`);
+      const hint = (err.data?.recovery as { hint?: string } | undefined)?.hint;
+      expect(hint).toContain('documented sort');
+      expect(hint).not.toBe(err.message);
+      expect(defaultIsTransient(err)).toBe(false);
+      expect(mockFetchWithTimeout).toHaveBeenCalledTimes(1);
+    });
+
+    it('sends an undocumented sort upstream and returns its results', async () => {
+      mockFetchWithTimeout.mockResolvedValue(results());
+      const result = await service().search({ query: 'CRISPR', sort: 'ID asc' });
+      expect(result.hits).toHaveLength(1);
+      expect(String(mockFetchWithTimeout.mock.calls[0]?.[0])).toContain('sort=ID+asc');
+      expect(mockFetchWithTimeout).toHaveBeenCalledTimes(1);
+    });
+
+    it('blames a pagination cursor only once the envelope persists through every attempt', async () => {
+      mockFetchWithTimeout.mockImplementation(() => Promise.resolve(envelope()));
+      await expect(
+        service().search({ query: 'CRISPR', cursorMark: 'AoIIQDeiFSg1' }),
+      ).rejects.toMatchObject({
+        code: JsonRpcErrorCode.ValidationError,
+        message: expect.stringContaining('"AoIIQDeiFSg1"'),
+        data: {
+          reason: 'europepmc_invalid_input',
+          cursorMark: 'AoIIQDeiFSg1',
+          recovery: { hint: expect.stringContaining('cursorMark') },
+        },
+      });
+      expect(mockFetchWithTimeout).toHaveBeenCalledTimes(EXHAUSTED);
+    });
+
+    it('returns a cursor page whose envelope clears on retry', async () => {
+      mockFetchWithTimeout.mockResolvedValueOnce(envelope()).mockResolvedValueOnce(results());
+      const result = await service().search({ query: 'CRISPR', cursorMark: 'AoIIQDeiFSg1' });
+      expect(result.hitCount).toBe(1);
+      expect(mockFetchWithTimeout).toHaveBeenCalledTimes(2);
+    });
+
+    it('treats an HTTP-200 zero-hit answer as an empty result, not an envelope', async () => {
+      mockFetchWithTimeout.mockResolvedValue(
+        jsonResponse({ version: '6.9', hitCount: 0, request: { queryString: 'zzqx' } }),
+      );
+      const result = await service().search({ query: 'zzqx' });
+      expect(result).toMatchObject({ hitCount: 0, hits: [] });
+      expect(mockFetchWithTimeout).toHaveBeenCalledTimes(1);
+    });
+
+    it('fails an errMsg envelope fast as europepmc_invalid_input', async () => {
+      mockFetchWithTimeout.mockResolvedValue(jsonResponse({ errCode: 400, errMsg: 'bad query' }));
+      await expect(service().search({ query: 'x' })).rejects.toMatchObject({
+        code: JsonRpcErrorCode.ValidationError,
+        data: { reason: 'europepmc_invalid_input' },
+      });
+      expect(mockFetchWithTimeout).toHaveBeenCalledTimes(1);
+    });
+
+    it('fails an unparseable body fast as europepmc_invalid_response', async () => {
+      mockFetchWithTimeout.mockResolvedValue(new Response('<html/>', { status: 200 }));
+      await expect(service().search({ query: 'x' })).rejects.toMatchObject({
+        code: JsonRpcErrorCode.SerializationError,
+        data: { reason: 'europepmc_invalid_response' },
+      });
+      expect(mockFetchWithTimeout).toHaveBeenCalledTimes(1);
+    });
+
+    it('fetchRecords shares the envelope retry through search()', async () => {
+      mockFetchWithTimeout.mockResolvedValueOnce(envelope()).mockResolvedValueOnce(results());
+      const hits = await service().fetchRecords([{ source: 'MED', epmcId: '1' }]);
+      expect(hits).toHaveLength(1);
+      expect(mockFetchWithTimeout).toHaveBeenCalledTimes(2);
     });
   });
 });
@@ -435,14 +755,19 @@ describe('EuropePmcService.fullTextXml', () => {
     await expect(service.fullTextXml('X', 'PMC')).rejects.toThrow(/503/);
   });
 
-  it('throws NotFound onward for a 404 on a non-fullTextXML endpoint', async () => {
-    // The 404 → `not-available` conversion is scoped to fullTextXml; a 404 from
-    // any other Europe PMC endpoint keeps propagating. (#90)
+  it('never gives a search 404 the fullTextXML `not-available` treatment', async () => {
+    // The 404 → `not-available` conversion is scoped to fullTextXml (#90). A
+    // failed search is not "no record" — it is an outage, surfaced as
+    // `europepmc_unreachable` rather than a bare NotFound. (#152)
     mockFetchWithTimeout.mockRejectedValue(
       httpErrorRejection(404, JsonRpcErrorCode.NotFound, 'nope'),
     );
     const service = makeService();
-    await expect(service.search({ query: 'foo' })).rejects.toThrow(/404/);
+    await expect(service.search({ query: 'foo' })).rejects.toMatchObject({
+      code: JsonRpcErrorCode.ServiceUnavailable,
+      message: expect.stringMatching(/Status: 404.*\(failed after 1 attempts\)$/),
+      data: { reason: 'europepmc_unreachable' },
+    });
   });
 
   it('uses the single-id URL pattern, not source/id', async () => {

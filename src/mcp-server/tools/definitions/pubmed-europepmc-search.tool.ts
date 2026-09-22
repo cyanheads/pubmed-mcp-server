@@ -98,7 +98,7 @@ export const pubmedEuropepmcSearchTool = tool('pubmed_europepmc_search', {
       .string()
       .optional()
       .describe(
-        'Optional EPMC sort: `<field> asc|desc`. Documented sortable fields: `P_PDATE_D` (publication date), `CITED` (citation count), `AUTH_FIRST` (first author surname), `PUB_YEAR` (publication year). Examples: `P_PDATE_D desc` (newest first), `CITED desc` (most cited). Omit for relevance ranking. Fields outside the documented set are rejected by EPMC. Note: `P_PDATE_D` is ignored for preprint-only (`sources: ["PPR"]`) result sets — preprints have no populated publication date, so use `PUB_YEAR` to order preprints by date.',
+        'Optional EPMC sort: `<field> asc|desc`, or several comma-separated keys applied in order (`PUB_YEAR desc, CITED desc`). Documented sortable fields: `P_PDATE_D` (publication date), `CITED` (citation count), `AUTH_FIRST` (first author surname), `PUB_YEAR` (publication year). Examples: `P_PDATE_D desc` (newest first), `CITED desc` (most cited). Omit for relevance ranking. Field and direction match case-insensitively. A field outside the documented set may be honored, silently ignored, or rejected, and a sort using one — or a key without `asc`/`desc` — can fail with `europepmc_invalid_input` naming it, even when Europe PMC honors the field. Note: `P_PDATE_D` is ignored for preprint-only (`sources: ["PPR"]`) result sets — preprints have no populated publication date, so use `PUB_YEAR` to order preprints by date.',
       ),
   }),
 

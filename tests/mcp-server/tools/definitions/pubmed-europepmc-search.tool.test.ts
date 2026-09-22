@@ -383,6 +383,13 @@ describe('pubmedEuropepmcSearchTool', () => {
     expect(result.hits[0]?.epmcUrl).toBe('https://europepmc.org/article/PPR/PPR9');
   });
 
+  it('describes sort without promising that undocumented fields are rejected (#159)', () => {
+    const description = pubmedEuropepmcSearchTool.input.shape.sort.description ?? '';
+    expect(description).not.toMatch(/outside the documented set are rejected/);
+    expect(description).toContain('case-insensitively');
+    expect(description).toContain('europepmc_invalid_input');
+  });
+
   describe('PPR date-sort advisory (issue #67)', () => {
     const pprHit = { id: 'PPR1', source: 'PPR', firstPublicationDate: '2026-03-13' };
 
