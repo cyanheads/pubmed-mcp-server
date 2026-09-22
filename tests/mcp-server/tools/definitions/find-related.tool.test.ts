@@ -630,6 +630,61 @@ describe('findRelatedTool', () => {
     expect(getEnrichment(ctx).notice).toContain('PMIDs only');
   });
 
+  // ── Declared error surface ─────────────────────────────────────────────────
+
+  describe('declared error surface', () => {
+    /** A service-layer failure carrying one of the service-contract reasons. */
+    const serviceFailure = (reason: string) =>
+      new McpError(JsonRpcErrorCode.ServiceUnavailable, `${reason} upstream`, { reason });
+
+    /** The top-level `data.reason` a call surfaces, or `undefined` when it succeeds. */
+    async function topLevelReason(
+      input: Parameters<typeof runToolContract<typeof findRelatedTool>>[1],
+    ): Promise<string | undefined> {
+      const result = await runToolContract(findRelatedTool, input);
+      if (!result.isError) return;
+      const error = (result.structuredContent as { error?: { data?: { reason?: string } } }).error;
+      return error?.data?.reason;
+    }
+
+    it('absorbs every service-layer reason — none reaches the caller as the top-level reason', async () => {
+      // Every provider in the chain fails.
+      mockELink.mockRejectedValue(serviceFailure('queue_full'));
+      mockEpmcCitations.mockRejectedValue(serviceFailure('europepmc_invalid_response'));
+      mockOaCitedBy.mockRejectedValue(serviceFailure('openalex_invalid_response'));
+      expect(await topLevelReason({ pmid: '12345', relationship: 'cited_by' })).toBe(
+        'all_providers_failed',
+      );
+
+      // A fallback answers, then the window-enrichment ESummary fails.
+      mockEpmcCitations.mockResolvedValue({
+        pmids: ['333'],
+        hitCount: 1,
+        droppedNoPmid: 0,
+      });
+      mockESummary.mockRejectedValue(serviceFailure('ncbi_deadline_exceeded'));
+      expect(await topLevelReason({ pmid: '12345', relationship: 'cited_by' })).toBeUndefined();
+
+      // NCBI answers empty and the source-PMID ESummary fails.
+      mockELink.mockResolvedValue({ eLinkResult: [{ LinkSet: {} }] });
+      mockESummary.mockRejectedValue(serviceFailure('ncbi_invalid_response'));
+      expect(await topLevelReason({ pmid: '12345', relationship: 'similar' })).toBeUndefined();
+
+      // A confirmed source whose reference-coverage fallbacks both fail.
+      mockESummary.mockResolvedValue({ eSummaryResult: {} });
+      mockExtractBriefSummaries.mockResolvedValue([{ pmid: '12345', title: 'Source' }]);
+      mockEpmcReferences.mockRejectedValue(serviceFailure('europepmc_unreachable'));
+      mockOaReferences.mockRejectedValue(serviceFailure('openalex_unreachable'));
+      expect(await topLevelReason({ pmid: '12345', relationship: 'references' })).toBeUndefined();
+    });
+
+    it('declares only the reason the handler itself throws', () => {
+      expect(findRelatedTool.errors?.map((entry) => entry.reason)).toEqual([
+        'all_providers_failed',
+      ]);
+    });
+  });
+
   // ── Europe PMC paging + PMID-addressable disclosure (#101) ─────────────────
 
   describe('Europe PMC window paging (issue #101)', () => {

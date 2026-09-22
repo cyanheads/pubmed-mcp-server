@@ -12,6 +12,11 @@
  *
  * Tool definitions import the contract arrays directly and spread them into
  * their `errors: [...]` declarations to surface the failure modes to the LLM.
+ * Every service-array entry carries `thrownBy: 'service'` so the linter's
+ * `error-contract-unthrown` check skips it while still checking the handler's
+ * own reasons. Spread a service array only into a tool whose handler lets that
+ * service's errors propagate — a tool that catches them all never produces
+ * those reasons.
  *
  * @module src/services/error-contracts
  */
@@ -19,17 +24,19 @@
 import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
 
 /**
- * Failure modes the NCBI service layer can surface. Tools that consume
- * `getNcbiService()` should spread these into their own `errors[]` so the
- * declared contract matches what actually reaches the wire.
+ * Failure modes the NCBI service layer can surface. Tools whose handler lets
+ * `getNcbiService()` failures propagate spread these into their own `errors[]`
+ * so the declared contract matches what actually reaches the wire.
  */
 export const NCBI_SERVICE_ERRORS = [
   {
     reason: 'queue_full',
     code: JsonRpcErrorCode.RateLimited,
-    when: 'Local NCBI request queue is at capacity.',
-    recovery: 'Retry after 1-2 seconds; the request queue hit the NCBI rate limit.',
+    when: 'The local NCBI request queue shed the call — the queue is full, or the call cannot start before its total deadline (for example behind the cooldown that follows an NCBI 429).',
+    recovery:
+      'Wait the number of seconds in `retryAfter`, then retry; the NCBI request queue is saturated or cooling down after a rate limit.',
     retryable: true,
+    thrownBy: 'service',
   },
   {
     reason: 'ncbi_unreachable',
@@ -37,6 +44,7 @@ export const NCBI_SERVICE_ERRORS = [
     when: 'NCBI E-utilities is unreachable after all retry attempts.',
     recovery: 'Retry after a brief delay; NCBI was unreachable across all retry attempts.',
     retryable: true,
+    thrownBy: 'service',
   },
   {
     reason: 'ncbi_deadline_exceeded',
@@ -44,6 +52,7 @@ export const NCBI_SERVICE_ERRORS = [
     when: 'Total request deadline expired before NCBI returned a response.',
     recovery: 'Reduce batch size or retry; NCBI may be under temporary load.',
     retryable: true,
+    thrownBy: 'service',
   },
   {
     reason: 'ncbi_invalid_response',
@@ -51,6 +60,7 @@ export const NCBI_SERVICE_ERRORS = [
     when: 'NCBI returned a body that could not be parsed (invalid XML/JSON).',
     recovery: 'Retry the request; NCBI returned a malformed response that could not be parsed.',
     retryable: true,
+    thrownBy: 'service',
   },
   {
     reason: 'ncbi_resource_not_found',
@@ -59,6 +69,7 @@ export const NCBI_SERVICE_ERRORS = [
     recovery:
       'Verify the ID exists in PubMed; the resource was not found in NCBI and retrying will not help.',
     retryable: false,
+    thrownBy: 'service',
   },
 ] as const;
 
@@ -118,13 +129,14 @@ export const UNPAYWALL_SERVICE_ERRORS = [
     recovery:
       'Retry after a brief delay; Unpaywall was unreachable. The PMC source remains the primary path.',
     retryable: true,
+    thrownBy: 'service',
   },
 ] as const;
 
 /**
- * Failure modes the OpenAlex service layer can surface. Tools that consume
- * `getOpenAlexService()` / `getOpenAlexServiceOptional()` should spread
- * these into their `errors[]`.
+ * Failure modes the OpenAlex service layer can surface. Tools whose handler
+ * lets `getOpenAlexService()` / `getOpenAlexServiceOptional()` failures
+ * propagate spread these into their `errors[]`.
  */
 export const OPENALEX_SERVICE_ERRORS = [
   {
@@ -134,6 +146,7 @@ export const OPENALEX_SERVICE_ERRORS = [
     recovery:
       'Retry after a brief delay; OpenAlex was unreachable. NCBI and Europe PMC remain available.',
     retryable: true,
+    thrownBy: 'service',
   },
   {
     reason: 'openalex_invalid_response',
@@ -141,21 +154,24 @@ export const OPENALEX_SERVICE_ERRORS = [
     when: 'OpenAlex returned a body that could not be parsed (invalid JSON).',
     recovery: 'Retry the request; OpenAlex returned a malformed response that could not be parsed.',
     retryable: true,
+    thrownBy: 'service',
   },
 ] as const;
 
 /**
- * Failure modes the Europe PMC service layer can surface. Tools that consume
- * `getEuropePmcService()` should spread these into their `errors[]`.
+ * Failure modes the Europe PMC service layer can surface. Tools whose handler
+ * lets `getEuropePmcService()` failures propagate spread these into their
+ * `errors[]`.
  */
 export const EUROPEPMC_SERVICE_ERRORS = [
   {
     reason: 'europepmc_unreachable',
     code: JsonRpcErrorCode.ServiceUnavailable,
-    when: 'Europe PMC was unreachable after all retry attempts.',
+    when: 'Europe PMC failed on every retry attempt — unreachable, an HTTP 404 or 5xx other than a 504 timeout from its search endpoint, or an empty response with no results.',
     recovery:
       'Retry after a brief delay; Europe PMC was unreachable. NCBI PMC and Unpaywall remain available.',
     retryable: true,
+    thrownBy: 'service',
   },
   {
     reason: 'europepmc_invalid_response',
@@ -164,14 +180,16 @@ export const EUROPEPMC_SERVICE_ERRORS = [
     recovery:
       'Retry the request; Europe PMC returned a malformed response that could not be parsed.',
     retryable: true,
+    thrownBy: 'service',
   },
   {
     reason: 'europepmc_invalid_input',
     code: JsonRpcErrorCode.ValidationError,
-    when: 'Europe PMC rejected the request input (empty query, unknown sort field, malformed parameter).',
+    when: 'Europe PMC rejected the request input — an error message such as an empty query, an empty response to a sort with an undocumented field or no asc/desc direction, or an empty response to a pagination cursor on every attempt.',
     recovery:
-      'Adjust the input — usually the query or sort field — before retrying; the same input will be rejected again.',
+      'Adjust the input — the query, the sort, or the cursorMark — before retrying; the same input will be rejected again.',
     retryable: false,
+    thrownBy: 'service',
   },
 ] as const;
 

@@ -4,7 +4,7 @@ description: >
   Scaffold a new MCP tool definition. Use when the user asks to add a tool, create a new tool, or implement a new capability for the server.
 metadata:
   author: cyanheads
-  version: "2.27"
+  version: "2.29"
   audience: external
   type: reference
 ---
@@ -719,6 +719,8 @@ export const fetchArticles = tool('fetch_articles', {
 
 `ctx.recoveryFor` returns `{}` when the calling tool has no contract or the reason isn't declared, so the spread is always safe — services don't have to know which tool called them.
 
+Add `thrownBy: 'service'` to a contract entry the service produces once the handler also throws one of its own. `error-contract-unthrown` reads the handler body alone: as soon as one literal `ctx.fail(` appears there, every declared reason the body does not name is flagged, and the marker is what tells the rule this one is thrown a layer down. Lint-only metadata — the entry stays typed, advertised, and thrown exactly as an unmarked one.
+
 See `add-service` for the full pattern.
 
 #### Ad-hoc factory throws (fallback)
@@ -740,9 +742,12 @@ import { serviceUnavailable } from '@cyanheads/mcp-ts-core/errors';
 throw serviceUnavailable(`arXiv API returned HTTP ${status}. Retry in a few seconds.`);
 
 // Recovery hint via the canonical `data.recovery.hint` shape — the framework
-// auto-mirrors it into the content[] text as `Recovery: <hint>`, so format()-only
+// mirrors it into the content[] text as `Recovery: <hint>`, so format()-only
 // clients (Claude Desktop) see the same guidance that structuredContent clients
-// (Claude Code) read from `error.data.recovery.hint`. Other `data` keys reach
+// (Claude Code) read from `error.data.recovery.hint`. A hint the message already
+// contains verbatim is dropped from the text rather than stated twice; it stays
+// on structuredContent regardless. `data.reason` and `data.retryable` render as
+// a closing `(reason … · not retryable)` line; other `data` keys reach
 // structuredContent only.
 import { invalidParams } from '@cyanheads/mcp-ts-core/errors';
 throw invalidParams(
@@ -815,7 +820,7 @@ Large payloads burn the agent's context window. Default to curated summaries; of
 - **Lists**: Return top N with a total count and pagination cursor, not unbounded arrays
 - **Large objects**: Return key fields by default; accept a `fields` or `verbose` parameter for full data
 - **Binary/blob content**: Return metadata and a reference, not the raw content
-- **Analytical working sets**: When upstream returns more *analytical* rows (data an agent would SQL — aggregate, group, join) than fit in context, `DataCanvas` (`core.canvas`, wired in `setup()` via `setCanvas`; Tier 3 — opt-in via `CANVAS_PROVIDER_TYPE=duckdb`) lets you register the rows and return the `canvas_id` plus a preview so the agent can run SQL to slice down without a re-fetch. The `spillover()` helper (`@cyanheads/mcp-ts-core/canvas`) automates the overflow case: drain rows up to a character budget for the inline preview, auto-register the full source on overflow, return both as a discriminated union. **Two gates:** it must be analytical, not a discovery/search surface of categorical metadata (those don't earn a canvas regardless of row count — use MCP-side list filtering or pagination); and a tool emitting a `canvas_id` MUST be paired with a registered `dataframe_query` tool, or the handle is unreachable. Compute distributions or refinement hints across the full result — not the preview — so the agent gets honest aggregate signal on the rows it didn't read. See `api-canvas` for the register / query / export pattern and the spillover flow.
+- **Analytical working sets**: When upstream returns more *analytical* rows (data an agent would SQL — aggregate, group, join) than fit in context, `DataCanvas` (`core.canvas`, wired in `setup()` via `setCanvas`; Tier 3 — opt-in via `CANVAS_PROVIDER_TYPE=duckdb`) lets you register the rows and return the `canvas_id` plus a preview so the agent can run SQL to slice down without a re-fetch. The `spillover()` helper (`@cyanheads/mcp-ts-core/canvas`) automates the overflow case: drain rows up to a character budget for the inline preview, auto-register the full source on overflow, return both as a discriminated union. **Two gates:** it must be analytical, not a discovery/search surface of categorical metadata (those don't earn a canvas regardless of row count — use MCP-side list filtering or pagination); and a tool emitting a `canvas_id` MUST be paired with a registered `dataframe_query` tool, or the handle is unreachable. Compute distributions or refinement hints across the full result — not the preview — so the agent gets honest aggregate signal on the rows it didn't read. Declare the *input* `canvas_id` field with `CanvasIdSchema` (`@cyanheads/mcp-ts-core/canvas`) rather than a bare `z.string()`: it advertises the 10-character URL-safe pattern in `inputSchema`, so a model sees the shape before it calls and a value that could never be an id is rejected at argument validation instead of after a registry lookup. Add your own `.describe()` over it to say which tool produced the id. The *output* field stays a plain `z.string()` — that id came from the server. See `api-canvas` for the register / query / export pattern and the spillover flow.
 - **One large document**: When a single call returns one document-shaped record (not a row set) that can overflow context, return a section *outline* — top-level keys + per-section byte size — and let the agent re-call with `sections: [...]` for only what it needs, instead of truncating one surface. `outlineOnOverflow()` with `OUTLINE_VARIANT` / `selectSections()` / `formatOutline()` (`@cyanheads/mcp-ts-core/utils`) measures the payload and returns a `full | outline` result. Declare the tool's `output` as a flat `z.object` with a `kind` discriminator and presence-based optional arms (fold in `OUTLINE_VARIANT.shape.sections` / `.notice`) — `tool()` rejects a `z.discriminatedUnion` output — and render each arm on field presence in `format()` so parity holds. Pure measure + key-slice — Workers-portable, unlike canvas `spillover()`. Use for one fat record; use `spillover()` for a row collection. See the `techniques` skill's `outline-on-overflow` reference.
 
 ## MCP-side list filtering
@@ -857,7 +862,7 @@ return { items: hits };
 - [ ] Optional nested objects guarded for empty inner values from form-based clients (check `?.field` truthiness, not just object presence)
 - [ ] No `console` calls — use `ctx.log` for handler logging
 - [ ] `handler(input, ctx)` is pure — throws on failure, no try/catch (exception: batch tools with per-item isolation use try/catch inside the loop — that's intentional, don't remove it)
-- [ ] `format()` renders every field in the output schema — enforced at lint time via sentinel injection, startup fails with `format-parity` errors otherwise. Different clients forward different surfaces (Claude Code → `structuredContent`, Claude Desktop → `content[]`); both must carry the same data. Primary fix: render the missing field in `format()` (use `z.discriminatedUnion` for list/detail variants). Escape hatch: if the output schema was over-typed for a genuinely dynamic upstream API, relax it (`z.object({}).passthrough()`) rather than maintaining aspirational typing
+- [ ] `format()` renders every field in the output schema — enforced at lint time via sentinel injection, startup fails with `format-parity` errors otherwise. Different clients forward different surfaces (Claude Code → `structuredContent`, Claude Desktop → `content[]`); both must carry the same data. Primary fix: render the missing field in `format()` (for list/detail variants, one flat `z.object` with a `kind` discriminator and presence-based optional arms rendered by independent `if` blocks — `tool()` rejects a `z.discriminatedUnion` output). Escape hatch: if the output schema was over-typed for a genuinely dynamic upstream API, relax it (`z.object({}).passthrough()`) rather than maintaining aspirational typing
 - [ ] Agent-facing context (empty-result notices, query/filter echo, pagination totals) declared in an `enrichment` block and populated via `ctx.enrich(...)` — reaches both `structuredContent` and `content[]` automatically, not authored solely in `format()` text. Enrichment keys disjoint from `output` keys
 - [ ] If wrapping external API: output schema and `format()` preserve uncertainty from sparse upstream payloads instead of inventing concrete values, and a parsed `NaN`/`null` is dropped at the parse site rather than passed to a required output field
 - [ ] `auth` scopes declared if the tool needs authorization

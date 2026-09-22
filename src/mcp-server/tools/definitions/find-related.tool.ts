@@ -9,11 +9,7 @@
 
 import { tool, z } from '@cyanheads/mcp-ts-core';
 import { configurationError, JsonRpcErrorCode, McpError } from '@cyanheads/mcp-ts-core/errors';
-import {
-  EUROPEPMC_SERVICE_ERRORS,
-  NCBI_SERVICE_ERRORS,
-  OPENALEX_SERVICE_ERRORS,
-} from '@/services/error-contracts.js';
+import { EUROPEPMC_SERVICE_ERRORS, OPENALEX_SERVICE_ERRORS } from '@/services/error-contracts.js';
 import { getEuropePmcService } from '@/services/europe-pmc/europe-pmc-service.js';
 import { getNcbiService } from '@/services/ncbi/ncbi-service.js';
 import { extractBriefSummaries } from '@/services/ncbi/parsing/esummary-parser.js';
@@ -352,10 +348,10 @@ export const findRelatedTool = tool('pubmed_find_related', {
   sourceUrl:
     'https://github.com/cyanheads/pubmed-mcp-server/blob/main/src/mcp-server/tools/definitions/find-related.tool.ts',
 
+  // The handler catches every provider and ESummary failure, so no service
+  // reason reaches the caller as the top-level `data.reason`; each surfaces
+  // nested in `data.attempted` or the `coverageFailures` enrichment instead.
   errors: [
-    ...NCBI_SERVICE_ERRORS,
-    ...EUROPEPMC_SERVICE_ERRORS,
-    ...OPENALEX_SERVICE_ERRORS,
     {
       reason: 'all_providers_failed',
       code: JsonRpcErrorCode.ServiceUnavailable,

@@ -2,7 +2,7 @@
 
 **Server:** @cyanheads/pubmed-mcp-server
 **Version:** 2.10.14
-**Framework:** [@cyanheads/mcp-ts-core](https://www.npmjs.com/package/@cyanheads/mcp-ts-core) `^0.13.4`
+**Framework:** [@cyanheads/mcp-ts-core](https://www.npmjs.com/package/@cyanheads/mcp-ts-core) `^0.13.6`
 **Engines:** Bun ≥1.4.0, Node ≥24.0.0
 
 > **Read the framework docs first:** `node_modules/@cyanheads/mcp-ts-core/CLAUDE.md` contains the full API reference — builders, Context, error codes, exports, patterns. This file covers server-specific conventions only.
@@ -198,7 +198,7 @@ Handlers receive a unified `ctx` object. Key properties:
 
 Handlers throw — the framework catches, classifies, and formats.
 
-**Recommended: typed error contract.** Declare `errors: [{ reason, code, when, recovery, retryable? }]` on `tool()` / `resource()` to receive a typed `ctx.fail(reason, …)` keyed by the declared reason union. TypeScript catches `ctx.fail('typo')` at compile time, `data.reason` is auto-populated for observability, and the linter enforces conformance against the handler body. The `recovery` field is required (≥ 5 words, lint-validated) — it's the single source of truth for the recovery hint. Spread `ctx.recoveryFor('reason')` into `data` to mirror the contract recovery onto the wire (the framework mirrors `data.recovery.hint` into `content[]` text); pass an explicit `recovery: { hint: '...' }` when runtime context matters. Baseline codes (`InternalError`, `ServiceUnavailable`, `Timeout`, `ValidationError`, `SerializationError`, `RequestCancelled`) bubble freely and don't need declaring.
+**Recommended: typed error contract.** Declare `errors: [{ reason, code, when, recovery, retryable?, severity?, thrownBy? }]` on `tool()` / `resource()` to receive a typed `ctx.fail(reason, …)` keyed by the declared reason union. TypeScript catches `ctx.fail('typo')` at compile time, `data.reason` is auto-populated for observability, and the linter enforces conformance against the handler body. The `recovery` field is required (≥ 5 words, lint-validated) — it's the single source of truth for the recovery hint. Spread `ctx.recoveryFor('reason')` into `data` to mirror the contract recovery onto the wire (the framework mirrors `data.recovery.hint` into `content[]` text unless the message already contains it verbatim, then closes the text with `(reason <reason> · not retryable)`); pass an explicit `recovery: { hint: '...' }` when runtime context matters. Forwarding is lint-enforced per throw site (`error-contract-recovery-unforwarded`). A declared reason the handler never names warns as `error-contract-unthrown` — entries the service layer throws carry `thrownBy: 'service'` (lint-only metadata; every entry in `src/services/error-contracts.ts`'s service arrays has it), and a tool whose handler catches a service's failures doesn't spread that service's array at all. Baseline codes (`InternalError`, `ServiceUnavailable`, `Timeout`, `ValidationError`, `SerializationError`, `RequestCancelled`) bubble freely and don't need declaring.
 
 ```ts
 errors: [
@@ -257,7 +257,7 @@ src/
     ncbi/
       ncbi-service.ts                   # NCBI E-utilities service (init/accessor)
       api-client.ts                     # HTTP client for NCBI API
-      request-queue.ts                  # Rate-limited request queue
+      request-queue.ts                  # Request queue (framework pacer, 429 cooldown)
       response-handler.ts              # XML response parsing
       types.ts                          # NCBI/PubMed domain types
       parsing/                          # XML parsers (article, esummary, PMC)

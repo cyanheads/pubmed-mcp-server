@@ -8,10 +8,33 @@ import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
 import { describe, expect, it } from 'vitest';
 
 import {
+  EUROPEPMC_SERVICE_ERRORS,
+  NCBI_ID_INPUT_ERRORS,
+  NCBI_QUERY_INPUT_ERRORS,
   NCBI_SERVICE_ERRORS,
+  OPENALEX_SERVICE_ERRORS,
   recoveryFor,
   UNPAYWALL_SERVICE_ERRORS,
 } from '@/services/error-contracts.js';
+
+describe('contract provenance', () => {
+  it("marks every service-layer entry thrownBy: 'service'", () => {
+    for (const entry of [
+      ...NCBI_SERVICE_ERRORS,
+      ...UNPAYWALL_SERVICE_ERRORS,
+      ...EUROPEPMC_SERVICE_ERRORS,
+      ...OPENALEX_SERVICE_ERRORS,
+    ]) {
+      expect((entry as { thrownBy?: string }).thrownBy, entry.reason).toBe('service');
+    }
+  });
+
+  it('leaves the handler-thrown input rejections unmarked', () => {
+    for (const entry of [...NCBI_QUERY_INPUT_ERRORS, ...NCBI_ID_INPUT_ERRORS]) {
+      expect((entry as { thrownBy?: string }).thrownBy, entry.reason).toBeUndefined();
+    }
+  });
+});
 
 describe('NCBI_SERVICE_ERRORS', () => {
   it('declares the expected reasons', () => {
@@ -84,7 +107,7 @@ describe('recoveryFor', () => {
     const data = { endpoint: 'esearch', ...recoveryFor('queue_full') };
     expect(data).toMatchObject({
       endpoint: 'esearch',
-      recovery: { hint: expect.stringContaining('Retry after') },
+      recovery: { hint: expect.stringContaining('retryAfter') },
     });
   });
 });
