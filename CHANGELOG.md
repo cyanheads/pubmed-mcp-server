@@ -2,6 +2,10 @@
 
 All notable changes to this project. Each entry links to its full per-version file in [changelog/](changelog/).
 
+## [2.10.15](changelog/2.10.x/2.10.15.md) — 2026-09-22
+
+Retries NCBI's proxy_stream() backend relays and Europe PMC's empty-envelope and outage responses instead of surfacing them as caller errors, and closes the NCBI request queue on a 429 for every caller at once.
+
 ## [2.10.14](changelog/2.10.x/2.10.14.md) — 2026-09-18 · 🛡️ Security
 
 Adopts mcp-ts-core 0.13.4: argument rejections carry a Recovery hint, a mistyped key or JSON-stringified array is repaired before validation, and tool-argument copying is hardened against __proto__ injection.

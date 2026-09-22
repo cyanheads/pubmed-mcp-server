@@ -1,6 +1,6 @@
 # pubmed-mcp-server - Directory Structure
 
-Generated on: 2026-09-18 11:13:48
+Generated on: 2026-09-22 23:00:25
 
 ```text
 pubmed-mcp-server/
@@ -225,6 +225,7 @@ pubmed-mcp-server/
 │   │           ├── _fuzz-helpers.ts
 │   │           ├── _text.test.ts
 │   │           ├── convert-ids.tool.test.ts
+│   │           ├── europepmc-search-failures.test.ts
 │   │           ├── fetch-articles.tool.test.ts
 │   │           ├── fetch-fulltext.tool.test.ts
 │   │           ├── find-related.tool.test.ts
@@ -236,7 +237,8 @@ pubmed-mcp-server/
 │   │           ├── search-articles.tool.test.ts
 │   │           ├── security.test.ts
 │   │           ├── spell-check.tool.test.ts
-│   │           └── tools.fuzz.test.ts
+│   │           ├── tools.fuzz.test.ts
+│   │           └── unknown-pmid-envelope.test.ts
 │   ├── services/
 │   │   ├── europe-pmc/
 │   │   │   └── europe-pmc-service.test.ts
@@ -255,6 +257,7 @@ pubmed-mcp-server/
 │   │   │   ├── api-client.test.ts
 │   │   │   ├── efetch-timeout-retry.test.ts
 │   │   │   ├── ncbi-service.test.ts
+│   │   │   ├── rate-limit-cooldown.test.ts
 │   │   │   ├── request-queue.test.ts
 │   │   │   ├── response-handler.test.ts
 │   │   │   └── transient-500-retry.test.ts
