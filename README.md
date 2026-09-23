@@ -44,9 +44,9 @@ The biomedical literature via NCBI's E-utilities, PubMed Central, and Europe PMC
 | `pubmed_fetch_fulltext` | Fetch full-text articles via a chain: NCBI PMC EFetch → Europe PMC `fullTextXML` → Unpaywall. Accepts PMIDs, PMCIDs, or DOIs. |
 | `pubmed_format_citations` | Generate formatted citations in APA 7th, MLA 9th, BibTeX, RIS, or Vancouver (ICMJE/NLM) |
 | `pubmed_find_related` | Find similar articles, citing articles, or references for a given PMID |
-| `pubmed_spell_check` | Spell-check a biomedical query via NCBI ESpell — returns the corrected query and whether a suggestion was found |
+| `pubmed_spell_check` | Spell-check a PubMed query via NCBI ESpell — every misspelled token corrected in one call; the recovery step after a zero-hit or thin search |
 | `pubmed_lookup_mesh` | Search MeSH by heading — tree numbers, scope notes, entry terms — for building controlled-vocabulary queries |
-| `pubmed_lookup_citation` | Resolve partial bibliographic references to PubMed IDs via ECitMatch |
+| `pubmed_lookup_citation` | Resolve partial bibliographic references — one citation or a batch of up to 25 — to PubMed IDs via ECitMatch |
 | `pubmed_convert_ids` | Convert between DOI, PMID, and PMCID using the PMC ID Converter API |
 
 ### Resources
@@ -68,14 +68,17 @@ The biomedical literature via NCBI's E-utilities, PubMed Central, and Europe PMC
 - Full PubMed boolean and field-tag syntax, plus structured filters: author, journal, MeSH terms, language, species, publication type, has-abstract, free-full-text
 - Date ranges by publication, modification, or Entrez date; sort by relevance, date, author, or journal; offset pagination
 - Optional brief summaries for the top N results via ESummary
-- NCBI Bookshelf hits carry `bookTitle`, `publisherName`, `docType`, and `editors` in place of the empty `source`
-- Echoes the original query, the fully applied PubMed query, and normalized filter metadata
+- NCBI Bookshelf hits carry `bookTitle`, `publisherName`, `docType`, and `editors` in place of the empty `source`; the rendered summary shows the doc type only for these, not for ordinary journal articles (`citation`)
+- Reports `totalCount`, stated in the header beside the page (`Returned: 3 of 2924`); echoes the original query, the fully applied PubMed query, and normalized filter metadata
+- A query with no search term — blank, markup only, a bare field tag like `[pdat]`, or empty `()` — is rejected as `blank_query` rather than sent upstream
+- `limit` is accepted for `maxResults`
 
 ---
 
 ### `pubmed_fetch_articles` <sub>tool</sub>
 
-- Up to 200 PMIDs per call (POST for batches of 100 or more)
+- Up to 200 PMIDs per call (POST for batches of 100 or more); `ids` is accepted for `pmids`
+- A zero-padded PMID (`00000001`) resolves as the PMID it spells; `unavailablePmids` lists misses as you sent them
 - Title, abstract, authors with deduplicated affiliations, journal info, DOI, PubMed/PMC links; optional MeSH terms, grants, and publication types
 - Tolerant of PubMed's inconsistent XML — structured abstracts, missing fields, varying date formats
 - Bookshelf chapters and books are first-class: `recordType` (`journal-article` / `book-chapter` / `book`) plus a `book` object (title, publisher, editors, ISBNs, Bookshelf accession); `journalInfo` is absent on them
@@ -86,7 +89,7 @@ The biomedical literature via NCBI's E-utilities, PubMed Central, and Europe PMC
 
 ### `pubmed_fetch_fulltext` <sub>tool</sub>
 
-- Exactly one of `pmcids`, `pmids`, or `dois` (one id per element), up to 10 per request
+- Exactly one of `pmcids`, `pmids`, or `dois` (one id per element), up to 10 per request; a zero-padded PMID resolves as the PMID it spells, and `unavailable[].id` keeps your spelling
 - Three-tier chain: NCBI PMC EFetch → Europe PMC `fullTextXML` (`EUROPEPMC_ENABLED`, default on) → Unpaywall (needs `UNPAYWALL_EMAIL`); `viaSource` names which tier served each article
 - Preprints, patents, and Agricola records have metadata via `pubmed_europepmc_search` but no full text through this chain — Europe PMC's `fullTextXML` is PMC-keyed
 - `source: "pmc"` returns structured sections plus `tables[]` (cells, caption, label, footnotes) and `assets[]` (figures and supplementary material, with `[Figure: <label>]` markers left in the body); `source: "unpaywall"` returns a best-effort body with `contentFormat` (`html-markdown` / `pdf-text`)
@@ -98,8 +101,9 @@ The biomedical literature via NCBI's E-utilities, PubMed Central, and Europe PMC
 ### `pubmed_europepmc_search` <sub>tool</sub>
 
 - Reaches records PubMed can't: preprints (`PPR`), patents (`PAT`), Agricola (`AGR`), alongside `MED` and `PMC`; default `sources` is `["MED", "PMC", "PPR"]`
-- Cursor pagination via `cursorMark` — `*` for the first page, then `nextCursorMark`
+- Cursor pagination via `cursorMark` — `*` for the first page, then `nextCursorMark`; `pageSize` up to 100, with `max_results` and `limit` accepted for it
 - Hits carry `source` plus `pmid` / `pmcId` / `doi` when known; `abstractSnippet` is capped at 400 characters, with `abstractTruncated` flagging the cut
+- `totalCount` reports the full hit count, stated in the header beside the page; `searchUrl` opens the same source-filtered query on europepmc.org
 - Not registered when `EUROPEPMC_ENABLED=false`
 
 ---
@@ -117,7 +121,7 @@ The biomedical literature via NCBI's E-utilities, PubMed Central, and Europe PMC
 - APA 7th, MLA 9th, BibTeX, RIS, Vancouver (ICMJE/NLM); several styles per article in one call, up to 50 articles
 - Bookshelf chapters and books cite in each style's edited-book form; articles without a page range cite by electronic locator in each style's convention
 - Hand-rolled formatters — zero dependencies, Workers-compatible
-- Reports formatted counts and unavailable PMIDs
+- Reports formatted counts and unavailable PMIDs; `ids` is accepted for `pmids`, and a zero-padded PMID resolves as the PMID it spells
 
 ---
 
@@ -125,12 +129,15 @@ The biomedical literature via NCBI's E-utilities, PubMed Central, and Europe PMC
 
 - `similar`, `cited_by`, or `references` for a PMID, in NCBI relevance order, enriched with title, authors, date, and source (or Bookshelf book title and publisher)
 - Falls back to Europe PMC, then OpenAlex, when NCBI can't answer; the response names the provider. Fails with a typed `all_providers_failed` error rather than an empty result
+- `maxResults` up to 50 (`limit` also accepted) with offset pagination; `totalCount` reports the full match count, stated in the header beside the page
+- A zero-padded source PMID resolves as the PMID it spells and is never listed among its own related articles
 
 ---
 
 ### `pubmed_spell_check` <sub>tool</sub>
 
-- Runs a query through NCBI ESpell and returns `original`, `corrected`, and `hasSuggestion`
+- Runs a PubMed query through NCBI ESpell and returns `original`, `corrected`, and `hasSuggestion`; every misspelled token is corrected in one call (`alzhiemer diseese treatmnt outcomse` → `alzheimer disease treatment outcomes`)
+- Reach for it after a zero-hit or thin `pubmed_search_articles` result, or when a drug, gene, disease, or author name may be misspelled, then re-run the search with `corrected`
 - A blank or whitespace-only query is rejected rather than sent upstream
 
 ---
@@ -139,13 +146,14 @@ The biomedical literature via NCBI's E-utilities, PubMed Central, and Europe PMC
 
 - Looks up MeSH descriptors by name or free-text term, pinning the exact-heading match to the top of the first page
 - Records carry `meshId` (DescriptorUI), `entrezUid`, and, with `includeDetails` (default on), tree numbers, scope notes, and entry terms
-- `maxResults` up to 50 with offset pagination via `nextOffset`; `totalCount` reports the upstream match count
+- `maxResults` up to 50 (`limit` also accepted) with offset pagination via `nextOffset`; `totalCount` reports the upstream match count
 
 ---
 
 ### `pubmed_lookup_citation` <sub>tool</sub>
 
-- Match on journal, year, volume, first page, and/or author — at least one field, more fields for better precision; up to 25 per call
+- Match on journal, year, volume, first page, and/or author — journal or year required, more fields for better precision
+- `citations` takes an array of up to 25 or a single citation object; `citation` is accepted for it
 - Pipes and line breaks are rejected at the schema (ECitMatch's wire format is pipe-delimited); the free-form `key` label is exempt
 - Explicit `matched`, `not_found`, and `ambiguous` statuses with recovery detail
 
@@ -155,7 +163,8 @@ The biomedical literature via NCBI's E-utilities, PubMed Central, and Europe PMC
 
 - Up to 50 DOIs, PMIDs, or PMCIDs per call, all one type; only PMC-indexed articles resolve
 - One id per element — a packed `"23193287,37952131"` is rejected rather than expanded
-- Per-id success/error rows; a partial batch never fails as a whole
+- One success/error row per submitted element, in order, with `requestedId` exactly as sent — repeats, a bare-digit PMCID, and a DOI's casing included; a partial batch never fails as a whole
+- A zero-padded PMID resolves as the PMID it spells
 
 ---
 
