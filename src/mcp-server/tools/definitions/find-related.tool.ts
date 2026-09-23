@@ -66,8 +66,18 @@ const PROVIDER_LABELS: Record<ProviderName, string> = {
 
 /** A provider the server never reached because configuration turned it off. */
 const PROVIDER_DISABLED = 'provider_disabled';
-/** A provider failure that carried no declared service-contract reason. */
+/** A provider failure that carried no declared reason and whose code names none below. */
 const UNCLASSIFIED_ERROR = 'unclassified_error';
+
+/**
+ * Label for a provider failure that carries no declared reason, named by its code.
+ * Each service declares its `*_unreachable` reason for `ServiceUnavailable` only, so
+ * an exhausted rate limit or timeout reaches the chain with its code and no reason.
+ */
+const REASON_BY_CODE = new Map<JsonRpcErrorCode, string>([
+  [JsonRpcErrorCode.RateLimited, 'rate_limited'],
+  [JsonRpcErrorCode.Timeout, 'timed_out'],
+]);
 
 /**
  * Common result shape returned by each provider.
@@ -267,13 +277,15 @@ async function openAlexProvider(
 
 /**
  * Record a coverage-fallback failure with its declared reason. A provider off by
- * configuration never recovers on retry; an unclassified transport failure is
- * treated as transient, matching how the fully-failed chain reports one.
+ * configuration never recovers on retry; a failure with no declared reason is
+ * treated as transient, matching how the fully-failed chain reports one, unless
+ * the error itself says a retry cannot succeed (`data.retryable: false`).
  */
 function coverageFailureFrom(provider: 'europepmc' | 'openalex', err: unknown): CoverageFailure {
   const { reason } = attemptFrom(provider, err);
+  if (reason === PROVIDER_DISABLED) return { provider, reason, retryable: false };
   const retryable =
-    reason === PROVIDER_DISABLED ? false : (RETRYABLE_BY_REASON.get(reason) ?? true);
+    RETRYABLE_BY_REASON.get(reason) ?? !(err instanceof McpError && err.data?.retryable === false);
   return { provider, reason, retryable };
 }
 
@@ -321,13 +333,16 @@ function describeError(err: unknown): string {
 
 /**
  * Record a provider failure with the declared service-contract reason it
- * carries, so the aggregate error names each origin's own failure mode instead
- * of collapsing the chain into one opaque message.
+ * carries — or, without one, a label for its code — so the aggregate error names
+ * each origin's own failure mode instead of collapsing the chain into one
+ * opaque message.
  */
 function attemptFrom(provider: ProviderName, err: unknown): ProviderAttempt {
   const reason =
     err instanceof McpError
-      ? ((err.data as { reason?: string } | undefined)?.reason ?? UNCLASSIFIED_ERROR)
+      ? ((err.data as { reason?: string } | undefined)?.reason ??
+        REASON_BY_CODE.get(err.code) ??
+        UNCLASSIFIED_ERROR)
       : UNCLASSIFIED_ERROR;
   return { provider, reason, message: describeError(err) };
 }

@@ -12,13 +12,17 @@
  * never minted — and counted, so callers can disclose the shortfall instead of
  * serving an unexplained empty window.
  *
+ * Transient failures retry with capped exponential backoff. Once retries run
+ * out, only a `ServiceUnavailable` is reported as `openalex_unreachable`; a
+ * `Timeout` or `RateLimited` keeps its own code and any upstream `retryAfter`.
+ *
  * Uses the NCBI_ADMIN_EMAIL config (adminEmail) as the OpenAlex polite-pool
  * `mailto=` parameter when set; omits it when unset.
  *
  * @module src/services/openalex/openalex-service
  */
 
-import { internalError, McpError } from '@cyanheads/mcp-ts-core/errors';
+import { internalError, JsonRpcErrorCode, McpError } from '@cyanheads/mcp-ts-core/errors';
 import { defaultIsTransient, logger, requestContextService } from '@cyanheads/mcp-ts-core/utils';
 
 import { getServerConfig } from '@/config/server-config.js';
@@ -258,7 +262,13 @@ export class OpenAlexService {
     };
   }
 
-  /** Retry wrapper for transient errors, mirroring the EPMC service pattern. */
+  /**
+   * Retry wrapper for transient errors. On exhaustion the last error keeps its
+   * code and an upstream `retryAfter`, so a 429 still tells the caller how long to
+   * wait. Only a `ServiceUnavailable` gains `openalex_unreachable` and its hint — the
+   * one code that reason is declared for; a `Timeout` or `RateLimited` keeps its
+   * code with no reason, as the NCBI and Europe PMC services report them.
+   */
   private async withRetry<T>(
     execute: () => Promise<T>,
     label: string,
@@ -290,25 +300,24 @@ export class OpenAlexService {
         }
 
         const attempts = this.maxRetries + 1;
-        const msg = error instanceof Error ? error.message : String(error);
         throw new McpError(
           error.code,
-          `${msg} (failed after ${attempts} attempts)`,
+          `${error.message} (failed after ${attempts} attempts)`,
           {
-            reason: 'openalex_unreachable',
+            ...(error.code === JsonRpcErrorCode.ServiceUnavailable && {
+              reason: 'openalex_unreachable',
+              ...recoveryFor('openalex_unreachable'),
+            }),
             label,
             attempts,
-            ...recoveryFor('openalex_unreachable'),
+            ...(error.data?.retryAfter !== undefined && { retryAfter: error.data.retryAfter }),
           },
           { cause: error },
         );
       }
     }
 
-    throw internalError('OpenAlex request failed after all retries.', {
-      reason: 'openalex_unreachable',
-      ...recoveryFor('openalex_unreachable'),
-    });
+    throw internalError('OpenAlex request failed after all retries.', { label });
   }
 }
 

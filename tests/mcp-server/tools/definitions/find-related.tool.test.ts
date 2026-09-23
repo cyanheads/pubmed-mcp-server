@@ -1,7 +1,9 @@
 /**
  * @fileoverview Tests for the find-related tool — offset pagination (#36),
  * multi-source provider fallback (#63), the total match count in the header on
- * every return path (#147), and Doc Type rendering (#146).
+ * every return path (#147), Doc Type rendering (#146), and the label an
+ * exhausted OpenAlex or Europe PMC Timeout or RateLimited reports — named by its
+ * code — in the coverage summary and the all-providers-failed attempts (#160).
  * @module tests/mcp-server/tools/definitions/find-related.tool.test
  */
 
@@ -1193,6 +1195,157 @@ describe('findRelatedTool', () => {
         { provider: 'europepmc', reason: 'unclassified_error', retryable: true },
         { provider: 'openalex', reason: 'unclassified_error', retryable: true },
       ]);
+    });
+
+    /**
+     * Runs the real OpenAlex service behind a stubbed global fetch, so the reason
+     * reaching the coverage summary is the one its retry loop stamps on exhaustion.
+     * (#160)
+     */
+    it.each([
+      ['429', 'rate_limited', { status: 429, headers: { 'retry-after': '5' } }],
+      ['504', 'timed_out', { status: 504 }],
+    ])(
+      'labels an exhausted OpenAlex %s as %s, still retryable (#160)',
+      async (_status, reason, init) => {
+        const { OpenAlexService } = await vi.importActual<
+          typeof import('@/services/openalex/openalex-service.js')
+        >('@/services/openalex/openalex-service.js');
+        const { OpenAlexApiClient } = await import('@/services/openalex/api-client.js');
+        mockGetOaService.mockReturnValue(
+          new OpenAlexService(new OpenAlexApiClient({ timeoutMs: 20_000 }), 0),
+        );
+        mockEpmcReferences.mockResolvedValue({
+          pmids: [],
+          totalCount: 0,
+          hitCount: 0,
+          droppedNoPmid: 0,
+        });
+        const fetchSpy = vi
+          .spyOn(globalThis, 'fetch')
+          .mockImplementation(() => Promise.resolve(new Response('', init)));
+
+        try {
+          const result = await runToolContract(findRelatedTool, referencesInput);
+
+          const structured = result.structuredContent as {
+            coverageFailures?: Array<{ provider: string; reason: string; retryable: boolean }>;
+            notice?: string;
+          };
+          expect(structured.coverageFailures).toEqual([
+            { provider: 'openalex', reason, retryable: true },
+          ]);
+          expect(structured.notice).toContain(`OpenAlex (${reason}) did not answer`);
+          expect(structured.notice).toContain('Retry after a brief delay');
+          const text = textBlocks(result.content as ContentBlock[])
+            .map((b) => b.text)
+            .join('\n');
+          expect(text).toContain(`OpenAlex (${reason})`);
+          expect(text).not.toContain('openalex_unreachable');
+          expect(text).not.toContain('unclassified_error');
+          expect(fetchSpy).toHaveBeenCalledTimes(1);
+        } finally {
+          fetchSpy.mockRestore();
+        }
+      },
+    );
+
+    /**
+     * The same labels through the real Europe PMC service and its pacer. A 429
+     * whose Retry-After outlasts the backoff cap fails on its first attempt with
+     * no reason at all, so it too is named by its code.
+     */
+    it.each([
+      ['exhausted 504', 'timed_out', { status: 504 }],
+      ['exhausted 429', 'rate_limited', { status: 429, headers: { 'retry-after': '5' } }],
+      [
+        '429 with a Retry-After past the backoff cap',
+        'rate_limited',
+        { status: 429, headers: { 'retry-after': '120' } },
+      ],
+    ])('labels a Europe PMC %s as %s, still retryable', async (_label, reason, init) => {
+      const { EuropePmcService } = await vi.importActual<
+        typeof import('@/services/europe-pmc/europe-pmc-service.js')
+      >('@/services/europe-pmc/europe-pmc-service.js');
+      const { EuropePmcApiClient } = await import('@/services/europe-pmc/api-client.js');
+      const { createEuropePmcRequestQueue } = await import(
+        '@/services/europe-pmc/request-queue.js'
+      );
+      mockGetEpmcService.mockReturnValue(
+        new EuropePmcService(
+          new EuropePmcApiClient({ timeoutMs: 20_000 }),
+          createEuropePmcRequestQueue(0),
+          0,
+        ),
+      );
+      mockOaReferences.mockResolvedValue({
+        pmids: [],
+        totalCount: 0,
+        droppedNoPmid: 0,
+        reachCapped: false,
+      });
+      const fetchSpy = vi
+        .spyOn(globalThis, 'fetch')
+        .mockImplementation(() => Promise.resolve(new Response('', init)));
+
+      try {
+        const result = await runToolContract(findRelatedTool, referencesInput);
+
+        const structured = result.structuredContent as {
+          coverageFailures?: Array<{ provider: string; reason: string; retryable: boolean }>;
+          notice?: string;
+        };
+        expect(structured.coverageFailures).toEqual([
+          { provider: 'europepmc', reason, retryable: true },
+        ]);
+        expect(structured.notice).toContain(`Europe PMC (${reason}) did not answer`);
+        expect(fetchSpy).toHaveBeenCalledTimes(1);
+      } finally {
+        fetchSpy.mockRestore();
+      }
+    });
+
+    it('reports a fallback failure the upstream marked not retryable as not retryable', async () => {
+      mockEpmcReferences.mockResolvedValue({
+        pmids: [],
+        totalCount: 0,
+        hitCount: 0,
+        droppedNoPmid: 0,
+      });
+      mockOaReferences.mockRejectedValue(
+        new McpError(JsonRpcErrorCode.ServiceUnavailable, 'Fetch failed. Status: 501', {
+          status: 501,
+          retryable: false,
+        }),
+      );
+
+      const ctx = createMockContext({ errors: findRelatedTool.errors });
+      await findRelatedTool.handler(findRelatedTool.input.parse(referencesInput), ctx);
+
+      const enrichment = getEnrichment(ctx);
+      expect(enrichment.coverageFailures).toEqual([
+        { provider: 'openalex', reason: 'unclassified_error', retryable: false },
+      ]);
+      expect(String(enrichment.notice)).not.toContain('Retry after a brief delay');
+    });
+
+    it('names an all-providers-failed attempt by its code when it carries no reason', async () => {
+      mockELink.mockRejectedValue(
+        new McpError(JsonRpcErrorCode.RateLimited, 'NCBI 429', { retryAfter: '2' }),
+      );
+      mockOaSimilar.mockRejectedValue(new McpError(JsonRpcErrorCode.Timeout, 'OA timed out'));
+
+      const ctx = createMockContext({ errors: findRelatedTool.errors });
+      const input = findRelatedTool.input.parse({ pmid: '12345', relationship: 'similar' });
+      const error = await rejection(input, ctx);
+
+      expect(failureData(error).attempted).toEqual([
+        { provider: 'ncbi', reason: 'rate_limited', message: 'NCBI 429' },
+        { provider: 'openalex', reason: 'timed_out', message: 'OA timed out' },
+      ]);
+      expect(failureData(error).recovery?.hint).toContain(
+        'NCBI (rate_limited), OpenAlex (timed_out)',
+      );
     });
   });
 

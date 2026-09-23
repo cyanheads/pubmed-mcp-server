@@ -1,9 +1,10 @@
 /**
- * @fileoverview Retry-gate regression for the three service retry loops — NCBI's on the
- * framework `withRetry`, OpenAlex's and Europe PMC's hand-rolled. Each gates on the
+ * @fileoverview Retry-gate regression for the three service retry loops — NCBI's and
+ * Europe PMC's on the framework `withRetry`, OpenAlex's hand-rolled. Each gates on the
  * framework's `defaultIsTransient`, so each must honor its in-band
  * `data.retryable === false` opt-out: an upstream 501
  * classifies as ServiceUnavailable — a transient code — but can never succeed on retry.
+ * Also pins the shape of OpenAlex's exhausted error per code (#160).
  *
  * Every case asserts the upstream attempt count, not just the surfaced code: a gate
  * that burned its full budget before failing would still throw the same code.
@@ -33,7 +34,7 @@ const { NcbiApiClient } = await import('@/services/ncbi/api-client.js');
 const { NcbiService } = await import('@/services/ncbi/ncbi-service.js');
 const { NcbiResponseHandler } = await import('@/services/ncbi/response-handler.js');
 const { EuropePmcApiClient } = await import('@/services/europe-pmc/api-client.js');
-const { EuropePmcRequestQueue } = await import('@/services/europe-pmc/request-queue.js');
+const { createEuropePmcRequestQueue } = await import('@/services/europe-pmc/request-queue.js');
 const { EuropePmcService } = await import('@/services/europe-pmc/europe-pmc-service.js');
 const { OpenAlexApiClient } = await import('@/services/openalex/api-client.js');
 const { OpenAlexService } = await import('@/services/openalex/openalex-service.js');
@@ -92,7 +93,7 @@ function buildNcbiService() {
 
 function buildEuropePmcService() {
   const client = new EuropePmcApiClient({ timeoutMs: 20_000 });
-  return new EuropePmcService(client, new EuropePmcRequestQueue(0), MAX_RETRIES);
+  return new EuropePmcService(client, createEuropePmcRequestQueue(0), MAX_RETRIES);
 }
 
 function buildOpenAlexService() {
@@ -190,5 +191,93 @@ describe('OpenAlexService retry gate', () => {
       code: JsonRpcErrorCode.ServiceUnavailable,
     });
     expect(mockFetchWithTimeout).toHaveBeenCalledTimes(EXHAUSTED_ATTEMPTS);
+  });
+
+  /**
+   * `openalex_unreachable` is declared for `ServiceUnavailable` only. An exhausted
+   * Timeout or RateLimited keeps its own code and says what it is through that code
+   * and its message, carrying the attempt count and any upstream `retryAfter`. (#160)
+   */
+  describe('exhaustion shape (#160)', () => {
+    const suffix = new RegExp(`\\(failed after ${EXHAUSTED_ATTEMPTS} attempts\\)$`);
+
+    it('keeps an exhausted 429 RateLimited with its retryAfter and no reason', async () => {
+      mockFetchWithTimeout.mockRejectedValue(
+        new McpError(JsonRpcErrorCode.RateLimited, 'Fetch failed. Status: 429', {
+          status: 429,
+          retryAfter: '5',
+          errorSource: 'FetchHttpError',
+        }),
+      );
+
+      const err = (await buildOpenAlexService()
+        .citedBy('31295471', 25)
+        .catch((e: unknown) => e)) as McpError;
+
+      expect(err).toBeInstanceOf(McpError);
+      expect(err.code).toBe(JsonRpcErrorCode.RateLimited);
+      expect(err.message).toMatch(suffix);
+      expect(err.data?.reason).toBeUndefined();
+      expect(err.data?.recovery).toBeUndefined();
+      expect(err.data?.attempts).toBe(EXHAUSTED_ATTEMPTS);
+      expect(err.data?.retryAfter).toBe('5');
+      expect(mockFetchWithTimeout).toHaveBeenCalledTimes(EXHAUSTED_ATTEMPTS);
+    });
+
+    it('keeps an exhausted request timeout as Timeout with no reason', async () => {
+      mockFetchWithTimeout.mockRejectedValue(
+        new McpError(JsonRpcErrorCode.Timeout, 'Request timed out after 20000ms.', {
+          errorSource: 'FetchTimeout',
+        }),
+      );
+
+      const err = (await buildOpenAlexService()
+        .references('31295471', 10)
+        .catch((e: unknown) => e)) as McpError;
+
+      expect(err.code).toBe(JsonRpcErrorCode.Timeout);
+      expect(err.message).toMatch(suffix);
+      expect(err.data?.reason).toBeUndefined();
+      expect(err.data?.recovery).toBeUndefined();
+      expect(err.data?.attempts).toBe(EXHAUSTED_ATTEMPTS);
+      expect(mockFetchWithTimeout).toHaveBeenCalledTimes(EXHAUSTED_ATTEMPTS);
+    });
+
+    it('keeps an exhausted 504 as Timeout with no reason', async () => {
+      mockFetchWithTimeout.mockRejectedValue(await fetchHttpError(504));
+
+      const err = (await buildOpenAlexService()
+        .similar('31295471', 10)
+        .catch((e: unknown) => e)) as McpError;
+
+      expect(err.code).toBe(JsonRpcErrorCode.Timeout);
+      expect(err.data?.reason).toBeUndefined();
+      expect(err.data?.attempts).toBe(EXHAUSTED_ATTEMPTS);
+      expect(mockFetchWithTimeout).toHaveBeenCalledTimes(EXHAUSTED_ATTEMPTS);
+    });
+
+    it('stamps an exhausted ServiceUnavailable openalex_unreachable with its hint and retryAfter', async () => {
+      mockFetchWithTimeout.mockRejectedValue(
+        new McpError(JsonRpcErrorCode.ServiceUnavailable, 'Fetch failed. Status: 503', {
+          status: 503,
+          retryAfter: '9',
+          errorSource: 'FetchHttpError',
+        }),
+      );
+
+      const err = (await buildOpenAlexService()
+        .citedBy('31295471', 25)
+        .catch((e: unknown) => e)) as McpError;
+
+      expect(err.code).toBe(JsonRpcErrorCode.ServiceUnavailable);
+      expect(err.message).toMatch(suffix);
+      expect(err.data).toMatchObject({
+        reason: 'openalex_unreachable',
+        recovery: { hint: expect.stringContaining('OpenAlex was unreachable') },
+        attempts: EXHAUSTED_ATTEMPTS,
+        retryAfter: '9',
+      });
+      expect(mockFetchWithTimeout).toHaveBeenCalledTimes(EXHAUSTED_ATTEMPTS);
+    });
   });
 });
