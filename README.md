@@ -89,12 +89,14 @@ The biomedical literature via NCBI's E-utilities, PubMed Central, and Europe PMC
 
 ### `pubmed_fetch_fulltext` <sub>tool</sub>
 
-- Exactly one of `pmcids`, `pmids`, or `dois` (one id per element), up to 10 per request; a zero-padded PMID resolves as the PMID it spells, and `unavailable[].id` keeps your spelling
+- Exactly one of `pmcids`, `pmids`, or `dois` (one id per element), up to 10 per request; a zero-padded PMID or PMC ID resolves as the ID it spells, DOIs match case-insensitively, and PMC IDs match with or without the `PMC` prefix in any case. Each record is fetched once however many spellings name it; `unavailable[].id` keeps your PMID or DOI spelling, and reports a PMC ID as `PMC<digits>`
 - Three-tier chain: NCBI PMC EFetch → Europe PMC `fullTextXML` (`EUROPEPMC_ENABLED`, default on) → Unpaywall (needs `UNPAYWALL_EMAIL`); `viaSource` names which tier served each article
 - Preprints, patents, and Agricola records have metadata via `pubmed_europepmc_search` but no full text through this chain — Europe PMC's `fullTextXML` is PMC-keyed
-- `source: "pmc"` returns structured sections plus `tables[]` (cells, caption, label, footnotes) and `assets[]` (figures and supplementary material, with `[Figure: <label>]` markers left in the body); `source: "unpaywall"` returns a best-effort body with `contentFormat` (`html-markdown` / `pdf-text`)
+- `source: "pmc"` returns structured sections plus `tables[]` (cells, caption, label, footnotes) and `assets[]` (figures and supplementary material, with `[Figure: <label>]` markers left in the body, and the file pointer read through `<alternatives>` when a figure offers several formats); `source: "unpaywall"` returns a best-effort body with `contentFormat` (`html-markdown` / `pdf-text`), a `title` from Unpaywall's record (else the Europe PMC record, else the HTML page), and `journalName` / `year` when Unpaywall has them
+- A titled list, definition list, or boxed text that sits in the body outside any section, or is the only content of an untitled section, such as an abbreviations list, becomes a section under its own title, and a figure or table inside it names that section; a section with no title is headed `untitled section`, the same name the `truncation` ledger gives it, and section titles in headings and ledger lines are Markdown-escaped
 - Unavailable entries carry a typed `reason` (`not-found`, `no-doi`, `doi-lookup-failed`, `no-oa`, `service-error`, …), `idType`, `triedTiers` (per-tier outcome in execution order), and `unqueriedTiers` when an unconfigured tier could have served the id
-- Filters and budgets: `sections` (case-insensitive title match), `maxSections`, `includeTables`, `includeAssets`, `maxCharacters`, `maxCharactersPerSection`, `overflowMode` (`truncate` / `outline`), and `maxResponseCharacters`, which defers whole articles past the ceiling to `deferred.ids`; a `truncation` object reports what was shortened or omitted
+- Filters and budgets: `sections` (case-insensitive title match), `maxSections`, `includeTables`, `includeAssets`, `maxCharacters`, `maxCharactersPerSection`, `overflowMode` (`truncate` / `outline`), and `maxResponseCharacters`, which defers whole articles past the ceiling to `deferred.ids`; a `truncation` object reports what was shortened or omitted, per section and subsection
+- A budget cut ends at a word boundary; `truncate` drops every section and subsection past the cut, while `outline` keeps each heading and marks one the budget left empty
 
 ---
 
