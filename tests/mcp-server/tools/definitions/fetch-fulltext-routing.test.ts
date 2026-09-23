@@ -18,8 +18,10 @@
  *
  * Covers DOI matching and dispatch (#166), per-PMCID dispatch on the `pmcids`
  * branch with zero-padded PMC IDs run in canonical form (#170), the title / journal / year an Unpaywall-served article carries and
- * the order its title sources are consulted in (#144), and tier failures
- * staying on the chain rather than reaching the caller as an error (#168).
+ * the order its title sources are consulted in (#144), tier failures
+ * staying on the chain rather than reaching the caller as an error (#168), and
+ * the Europe PMC tier's parallel fan-out staying within four requests in flight
+ * (#163).
  * @module tests/mcp-server/tools/definitions/fetch-fulltext-routing.test
  */
 
@@ -835,5 +837,42 @@ describe('PMC-served article from the dois branch', () => {
     const { result } = await fetchFulltext({ dois: ['10.1093/NAR/GKS1195'] });
 
     expect(pmcArticle(result)).toMatchObject({ pmcId: 'PMC3531190', doi: GENBANK.doi });
+  });
+});
+
+// ─── Europe PMC fan-out stays within the request pacer's cap ─────────────────
+
+describe('Europe PMC fan-out', () => {
+  it('keeps at most four Europe PMC requests in flight across parallel candidates', async () => {
+    const dois = Array.from({ length: 8 }, (_, i) => `10.5555/fanout-${i}`);
+    for (const doi of dois) converter.set(doi, null);
+
+    /**
+     * Each Europe PMC answer takes 300 ms against a 50 ms start gap, so without
+     * the cap six or more requests would overlap.
+     */
+    let inFlight = 0;
+    let peak = 0;
+    fetchSpy.mockImplementation(async (input: Parameters<typeof fetch>[0]) => {
+      const url = new URL(String(input));
+      if (url.hostname !== 'www.ebi.ac.uk') return upstream(url);
+      inFlight++;
+      peak = Math.max(peak, inFlight);
+      await new Promise((resolve) => setTimeout(resolve, 300));
+      inFlight--;
+      return upstream(url);
+    });
+
+    try {
+      const { result } = await fetchFulltext({ dois });
+      expect(result.unavailable?.map((u) => u.id)).toEqual(dois);
+    } finally {
+      fetchSpy.mockImplementation(async (input: Parameters<typeof fetch>[0]) =>
+        upstream(new URL(String(input))),
+      );
+    }
+
+    expect(epmcQueries()).toHaveLength(8);
+    expect(peak).toBe(4);
   });
 });

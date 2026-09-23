@@ -18,7 +18,7 @@ vi.mock('@cyanheads/mcp-ts-core/utils', async () => {
 
 const { defaultIsTransient } = await import('@cyanheads/mcp-ts-core/utils');
 const { EuropePmcApiClient } = await import('@/services/europe-pmc/api-client.js');
-const { EuropePmcRequestQueue } = await import('@/services/europe-pmc/request-queue.js');
+const { createEuropePmcRequestQueue } = await import('@/services/europe-pmc/request-queue.js');
 const { EuropePmcService } = await import('@/services/europe-pmc/europe-pmc-service.js');
 const { parsePmcArticle } = await import('@/services/ncbi/parsing/pmc-article-parser.js');
 
@@ -64,7 +64,7 @@ function httpErrorRejection(
 
 function makeService(opts: { maxRetries?: number; minStartGapMs?: number } = {}) {
   const client = new EuropePmcApiClient({ timeoutMs: 20000 });
-  const queue = new EuropePmcRequestQueue(opts.minStartGapMs ?? 0);
+  const queue = createEuropePmcRequestQueue(opts.minStartGapMs ?? 0);
   return new EuropePmcService(client, queue, opts.maxRetries ?? 0);
 }
 
@@ -624,6 +624,273 @@ describe('EuropePmcService.search — upstream failures and empty envelopes (#15
       expect(hits).toHaveLength(1);
       expect(mockFetchWithTimeout).toHaveBeenCalledTimes(2);
     });
+  });
+});
+
+/**
+ * Request pacing across every Europe PMC call: at most four requests in flight,
+ * starts spaced by the configured gap, no queue-depth cap, and a caller whose
+ * signal fires while queued or backing off is released with its own reason.
+ * Also pins the retry schedule — 1 s doubling, ±25% jitter, a 30 s cap, and an
+ * upstream `Retry-After` honored in place of the computed wait.
+ * Drives the real service, pacing, and retry loop with a stubbed
+ * `fetchWithTimeout` under fake timers; `Math.random` is pinned so the ±25%
+ * backoff jitter is exact.
+ */
+describe('EuropePmcService request pacing', () => {
+  const results = () =>
+    jsonResponse({
+      hitCount: 1,
+      request: { queryString: 'q', cursorMark: '*' },
+      resultList: { result: [{ id: '1', source: 'MED' }] },
+    });
+  const unavailable = () => httpErrorRejection(503, JsonRpcErrorCode.ServiceUnavailable, 'down');
+
+  /** A fetch the test settles by hand, so a request stays in flight until released. */
+  function heldFetches() {
+    const pending: Array<() => void> = [];
+    mockFetchWithTimeout.mockImplementation(
+      () =>
+        new Promise<Response>((resolve) => {
+          pending.push(() => resolve(results()));
+        }),
+    );
+    return pending;
+  }
+
+  /** The `query` each request carried, in start order. */
+  const sentQueries = () =>
+    mockFetchWithTimeout.mock.calls.map((call) =>
+      new URL(String(call[0])).searchParams.get('query'),
+    );
+
+  let randomSpy: ReturnType<typeof vi.spyOn>;
+  let t0: number;
+  /** Start instants of every upstream request, relative to the test's start. */
+  let starts: number[];
+
+  beforeEach(() => {
+    vi.useFakeTimers();
+    mockFetchWithTimeout.mockReset();
+    randomSpy = vi.spyOn(Math, 'random').mockReturnValue(0.5);
+    t0 = Date.now();
+    starts = [];
+  });
+
+  afterEach(() => {
+    randomSpy.mockRestore();
+    vi.useRealTimers();
+  });
+
+  /** Records each request's start instant, then answers with `reply`. */
+  function recordStarts(reply: (query: string | null) => Promise<Response>) {
+    mockFetchWithTimeout.mockImplementation((url: string) => {
+      starts.push(Date.now() - t0);
+      return reply(new URL(url).searchParams.get('query'));
+    });
+  }
+
+  it('holds in-flight requests to four across search, fullTextXml, and the link calls', async () => {
+    const release = heldFetches();
+    const service = makeService();
+    const calls = [
+      service.search({ query: 'a' }),
+      service.fullTextXml('PMC1', 'PMC'),
+      service.citations('1', 10, 1),
+      service.references('2', 10, 1),
+      service.search({ query: 'e' }),
+      service.fullTextXml('PMC6', 'PMC'),
+    ];
+
+    await vi.advanceTimersByTimeAsync(0);
+    expect(mockFetchWithTimeout).toHaveBeenCalledTimes(4);
+
+    release.shift()?.();
+    await vi.advanceTimersByTimeAsync(0);
+    expect(mockFetchWithTimeout).toHaveBeenCalledTimes(5);
+
+    while (release.length > 0) {
+      release.shift()?.();
+      await vi.advanceTimersByTimeAsync(0);
+    }
+    await expect(Promise.all(calls)).resolves.toHaveLength(6);
+    expect(mockFetchWithTimeout).toHaveBeenCalledTimes(6);
+  });
+
+  it('spaces request starts by the configured gap', async () => {
+    recordStarts(() => Promise.resolve(results()));
+    const service = makeService({ minStartGapMs: 200 });
+
+    const calls = ['a', 'b', 'c'].map((query) => service.search({ query }));
+    await vi.advanceTimersByTimeAsync(1_000);
+
+    await expect(Promise.all(calls)).resolves.toHaveLength(3);
+    expect(starts).toEqual([0, 200, 400]);
+  });
+
+  it('queues callers without a depth cap, so none is shed', async () => {
+    mockFetchWithTimeout.mockImplementation(() => Promise.resolve(results()));
+    const service = makeService();
+
+    const calls = Array.from({ length: 150 }, (_, i) => service.search({ query: `q${i}` }));
+    await vi.advanceTimersByTimeAsync(0);
+
+    const settled = await Promise.allSettled(calls);
+    expect(settled.filter((s) => s.status === 'rejected')).toEqual([]);
+    expect(mockFetchWithTimeout).toHaveBeenCalledTimes(150);
+  });
+
+  it('rejects a queued caller with its own abort reason and never sends its request', async () => {
+    const release = heldFetches();
+    const service = makeService();
+    const inFlight = ['a', 'b', 'c', 'd'].map((query) => service.search({ query }));
+    await vi.advanceTimersByTimeAsync(0);
+
+    const controller = new AbortController();
+    const queued = service.search({ query: 'queued', signal: controller.signal });
+    await vi.advanceTimersByTimeAsync(0);
+    const reason = new Error('caller went away');
+    controller.abort(reason);
+
+    await expect(queued).rejects.toBe(reason);
+    expect(sentQueries()).not.toContain('queued');
+
+    for (const settle of release.splice(0)) settle();
+    await expect(Promise.all(inFlight)).resolves.toHaveLength(4);
+    expect(mockFetchWithTimeout).toHaveBeenCalledTimes(4);
+  });
+
+  it('rejects a caller that aborts mid-backoff with its own reason, without another attempt', async () => {
+    recordStarts(() => Promise.reject(unavailable()));
+    const service = makeService({ maxRetries: 3 });
+    const controller = new AbortController();
+
+    const call = service.search({ query: 'a', signal: controller.signal });
+    const outcome = expect(call).rejects.toBe('caller went away');
+    await vi.advanceTimersByTimeAsync(500);
+    controller.abort('caller went away');
+    await outcome;
+
+    await vi.advanceTimersByTimeAsync(60_000);
+    expect(starts).toEqual([0]);
+  });
+
+  it('backs off 1 s, doubling per attempt, capped at 30 s', async () => {
+    recordStarts(() => Promise.reject(unavailable()));
+    const service = makeService({ maxRetries: 6 });
+
+    const outcome = expect(service.search({ query: 'a' })).rejects.toMatchObject({
+      code: JsonRpcErrorCode.ServiceUnavailable,
+      data: { reason: 'europepmc_unreachable', attempts: 7 },
+    });
+    await vi.advanceTimersByTimeAsync(120_000);
+    await outcome;
+
+    // Waits of 1, 2, 4, 8, 16, then 30 s (32 s capped) between the seven attempts.
+    expect(starts).toEqual([0, 1_000, 3_000, 7_000, 15_000, 31_000, 61_000]);
+  });
+
+  it('draws each backoff from ±25% of the doubled base', async () => {
+    randomSpy.mockReturnValue(0);
+    recordStarts(() => Promise.reject(unavailable()));
+    const service = makeService({ maxRetries: 2 });
+
+    const outcome = expect(service.search({ query: 'a' })).rejects.toMatchObject({
+      data: { attempts: 3 },
+    });
+    await vi.advanceTimersByTimeAsync(10_000);
+    await outcome;
+
+    // 0.75 × 1 s, then 0.75 × 2 s.
+    expect(starts).toEqual([0, 750, 2_250]);
+  });
+
+  it('waits an upstream Retry-After in place of the exponential backoff', async () => {
+    let failed = false;
+    recordStarts(() => {
+      if (failed) return Promise.resolve(results());
+      failed = true;
+      return Promise.reject(httpErrorRejection(429, JsonRpcErrorCode.RateLimited, '', '3'));
+    });
+    const service = makeService({ maxRetries: 3 });
+
+    const call = service.search({ query: 'a' });
+    await vi.advanceTimersByTimeAsync(5_000);
+
+    await expect(call).resolves.toMatchObject({ hitCount: 1 });
+    expect(starts).toEqual([0, 3_000]);
+  });
+
+  it('fails fast with the 429 and its retryAfter when Retry-After exceeds the 30 s backoff cap', async () => {
+    recordStarts(() =>
+      Promise.reject(httpErrorRejection(429, JsonRpcErrorCode.RateLimited, '', '120')),
+    );
+    const service = makeService({ maxRetries: 3 });
+
+    const outcome = expect(service.search({ query: 'a' })).rejects.toMatchObject({
+      code: JsonRpcErrorCode.RateLimited,
+      message: 'Fetch failed for <upstream>. Status: 429',
+      data: { retryAfter: '120' },
+    });
+    await vi.advanceTimersByTimeAsync(0);
+    await outcome;
+    expect(starts).toEqual([0]);
+  });
+
+  /**
+   * A retry's backoff sleep runs outside the pacer: the failed attempt gives its
+   * slot back, so four callers backing off at once leave room for a fifth. (#163)
+   */
+  it('lets a fifth caller start while four others are mid-backoff (#163)', async () => {
+    const failedOnce = new Set<string | null>();
+    recordStarts((query) => {
+      if (query !== 'e' && !failedOnce.has(query)) {
+        failedOnce.add(query);
+        return Promise.reject(unavailable());
+      }
+      return Promise.resolve(results());
+    });
+    const service = makeService({ maxRetries: 3, minStartGapMs: 200 });
+
+    // Four first attempts start at 0/200/400/600 ms and fail; each retries 1 s later.
+    const first = ['a', 'b', 'c', 'd'].map((query) => service.search({ query }));
+    await vi.advanceTimersByTimeAsync(650);
+    expect(starts).toEqual([0, 200, 400, 600]);
+
+    const fifth = service.search({ query: 'e' });
+    await vi.advanceTimersByTimeAsync(200);
+    // All four are still sleeping (their retries are due at 1000 ms and later).
+    expect(sentQueries()).toEqual(['a', 'b', 'c', 'd', 'e']);
+    expect(starts).toEqual([0, 200, 400, 600, 800]);
+
+    await vi.advanceTimersByTimeAsync(5_000);
+    await expect(Promise.all([...first, fifth])).resolves.toHaveLength(5);
+  });
+
+  /**
+   * Each retry re-enters the pacer, so it waits out the start gap measured from
+   * the last request any caller started — not only its own previous attempt. (#163)
+   */
+  it('spaces a retry attempt from the last start by any caller (#163)', async () => {
+    let failed = false;
+    recordStarts((query) => {
+      if (query === 'a' && !failed) {
+        failed = true;
+        return Promise.reject(unavailable());
+      }
+      return Promise.resolve(results());
+    });
+    const service = makeService({ maxRetries: 3, minStartGapMs: 200 });
+
+    const retrying = service.search({ query: 'a' });
+    await vi.advanceTimersByTimeAsync(900);
+    const other = service.search({ query: 'b' });
+    await vi.advanceTimersByTimeAsync(1_000);
+
+    await expect(Promise.all([retrying, other])).resolves.toHaveLength(2);
+    // The retry is due at 1000 ms, but `b` started at 900 ms, so it waits until 1100 ms.
+    expect(sentQueries()).toEqual(['a', 'b', 'a']);
+    expect(starts).toEqual([0, 900, 1_100]);
   });
 });
 

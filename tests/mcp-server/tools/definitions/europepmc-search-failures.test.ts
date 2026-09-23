@@ -37,7 +37,7 @@ vi.mock('@/services/europe-pmc/europe-pmc-service.js', async () => {
 });
 
 const { EuropePmcApiClient } = await import('@/services/europe-pmc/api-client.js');
-const { EuropePmcRequestQueue } = await import('@/services/europe-pmc/request-queue.js');
+const { createEuropePmcRequestQueue } = await import('@/services/europe-pmc/request-queue.js');
 const { EuropePmcService } = await import('@/services/europe-pmc/europe-pmc-service.js');
 const { pubmedEuropepmcSearchTool } = await import(
   '@/mcp-server/tools/definitions/pubmed-europepmc-search.tool.js'
@@ -104,7 +104,7 @@ beforeEach(() => {
   service = new EuropePmcService(
     // Above the setTimeout stub's pass-through ceiling, so the request timer never fires.
     new EuropePmcApiClient({ timeoutMs: 60_000 }),
-    new EuropePmcRequestQueue(0),
+    createEuropePmcRequestQueue(0),
     MAX_RETRIES,
   );
   // Fire retry backoff at once; leave long timers (the request timeout) unarmed.

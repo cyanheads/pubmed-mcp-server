@@ -7,6 +7,10 @@
  * from the same `ORDERED_XML_PARSER_OPTIONS` NCBI's ordered parser uses, so
  * `parsePmcArticle` consumes the result without modification.
  *
+ * Every call runs as a retry loop around the shared request queue: each attempt
+ * re-enters the queue and waits out its start gap, and a backoff sleep holds no
+ * concurrency slot, so callers backing off never stall the calls behind them.
+ *
  * A search's retry boundary covers fetch and response classification, so
  * Europe PMC's intermittent empty `{ version }` envelope is retried like an
  * HTTP outage; only a sort or cursor that explains it is reported as bad input.
@@ -21,14 +25,19 @@
  */
 
 import {
-  internalError,
   JsonRpcErrorCode,
   McpError,
   serializationError,
   serviceUnavailable,
   validationError,
 } from '@cyanheads/mcp-ts-core/errors';
-import { defaultIsTransient, logger, requestContextService } from '@cyanheads/mcp-ts-core/utils';
+import {
+  defaultIsTransient,
+  logger,
+  type Pacer,
+  requestContextService,
+  withRetry,
+} from '@cyanheads/mcp-ts-core/utils';
 // biome-ignore lint/suspicious/noDeprecatedImports: staying on in-tree XMLValidator — see ncbi/response-handler.ts
 import { XMLParser, XMLValidator } from 'fast-xml-parser';
 
@@ -38,7 +47,7 @@ import { ORDERED_XML_PARSER_OPTIONS } from '@/services/ncbi/parsing/ordered-xml-
 import type { JatsNode, JatsNodeList } from '@/services/ncbi/parsing/pmc-xml-helpers.js';
 import { ensureArray } from '@/services/ncbi/parsing/xml-helpers.js';
 import { buildSearchQuery, EuropePmcApiClient } from './api-client.js';
-import { EuropePmcRequestQueue } from './request-queue.js';
+import { createEuropePmcRequestQueue } from './request-queue.js';
 import type {
   EuropePmcFullTextResult,
   EuropePmcLinksResponse,
@@ -52,22 +61,44 @@ import type {
   EuropePmcSource,
 } from './types.js';
 
+/** Ceiling on one backoff sleep, so a high retry count cannot grow it without bound. */
 const MAX_BACKOFF_MS = 30_000;
 
-function abortableSleep(ms: number, signal?: AbortSignal): Promise<void> {
-  if (!signal) return new Promise((r) => setTimeout(r, ms));
-  if (signal.aborted) return Promise.reject(signal.reason);
-  return new Promise<void>((resolve, reject) => {
-    const onAbort = () => {
-      clearTimeout(timer);
-      reject(signal.reason);
-    };
-    const timer = setTimeout(() => {
-      signal.removeEventListener('abort', onAbort);
-      resolve();
-    }, ms);
-    signal.addEventListener('abort', onAbort, { once: true });
-  });
+/**
+ * Retry gate: the framework's transient set, narrowed to `McpError`s. The client
+ * classifies every upstream failure, so a plain `Error` reaching the loop is a defect
+ * or a response that cannot parse — retrying it only repeats it.
+ */
+const isTransient = (error: unknown): boolean =>
+  error instanceof McpError && defaultIsTransient(error);
+
+/**
+ * Reshapes an error whose retries ran out: the last attempt's code and message with
+ * the attempt count appended, `label`, `attempts`, and the upstream `retryAfter`, so a
+ * 429 still tells the caller how long to wait. Only a `ServiceUnavailable` gains
+ * `europepmc_unreachable` and its hint; a `Timeout` or `RateLimited` keeps its code
+ * with no reason, as the NCBI service reports them. Anything never retried — a
+ * non-transient failure, or a `Retry-After` longer than the backoff cap — passes
+ * through unchanged.
+ */
+function toServiceError(error: unknown, label: string): unknown {
+  if (!(error instanceof McpError) || typeof error.data?.retryAttempts !== 'number') return error;
+  const last = error.cause instanceof McpError ? error.cause : error;
+  const attempts = error.data.retryAttempts;
+  return new McpError(
+    error.code,
+    `${last.message} (failed after ${attempts} attempts)`,
+    {
+      ...(error.code === JsonRpcErrorCode.ServiceUnavailable && {
+        reason: 'europepmc_unreachable',
+        ...recoveryFor('europepmc_unreachable'),
+      }),
+      label,
+      attempts,
+      ...(last.data?.retryAfter !== undefined && { retryAfter: last.data.retryAfter }),
+    },
+    { cause: last },
+  );
 }
 
 /**
@@ -127,14 +158,15 @@ function sortExplainsEnvelope(sort: string): boolean {
  *   - `citations()` / `references()` — EPMC's link graph for a PubMed article.
  *
  * All honor `ctx.signal` for cancellation and retry transient failures with
- * capped exponential backoff plus jitter.
+ * capped exponential backoff plus jitter, each attempt paced through the shared
+ * request queue.
  */
 export class EuropePmcService {
   private readonly orderedXmlParser: XMLParser;
 
   constructor(
     private readonly client: EuropePmcApiClient,
-    private readonly queue: EuropePmcRequestQueue,
+    private readonly queue: Pacer,
     private readonly maxRetries: number,
   ) {
     /**
@@ -154,15 +186,8 @@ export class EuropePmcService {
    * rather than surfacing after the loop has already returned. (#159)
    */
   search(params: EuropePmcSearchParams): Promise<EuropePmcSearchResult> {
-    return this.queue.enqueue(
-      () =>
-        this.withRetry(
-          (attempt) => this.searchOnce(params, attempt === this.maxRetries),
-          'search',
-          params.signal,
-        ),
-      'search',
-      params.signal,
+    return this.runPaced('search', params.signal, (attempt) =>
+      this.searchOnce(params, attempt === this.maxRetries + 1),
     );
   }
 
@@ -328,15 +353,8 @@ export class EuropePmcService {
     source: EuropePmcSource,
     signal?: AbortSignal,
   ): Promise<EuropePmcFullTextResult> {
-    const outcome = await this.queue.enqueue(
-      () =>
-        this.withRetry(
-          () => this.client.fullTextXml(epmcId, signal),
-          `fullTextXml(${epmcId})`,
-          signal,
-        ),
-      `fullTextXml(${epmcId})`,
-      signal,
+    const outcome = await this.runPaced(`fullTextXml(${epmcId})`, signal, () =>
+      this.client.fullTextXml(epmcId, signal),
     );
 
     if (outcome.kind === 'not-available') {
@@ -410,11 +428,7 @@ export class EuropePmcService {
     extractRecords: (parsed: EuropePmcLinksResponse) => EuropePmcRelatedRecord[],
     signal?: AbortSignal,
   ): Promise<EuropePmcRelatedResult> {
-    const text = await this.queue.enqueue(
-      () => this.withRetry(fetch, `${kind}(${pmid})`, signal),
-      `${kind}(${pmid})`,
-      signal,
-    );
+    const text = await this.runPaced(`${kind}(${pmid})`, signal, fetch);
 
     let parsed: EuropePmcLinksResponse;
     try {
@@ -515,64 +529,57 @@ export class EuropePmcService {
   }
 
   /**
-   * Retry wrapper for transient errors. Mirrors NCBI's `withRetry` minus the
-   * service-level deadline — EPMC requests are cheaper individually and the
-   * caller (typically `ctx.signal`) bounds the total chain. `execute` receives
-   * the zero-based attempt index. On exhaustion the last error keeps its code
-   * and an upstream `retryAfter`, so a 429 still tells the caller how long to
-   * wait. Only a `ServiceUnavailable` gains `europepmc_unreachable` and its hint;
-   * a `Timeout` or `RateLimited` keeps its code with no reason, as the NCBI
-   * service reports them.
+   * Runs one Europe PMC call: a retry loop around the shared request queue, so
+   * every attempt re-queues and is re-paced, and a backoff sleep holds no queue
+   * slot. No service-level deadline — Europe PMC requests are cheap individually
+   * and the caller's signal (typically `ctx.signal`) bounds the total chain; that
+   * signal reaches the queue wait and the backoff sleep. `execute` receives the
+   * one-based attempt number.
+   *
+   * A caller abort rethrows the caller's own reason; an exhausted failure is
+   * reshaped by {@link toServiceError}, after the loop.
    */
-  private async withRetry<T>(
-    execute: (attempt: number) => Promise<T>,
+  private async runPaced<T>(
     label: string,
-    signal?: AbortSignal,
+    signal: AbortSignal | undefined,
+    execute: (attempt: number) => Promise<T>,
   ): Promise<T> {
-    for (let attempt = 0; attempt <= this.maxRetries; attempt++) {
+    let attempt = 0;
+    try {
+      return await withRetry(
+        ({ signal: attemptSignal }) => {
+          const current = ++attempt;
+          return this.queue
+            .run(() => execute(current), { signal: attemptSignal })
+            .catch((error: unknown) => {
+              if (current <= this.maxRetries && isTransient(error)) {
+                logger.warning(
+                  `Europe PMC ${label} failed on attempt ${current} of ${this.maxRetries + 1}.`,
+                  requestContextService.createRequestContext({
+                    operation: 'EuropePmcRetry',
+                    additionalContext: {
+                      label,
+                      attempt: current,
+                      error: error instanceof Error ? error.message : String(error),
+                    },
+                  }),
+                );
+              }
+              throw error;
+            });
+        },
+        {
+          maxRetries: this.maxRetries,
+          maxDelayMs: MAX_BACKOFF_MS,
+          isTransient,
+          operation: `Europe PMC ${label}`,
+          ...(signal && { signal }),
+        },
+      );
+    } catch (error: unknown) {
       if (signal?.aborted) throw signal.reason;
-
-      try {
-        return await execute(attempt);
-      } catch (error: unknown) {
-        if (signal?.aborted) throw signal.reason;
-        if (!(error instanceof McpError)) throw error;
-        if (!defaultIsTransient(error)) throw error;
-
-        if (attempt < this.maxRetries) {
-          const baseDelay = Math.min(1000 * 2 ** attempt, MAX_BACKOFF_MS);
-          const jitter = baseDelay * (0.75 + 0.5 * Math.random());
-          const retryDelay = Math.round(jitter);
-          logger.warning(
-            `Europe PMC ${label} failed. Retrying (${attempt + 1}/${this.maxRetries}) in ${retryDelay}ms.`,
-            requestContextService.createRequestContext({
-              operation: 'EuropePmcRetry',
-              additionalContext: { label, attempt: attempt + 1, retryDelay },
-            }),
-          );
-          await abortableSleep(retryDelay, signal);
-          continue;
-        }
-
-        const attempts = this.maxRetries + 1;
-        throw new McpError(
-          error.code,
-          `${error.message} (failed after ${attempts} attempts)`,
-          {
-            ...(error.code === JsonRpcErrorCode.ServiceUnavailable && {
-              reason: 'europepmc_unreachable',
-              ...recoveryFor('europepmc_unreachable'),
-            }),
-            label,
-            attempts,
-            ...(error.data?.retryAfter !== undefined && { retryAfter: error.data.retryAfter }),
-          },
-          { cause: error },
-        );
-      }
+      throw toServiceError(error, label);
     }
-
-    throw internalError('Europe PMC request failed after all retries.', { label });
   }
 }
 
@@ -596,7 +603,7 @@ export function initEuropePmcService(): void {
     timeoutMs: config.europepmcTimeoutMs,
     ...(config.europepmcEmail && { email: config.europepmcEmail }),
   });
-  const queue = new EuropePmcRequestQueue(config.europepmcRequestDelayMs);
+  const queue = createEuropePmcRequestQueue(config.europepmcRequestDelayMs);
   _service = new EuropePmcService(client, queue, config.europepmcMaxRetries);
   logger.info(
     'Europe PMC service initialized.',
