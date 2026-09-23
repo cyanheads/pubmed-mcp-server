@@ -117,9 +117,11 @@ export const NCBI_ID_INPUT_ERRORS = [
 ] as const;
 
 /**
- * Failure modes the Unpaywall service layer can surface. Tools that consume
- * `getUnpaywallService()` (currently `pubmed_fetch_fulltext`) should spread
- * these into their `errors[]`.
+ * Failure modes the Unpaywall service layer can surface. A tool whose handler
+ * lets `getUnpaywallService()` failures propagate spreads these into its
+ * `errors[]`. None does today: `pubmed_fetch_fulltext`, the only consumer,
+ * folds every Unpaywall failure into its tier chain, so the entries serve the
+ * service's own `recoveryFor` hints.
  */
 export const UNPAYWALL_SERVICE_ERRORS = [
   {

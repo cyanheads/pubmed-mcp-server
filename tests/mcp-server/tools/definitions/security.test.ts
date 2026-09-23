@@ -654,6 +654,31 @@ describe('format() output sanitization', () => {
     ]);
   });
 
+  it('fetch-fulltext format() neutralizes Markdown markup in an Unpaywall title and journal name', () => {
+    const blocks = textBlocks(
+      fetchFulltextTool.format!({
+        articles: [
+          {
+            source: 'unpaywall',
+            viaSource: 'unpaywall',
+            contentFormat: 'pdf-text',
+            doi: '10.1000/x',
+            sourceUrl: 'https://repo.example.org/x.pdf',
+            title: '# Injected\n[Click me](https://evil.test)',
+            journalName: '[Journal](https://evil.test)',
+            year: 2026,
+            content: 'Body.',
+          },
+        ],
+        totalReturned: 1,
+      }),
+    );
+    const text = blocks[0]?.text ?? '';
+    expect(text).toContain('### # Injected \\[Click me\\](https://evil.test)');
+    expect(text).toContain('**Journal:** \\[Journal\\](https://evil.test)');
+    expect(text).toContain('**Year:** 2026');
+  });
+
   it('fetch-fulltext format() neutralizes Markdown markup in an asset label, caption, and href', () => {
     const blocks = textBlocks(
       fetchFulltextTool.format!({

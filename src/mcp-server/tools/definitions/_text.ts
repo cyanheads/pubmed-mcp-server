@@ -1,8 +1,9 @@
 /**
  * @fileoverview Text helpers shared by the tool definitions: the surrogate-safe
- * character cut used to bound returned text to a budget, and the render-time
- * Markdown escapes applied to upstream strings interpolated into `format()` —
- * one for an inline position, one for a table cell.
+ * character cut and the word-boundary cut built on it, which bound returned text
+ * to a budget, and the render-time Markdown escapes applied to upstream strings
+ * interpolated into `format()` — one for an inline position, one for a table
+ * cell.
  * @module src/mcp-server/tools/definitions/_text
  */
 
@@ -30,6 +31,39 @@ export function sliceCodeUnits(text: string, limit: number): string {
   const last = text.charCodeAt(limit - 1);
   const splitsPair = last >= HIGH_SURROGATE_FIRST && last <= HIGH_SURROGATE_LAST;
   return text.slice(0, splitsPair ? limit - 1 : limit);
+}
+
+/** A whitespace character — the boundary a word-boundary cut backs off to. */
+const WHITESPACE_RE = /\s/;
+
+const isWhitespace = (text: string, index: number): boolean =>
+  WHITESPACE_RE.test(text.charAt(index));
+
+/**
+ * Take at most `limit` UTF-16 code units from `text`, ending at the last word
+ * boundary inside the allowance rather than partway through a word.
+ *
+ * The cut is {@link sliceCodeUnits}' cut, backed off past the partial word it
+ * would end on — unless the character after it is whitespace, in which case
+ * the last word is already whole — with the whitespace before that word
+ * trimmed. A cut is therefore never mid-word and never ends in whitespace.
+ * `limit` stays a ceiling: the result can come back several units short of it,
+ * so callers reporting character counts measure the returned string. (#143)
+ *
+ * An allowance holding no boundary at all — one token longer than the
+ * allowance, such as a sequence or a URL — is cut at the allowance instead:
+ * backing off would return nothing, dropping a field that has text to give.
+ */
+export function sliceAtWordBoundary(text: string, limit: number): string {
+  const cut = sliceCodeUnits(text, limit);
+  if (cut.length === text.length) return cut;
+
+  let end = cut.length;
+  if (!isWhitespace(text, end)) {
+    while (end > 0 && !isWhitespace(cut, end - 1)) end -= 1;
+  }
+  while (end > 0 && isWhitespace(cut, end - 1)) end -= 1;
+  return end > 0 ? cut.slice(0, end) : cut.trimEnd();
 }
 
 /** Any line break, including the Unicode line and paragraph separators. */

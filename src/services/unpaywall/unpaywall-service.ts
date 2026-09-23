@@ -1,7 +1,8 @@
 /**
- * @fileoverview Unpaywall service. Resolves a DOI to an open-access location
- * and fetches the raw content (HTML or PDF) for downstream extraction. Enabled
- * only when `UNPAYWALL_EMAIL` is set — absence leaves the fallback disabled.
+ * @fileoverview Unpaywall service. Resolves a DOI to an open-access location —
+ * together with the title, journal name, and year the DOI object carries — and
+ * fetches the raw content (HTML or PDF) for downstream extraction. Enabled only
+ * when `UNPAYWALL_EMAIL` is set — absence leaves the fallback disabled.
  *
  * Philosophy: best-effort. Upstream 404s and non-OA DOIs return a `no-oa`
  * resolution; only genuine service failures (5xx, network, timeout) throw.
@@ -105,7 +106,13 @@ export class UnpaywallService {
       }),
     );
 
-    return { kind: 'found', location };
+    return {
+      kind: 'found',
+      location,
+      ...(nonBlank(data.title) && { title: data.title }),
+      ...(nonBlank(data.journal_name) && { journalName: data.journal_name }),
+      ...(typeof data.year === 'number' && Number.isInteger(data.year) && { year: data.year }),
+    };
   }
 
   /**
@@ -225,6 +232,11 @@ export class UnpaywallService {
 
     return { kind: 'html', fetchedUrl, body: new TextDecoder().decode(bytes) };
   }
+}
+
+/** True for a string carrying more than whitespace — Unpaywall sends `null` for a field it has no value for. */
+function nonBlank(value: unknown): value is string {
+  return typeof value === 'string' && value.trim().length > 0;
 }
 
 /** `%PDF-`, the five bytes every PDF file opens with. */

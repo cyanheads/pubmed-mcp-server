@@ -3,19 +3,29 @@
  * three-stage chain: NCBI PMC EFetch → Europe PMC `fullTextXML` → Unpaywall.
  * Accepts three mutually-exclusive input shapes:
  *
- *   - `pmcids` — fetch directly by PMC ID. Articles not in PMC fall through to
- *     EPMC by PMC ID, then to Unpaywall when the DOI is available.
+ *   - `pmcids` — fetch directly by PMC ID, once per record however it is
+ *     spelled (`PMC123`, `pmc123`, `123`, zero-padded `PMC0123`), and reported
+ *     in `PMC<digits>` form. Articles not in PMC fall through to EPMC by PMC ID,
+ *     then to Unpaywall when the DOI is available.
  *   - `pmids` — resolve PMID → PMCID via PMC ID Converter, then run the chain.
  *     A zero-padded PMID runs as the PMID it spells; `unavailable[]` and
  *     `deferred.ids` report it as the caller wrote it.
  *   - `dois` — resolve DOI → PMCID via the PMC ID Converter (mirroring `pmids`),
  *     then run the chain. DOIs with no PMC counterpart fall through to EPMC
  *     search-by-DOI → fullTextXML, then Unpaywall (EPMC-only OA, preprints).
+ *     DOIs are case-insensitive: every casing of one DOI runs the chain once,
+ *     and `unavailable[]` reports each casing as the caller wrote it.
  *
  * Output uses a discriminated union on `source` (`pmc` | `unpaywall`) with an
  * extra `viaSource` discriminator that records which layer produced the
  * content. EPMC's JATS reuses the `pmc` schema shape because it's the same
- * DTD; `viaSource: 'europepmc'` distinguishes it from PMC EFetch output.
+ * DTD; `viaSource: 'europepmc'` distinguishes it from PMC EFetch output. An
+ * Unpaywall article takes its title from Unpaywall's record, else the Europe
+ * PMC record the chain searched, else (HTML only) the page itself.
+ *
+ * Europe PMC and Unpaywall failures are folded into each id's `triedTiers`
+ * rather than thrown, so the declared `errors[]` covers the NCBI ID routing
+ * alone.
  *
  * @module src/mcp-server/tools/definitions/fetch-fulltext.tool
  */
@@ -23,11 +33,7 @@
 import { type Context, tool, z } from '@cyanheads/mcp-ts-core';
 import { htmlExtractor, pdfParser } from '@cyanheads/mcp-ts-core/utils';
 import { getServerConfig } from '@/config/server-config.js';
-import {
-  EUROPEPMC_SERVICE_ERRORS,
-  NCBI_SERVICE_ERRORS,
-  UNPAYWALL_SERVICE_ERRORS,
-} from '@/services/error-contracts.js';
+import { NCBI_SERVICE_ERRORS } from '@/services/error-contracts.js';
 import {
   type EuropePmcService,
   getEuropePmcService,
@@ -37,6 +43,7 @@ import { getNcbiService } from '@/services/ncbi/ncbi-service.js';
 import { extractDoi, extractPmid } from '@/services/ncbi/parsing/article-parser.js';
 import { parsePmcArticle } from '@/services/ncbi/parsing/pmc-article-parser.js';
 import { findAll, findOne, type JatsNodeList } from '@/services/ncbi/parsing/pmc-xml-helpers.js';
+import { toDisplayText } from '@/services/ncbi/parsing/text-helpers.js';
 import { ensureArray } from '@/services/ncbi/parsing/xml-helpers.js';
 import type {
   ParsedPmcArticle,
@@ -57,10 +64,18 @@ import {
 import { fitWholeItems } from './_budget.js';
 import { conceptMeta, EDAM_DATA_RETRIEVAL, SCHEMA_SCHOLARLY_ARTICLE } from './_concepts.js';
 import { doiStringSchema, normalizePmid, pmcidStringSchema, pmidStringSchema } from './_schemas.js';
-import { escapeMarkdownInline, escapeMarkdownTableCell, sliceCodeUnits } from './_text.js';
+import { escapeMarkdownInline, escapeMarkdownTableCell, sliceAtWordBoundary } from './_text.js';
 
+/**
+ * Canonical digits of a PMC ID {@link pmcidStringSchema} accepted: the `PMC`
+ * prefix dropped in any case, and leading zeros stripped the way
+ * {@link normalizePmid} strips them. PMC EFetch reads `03531190` as PMC3531190
+ * and answers with that record, so every `pmcids` path keys on this form — and
+ * reports it back as `PMC<digits>`. An all-zero ID keeps `0`, which EFetch
+ * still answers with its empty-list envelope. (#170)
+ */
 function normalizePmcId(id: string): string {
-  return id.replace(/^PMC/i, '');
+  return normalizePmid(id.replace(/^PMC/i, ''));
 }
 
 function withPmcPrefix(id: string): string {
@@ -665,7 +680,24 @@ const UnpaywallArticleSchema = z
     pubmedUrl: z.string().optional().describe('PubMed URL — present when `pmid` is set'),
     doi: z.string().describe('DOI used to locate the open-access copy'),
     sourceUrl: z.string().describe('URL the content was fetched from'),
-    title: z.string().optional().describe('Detected article title when present'),
+    title: z
+      .string()
+      .optional()
+      .describe(
+        "Article title, from the first source that carries one: Unpaywall's record for the DOI, then the Europe PMC record when the chain searched Europe PMC for this id, then — for `html-markdown` content only — the title detected on the page. Absent when none of them has a title.",
+      ),
+    journalName: z
+      .string()
+      .optional()
+      .describe(
+        "Journal or repository name from Unpaywall's record for the DOI (e.g. `medRxiv` for a medRxiv preprint). Absent when Unpaywall has none.",
+      ),
+    year: z
+      .number()
+      .optional()
+      .describe(
+        "Publication year from Unpaywall's record for the DOI. Absent when Unpaywall has none.",
+      ),
     content: z.string().describe('Full article text — Markdown or plain text per `contentFormat`'),
     wordCount: z
       .number()
@@ -765,22 +797,68 @@ const UnavailableSchema = z
 
 // ─── Character-budget schemas ────────────────────────────────────────────────
 
+/**
+ * Character accounting for one subsection. Its own type rather than a
+ * self-reference for the reason {@link SubsectionSchema} is inlined: a
+ * `z.lazy()` schema emits `$defs`/`$ref`. The article schema carries sections
+ * two levels deep, so the ledger does too.
+ *
+ * The chain `truncation` → `articles[]` → `sections[]` → `subsections[]` → a
+ * leaf is eight schema hops, the most the `format-parity` sentinel walker
+ * reaches. Re-run `bun run lint:mcp` after any change to this shape. (#143)
+ */
+const TruncatedSubsectionSchema = z
+  .object({
+    title: z.string().optional().describe('Subsection heading, when the subsection carries one'),
+    label: z
+      .string()
+      .optional()
+      .describe('Subsection label as printed (e.g. `2.1`), when the subsection carries one'),
+    originalCharacters: z
+      .number()
+      .describe('Body characters this subsection carried before the budget pass'),
+    returnedCharacters: z
+      .number()
+      .describe(
+        'Body characters this subsection carries in the response. Zero means it was dropped in `truncate` mode and counted in `omittedSections`, or kept as a heading-only entry in `outline` mode, marked as such in the rendered text.',
+      ),
+    truncated: z
+      .boolean()
+      .describe('True when the subsection returned fewer characters than it originally carried'),
+  })
+  .describe('Character accounting for one subsection of a shortened section');
+
 const TruncatedSectionSchema = z
   .object({
     title: z.string().optional().describe('Section heading, when the section carries one'),
+    label: z
+      .string()
+      .optional()
+      .describe('Section label as printed (e.g. `2`), when the section carries one'),
     originalCharacters: z
       .number()
       .describe('Body characters this section carried before the budget pass'),
     returnedCharacters: z
       .number()
       .describe(
-        'Body characters this section carries in the response. Zero means the section was dropped in `truncate` mode, or kept as a heading-only entry in `outline` mode.',
+        'Body characters this section carries in the response. Zero means the section was dropped in `truncate` mode, or kept as a heading-only entry in `outline` mode, marked as such in the rendered text.',
       ),
     truncated: z
       .boolean()
       .describe('True when the section returned fewer characters than it originally carried'),
+    subsections: z
+      .array(TruncatedSubsectionSchema)
+      .optional()
+      .describe(
+        'Per-subsection accounting for a shortened section, in document order, including subsections dropped for budget — where inside the section the cut landed. Absent when the section was returned whole or carries no subsections.',
+      ),
   })
   .describe('Character accounting for one body section of a budgeted article');
+
+/** One ledger entry at either level — the shape the budget pass builds and `format()` walks. */
+type SectionLedgerEntry = z.infer<typeof TruncatedSubsectionSchema> & {
+  subsections?: SectionLedgerEntry[] | undefined;
+};
 
 const TruncatedArticleSchema = z
   .object({
@@ -802,7 +880,7 @@ const TruncatedArticleSchema = z
       .array(TruncatedSectionSchema)
       .optional()
       .describe(
-        'Per-section accounting for `source: pmc` articles, in document order, including sections dropped for budget. Absent for `source: unpaywall`, whose body has no section structure.',
+        'Per-section accounting for `source: pmc` articles, in document order, including sections dropped for budget; a shortened section lists its subsections. Absent for `source: unpaywall`, whose body has no section structure.',
       ),
     omittedTables: z
       .number()
@@ -850,7 +928,7 @@ const TruncationSchema = z
     omittedSections: z
       .number()
       .describe(
-        'Body sections dropped entirely because an article budget was exhausted before reaching them. Always 0 in `outline` mode, which keeps every heading.',
+        'Body sections and subsections dropped entirely because an article budget was exhausted before reaching them. A dropped section counts once, together with its subsections. Always 0 in `outline` mode, which keeps every heading.',
       ),
     omittedTables: z
       .number()
@@ -992,35 +1070,100 @@ function fitWholeNamed<T>(
 }
 
 /**
- * Rebuild a section subtree from `fitted`, consuming one entry per node in the
- * same document order {@link sectionTextFields} produced them. `cursor` walks
- * the flat list across the whole subtree.
+ * True when the budget emptied a node that had text — which `truncate` mode
+ * drops, at any depth, and `outline` mode keeps as a heading-only entry. A node
+ * that never carried text is kept either way: there was nothing to cut.
  */
-function withFittedTexts(
+function isBudgetEmptied(entry: SectionLedgerEntry): boolean {
+  return entry.returnedCharacters === 0 && entry.originalCharacters > 0;
+}
+
+/**
+ * Sections and subsections `truncate` mode dropped, read off the ledger. A
+ * dropped node counts once and takes its subtree with it, so its subsections
+ * are not counted again. Shared by the budget pass and the deferral roll-back
+ * so both count by one rule. (#81, #143)
+ */
+function countDroppedSections(
+  entries: readonly SectionLedgerEntry[],
+  mode: 'truncate' | 'outline',
+): number {
+  if (mode !== 'truncate') return 0;
+  return entries.reduce(
+    (n, entry) =>
+      n + (isBudgetEmptied(entry) ? 1 : countDroppedSections(entry.subsections ?? [], mode)),
+    0,
+  );
+}
+
+/**
+ * Rebuild a section subtree from `fitted` — one entry per node, in the document
+ * order {@link sectionTextFields} produced them, `cursor` walking the flat list
+ * across the whole subtree — together with its ledger entry.
+ *
+ * In `truncate` mode a node the budget emptied is dropped (`kept` is absent) at
+ * every depth, where only a top-level section used to be: a subsection left as
+ * a heading over nothing is a stub, not content. `outline` mode keeps it, and
+ * `format()` marks it. The entry lists its subsections only when this node was
+ * shortened, which is where they say something a whole section's entry does
+ * not. (#81, #143)
+ */
+function fitSectionTree(
   section: ParsedSection,
   fitted: string[],
   cursor: { i: number },
-): ParsedSection {
+  mode: 'truncate' | 'outline',
+): { entry: SectionLedgerEntry; kept?: ParsedSection } {
   const text = fitted[cursor.i++] ?? '';
-  const subsections = section.subsections?.map((sub) => withFittedTexts(sub, fitted, cursor));
-  return { ...section, text, ...(subsections && { subsections }) };
+  const children = (section.subsections ?? []).map((sub) =>
+    fitSectionTree(sub, fitted, cursor, mode),
+  );
+  const originalCharacters = sectionCharacters(section);
+  const returnedCharacters = children.reduce(
+    (n, child) => n + child.entry.returnedCharacters,
+    text.length,
+  );
+  const truncated = returnedCharacters < originalCharacters;
+  const entry: SectionLedgerEntry = {
+    ...(section.title !== undefined && { title: section.title }),
+    ...(section.label !== undefined && { label: section.label }),
+    originalCharacters,
+    returnedCharacters,
+    truncated,
+    ...(truncated && children.length > 0 && { subsections: children.map((c) => c.entry) }),
+  };
+  if (mode === 'truncate' && isBudgetEmptied(entry)) return { entry };
+
+  const { subsections: _replaced, ...rest } = section;
+  const subsections = children.flatMap((child) => (child.kept ? [child.kept] : []));
+  return {
+    entry,
+    kept: { ...rest, text, ...(subsections.length > 0 && { subsections }) },
+  };
 }
 
 /**
  * Shorten an ordered list of text fields so their combined length fits
- * `allowance`. Fields are filled in order, so earlier fields survive whole and
- * later ones absorb the shortfall — the section's own text before its
- * subsections. Cuts at the character boundary with no appended marker so the
- * reported `returnedCharacters` is exact; `format()` carries the human-visible
- * note. A cut that would split a surrogate pair backs off a code unit, so a
- * field can return one character under its share — counts are measured off the
- * returned text, never off the allowance. (#93)
+ * `allowance`. Fields are filled in order, so earlier fields survive whole — the
+ * section's own text before its subsections — and the first field that does not
+ * fit is cut at the last word boundary inside what is left. Every field after
+ * that cut is past it and returns empty, the way a top-level section past the
+ * budget does, even when the cut left a few characters unspent: handing those
+ * on would open the next subsection with a fragment of its first word. (#143)
+ *
+ * No marker is appended, so the reported `returnedCharacters` is exact;
+ * `format()` carries the human-visible note. Counts are measured off the
+ * returned text, never off the allowance, which stays a ceiling. (#93)
  */
 function fitFields(fields: string[], allowance: number): string[] {
   let remaining = Math.max(allowance, 0);
   return fields.map((text) => {
-    const kept = sliceCodeUnits(text, remaining);
-    remaining -= kept.length;
+    if (text.length <= remaining) {
+      remaining -= text.length;
+      return text;
+    }
+    const kept = sliceAtWordBoundary(text, remaining);
+    remaining = 0;
     return kept;
   });
 }
@@ -1100,10 +1243,10 @@ function allotSectionBudgets(sizes: number[], budget: BudgetOptions): number[] {
  * nothing bounds either list and every entry is kept. (#111, #130)
  *
  * Returns the article untouched (same object identity) when no budget was
- * requested or nothing exceeded it. A section left with zero characters is
- * dropped in `truncate` mode and counted as omitted; `outline` keeps it as a
- * heading-only entry. Dropped sections still appear in the accounting so the
- * caller can see which headings exist. (#81)
+ * requested or nothing exceeded it. A section or subsection left with zero
+ * characters is dropped in `truncate` mode and counted as omitted; `outline`
+ * keeps it as a heading-only entry. Dropped nodes still appear in the accounting
+ * so the caller can see which headings exist. (#81, #143)
  */
 function applyPmcBudget<
   T extends { sections: ParsedPmcArticle['sections'] } & WithTables & WithAssets,
@@ -1128,28 +1271,17 @@ function applyPmcBudget<
   const allowances = allotSectionBudgets(sizes, budget);
 
   const kept: ParsedPmcArticle['sections'] = [];
-  const sectionReports: z.infer<typeof TruncatedSectionSchema>[] = [];
-  let omittedSections = 0;
+  const sectionReports: SectionLedgerEntry[] = [];
   let returnedCharacters = 0;
 
   article.sections.forEach((section, i) => {
-    const original = sizes[i] ?? 0;
     const fitted = fitFields(sectionTextFields(section), allowances[i] ?? 0);
-    const returned = totalLength(fitted);
-    returnedCharacters += returned;
-    sectionReports.push({
-      ...(section.title !== undefined && { title: section.title }),
-      originalCharacters: original,
-      returnedCharacters: returned,
-      truncated: returned < original,
-    });
-
-    if (returned === 0 && original > 0 && budget.overflowMode === 'truncate') {
-      omittedSections += 1;
-      return;
-    }
-    kept.push(withFittedTexts(section, fitted, { i: 0 }));
+    const fit = fitSectionTree(section, fitted, { i: 0 }, budget.overflowMode);
+    returnedCharacters += fit.entry.returnedCharacters;
+    sectionReports.push(fit.entry);
+    if (fit.kept) kept.push(fit.kept);
   });
+  const omittedSections = countDroppedSections(sectionReports, budget.overflowMode);
 
   // Sections are served first, then tables, then assets — each spending whatever
   // `maxCharacters` has left. A bare per-section budget sets no total, so nothing
@@ -1212,7 +1344,7 @@ function applyPmcBudget<
  * Apply the character budget to an Unpaywall body. That body is one
  * unstructured blob — HTML-as-Markdown or PDF-as-text — so only `maxCharacters`
  * applies, and `outline` mode has no headings to preserve and behaves like
- * `truncate`. (#81)
+ * `truncate`. The cut ends at a word boundary, as a section cut does. (#81, #143)
  */
 function applyContentBudget(
   content: string,
@@ -1220,7 +1352,7 @@ function applyContentBudget(
 ): { content: string; truncation?: UnkeyedTruncation } {
   const cap = budget.maxCharacters;
   if (cap === undefined || content.length <= cap) return { content };
-  const kept = sliceCodeUnits(content, cap);
+  const kept = sliceAtWordBoundary(content, cap);
   return {
     content: kept,
     truncation: { originalCharacters: content.length, returnedCharacters: kept.length },
@@ -1353,22 +1485,6 @@ function buildDeferralNotice(deferred: z.infer<typeof DeferredSchema>): string {
   return `${spent} ${deferred.deferredCount} resolved article(s) were deferred whole: ${deferred.ids.join(', ')}. Re-call pubmed_fetch_fulltext with those ids under \`${deferred.idType}s\` to retrieve them, or raise maxResponseCharacters to at least ${deferred.nextDeferredCharacters} — the size of the next deferred article.`;
 }
 
-/**
- * Body sections an article's per-article budget dropped, derived from that
- * article's own accounting by the rule {@link applyPmcBudget} counts by:
- * `outline` mode keeps every heading, so it drops none. Used to take a deferred
- * article's contribution back out of the response-level roll-up. (#100)
- */
-function countOmittedSections(
-  entry: z.infer<typeof TruncatedArticleSchema>,
-  mode: 'truncate' | 'outline',
-): number {
-  if (mode !== 'truncate') return 0;
-  return (entry.sections ?? []).filter(
-    (s) => s.originalCharacters > 0 && s.returnedCharacters === 0,
-  ).length;
-}
-
 // ─── Tool Definition ─────────────────────────────────────────────────────────
 
 /**
@@ -1428,11 +1544,11 @@ export const fetchFulltextTool = tool('pubmed_fetch_fulltext', {
   sourceUrl:
     'https://github.com/cyanheads/pubmed-mcp-server/blob/main/src/mcp-server/tools/definitions/fetch-fulltext.tool.ts',
 
-  errors: [
-    ...NCBI_SERVICE_ERRORS,
-    ...UNPAYWALL_SERVICE_ERRORS,
-    ...EUROPEPMC_SERVICE_ERRORS,
-  ] as const,
+  // Only the ID routing's `idConvert` calls run unwrapped. Every Europe PMC and
+  // Unpaywall call sits behind a catch that folds the failure into
+  // `unavailable[].triedTiers`, so their service reasons never reach a caller
+  // and are not declared here. (#168)
+  errors: [...NCBI_SERVICE_ERRORS] as const,
 
   input: z
     .object({
@@ -1496,7 +1612,7 @@ export const fetchFulltextTool = tool('pubmed_fetch_fulltext', {
         .max(1_000_000)
         .optional()
         .describe(
-          'Per-article budget for body text, in characters. Counts `source=pmc` section and subsection text — which carries the inline blocks the parser renders in place, such as lists, definition lists, block quotes, boxed text, preformatted blocks and displayed formulae — plus table label, caption, cell and footnote text and asset label, caption and `href` text; or the `source=unpaywall` `content` body. Titles, abstracts, identifiers, and references are never counted or shortened. The counted unit is that text alone — the Markdown grid `content[]` renders around the cells (pipes, padding, the divider row, headings) is scaffolding this budget does not measure, so a table renders longer than it costs here. Sections are served first, then tables, then assets, each spending what is left, in document order — admission stops at the first entry that does not fit, and every entry from there on is dropped whole rather than cut mid-row or returned with a shortened caption, counted in `truncation.omittedTables` / `truncation.omittedAssets` and named in `truncation.articles[].omittedTableNames` / `omittedAssetNames`. Applied after `sections`, `maxSections`, `includeReferences`, `includeTables`, and `includeAssets`, so semantic filtering is unaffected. This knob alone bounds only bodies: the response-wide ceiling it implies is this value times the number of articles returned, plus every uncounted field. Use `maxResponseCharacters` for a true whole-response ceiling. Omit for the full body.',
+          'Per-article budget for body text, in characters. Counts `source=pmc` section and subsection text — which carries the inline blocks the parser renders in place, such as lists, definition lists, block quotes, boxed text, preformatted blocks and displayed formulae — plus table label, caption, cell and footnote text and asset label, caption and `href` text; or the `source=unpaywall` `content` body. Titles, abstracts, identifiers, and references are never counted or shortened. Shortened text ends at the last word boundary inside its allowance, so it can come back a few characters under it. The counted unit is that text alone — the Markdown grid `content[]` renders around the cells (pipes, padding, the divider row, headings) is scaffolding this budget does not measure, so a table renders longer than it costs here. Sections are served first, then tables, then assets, each spending what is left, in document order — admission stops at the first entry that does not fit, and every entry from there on is dropped whole rather than cut mid-row or returned with a shortened caption, counted in `truncation.omittedTables` / `truncation.omittedAssets` and named in `truncation.articles[].omittedTableNames` / `omittedAssetNames`. Applied after `sections`, `maxSections`, `includeReferences`, `includeTables`, and `includeAssets`, so semantic filtering is unaffected. This knob alone bounds only bodies: the response-wide ceiling it implies is this value times the number of articles returned, plus every uncounted field. Use `maxResponseCharacters` for a true whole-response ceiling. Omit for the full body.',
         ),
       maxCharactersPerSection: z
         .number()
@@ -1520,7 +1636,7 @@ export const fetchFulltextTool = tool('pubmed_fetch_fulltext', {
         .enum(['truncate', 'outline'])
         .default('truncate')
         .describe(
-          'How to spend `maxCharacters` across an article that exceeds it. truncate: fill sections in document order, so early sections stay whole and sections past the budget are dropped (counted in `truncation.omittedSections`). outline: split the budget evenly so every section keeps its heading, and an excerpt as far as the budget reaches — use it to survey what an article contains before requesting specific `sections`. Ignored when no budget is set, and identical for `source=unpaywall` bodies, which have no headings to preserve.',
+          'How to spend `maxCharacters` across an article that exceeds it. truncate: fill sections in document order, so early sections stay whole, the section the budget runs out in is cut, and every section or subsection past that point is dropped (counted in `truncation.omittedSections`). outline: split the budget evenly so every section and subsection keeps its heading, and an excerpt as far as the budget reaches — a heading the budget left empty is marked as such in the rendered text. Use it to survey what an article contains before requesting specific `sections`. Ignored when no budget is set, and identical for `source=unpaywall` bodies, which have no headings to preserve.',
         ),
     })
     .refine((v) => [v.pmcids, v.pmids, v.dois].filter((b) => b !== undefined).length === 1, {
@@ -1618,10 +1734,17 @@ export const fetchFulltextTool = tool('pubmed_fetch_fulltext', {
     // carry — a `pmids` request recovers articles keyed by PMCID. (#100)
     const inputIdByArticle = new Map<FulltextArticle, string>();
     // The caller's own spellings of each chain key, so `unavailable[]` and
-    // `deferred.ids` report what was submitted. Only the `pmids` branch fills
-    // it — a PMID's chain runs on its canonical form — and any other key is its
-    // own spelling. (#161)
+    // `deferred.ids` report what was submitted. The `pmids` branch fills it — a
+    // PMID's chain runs on its canonical form — and so does the `dois` branch,
+    // whose chain runs once per DOI however many casings name it. Both also
+    // fold in an input id that resolves to a PMC record another one already
+    // claimed (see `routeToPmc`). Any other key is its own spelling. (#161, #166)
     const callerIds = new Map<string, string[]>();
+    const addCallerId = (key: string, spelling: string) => {
+      const spellings = callerIds.get(key) ?? [];
+      if (!spellings.includes(spelling)) spellings.push(spelling);
+      callerIds.set(key, spellings);
+    };
 
     const budget: BudgetOptions = {
       overflowMode: input.overflowMode,
@@ -1639,16 +1762,32 @@ export const fetchFulltextTool = tool('pubmed_fetch_fulltext', {
     let pmcidFallbackCandidates: PmcidCandidate[] = [];
     let doiCandidates: DoiCandidate[] = [];
 
+    // Send a converter-resolved PMCID to PMC EFetch under the input id that
+    // named it. A second input id the converter places on the same PMC record
+    // — two DOIs for one article — joins the first one's chain as another
+    // spelling of it: the record is fetched once, and both ids are recovered,
+    // or reported unavailable with that chain, rather than the later id taking
+    // the PMCID over and leaving the earlier one with an empty chain.
+    const routeToPmc = (inputId: string, pmcid: string) => {
+      const normalized = normalizePmcId(pmcid);
+      const prefixed = withPmcPrefix(normalized);
+      const owner = pmcidToInputId.get(prefixed);
+      if (owner === undefined) {
+        pmcIds.push(normalized);
+        pmcidToInputId.set(prefixed, inputId);
+        return;
+      }
+      if (owner === inputId) return;
+      for (const spelling of callerIds.get(inputId) ?? [inputId]) addCallerId(owner, spelling);
+      callerIds.delete(inputId);
+      chainByInput.delete(inputId);
+    };
+
     if (input.pmids) {
       // The ID Converter parses `00000001` as PMID 1 yet reports it "not found
       // in PMC", and every later stage answers with NCBI's own PMID, so the chain
       // runs once per distinct PMID in its canonical form. (#161)
-      for (const id of input.pmids) {
-        const pmid = normalizePmid(id);
-        const spellings = callerIds.get(pmid) ?? [];
-        if (!spellings.includes(id)) spellings.push(id);
-        callerIds.set(pmid, spellings);
-      }
+      for (const id of input.pmids) addCallerId(normalizePmid(id), id);
       const pmids = [...callerIds.keys()];
       for (const id of pmids) chainByInput.set(id, []);
       const records = await getNcbiService().idConvert(
@@ -1662,9 +1801,7 @@ export const fetchFulltextTool = tool('pubmed_fetch_fulltext', {
         const pmid = String(r.pmid);
         seen.add(pmid);
         if (r.pmcid) {
-          const normalized = normalizePmcId(String(r.pmcid));
-          pmcIds.push(normalized);
-          pmcidToInputId.set(withPmcPrefix(normalized), pmid);
+          routeToPmc(pmid, String(r.pmcid));
           pmidContext.set(pmid, { pmid, ...(r.doi && { doi: r.doi }) });
         } else {
           chainByInput.get(pmid)?.push({
@@ -1686,31 +1823,42 @@ export const fetchFulltextTool = tool('pubmed_fetch_fulltext', {
         }
       }
     } else if (input.pmcids) {
-      for (const id of input.pmcids) chainByInput.set(withPmcPrefix(normalizePmcId(id)), []);
-      pmcIds = input.pmcids.map(normalizePmcId);
+      // `PMC123`, `pmc123`, `123` and `PMC0123` name one record; it runs the
+      // chain once. (#170)
+      pmcIds = [...new Set(input.pmcids.map(normalizePmcId))];
+      for (const id of pmcIds) chainByInput.set(withPmcPrefix(id), []);
     } else if (input.dois) {
       // Mirror the `pmids` branch: resolve DOI → PMCID via the PMC ID Converter
       // so PMC-indexed DOIs reach PMC EFetch instead of going straight to the
       // EPMC/Unpaywall fallback (which misses articles whose only OA copy is the
       // PMC JATS). DOIs the converter can't place in PMC seed `doiCandidates`.
-      const requestedDois = new Set(input.dois);
-      for (const doi of input.dois) chainByInput.set(doi, []);
+      //
+      // DOIs are case-insensitive, and the converter echoes one casing in
+      // `requested-id` for DOIs that differ only in case, so every casing of a
+      // DOI shares one chain, keyed by the first spelling submitted, and
+      // converter records are matched to it case-insensitively. (#166)
+      const chainKeyByDoi = new Map<string, string>();
+      for (const doi of input.dois) {
+        const key = chainKeyByDoi.get(doi.toLowerCase()) ?? doi;
+        chainKeyByDoi.set(doi.toLowerCase(), key);
+        addCallerId(key, doi);
+      }
+      const dois = [...callerIds.keys()];
+      for (const doi of dois) chainByInput.set(doi, []);
       const records = await getNcbiService().idConvert(
-        input.dois,
+        dois,
         'doi',
         ctx.signal ? { signal: ctx.signal } : undefined,
       );
       const seen = new Set<string>();
       for (const r of records) {
-        // The converter echoes the submitted id verbatim in `requested-id`;
-        // match on it, not `r.doi` (DOIs aren't case-stable across the API).
-        const doi = String(r['requested-id']);
-        if (!requestedDois.has(doi)) continue;
+        // Match on the echoed `requested-id`, not `r.doi`: the record's own DOI
+        // can be cased differently from anything the caller sent.
+        const doi = chainKeyByDoi.get(String(r['requested-id']).toLowerCase());
+        if (doi === undefined) continue;
         seen.add(doi);
         if (r.pmcid) {
-          const normalized = normalizePmcId(String(r.pmcid));
-          pmcIds.push(normalized);
-          pmcidToInputId.set(withPmcPrefix(normalized), doi);
+          routeToPmc(doi, String(r.pmcid));
         } else {
           chainByInput.get(doi)?.push({
             tier: 'pmc',
@@ -1720,7 +1868,7 @@ export const fetchFulltextTool = tool('pubmed_fetch_fulltext', {
           doiCandidates.push({ doi });
         }
       }
-      for (const requested of input.dois) {
+      for (const requested of dois) {
         if (!seen.has(requested)) {
           chainByInput.get(requested)?.push({
             tier: 'pmc',
@@ -2001,7 +2149,11 @@ export const fetchFulltextTool = tool('pubmed_fetch_fulltext', {
             return {
               pmcId,
               result: candidate.doi
-                ? await resolveUnpaywall({ pmcId, doi: candidate.doi, budget }, unpaywall, ctx)
+                ? await resolveUnpaywall(
+                    { pmcId, doi: candidate.doi, epmcTitle: candidate.title, budget },
+                    unpaywall,
+                    ctx,
+                  )
                 : undefined,
             };
           }),
@@ -2072,7 +2224,7 @@ export const fetchFulltextTool = tool('pubmed_fetch_fulltext', {
             candidate,
             result: candidate.doi
               ? await resolveUnpaywall(
-                  { pmid: candidate.pmid, doi: candidate.doi, budget },
+                  { pmid: candidate.pmid, doi: candidate.doi, epmcTitle: candidate.title, budget },
                   unpaywall,
                   ctx,
                 )
@@ -2117,7 +2269,11 @@ export const fetchFulltextTool = tool('pubmed_fetch_fulltext', {
         const outcomes = await Promise.all(
           doiCandidates.map(async (c) => ({
             doi: c.doi,
-            result: await resolveUnpaywall({ doi: c.doi, budget }, unpaywall, ctx),
+            result: await resolveUnpaywall(
+              { doi: c.doi, epmcTitle: c.title, budget },
+              unpaywall,
+              ctx,
+            ),
           })),
         );
         for (const { doi, result } of outcomes) {
@@ -2189,7 +2345,9 @@ export const fetchFulltextTool = tool('pubmed_fetch_fulltext', {
         const index = truncatedArticles.findIndex((t) => t.id === id);
         if (index === -1) continue;
         const [dropped] = truncatedArticles.splice(index, 1);
-        if (dropped) omittedSections -= countOmittedSections(dropped, input.overflowMode);
+        if (dropped) {
+          omittedSections -= countDroppedSections(dropped.sections ?? [], input.overflowMode);
+        }
       }
     }
 
@@ -2311,7 +2469,7 @@ export const fetchFulltextTool = tool('pubmed_fetch_fulltext', {
     for (const a of result.articles) {
       lines.push('');
       const t = truncationById.get(articleDisplayId(a));
-      if (a.source === 'pmc') formatPmcArticle(a, lines, t);
+      if (a.source === 'pmc') formatPmcArticle(a, lines, t, result.truncation?.mode);
       else formatUnpaywallArticle(a, lines, t);
     }
 
@@ -2321,8 +2479,16 @@ export const fetchFulltextTool = tool('pubmed_fetch_fulltext', {
 
 // ─── Handler helpers ─────────────────────────────────────────────────────────
 
+/**
+ * What a Europe PMC search hit tells the Unpaywall stage about a candidate it
+ * did not serve: the record's DOI and its display title, captured whatever the
+ * fetch outcome was. The title is the article's fallback when Unpaywall's own
+ * record carries none. (#88, #144)
+ */
+type EpmcHitCarry = { doi?: string; title?: string };
+
 /** A PMID not present in PMC, optionally paired with a DOI for Unpaywall lookup. */
-type PmidCandidate = { pmid: string; doi?: string };
+type PmidCandidate = { pmid: string } & EpmcHitCarry;
 
 /**
  * A PMCID requested directly but not returned by PMC EFetch, optionally paired
@@ -2330,10 +2496,28 @@ type PmidCandidate = { pmid: string; doi?: string };
  * the stage already made, or from the PMC ID Converter when EPMC never resolved
  * the record. (#88)
  */
-type PmcidCandidate = { pmcid: string; doi?: string };
+type PmcidCandidate = { pmcid: string } & EpmcHitCarry;
 
 /** A DOI candidate for direct DOI input. */
-type DoiCandidate = { doi: string };
+type DoiCandidate = { doi: string } & EpmcHitCarry;
+
+/**
+ * Merge what a Europe PMC hit carried onto a candidate bound for Unpaywall. A
+ * DOI the candidate already holds wins — for `dois` input it is the caller's
+ * own identifier.
+ */
+function carryEpmcHit<C extends EpmcHitCarry>(candidate: C, hit: EpmcHitCarry): C {
+  return {
+    ...candidate,
+    ...(hit.doi && !candidate.doi && { doi: hit.doi }),
+    ...(hit.title && { title: hit.title }),
+  };
+}
+
+/** Display-ready plain text, or `undefined` when nothing is left once markup is stripped. */
+function nonEmptyDisplayText(raw: string | undefined): string | undefined {
+  return (raw && toDisplayText(raw)) || undefined;
+}
 
 /** Reason + optional detail returned by the Unpaywall resolver; the handler
  *  stamps `id`/`idType`/`triedTiers` on top when building unavailable entries. */
@@ -2402,14 +2586,12 @@ async function runEpmcStage(
   epmc: EuropePmcService,
   args: EpmcStageInput,
 ): Promise<EpmcStageOutput> {
-  type CandidateRun<C> = {
+  /** The DOI and title the hit carried sit on the run itself, set on non-hit outcomes too. */
+  type CandidateRun<C> = EpmcHitCarry & {
     c: C;
     outcome: EpmcCandidateOutcome;
     article?: z.infer<typeof PmcArticleSchema>;
     sectionFilterMiss?: boolean;
-    /** DOI carried by the EPMC hit, captured on non-hit outcomes too so the
-     *  Unpaywall stage can use it for `pmcids` input. (#88) */
-    doi?: string;
     /** Character accounting when the budget shortened this article. (#81) */
     truncation?: z.infer<typeof TruncatedArticleSchema>;
     omittedSections?: number;
@@ -2425,24 +2607,28 @@ async function runEpmcStage(
       return { c, outcome: { kind: 'service-error', detail: search.detail } };
     }
     if (search.kind === 'miss') return { c, outcome: { kind: 'miss' } };
-    const doi = search.hit.doi ? { doi: search.hit.doi } : {};
+    const title = nonEmptyDisplayText(search.hit.title);
+    const hit: EpmcHitCarry = {
+      ...(search.hit.doi && { doi: search.hit.doi }),
+      ...(title && { title }),
+    };
     const fetched = await fetchEpmcArticle(epmc, search.hit, args, contextPmid);
     if (fetched.kind === 'error') {
-      return { c, ...doi, outcome: { kind: 'service-error', detail: fetched.detail } };
+      return { c, ...hit, outcome: { kind: 'service-error', detail: fetched.detail } };
     }
     if (fetched.kind === 'no-fulltext') {
       return {
         c,
-        ...doi,
+        ...hit,
         outcome: { kind: 'no-fulltext', ...(fetched.detail && { detail: fetched.detail }) },
       };
     }
     if (fetched.kind === 'no-body') {
-      return { c, ...doi, outcome: { kind: 'no-body', detail: fetched.detail } };
+      return { c, ...hit, outcome: { kind: 'no-body', detail: fetched.detail } };
     }
     return {
       c,
-      ...doi,
+      ...hit,
       outcome: { kind: 'hit' },
       article: fetched.article,
       sectionFilterMiss: fetched.sectionFilterMiss,
@@ -2504,20 +2690,20 @@ async function runEpmcStage(
   for (const run of pmidResults) {
     pmidOutcomes.set(run.c.pmid, run.outcome);
     if (run.article) collectHit(run.c.pmid, { ...run, article: run.article });
-    // A DOI the EPMC hit carried is evidence the next stage needs, whatever the
-    // fetch outcome was — merge it in like the pmcid branch below, so Unpaywall
-    // gets it without a redundant PubMed metadata round-trip. (#119)
-    else remainingPmid.push(run.doi && !run.c.doi ? { ...run.c, doi: run.doi } : run.c);
+    // What the EPMC hit carried is evidence the next stage needs, whatever the
+    // fetch outcome was: its DOI spares Unpaywall a PubMed metadata round-trip
+    // (#119), and its title backs up Unpaywall's own record (#144).
+    else remainingPmid.push(carryEpmcHit(run.c, run));
   }
   for (const run of pmcidResults) {
     pmcidOutcomes.set(run.c.normalized, run.outcome);
     if (run.article) collectHit(run.c.normalized, { ...run, article: run.article });
-    else remainingPmcid.push(run.doi && !run.c.c.doi ? { ...run.c.c, doi: run.doi } : run.c.c);
+    else remainingPmcid.push(carryEpmcHit(run.c.c, run));
   }
   for (const run of doiResults) {
     doiOutcomes.set(run.c.doi, run.outcome);
     if (run.article) collectHit(run.c.doi, { ...run, article: run.article });
-    else remainingDoi.push(run.c);
+    else remainingDoi.push(carryEpmcHit(run.c, run));
   }
 
   return {
@@ -2708,13 +2894,25 @@ async function fetchPubmedDois(
  * Resolve a DOI to an open-access article via Unpaywall. `pmcId` and `pmid`,
  * when set, are stamped onto the resulting article so the branch that requested
  * it carries its identifier through — Unpaywall itself only knows the DOI.
+ *
+ * The article's title is the first one found in Unpaywall's own record, then
+ * `epmcTitle` — the Europe PMC record the chain searched for this id — then,
+ * for HTML content only, the title the extractor detects on the page. None is
+ * ever invented: with no source carrying one, the article has no title. The
+ * journal name and year come from Unpaywall's record alone. (#144)
  */
 async function resolveUnpaywall(
-  args: { pmcId?: string; pmid?: string; doi: string; budget: BudgetOptions },
+  args: {
+    pmcId?: string;
+    pmid?: string;
+    doi: string;
+    epmcTitle?: string | undefined;
+    budget: BudgetOptions;
+  },
   service: UnpaywallService,
   ctx: Context,
 ): Promise<FallbackOutcome> {
-  const { pmcId, pmid, doi, budget } = args;
+  const { pmcId, pmid, doi, epmcTitle, budget } = args;
   const requestedIds = { ...(pmcId && { pmcId }), ...(pmid && { pmid }) };
 
   /** Budget the extracted body, then pair the article with its accounting. */
@@ -2758,6 +2956,16 @@ async function resolveUnpaywall(
     return { unavailable: { reason: 'fetch-failed', detail } };
   }
 
+  const recordTitle = nonEmptyDisplayText(resolution.title) ?? epmcTitle;
+  const record = {
+    ...requestedIds,
+    doi,
+    sourceUrl: content.fetchedUrl,
+    location: resolution.location,
+    journalName: nonEmptyDisplayText(resolution.journalName),
+    year: resolution.year,
+  };
+
   try {
     if (content.kind === 'html') {
       const extracted = await htmlExtractor.extract(content.body, {
@@ -2776,13 +2984,10 @@ async function resolveUnpaywall(
       return budgeted(
         (text) =>
           buildUnpaywallArticle({
-            ...requestedIds,
-            doi,
-            sourceUrl: content.fetchedUrl,
-            location: resolution.location,
+            ...record,
             contentFormat: 'html-markdown',
             content: text,
-            title: extracted.title,
+            title: recordTitle ?? extracted.title,
             wordCount: extracted.wordCount,
           }),
         body,
@@ -2799,12 +3004,10 @@ async function resolveUnpaywall(
     return budgeted(
       (body) =>
         buildUnpaywallArticle({
-          ...requestedIds,
-          doi,
-          sourceUrl: content.fetchedUrl,
-          location: resolution.location,
+          ...record,
           contentFormat: 'pdf-text',
           content: body,
+          title: recordTitle,
           totalPages: extracted.totalPages,
         }),
       text,
@@ -2825,6 +3028,8 @@ function buildUnpaywallArticle(args: {
   contentFormat: 'html-markdown' | 'pdf-text';
   content: string;
   title?: string | undefined;
+  journalName?: string | undefined;
+  year?: number | undefined;
   wordCount?: number | undefined;
   totalPages?: number | undefined;
 }): z.infer<typeof UnpaywallArticleSchema> {
@@ -2842,6 +3047,8 @@ function buildUnpaywallArticle(args: {
     sourceUrl: args.sourceUrl,
     content: args.content,
     ...(args.title && { title: args.title }),
+    ...(args.journalName && { journalName: args.journalName }),
+    ...(args.year !== undefined && { year: args.year }),
     ...(args.wordCount !== undefined && { wordCount: args.wordCount }),
     ...(args.totalPages !== undefined && { totalPages: args.totalPages }),
     ...(location.license && { license: location.license }),
@@ -3024,12 +3231,32 @@ function formatTruncation(t: z.infer<typeof TruncationSchema>, lines: string[]):
     lines.push(
       `- ${a.id} (${a.source}): ${a.returnedCharacters} of ${a.originalCharacters} characters${tablesDropped}${assetsDropped}`,
     );
-    for (const s of a.sections ?? []) {
-      lines.push(
-        `  - ${s.title ?? 'untitled section'} — ${s.returnedCharacters} of ${s.originalCharacters} characters (truncated: ${s.truncated})`,
-      );
-    }
+    for (const s of a.sections ?? []) formatLedgerEntry(s, lines, t.mode, 1);
   }
+}
+
+/**
+ * One section's ledger line, then its subsections' one level deeper. The line
+ * names the section by {@link sectionHeading}, so it reads exactly as the
+ * section's heading does in the body. An entry the budget emptied says what
+ * became of it — dropped in `truncate` mode, kept as a bare heading in
+ * `outline` mode. (#143, #148)
+ */
+function formatLedgerEntry(
+  entry: SectionLedgerEntry,
+  lines: string[],
+  mode: 'truncate' | 'outline',
+  depth: number,
+): void {
+  const fate = isBudgetEmptied(entry)
+    ? mode === 'truncate'
+      ? ' — dropped'
+      : ' — heading only'
+    : '';
+  lines.push(
+    `${'  '.repeat(depth)}- ${sectionHeading(entry)} — ${entry.returnedCharacters} of ${entry.originalCharacters} characters (truncated: ${entry.truncated})${fate}`,
+  );
+  for (const sub of entry.subsections ?? []) formatLedgerEntry(sub, lines, mode, depth + 1);
 }
 
 /** Per-article inline marker so a reader of one article's body knows it is partial. */
@@ -3037,10 +3264,19 @@ function truncationNote(t: z.infer<typeof TruncatedArticleSchema>): string {
   return `\n> Body shortened to fit the requested character budget — ${t.returnedCharacters} of ${t.originalCharacters} characters returned. See \`truncation\` for per-section counts.`;
 }
 
+/**
+ * The marker an `outline`-mode heading carries when the budget left it no text,
+ * so it reads as withheld rather than as a heading over nothing. (#143)
+ */
+function emptiedSectionNote(originalCharacters: number): string {
+  return `> Text omitted to fit the requested character budget — 0 of ${originalCharacters} characters returned.`;
+}
+
 function formatPmcArticle(
   a: z.infer<typeof PmcArticleSchema>,
   lines: string[],
   truncation?: z.infer<typeof TruncatedArticleSchema>,
+  mode?: 'truncate' | 'outline',
 ): void {
   // Render-time only — `structuredContent.articles[].title` keeps the
   // plain-text value the JATS parser produced. (#102)
@@ -3087,7 +3323,13 @@ function formatPmcArticle(
   if (truncation) lines.push(truncationNote(truncation));
   if (a.abstract) lines.push(`\n#### Abstract\n${a.abstract}`);
 
-  for (const sec of a.sections) formatSection(sec, lines, 4);
+  // `outline` mode keeps every section and subsection, so each one lines up
+  // with its ledger entry by position. `truncate` mode drops the emptied ones —
+  // positions no longer line up, and nothing left needs a marker.
+  const ledger = mode === 'outline' ? truncation?.sections : undefined;
+  a.sections.forEach((sec, i) => {
+    formatSection(sec, lines, 4, ledger?.[i]);
+  });
 
   if (a.tables?.length) formatTables(a.tables, lines);
 
@@ -3227,6 +3469,8 @@ function formatUnpaywallArticle(
       : 'Unpaywall (PDF → plain text)';
   lines.push(`### ${escapeMarkdownInline(heading)}`);
   lines.push(`**Source:** ${formatLabel}`);
+  if (a.journalName) lines.push(`**Journal:** ${escapeMarkdownInline(a.journalName)}`);
+  if (a.year !== undefined) lines.push(`**Year:** ${a.year}`);
   if (a.pmcId) lines.push(`**PMCID:** ${a.pmcId}`);
   if (a.pmid) lines.push(`**PMID:** ${a.pmid}`);
   lines.push(`**DOI:** ${a.doi}`);
@@ -3262,6 +3506,25 @@ function formatHeading(label: string | undefined, title: string): string {
   return label ? `${label} ${title}` : title;
 }
 
+/** How a section with no title and no label is named — in its body heading and its ledger line. */
+const UNTITLED_SECTION_LABEL = 'untitled section';
+
+/**
+ * The name a section goes by in `content[]`: its label and title, else its
+ * label alone, else {@link UNTITLED_SECTION_LABEL}. The body heading and the
+ * truncation ledger line both take it from here, so the two always read the
+ * same. Render-time escaped like every other upstream string interpolated into
+ * a line, so a title's `*`, `_`, `` ` `` or `[` cannot restyle the heading;
+ * `structuredContent` keeps the plain title. (#148, #169)
+ */
+function sectionHeading(section: {
+  label?: string | undefined;
+  title?: string | undefined;
+}): string {
+  if (section.title) return escapeMarkdownInline(formatHeading(section.label, section.title));
+  return section.label ? escapeMarkdownInline(section.label) : UNTITLED_SECTION_LABEL;
+}
+
 /**
  * A body section at any nesting level. The schema inlines one type per level so
  * the emitted JSON Schema stays `$ref`-free, and every one of those types is a
@@ -3279,15 +3542,27 @@ interface RenderableSection {
  * level per nesting level. Walks the full depth the output schema carries, so
  * `content[]` shows every section `structuredContent` does. Headings stop
  * deepening at `######`, the deepest markdown supports. (#112)
+ *
+ * Every section gets a heading — an untitled one included, under the name the
+ * truncation ledger gives it — so its text never runs on from the block before
+ * it. `ledger` is the section's `outline`-mode accounting, when there is one: a
+ * section it shows the budget emptied carries a marker under its heading.
+ * (#143, #148)
  */
-function formatSection(section: RenderableSection, lines: string[], depth: number): void {
-  if (section.title) {
-    lines.push(
-      `\n${'#'.repeat(Math.min(depth, 6))} ${formatHeading(section.label, section.title)}`,
-    );
-  }
+function formatSection(
+  section: RenderableSection,
+  lines: string[],
+  depth: number,
+  ledger?: SectionLedgerEntry,
+): void {
+  lines.push(`\n${'#'.repeat(Math.min(depth, 6))} ${sectionHeading(section)}`);
   if (section.text) lines.push(section.text);
-  for (const sub of section.subsections ?? []) formatSection(sub, lines, depth + 1);
+  else if (ledger && isBudgetEmptied(ledger)) {
+    lines.push(emptiedSectionNote(ledger.originalCharacters));
+  }
+  section.subsections?.forEach((sub, i) => {
+    formatSection(sub, lines, depth + 1, ledger?.subsections?.[i]);
+  });
 }
 
 /**

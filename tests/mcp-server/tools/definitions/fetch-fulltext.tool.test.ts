@@ -209,6 +209,21 @@ describe('fetchFulltextTool', () => {
     });
   });
 
+  describe('declared error surface (issue #168)', () => {
+    it('declares only the NCBI reasons the unwrapped ID routing can surface', () => {
+      // Every Europe PMC and Unpaywall call sits behind a catch that folds the
+      // failure into `unavailable[].triedTiers`, so none of their reasons can
+      // reach the caller.
+      expect(fetchFulltextTool.errors?.map((entry) => entry.reason)).toEqual([
+        'queue_full',
+        'ncbi_unreachable',
+        'ncbi_deadline_exceeded',
+        'ncbi_invalid_response',
+        'ncbi_resource_not_found',
+      ]);
+    });
+  });
+
   describe('PMC path (existing behavior)', () => {
     it('fetches by PMC IDs and tags articles with viaSource=pmc', async () => {
       mockParsePmcArticle.mockReturnValue({
@@ -2751,12 +2766,24 @@ describe('fetchFulltextTool', () => {
       });
       const result = await fetchFulltextTool.handler(input, ctx);
 
+      // The subsection the budget emptied is dropped rather than returned as a
+      // heading over nothing, and counted; the ledger names both. (#143)
       const section = pmcSections(result)[0];
       expect(section?.text).toHaveLength(60);
-      expect(section?.subsections?.map((s) => s.text.length)).toEqual([40, 0]);
-      expect(section?.subsections?.map((s) => s.title)).toEqual(['Cohort', 'Outcomes']);
+      expect(section?.subsections?.map((s) => s.text.length)).toEqual([40]);
+      expect(section?.subsections?.map((s) => s.title)).toEqual(['Cohort']);
+      expect(result.truncation?.omittedSections).toBe(1);
       expect(result.truncation?.articles[0]?.sections).toEqual([
-        { title: 'Results', originalCharacters: 180, returnedCharacters: 100, truncated: true },
+        {
+          title: 'Results',
+          originalCharacters: 180,
+          returnedCharacters: 100,
+          truncated: true,
+          subsections: [
+            { title: 'Cohort', originalCharacters: 60, returnedCharacters: 40, truncated: true },
+            { title: 'Outcomes', originalCharacters: 60, returnedCharacters: 0, truncated: true },
+          ],
+        },
       ]);
     });
 
@@ -3086,9 +3113,12 @@ describe('fetchFulltextTool', () => {
         expect(result.truncation?.returnedCharacters).toBe(100);
       });
 
-      it('hands a section its leftover code unit when the previous field backed off', async () => {
-        // The section's own text backs off one unit; that unit is still available
-        // to the subsection, so the pair spends the allowance without exceeding it.
+      it('keeps the unit a backed-off cut leaves unspent rather than handing it on', async () => {
+        // The section's own text backs off one unit. That unit is not handed to
+        // the subsection: past a cut every field is past the budget, and a
+        // leftover of a few units would open the next field with a fragment of
+        // its first word. The subsection is emptied and, in truncate mode,
+        // dropped. (#93, superseded in this respect by #143)
         stagePmcArticle([
           {
             title: 'Introduction',
@@ -3108,11 +3138,10 @@ describe('fetchFulltextTool', () => {
 
         const section = pmcSections(result)[0];
         expect(section?.text).toBe('A'.repeat(99));
-        expect(section?.subsections?.[0]?.text).toBe('C');
-        const returned =
-          (section?.text.length ?? 0) + (section?.subsections?.[0]?.text.length ?? 0);
-        expect(returned).toBe(100);
-        expect(result.truncation?.returnedCharacters).toBe(100);
+        expect(section?.text.isWellFormed()).toBe(true);
+        expect(section?.subsections).toBeUndefined();
+        expect(result.truncation?.returnedCharacters).toBe(99);
+        expect(result.truncation?.omittedSections).toBe(1);
       });
 
       it('backs an Unpaywall body cut off a code unit and reports the real length', async () => {
@@ -4169,17 +4198,21 @@ describe('fetchFulltextTool deep section nesting (issue #112)', () => {
       };
     };
 
-    // 'Results overview.' (17) plus the folded case-reports tail (178).
+    // 'Results overview.' (17) plus the folded case-reports tail (178). The 23
+    // characters left for the tail end inside "narrative", so the cut backs off
+    // to the last whole word before it. (#143)
+    const keptTail = 'Patient 4\nPatient 4';
     expect(structured.truncation?.originalCharacters).toBe(17 + FLATTENED_TAIL.length);
-    expect(structured.truncation?.returnedCharacters).toBe(40);
+    expect(structured.truncation?.returnedCharacters).toBe(17 + keptTail.length);
     expect(structured.truncation?.articles[0]?.sections?.[0]).toMatchObject({
       title: 'RESULTS',
       originalCharacters: 17 + FLATTENED_TAIL.length,
-      returnedCharacters: 40,
+      returnedCharacters: 17 + keptTail.length,
       truncated: true,
     });
 
-    expect(sumText(structured.articles[0]?.sections)).toBe(40);
+    expect(structured.articles[0]?.sections[0]?.subsections?.[0]?.text).toBe(keptTail);
+    expect(sumText(structured.articles[0]?.sections)).toBe(17 + keptTail.length);
   });
 });
 
@@ -5592,5 +5625,591 @@ describe('fetchFulltextTool JATS assets (issue #130)', () => {
     // The counted-text contract has to name what it now counts.
     expect(shape.shape.maxCharacters?.description).toMatch(/asset label, caption and `href`/);
     expect(shape.shape.maxCharacters?.description).toMatch(/inline blocks/);
+  });
+});
+
+describe('fetchFulltextTool word-boundary cuts and subsection budgets (issue #143)', () => {
+  beforeEach(() => {
+    mockEFetch.mockReset();
+    mockIdConvert.mockReset();
+    mockParsePmcArticle.mockReset();
+    mockUnpaywallResolve.mockReset();
+    mockUnpaywallFetchContent.mockReset();
+    mockGetUnpaywallService.mockReset();
+    mockGetEpmcService.mockReset();
+    mockHtmlExtract.mockReset();
+    mockGetUnpaywallService.mockReturnValue(undefined);
+    mockGetEpmcService.mockReturnValue(undefined);
+  });
+
+  const INTRO = 'Obesity is a major global health issue and a driver of cardiovascular risk.';
+  /** 138 characters; a 70-character cut lands inside "comparisons". */
+  const STUDY_DESIGN =
+    'The transitivity assumption (a prerequisite for valid indirect comparisons) was assessed by comparing effect modifiers across comparisons.';
+  /** What a 70-character allowance keeps of {@link STUDY_DESIGN}: its last whole word inside it. */
+  const STUDY_DESIGN_70 = 'The transitivity assumption (a prerequisite for valid indirect';
+  const SEARCH =
+    'We searched PubMed, Embase, and the Cochrane Library from inception to June 2025.';
+  const ELIGIBILITY =
+    'Randomized trials comparing bariatric surgery with GLP-1 receptor agonists were eligible.';
+  const SELECTION =
+    'Two reviewers screened records independently and extracted outcome data in duplicate.';
+  const STATISTICS =
+    'A frequentist network meta-analysis estimated hazard ratios with random effects.';
+  const RESULTS = 'Twelve trials enrolling 4,512 participants met the inclusion criteria.';
+  const CHARACTERISTICS = 'Median follow-up was 3.1 years across the included trials.';
+
+  /** PMC13546078's shape: a Methods section carried entirely by five labelled subsections. */
+  const METHODS = {
+    label: '2',
+    title: 'Methods',
+    text: '',
+    subsections: [
+      { label: '2.1', title: 'Study Design', text: STUDY_DESIGN },
+      { label: '2.2', title: 'Search Strategy', text: SEARCH },
+      { label: '2.3', title: 'Eligibility Criteria', text: ELIGIBILITY },
+      { label: '2.4', title: 'Study Selection', text: SELECTION },
+      { label: '2.5', title: 'Statistical Analysis', text: STATISTICS },
+    ],
+  };
+  const METHODS_CHARACTERS =
+    STUDY_DESIGN.length + SEARCH.length + ELIGIBILITY.length + SELECTION.length + STATISTICS.length;
+
+  const LABELLED_ARTICLE_SECTIONS = [
+    { label: '1', title: 'Introduction', text: INTRO },
+    METHODS,
+    {
+      label: '3',
+      title: 'Results',
+      text: RESULTS,
+      subsections: [{ label: '3.1', title: 'Study Characteristics', text: CHARACTERISTICS }],
+    },
+  ];
+
+  function stageSections(sections: unknown[], pmcId = 'PMC13546078') {
+    mockParsePmcArticle.mockReturnValue({
+      pmcId,
+      pmcUrl: `https://www.ncbi.nlm.nih.gov/pmc/articles/${pmcId}/`,
+      title: 'Bariatric surgery versus GLP-1 receptor agonists',
+      abstract: 'Background: Obesity, a major global health issue.',
+      sections,
+    });
+    mockEFetch.mockResolvedValue([{ 'pmc-articleset': [{ article: [] }] }]);
+  }
+
+  async function run(input: Record<string, unknown>) {
+    const ctx = createMockContext({ errors: fetchFulltextTool.errors });
+    const result = await fetchFulltextTool.handler(fetchFulltextTool.input.parse(input), ctx);
+    const text = textBlocks(fetchFulltextTool.format!(result))[0]?.text ?? '';
+    return { result, ctx, text };
+  }
+
+  function sectionsOf(result: Awaited<ReturnType<typeof fetchFulltextTool.handler>>) {
+    const article = result.articles[0];
+    if (article?.source !== 'pmc') throw new Error('expected a pmc article');
+    return article.sections as DeepSection[];
+  }
+
+  const MARKER = (original: number) =>
+    `> Text omitted to fit the requested character budget — 0 of ${original} characters returned.`;
+
+  it('returns an under-budget article byte-identical to the unbudgeted response', async () => {
+    // Characterization: a budget that removes nothing is invisible on both surfaces.
+    const sections = [
+      { text: 'Opening paragraph before any section.' },
+      ...LABELLED_ARTICLE_SECTIONS,
+      { label: 'S1', text: 'Label-only narrative.' },
+    ];
+    stageSections(sections);
+    const plain = await run({ pmcids: ['PMC13546078'] });
+    stageSections(sections);
+    const roomy = await run({
+      pmcids: ['PMC13546078'],
+      maxCharacters: 100_000,
+      maxCharactersPerSection: 100_000,
+      overflowMode: 'outline',
+    });
+
+    expect(roomy.result.truncation).toBeUndefined();
+    expect(JSON.stringify(roomy.result)).toBe(JSON.stringify(plain.result));
+    expect(roomy.text).toBe(plain.text);
+  });
+
+  it('returns a section with room to spare whole and unmarked', async () => {
+    // Characterization: the section before the cut, its ledger entry, and its
+    // rendering are exactly what they were before word-boundary cuts existed.
+    stageSections([
+      { title: 'Introduction', text: INTRO },
+      { title: 'Methods', text: 'A'.repeat(300) },
+    ]);
+    const { result, text } = await run({
+      pmcids: ['PMC13546078'],
+      maxCharacters: INTRO.length + 20,
+    });
+
+    expect(sectionsOf(result)[0]).toEqual({ title: 'Introduction', text: INTRO });
+    expect(result.truncation?.articles[0]?.sections?.[0]).toEqual({
+      title: 'Introduction',
+      originalCharacters: INTRO.length,
+      returnedCharacters: INTRO.length,
+      truncated: false,
+    });
+    expect(text).toContain(`#### Introduction\n${INTRO}\n\n#### Methods\n`);
+  });
+
+  it('ends a cut section at the last word boundary inside the allowance', async () => {
+    stageSections([
+      { title: 'Introduction', text: INTRO },
+      { title: 'Study Design', text: STUDY_DESIGN },
+    ]);
+    const { result, text } = await run({
+      pmcids: ['PMC13546078'],
+      maxCharacters: INTRO.length + 70,
+    });
+
+    const cut = sectionsOf(result)[1]?.text ?? '';
+    expect(cut).toBe(STUDY_DESIGN_70);
+    // The allowance stays a ceiling and the counts measure what came back.
+    expect(result.truncation?.returnedCharacters).toBe(INTRO.length + STUDY_DESIGN_70.length);
+    expect(result.truncation?.articles[0]?.sections?.[1]).toEqual({
+      title: 'Study Design',
+      originalCharacters: STUDY_DESIGN.length,
+      returnedCharacters: STUDY_DESIGN_70.length,
+      truncated: true,
+    });
+    expect(text.endsWith(`#### Study Design\n${STUDY_DESIGN_70}`)).toBe(true);
+    expect(text).not.toContain('indirect compa');
+  });
+
+  it('drops the subsections a truncate-mode cut leaves empty and counts each one it drops', async () => {
+    stageSections(LABELLED_ARTICLE_SECTIONS);
+    const { result, ctx, text } = await run({
+      pmcids: ['PMC13546078'],
+      maxCharacters: INTRO.length + 70,
+    });
+
+    // No heading-only stubs past the cut, at either level.
+    expect(sectionsOf(result)).toEqual([
+      { label: '1', title: 'Introduction', text: INTRO },
+      {
+        label: '2',
+        title: 'Methods',
+        text: '',
+        subsections: [{ label: '2.1', title: 'Study Design', text: STUDY_DESIGN_70 }],
+      },
+    ]);
+    // Four Methods subsections, plus Results, which goes whole with its own
+    // subsection rather than being counted twice.
+    expect(result.truncation?.omittedSections).toBe(5);
+    expect(result.truncation?.returnedCharacters).toBe(INTRO.length + STUDY_DESIGN_70.length);
+    expect(result.truncation?.articles[0]?.sections).toEqual([
+      {
+        label: '1',
+        title: 'Introduction',
+        originalCharacters: INTRO.length,
+        returnedCharacters: INTRO.length,
+        truncated: false,
+      },
+      {
+        label: '2',
+        title: 'Methods',
+        originalCharacters: METHODS_CHARACTERS,
+        returnedCharacters: STUDY_DESIGN_70.length,
+        truncated: true,
+        subsections: [
+          {
+            label: '2.1',
+            title: 'Study Design',
+            originalCharacters: STUDY_DESIGN.length,
+            returnedCharacters: STUDY_DESIGN_70.length,
+            truncated: true,
+          },
+          {
+            label: '2.2',
+            title: 'Search Strategy',
+            originalCharacters: SEARCH.length,
+            returnedCharacters: 0,
+            truncated: true,
+          },
+          {
+            label: '2.3',
+            title: 'Eligibility Criteria',
+            originalCharacters: ELIGIBILITY.length,
+            returnedCharacters: 0,
+            truncated: true,
+          },
+          {
+            label: '2.4',
+            title: 'Study Selection',
+            originalCharacters: SELECTION.length,
+            returnedCharacters: 0,
+            truncated: true,
+          },
+          {
+            label: '2.5',
+            title: 'Statistical Analysis',
+            originalCharacters: STATISTICS.length,
+            returnedCharacters: 0,
+            truncated: true,
+          },
+        ],
+      },
+      {
+        label: '3',
+        title: 'Results',
+        originalCharacters: RESULTS.length + CHARACTERISTICS.length,
+        returnedCharacters: 0,
+        truncated: true,
+        subsections: [
+          {
+            label: '3.1',
+            title: 'Study Characteristics',
+            originalCharacters: CHARACTERISTICS.length,
+            returnedCharacters: 0,
+            truncated: true,
+          },
+        ],
+      },
+    ]);
+    expect(getEnrichment(ctx).notice).toContain('5 section(s) were dropped');
+
+    // content[]: the body carries no stub headings, and the ledger names every
+    // subsection with the same label the body heading would use.
+    expect(text).toContain(`##### 2.1 Study Design\n${STUDY_DESIGN_70}`);
+    expect(text).not.toContain('##### 2.2 Search Strategy');
+    expect(text).not.toContain('#### 3 Results');
+    expect(text).toContain(
+      `  - 2 Methods — ${STUDY_DESIGN_70.length} of ${METHODS_CHARACTERS} characters (truncated: true)`,
+    );
+    expect(text).toContain(
+      `    - 2.1 Study Design — ${STUDY_DESIGN_70.length} of ${STUDY_DESIGN.length} characters (truncated: true)`,
+    );
+    expect(text).toContain(
+      `    - 2.2 Search Strategy — 0 of ${SEARCH.length} characters (truncated: true) — dropped`,
+    );
+    expect(text).toContain(
+      `  - 3 Results — 0 of ${RESULTS.length + CHARACTERISTICS.length} characters (truncated: true) — dropped`,
+    );
+    expect(text).toContain(
+      `    - 3.1 Study Characteristics — 0 of ${CHARACTERISTICS.length} characters (truncated: true) — dropped`,
+    );
+  });
+
+  it('keeps a zero-character subsection in outline mode and marks it in content[]', async () => {
+    const methodsOwn = 'We followed the PRISMA extension for network meta-analyses throughout.';
+    stageSections([
+      { label: '1', title: 'Introduction', text: INTRO },
+      {
+        label: '2',
+        title: 'Methods',
+        text: methodsOwn,
+        subsections: [
+          { label: '2.1', title: 'Study Design', text: STUDY_DESIGN },
+          { label: '2.2', title: 'Search Strategy', text: SEARCH },
+          // Heading-only by nature — its table was lifted — so nothing was cut.
+          { label: '2.3', title: 'Data Availability', text: '' },
+        ],
+      },
+      { label: '3', title: 'Results', text: RESULTS },
+    ]);
+    const { result, text } = await run({
+      pmcids: ['PMC13546078'],
+      maxCharacters: 90,
+      overflowMode: 'outline',
+    });
+
+    const methods = sectionsOf(result)[1];
+    expect(methods?.text).toBe('We followed the PRISMA');
+    expect(methods?.subsections).toEqual([
+      { label: '2.1', title: 'Study Design', text: '' },
+      { label: '2.2', title: 'Search Strategy', text: '' },
+      { label: '2.3', title: 'Data Availability', text: '' },
+    ]);
+    expect(result.truncation?.omittedSections).toBe(0);
+    expect(result.truncation?.articles[0]?.sections?.[1]?.subsections).toEqual([
+      {
+        label: '2.1',
+        title: 'Study Design',
+        originalCharacters: STUDY_DESIGN.length,
+        returnedCharacters: 0,
+        truncated: true,
+      },
+      {
+        label: '2.2',
+        title: 'Search Strategy',
+        originalCharacters: SEARCH.length,
+        returnedCharacters: 0,
+        truncated: true,
+      },
+      {
+        label: '2.3',
+        title: 'Data Availability',
+        originalCharacters: 0,
+        returnedCharacters: 0,
+        truncated: false,
+      },
+    ]);
+
+    // A budget-emptied heading carries a visible marker; a heading that never
+    // had text does not.
+    expect(text).toContain(`##### 2.1 Study Design\n${MARKER(STUDY_DESIGN.length)}\n`);
+    expect(text).toContain(`##### 2.2 Search Strategy\n${MARKER(SEARCH.length)}\n`);
+    expect(text).toContain('##### 2.3 Data Availability\n\n#### 3 Results');
+    expect(text).toContain(
+      `    - 2.1 Study Design — 0 of ${STUDY_DESIGN.length} characters (truncated: true) — heading only`,
+    );
+    expect(text).toContain('    - 2.3 Data Availability — 0 of 0 characters (truncated: false)\n');
+  });
+
+  it('marks a top-level section the outline budget left empty, and cuts a first word it cannot fit', async () => {
+    stageSections([
+      { title: 'Introduction', text: 'Obesity is common.' },
+      { title: 'Methods', text: 'We searched three databases.' },
+    ]);
+    const { result, text } = await run({
+      pmcids: ['PMC13546078'],
+      maxCharacters: 1,
+      overflowMode: 'outline',
+    });
+
+    // One character reaches no word boundary, so the single allowance cuts the
+    // first token rather than returning nothing.
+    expect(sectionsOf(result).map((s) => s.text)).toEqual(['O', '']);
+    expect(text).toContain(`#### Methods\n${MARKER('We searched three databases.'.length)}`);
+    expect(text).toContain(
+      `  - Methods — 0 of ${'We searched three databases.'.length} characters (truncated: true) — heading only`,
+    );
+  });
+
+  it('takes a deferred article dropped subsections back out of omittedSections', async () => {
+    const staged = [
+      {
+        pmcId: 'PMC1',
+        sections: [
+          {
+            title: 'Methods',
+            text: '',
+            subsections: [
+              { title: 'Design', text: STUDY_DESIGN },
+              { title: 'Search', text: SEARCH },
+            ],
+          },
+        ],
+      },
+      {
+        pmcId: 'PMC2',
+        sections: [
+          {
+            title: 'Methods',
+            text: '',
+            subsections: [
+              { title: 'Design', text: STUDY_DESIGN },
+              { title: 'Search', text: SEARCH },
+              { title: 'Eligibility', text: ELIGIBILITY },
+            ],
+          },
+        ],
+      },
+    ];
+    const stage = () => {
+      mockEFetch.mockResolvedValue([{ 'pmc-articleset': [{ article: [] }, { article: [] }] }]);
+      for (const a of staged) {
+        mockParsePmcArticle.mockReturnValueOnce({
+          pmcId: a.pmcId,
+          pmcUrl: `https://www.ncbi.nlm.nih.gov/pmc/articles/${a.pmcId}/`,
+          title: `Article ${a.pmcId}`,
+          sections: a.sections,
+        });
+      }
+    };
+
+    stage();
+    const both = await run({ pmcids: ['PMC1', 'PMC2'], maxCharacters: 70 });
+    expect(both.result.truncation?.omittedSections).toBe(3);
+    const firstSize = JSON.stringify(both.result.articles[0]).length;
+
+    stage();
+    const { result } = await run({
+      pmcids: ['PMC1', 'PMC2'],
+      maxCharacters: 70,
+      maxResponseCharacters: firstSize,
+    });
+    expect(result.deferred?.ids).toEqual(['PMC2']);
+    expect(result.truncation?.articles.map((a) => a.id)).toEqual(['PMC1']);
+    expect(result.truncation?.omittedSections).toBe(1);
+  });
+
+  it('ends an Unpaywall body cut at a word boundary too', async () => {
+    mockIdConvert.mockResolvedValue([{ 'requested-id': '42', pmid: '42' }]);
+    mockEFetchBy({ pubmedDois: { '42': '10.1000/example' } });
+    mockGetUnpaywallService.mockReturnValue({
+      resolve: mockUnpaywallResolve,
+      fetchContent: mockUnpaywallFetchContent,
+    });
+    mockUnpaywallResolve.mockResolvedValue({
+      kind: 'found',
+      location: { url: 'https://repo.example.org/paper' },
+    });
+    mockUnpaywallFetchContent.mockResolvedValue({
+      kind: 'html',
+      fetchedUrl: 'https://repo.example.org/paper',
+      body: '<html><body>Long</body></html>',
+    });
+    const sentence = 'Obesity is a major global health issue. ';
+    mockHtmlExtract.mockResolvedValue({ title: 'A Paper', content: sentence.repeat(20).trim() });
+
+    // 255 = six sentences plus "Obesity is a ma".
+    const { result } = await run({ pmids: ['42'], maxCharacters: 255 });
+
+    const expected = `${sentence.repeat(6)}Obesity is a`;
+    const article = result.articles[0];
+    expect(article?.source).toBe('unpaywall');
+    if (article?.source === 'unpaywall') expect(article.content).toBe(expected);
+    expect(result.truncation?.articles).toEqual([
+      {
+        id: '42',
+        source: 'unpaywall',
+        originalCharacters: sentence.repeat(20).trim().length,
+        returnedCharacters: expected.length,
+      },
+    ]);
+  });
+
+  it('rejects a zero, negative, or fractional character budget', () => {
+    // Characterization: the invalid-input boundary of both body budgets.
+    for (const v of [0, -1, 1.5]) {
+      expect(
+        fetchFulltextTool.input.safeParse({ pmcids: ['PMC1'], maxCharacters: v }).success,
+      ).toBe(false);
+      expect(
+        fetchFulltextTool.input.safeParse({ pmcids: ['PMC1'], maxCharactersPerSection: v }).success,
+      ).toBe(false);
+    }
+  });
+
+  it('advertises per-subsection accounting as an optional ledger field', () => {
+    const output = fetchFulltextTool.output as unknown as {
+      shape: { truncation: z.ZodType };
+    };
+    const truncationSchema = z.toJSONSchema(output.shape.truncation) as unknown as {
+      properties: {
+        articles: {
+          items: {
+            properties: {
+              sections: {
+                items: {
+                  properties: Record<string, unknown>;
+                  required?: string[];
+                };
+              };
+            };
+          };
+        };
+      };
+    };
+    const entry = truncationSchema.properties.articles.items.properties.sections.items;
+    expect(Object.keys(entry.properties)).toEqual(
+      expect.arrayContaining(['label', 'title', 'subsections']),
+    );
+    expect(entry.required).not.toContain('subsections');
+    expect(entry.required).not.toContain('label');
+  });
+});
+
+describe('fetchFulltextTool section headings match the truncation ledger (issue #148)', () => {
+  beforeEach(() => {
+    mockEFetch.mockReset();
+    mockParsePmcArticle.mockReset();
+    mockGetUnpaywallService.mockReturnValue(undefined);
+    mockGetEpmcService.mockReturnValue(undefined);
+  });
+
+  function stageSections(sections: unknown[]) {
+    mockParsePmcArticle.mockReturnValue({
+      pmcId: 'PMC13546078',
+      pmcUrl: 'https://www.ncbi.nlm.nih.gov/pmc/articles/PMC13546078/',
+      title: 'Heading Article',
+      abstract: 'Background: Obesity, a major global health issue.',
+      sections,
+    });
+    mockEFetch.mockResolvedValue([{ 'pmc-articleset': [{ article: [] }] }]);
+  }
+
+  async function render(input: Record<string, unknown>) {
+    const result = await fetchFulltextTool.handler(
+      fetchFulltextTool.input.parse(input),
+      createMockContext({ errors: fetchFulltextTool.errors }),
+    );
+    return { result, text: textBlocks(fetchFulltextTool.format!(result))[0]?.text ?? '' };
+  }
+
+  it('heads an untitled section with the ledger label so it never runs on from the abstract', async () => {
+    stageSections([
+      { text: 'Opening paragraph before any section.' },
+      { title: 'Introduction', text: 'Intro text.' },
+    ]);
+    const { text } = await render({ pmcids: ['PMC13546078'] });
+
+    expect(text).toContain(
+      '#### Abstract\nBackground: Obesity, a major global health issue.\n\n#### untitled section\nOpening paragraph before any section.\n\n#### Introduction\nIntro text.',
+    );
+  });
+
+  it('heads an untitled subsection the same way', async () => {
+    stageSections([
+      { title: 'Results', text: 'Overview.', subsections: [{ text: 'Untitled detail.' }] },
+    ]);
+    const { text } = await render({ pmcids: ['PMC13546078'] });
+
+    expect(text).toContain('#### Results\nOverview.\n\n##### untitled section\nUntitled detail.');
+  });
+
+  it('heads a label-only section with its label rather than dropping it', async () => {
+    stageSections([{ label: 'S1', text: 'Label-only narrative.' }]);
+    const { text } = await render({ pmcids: ['PMC13546078'] });
+
+    expect(text).toContain('#### S1\nLabel-only narrative.');
+  });
+
+  it('uses one label per section in the body heading and the ledger line, at every level', async () => {
+    stageSections([
+      { text: 'Opening paragraph before any section, long enough to be cut by the budget.' },
+      {
+        label: '2',
+        title: 'Methods',
+        text: 'Methods overview that the outline budget will shorten considerably.',
+        subsections: [
+          { label: '2.1', title: 'Study Design', text: 'Design narrative that gets cut short.' },
+          { text: 'An untitled subsection narrative that gets cut short too.' },
+        ],
+      },
+      { label: 'S1', text: 'Label-only narrative that is long enough to be shortened.' },
+    ]);
+    // Outline mode keeps every section, so body and ledger list the same nodes.
+    const { result, text } = await render({
+      pmcids: ['PMC13546078'],
+      maxCharacters: 60,
+      overflowMode: 'outline',
+    });
+
+    const bodyHeadings = [...text.matchAll(/^#{4,6} (.+)$/gm)]
+      .map((m) => m[1])
+      .filter((h) => h !== 'Abstract');
+    const ledgerLabels = [...text.matchAll(/^ {2,4}- (.+?) — \d+ of \d+ characters/gm)].map(
+      (m) => m[1],
+    );
+    expect(bodyHeadings).toEqual([
+      'untitled section',
+      '2 Methods',
+      '2.1 Study Design',
+      'untitled section',
+      'S1',
+    ]);
+    expect(ledgerLabels).toEqual(bodyHeadings);
+    expect(result.truncation?.articles[0]?.sections?.map((s) => [s.label, s.title])).toEqual([
+      [undefined, undefined],
+      ['2', 'Methods'],
+      ['S1', undefined],
+    ]);
   });
 });

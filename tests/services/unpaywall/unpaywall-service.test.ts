@@ -67,6 +67,47 @@ describe('UnpaywallService.resolve', () => {
     );
   });
 
+  it('carries the DOI object’s title, journal name, and year beside the location (#144)', async () => {
+    const location = { url: 'https://www.medrxiv.org/content/10.64898/x', host_type: 'repository' };
+    mockFetchWithTimeout.mockResolvedValue(
+      jsonResponse({
+        doi: '10.64898/x',
+        is_oa: true,
+        title: 'Global genomics in over 4 million individuals',
+        journal_name: 'medRxiv',
+        year: 2026,
+        best_oa_location: location,
+      }),
+    );
+
+    const result = await new UnpaywallService('oa@example.com', 20000).resolve('10.64898/x');
+
+    expect(result).toEqual({
+      kind: 'found',
+      location,
+      title: 'Global genomics in over 4 million individuals',
+      journalName: 'medRxiv',
+      year: 2026,
+    });
+  });
+
+  it('omits bibliographic fields Unpaywall reports as null, blank, or mistyped (#144)', async () => {
+    const location = { url: 'https://repo.example.org/paper' };
+    mockFetchWithTimeout.mockResolvedValue(
+      jsonResponse({
+        is_oa: true,
+        title: '  ',
+        journal_name: null,
+        year: '2026',
+        best_oa_location: location,
+      }),
+    );
+
+    const result = await new UnpaywallService('oa@example.com', 20000).resolve('10.1000/x');
+
+    expect(result).toEqual({ kind: 'found', location });
+  });
+
   it('accepts DOI inputs with scheme or doi.org prefix', async () => {
     mockFetchWithTimeout.mockResolvedValue(jsonResponse({ is_oa: false }));
     const service = new UnpaywallService('oa@example.com', 20000);

@@ -1,14 +1,14 @@
 /**
- * @fileoverview Tests for the surrogate-safe character cut shared by the
- * budgeted tool definitions (issue #93).
+ * @fileoverview Tests for the text helpers shared by the tool definitions: the
+ * surrogate-safe character cut (issue #93), the word-boundary cut built on it
+ * (issue #143), and the render-time Markdown escapes (issues #102, #111, #130).
  * @module tests/mcp-server/tools/definitions/_text.test
  */
 
 import { describe, expect, it } from 'vitest';
 
-const { escapeMarkdownInline, escapeMarkdownTableCell, sliceCodeUnits } = await import(
-  '@/mcp-server/tools/definitions/_text.js'
-);
+const { escapeMarkdownInline, escapeMarkdownTableCell, sliceAtWordBoundary, sliceCodeUnits } =
+  await import('@/mcp-server/tools/definitions/_text.js');
 
 /** DNA emoji U+1F9EC — one code point, two UTF-16 code units. */
 const ASTRAL = '\u{1F9EC}';
@@ -73,6 +73,74 @@ describe('sliceCodeUnits', () => {
   it('cuts, it does not sanitize — malformed text that fits comes back untouched', () => {
     const malformed = 'AB\ud83e';
     expect(sliceCodeUnits(malformed, 10)).toBe(malformed);
+  });
+});
+
+describe('sliceAtWordBoundary (issue #143)', () => {
+  it('backs a cut that lands mid-word off to the end of the last whole word', () => {
+    // PMC13546078's 2.1 Study Design used to end "…valid indirect compa".
+    const text =
+      'The transitivity assumption (a prerequisite for valid indirect comparisons) holds.';
+    const cut = sliceAtWordBoundary(text, 70);
+
+    expect(sliceCodeUnits(text, 70)).toBe(
+      'The transitivity assumption (a prerequisite for valid indirect compari',
+    );
+    expect(cut).toBe('The transitivity assumption (a prerequisite for valid indirect');
+  });
+
+  it('keeps the last word whole when the allowance ends exactly on it', () => {
+    expect(sliceAtWordBoundary('alpha beta gamma', 10)).toBe('alpha beta');
+  });
+
+  it('drops the whitespace a cut would otherwise end on', () => {
+    expect(sliceAtWordBoundary('alpha   beta', 7)).toBe('alpha');
+    expect(sliceAtWordBoundary('alpha beta gamma', 11)).toBe('alpha beta');
+  });
+
+  it('treats a line break as a word boundary', () => {
+    expect(sliceAtWordBoundary('- BS — bariatric surgery\n- CV — cardiovascular', 30)).toBe(
+      '- BS — bariatric surgery\n- CV',
+    );
+    expect(sliceAtWordBoundary('line one\nline two', 12)).toBe('line one');
+  });
+
+  it('cuts at the allowance when a single unbroken token overruns it', () => {
+    // No boundary to back off to: returning nothing would drop the whole field
+    // on a small budget, so the token is cut the way sliceCodeUnits cuts it.
+    expect(sliceAtWordBoundary('A'.repeat(20), 10)).toBe('A'.repeat(10));
+    expect(sliceAtWordBoundary('ACGTACGTACGT tail', 6)).toBe('ACGTAC');
+  });
+
+  it('never splits a surrogate pair, backing off a word or falling back to a code unit', () => {
+    expect(sliceAtWordBoundary(`abc ${ASTRAL}${ASTRAL}xyz`, 6)).toBe('abc');
+    const unbroken = sliceAtWordBoundary(`${'A'.repeat(9)}${ASTRAL}B`, 10);
+    expect(unbroken).toBe('A'.repeat(9));
+    expect(unbroken.isWellFormed()).toBe(true);
+  });
+
+  it('returns the text unchanged when it fits, and empty for a zero or negative allowance', () => {
+    expect(sliceAtWordBoundary('fits whole', 10)).toBe('fits whole');
+    expect(sliceAtWordBoundary('fits whole', 500)).toBe('fits whole');
+    expect(sliceAtWordBoundary('alpha beta', 0)).toBe('');
+    expect(sliceAtWordBoundary('alpha beta', -3)).toBe('');
+  });
+
+  it('returns a well-formed prefix within the allowance that ends a word, for every cut point', () => {
+    const text = `Obesity ${ASTRAL} is a  major\nglobal health issue; GLP-1RAs reduce MACEs.`;
+    for (let limit = 0; limit <= text.length + 1; limit += 1) {
+      const cut = sliceAtWordBoundary(text, limit);
+      expect(cut.length).toBeLessThanOrEqual(limit);
+      expect(text.startsWith(cut)).toBe(true);
+      expect(cut.isWellFormed()).toBe(true);
+      expect(cut).toBe(cut.trimEnd());
+      // A cut with any boundary inside its allowance ends on one: the character
+      // after it starts a gap. Only an allowance inside the first word, which
+      // has no boundary to back off to, may end mid-token.
+      if (cut.length < text.length && /\s/.test(text.slice(0, limit))) {
+        expect(text.charAt(cut.length)).toMatch(/\s/);
+      }
+    }
   });
 });
 
