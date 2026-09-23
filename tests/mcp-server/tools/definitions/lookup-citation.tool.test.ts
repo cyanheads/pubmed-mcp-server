@@ -3,7 +3,8 @@
  * @module tests/mcp-server/tools/definitions/lookup-citation.tool.test
  */
 
-import { createMockContext } from '@cyanheads/mcp-ts-core/testing';
+import type { ContentBlock } from '@cyanheads/mcp-ts-core';
+import { createMockContext, runToolContract } from '@cyanheads/mcp-ts-core/testing';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { textBlocks } from '../../../_helpers.js';
@@ -924,6 +925,177 @@ describe('lookupCitationTool', () => {
     );
 
     expect(blocks[0]?.text).toContain('author_mismatch + year_mismatch detected');
+  });
+});
+
+describe('a single citation object and the `citation` alias (issue #156)', () => {
+  const PNAS = {
+    journal: 'proc natl acad sci u s a',
+    year: '1991',
+    volume: '88',
+    firstPage: '3248',
+    authorName: 'mann bj',
+  };
+  const NATURE = { journal: 'Nature', year: '2020' };
+
+  /** Raw client arguments — the alias is never part of the typed input. */
+  const callRaw = (args: Record<string, unknown>) =>
+    runToolContract(lookupCitationTool, args as never);
+
+  const textOf = (result: Awaited<ReturnType<typeof runToolContract>>) =>
+    textBlocks(result.content as ContentBlock[])
+      .map((b) => b.text)
+      .join('\n');
+
+  beforeEach(() => {
+    mockECitMatch.mockReset();
+    mockESummary.mockReset();
+    mockExtractBriefSummaries.mockReset();
+    mockESummary.mockResolvedValue({});
+    mockExtractBriefSummaries.mockResolvedValue([]);
+    // One row per submitted citation, in order — what the service guarantees.
+    mockECitMatch.mockImplementation(async (citations: { key: string }[]) =>
+      citations.map((c, i) => ({
+        key: c.key,
+        matched: true,
+        pmid: String(2_000_000 + i),
+        status: 'matched',
+      })),
+    );
+  });
+
+  it('parses a single object under `citations`', () => {
+    const input = lookupCitationTool.input.parse({ citations: PNAS });
+    expect(input.citations).toEqual(PNAS);
+  });
+
+  it('handles a single `citations` object as a one-element batch', async () => {
+    const ctx = createMockContext({ errors: lookupCitationTool.errors });
+    const result = await lookupCitationTool.handler(
+      lookupCitationTool.input.parse({ citations: PNAS }),
+      ctx,
+    );
+
+    expect(mockECitMatch).toHaveBeenCalledTimes(1);
+    expect(mockECitMatch.mock.calls[0]?.[0]).toEqual([{ ...PNAS, key: '1' }]);
+    expect(result.results).toEqual([
+      { key: '1', matched: true, pmid: '2000000', status: 'matched' },
+    ]);
+    expect(result.totalSubmitted).toBe(1);
+  });
+
+  it('resolves `citation` with one object as a one-element `citations` array, on both surfaces', async () => {
+    const result = await callRaw({ citation: PNAS });
+
+    expect(result.isError).toBeFalsy();
+    expect(mockECitMatch.mock.calls[0]?.[0]).toEqual([{ ...PNAS, key: '1' }]);
+    expect(result.structuredContent).toMatchObject({
+      results: [{ key: '1', pmid: '2000000', status: 'matched' }],
+      totalMatched: 1,
+      totalSubmitted: 1,
+    });
+    const text = textOf(result);
+    expect(text).toContain('**Matched:** 1/1');
+    expect(text).toContain('### 1 · 1');
+    expect(text).toContain('**PMID:** 2000000');
+  });
+
+  it('resolves `citation` with an array exactly as `citations` with the same array', async () => {
+    const aliased = await callRaw({ citation: [PNAS, NATURE] });
+    const aliasedCall = mockECitMatch.mock.calls[0]?.[0];
+    mockECitMatch.mockClear();
+    const canonical = await callRaw({ citations: [PNAS, NATURE] });
+
+    expect(aliased.isError).toBeFalsy();
+    expect(aliasedCall).toEqual(mockECitMatch.mock.calls[0]?.[0]);
+    expect(aliased).toEqual(canonical);
+    expect(canonical.structuredContent).toMatchObject({ totalSubmitted: 2, totalMatched: 2 });
+    expect(textOf(canonical)).toContain('### 2 · 2');
+  });
+
+  it('reads a single object the same as a one-element array on both surfaces', async () => {
+    const single = await callRaw({ citations: NATURE });
+    const wrapped = await callRaw({ citations: [NATURE] });
+
+    expect(single.isError).toBeFalsy();
+    expect(single).toEqual(wrapped);
+  });
+
+  it('rejects a call carrying both `citation` and `citations`', async () => {
+    const result = await callRaw({ citation: PNAS, citations: [NATURE] });
+
+    expect(result.isError).toBe(true);
+    expect(textOf(result)).toContain('Unrecognized key: "citation"');
+    expect(mockECitMatch).not.toHaveBeenCalled();
+  });
+
+  it('rejects `citation` once its inputAliases entry is removed', async () => {
+    expect(lookupCitationTool.inputAliases).toEqual({ citation: 'citations' });
+    const { inputAliases: _declared, ...undeclared } = lookupCitationTool;
+    const result = await runToolContract(undeclared, { citation: PNAS } as never);
+
+    expect(result.isError).toBe(true);
+    expect(textOf(result)).toContain('Unrecognized key: "citation"');
+  });
+
+  describe('validation messages survive the union', () => {
+    it('names the field and the pipe rule for a single object', () => {
+      const parsed = lookupCitationTool.input.safeParse({
+        citations: { journal: 'N Engl|J Med', year: '2024' },
+      });
+
+      expect(parsed.success).toBe(false);
+      expect(parsed.error?.issues).toHaveLength(1);
+      expect(parsed.error?.issues[0]?.path).toEqual(['citations', 'journal']);
+      expect(parsed.error?.issues[0]?.message).toMatch(/pipe/i);
+    });
+
+    it('requires journal or year on a single object', () => {
+      const parsed = lookupCitationTool.input.safeParse({ citations: { authorName: 'smith j' } });
+
+      expect(parsed.success).toBe(false);
+      expect(parsed.error?.issues[0]?.path).toEqual(['citations']);
+      expect(parsed.error?.issues[0]?.message).toMatch(/journal or year/);
+    });
+
+    it('names the element index for a bad entry deep in an array', () => {
+      const parsed = lookupCitationTool.input.safeParse({
+        citations: [NATURE, PNAS, { journal: 'Lancet', year: '20|21' }],
+      });
+
+      expect(parsed.success).toBe(false);
+      expect(parsed.error?.issues).toHaveLength(1);
+      expect(parsed.error?.issues[0]?.path).toEqual(['citations', 2, 'year']);
+      expect(parsed.error?.issues[0]?.message).toMatch(/pipe/i);
+    });
+
+    it('states both accepted shapes when the value is neither an object nor an array', () => {
+      const parsed = lookupCitationTool.input.safeParse({ citations: 'Nature 2020' });
+
+      expect(parsed.success).toBe(false);
+      expect(parsed.error?.issues[0]?.path).toEqual(['citations']);
+      expect(parsed.error?.issues[0]?.message).toMatch(
+        /citation object or an array of 1–25 citation objects/,
+      );
+    });
+
+    // A wrong-typed value inside an element fails both branches outright, so it
+    // arrives as one union issue; the caller-facing text must still name the
+    // element, the field, and what was wrong with it.
+    it('names the element and field of a wrong-typed value inside an array', async () => {
+      const result = await callRaw({ citations: [NATURE, { journal: 5, year: '1991' }] });
+
+      expect(result.isError).toBe(true);
+      const text = textOf(result);
+      expect(text).toContain('1.journal: Invalid input: expected string, received number');
+      expect(mockECitMatch).not.toHaveBeenCalled();
+    });
+
+    it('still bounds the array at 25 citations and rejects an empty one', () => {
+      const many = Array.from({ length: 26 }, () => NATURE);
+      expect(lookupCitationTool.input.safeParse({ citations: many }).success).toBe(false);
+      expect(lookupCitationTool.input.safeParse({ citations: [] }).success).toBe(false);
+    });
   });
 });
 

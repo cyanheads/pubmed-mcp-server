@@ -3,6 +3,8 @@
  * to PubMed IDs using NCBI's ECitMatch service, then verifies author agreement
  * against ESummary to catch cases where ECitMatch's journal+volume+page weighting
  * returns a PMID whose author roster doesn't contain the queried author.
+ * `citations` takes an array or a single citation object, and `citation` is
+ * accepted as an alias for it.
  * @module src/mcp-server/tools/definitions/lookup-citation.tool
  */
 
@@ -39,6 +41,62 @@ const BDATA_FIELD_RE = /^[^|\r\n]*$/;
 const BDATA_FIELD_HINT = 'Cannot contain a pipe ("|") or a line break.';
 const BDATA_FIELD_ERROR = `${BDATA_FIELD_HINT} Those characters shift ECitMatch's field layout — remove them or replace them with a space.`;
 
+const CitationSchema = z
+  .object({
+    journal: z
+      .string()
+      .regex(BDATA_FIELD_RE, BDATA_FIELD_ERROR)
+      .optional()
+      .describe(
+        `Journal title or ISO abbreviation (e.g., "proc natl acad sci u s a"). ${BDATA_FIELD_HINT}`,
+      ),
+    year: z
+      .string()
+      .regex(BDATA_FIELD_RE, BDATA_FIELD_ERROR)
+      .optional()
+      .describe(`Publication year (e.g., "1991"). ${BDATA_FIELD_HINT}`),
+    volume: z
+      .string()
+      .regex(BDATA_FIELD_RE, BDATA_FIELD_ERROR)
+      .optional()
+      .describe(`Volume number. ${BDATA_FIELD_HINT}`),
+    firstPage: z
+      .string()
+      .regex(BDATA_FIELD_RE, BDATA_FIELD_ERROR)
+      .optional()
+      .describe(`First page number. ${BDATA_FIELD_HINT}`),
+    authorName: z
+      .string()
+      .regex(BDATA_FIELD_RE, BDATA_FIELD_ERROR)
+      .optional()
+      .describe(
+        `Author name, typically "lastname initials" (e.g., "mann bj"). ${BDATA_FIELD_HINT}`,
+      ),
+    key: z
+      .string()
+      .optional()
+      .describe(
+        'Arbitrary label to track this citation in results. Auto-assigned if omitted. Echoed back unchanged and never sent to NCBI, so any character is accepted here.',
+      ),
+  })
+  .describe(
+    'Citation to match against PubMed. Must include at least journal or year — ECitMatch primary-keys on journal+volume+page, so author-only or volume-only inputs guarantee no match.',
+  )
+  .refine((c) => !!(c.journal || c.year), {
+    message:
+      'Each citation must include at least a journal or year field — ECitMatch primary-keys on journal+volume+page, so author-only or volume-only inputs guarantee no match.',
+  });
+
+/**
+ * The union issue's own message, in place of Zod's bare `Invalid input`. A value
+ * that fails only a check inside one branch — a pipe in a field, a missing
+ * journal and year — keeps that branch's issue and path. A value that fails both
+ * branches outright (a string, or an array element of the wrong type) is one
+ * union issue carrying this message, with each branch's issues nested under it.
+ */
+const CITATIONS_SHAPE_ERROR =
+  'Invalid input: expected a citation object or an array of 1–25 citation objects';
+
 export const lookupCitationTool = tool('pubmed_lookup_citation', {
   description: `Look up PubMed IDs from partial bibliographic citations. Useful when you have a reference (journal, year, volume, page, author) and need the PMID — deterministic citation matching, more reliable than free-text search for structured references. Each citation must include at least journal or year (ECitMatch primary-keys on journal+volume+page; author-only or volume-only inputs guarantee no match); more fields = better match accuracy.`,
   annotations: { readOnlyHint: true, openWorldHint: true },
@@ -48,58 +106,27 @@ export const lookupCitationTool = tool('pubmed_lookup_citation', {
 
   errors: [...NCBI_SERVICE_ERRORS] as const,
 
+  // Never advertised; rewritten to the canonical key before the schema parses.
+  // A single object usually arrives under this name, which the union below
+  // accepts. (#156)
+  inputAliases: { citation: 'citations' },
+
   input: z.object({
     citations: z
-      .array(
-        z
-          .object({
-            journal: z
-              .string()
-              .regex(BDATA_FIELD_RE, BDATA_FIELD_ERROR)
-              .optional()
-              .describe(
-                `Journal title or ISO abbreviation (e.g., "proc natl acad sci u s a"). ${BDATA_FIELD_HINT}`,
-              ),
-            year: z
-              .string()
-              .regex(BDATA_FIELD_RE, BDATA_FIELD_ERROR)
-              .optional()
-              .describe(`Publication year (e.g., "1991"). ${BDATA_FIELD_HINT}`),
-            volume: z
-              .string()
-              .regex(BDATA_FIELD_RE, BDATA_FIELD_ERROR)
-              .optional()
-              .describe(`Volume number. ${BDATA_FIELD_HINT}`),
-            firstPage: z
-              .string()
-              .regex(BDATA_FIELD_RE, BDATA_FIELD_ERROR)
-              .optional()
-              .describe(`First page number. ${BDATA_FIELD_HINT}`),
-            authorName: z
-              .string()
-              .regex(BDATA_FIELD_RE, BDATA_FIELD_ERROR)
-              .optional()
-              .describe(
-                `Author name, typically "lastname initials" (e.g., "mann bj"). ${BDATA_FIELD_HINT}`,
-              ),
-            key: z
-              .string()
-              .optional()
-              .describe(
-                'Arbitrary label to track this citation in results. Auto-assigned if omitted. Echoed back unchanged and never sent to NCBI, so any character is accepted here.',
-              ),
-          })
-          .describe(
-            'Citation to match against PubMed. Must include at least journal or year — ECitMatch primary-keys on journal+volume+page, so author-only or volume-only inputs guarantee no match.',
-          )
-          .refine((c) => !!(c.journal || c.year), {
-            message:
-              'Each citation must include at least a journal or year field — ECitMatch primary-keys on journal+volume+page, so author-only or volume-only inputs guarantee no match.',
-          }),
+      .union(
+        [
+          z
+            .array(CitationSchema)
+            .min(1)
+            .max(25)
+            .describe('Up to 25 citations, each matched independently.'),
+          CitationSchema,
+        ],
+        { error: CITATIONS_SHAPE_ERROR },
       )
-      .min(1)
-      .max(25)
-      .describe('Citations to look up. More fields = better match accuracy.'),
+      .describe(
+        'Citations to look up — an array of up to 25, or a single citation object. More fields = better match accuracy.',
+      ),
   }),
 
   output: z.object({
@@ -156,9 +183,10 @@ export const lookupCitationTool = tool('pubmed_lookup_citation', {
   }),
 
   async handler(input, ctx) {
-    ctx.log.info('Executing pubmed_lookup_citation', { count: input.citations.length });
+    const submitted = Array.isArray(input.citations) ? input.citations : [input.citations];
+    ctx.log.info('Executing pubmed_lookup_citation', { count: submitted.length });
 
-    const citations: ECitMatchCitation[] = input.citations.map((c, i) => ({
+    const citations: ECitMatchCitation[] = submitted.map((c, i) => ({
       journal: c.journal,
       year: c.year,
       volume: c.volume,
