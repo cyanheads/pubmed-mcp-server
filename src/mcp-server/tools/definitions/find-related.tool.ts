@@ -2,8 +2,12 @@
  * @fileoverview PubMed related articles tool — finds articles related to a
  * source article via a provider chain: NCBI ELink (primary) → Europe PMC →
  * OpenAlex. First success wins; results are never merged across sources.
- * Supports offset pagination on the returned window. A served empty answer is a
- * success; only a chain where every eligible provider failed is an error.
+ * Supports offset pagination on the returned window, sized by `maxResults`
+ * (`limit` accepted as an alias). A served empty answer is a success; only a
+ * chain where every eligible provider failed is an error. Every return path
+ * carries the total match count in `output`, which `format()` states in the
+ * header. A zero-padded source PMID runs as the PMID it spells, so the source
+ * never appears among its own related articles.
  * @module src/mcp-server/tools/definitions/find-related.tool
  */
 
@@ -21,7 +25,7 @@ import {
   type OpenAlexRelatedResult,
 } from '@/services/openalex/types.js';
 import { conceptMeta, EDAM_DATA_RETRIEVAL, SCHEMA_SCHOLARLY_ARTICLE } from './_concepts.js';
-import { pmidStringSchema } from './_schemas.js';
+import { normalizePmid, pmidStringSchema } from './_schemas.js';
 import { escapeMarkdownInline } from './_text.js';
 
 // ─── ELink XML types ─────────────────────────────────────────────────────────
@@ -362,6 +366,9 @@ export const findRelatedTool = tool('pubmed_find_related', {
     },
   ] as const,
 
+  // Never advertised; rewritten to the canonical key before the schema parses. (#156)
+  inputAliases: { limit: 'maxResults' },
+
   input: z.object({
     pmid: pmidStringSchema.describe('Source PubMed ID'),
     relationship: z
@@ -432,17 +439,19 @@ export const findRelatedTool = tool('pubmed_find_related', {
           .describe('Related article with enriched summary'),
       )
       .describe('Related articles'),
-  }),
-
-  // Result-set context the agent reasons with — pre-truncation match count,
-  // the answering provider, and recovery guidance. Surfaced via ctx.enrich(...)
-  // to structuredContent and content[]; kept out of the domain return.
-  enrichment: {
+    // A domain field, not enrichment: format() sees only this payload, and the
+    // header states the total beside the returned count. (#147)
     totalCount: z
       .number()
       .describe(
         'Total related articles found before windowing. A Europe PMC or OpenAlex total may shrink to the PubMed-addressable count once a request window covers the whole upstream set, since rows without a PubMed PMID cannot be returned.',
       ),
+  }),
+
+  // Result-set context the agent reasons with — the answering provider and
+  // recovery guidance. Surfaced via ctx.enrich(...) to structuredContent and
+  // content[]; kept out of the domain return.
+  enrichment: {
     source: z
       .enum(['ncbi', 'europepmc', 'openalex'])
       .describe('Provider that answered this request'),
@@ -473,7 +482,6 @@ export const findRelatedTool = tool('pubmed_find_related', {
   },
 
   enrichmentTrailer: {
-    totalCount: { label: 'Total Found' },
     source: { label: 'Source' },
     coverageFailures: {
       render: (value = []) => `**Coverage not checked:** ${summarizeOutcomes(value)}`,
@@ -487,6 +495,11 @@ export const findRelatedTool = tool('pubmed_find_related', {
       relationship: input.relationship,
       offset: input.offset,
     });
+    // ELink answers `0034265844` as PMID 34265844 and lists that PMID first among
+    // its own `similar` neighbors, so the self-filter — and every upstream call —
+    // uses the canonical form. `sourcePmid` and the notices keep the caller's
+    // spelling. (#161)
+    const canonicalPmid = normalizePmid(input.pmid);
 
     // ── Provider chain ──────────────────────────────────────────────────────
     // Try NCBI first; on failure fall back to Europe PMC then OpenAlex (first
@@ -511,7 +524,7 @@ export const findRelatedTool = tool('pubmed_find_related', {
 
     // 1. NCBI (primary)
     try {
-      providerResult = await ncbiProvider(input.pmid, input.relationship, ctx.signal);
+      providerResult = await ncbiProvider(canonicalPmid, input.relationship, ctx.signal);
     } catch (err) {
       ctx.log.warning('NCBI eLink failed, trying fallback providers', {
         pmid: input.pmid,
@@ -525,7 +538,7 @@ export const findRelatedTool = tool('pubmed_find_related', {
     if (providerResult === null && epmcSupports(input.relationship)) {
       try {
         const epmcResult = await epmcProvider(
-          input.pmid,
+          canonicalPmid,
           input.relationship as 'cited_by' | 'references',
           input.offset,
           input.maxResults,
@@ -550,7 +563,7 @@ export const findRelatedTool = tool('pubmed_find_related', {
     if (providerResult === null) {
       try {
         providerResult = await openAlexProvider(
-          input.pmid,
+          canonicalPmid,
           input.relationship,
           input.offset + input.maxResults,
           ctx.signal,
@@ -597,7 +610,7 @@ export const findRelatedTool = tool('pubmed_find_related', {
       let sourceConfirmedMissing = false;
       try {
         const summaryResult = await ncbi.eSummary(
-          { db: 'pubmed', id: input.pmid },
+          { db: 'pubmed', id: canonicalPmid },
           { signal: ctx.signal },
         );
         const summaries = await extractBriefSummaries(summaryResult);
@@ -614,7 +627,6 @@ export const findRelatedTool = tool('pubmed_find_related', {
 
       if (sourceConfirmedMissing) {
         ctx.enrich({ source: 'ncbi' });
-        ctx.enrich.total(0);
         ctx.enrich.notice(
           `Source PMID ${input.pmid} not found in PubMed. Verify the ID with \`pubmed_fetch_articles\` or \`pubmed_search_articles\`.`,
         );
@@ -623,6 +635,7 @@ export const findRelatedTool = tool('pubmed_find_related', {
           relationship: input.relationship,
           offset: input.offset,
           articles: [],
+          totalCount: 0,
         };
       }
 
@@ -643,13 +656,13 @@ export const findRelatedTool = tool('pubmed_find_related', {
           {
             provider: 'europepmc',
             run: () =>
-              epmcProvider(input.pmid, 'references', input.offset, input.maxResults, ctx.signal),
+              epmcProvider(canonicalPmid, 'references', input.offset, input.maxResults, ctx.signal),
           },
           {
             provider: 'openalex',
             run: () =>
               openAlexProvider(
-                input.pmid,
+                canonicalPmid,
                 'references',
                 input.offset + input.maxResults,
                 ctx.signal,
@@ -678,7 +691,6 @@ export const findRelatedTool = tool('pubmed_find_related', {
           fallbackKind = 'references_coverage';
         } else {
           ctx.enrich({ source: 'ncbi' });
-          ctx.enrich.total(0);
           if (coverageFailures.length > 0) ctx.enrich({ coverageFailures });
           const sourcePmcId = sourceSummary.pmcId;
           const checked = joinWithOr(coverageChecked.map((p) => PROVIDER_LABELS[p]));
@@ -695,18 +707,19 @@ export const findRelatedTool = tool('pubmed_find_related', {
             relationship: input.relationship,
             offset: input.offset,
             articles: [],
+            totalCount: 0,
           };
         }
       } else {
         // similar / cited_by empty for a valid source, or references with an
         // unconfirmed source — return the honest empty without a notice.
         ctx.enrich({ source: 'ncbi' });
-        ctx.enrich.total(0);
         return {
           sourcePmid: input.pmid,
           relationship: input.relationship,
           offset: input.offset,
           articles: [],
+          totalCount: 0,
         };
       }
     }
@@ -714,7 +727,6 @@ export const findRelatedTool = tool('pubmed_find_related', {
     // ── Window the result set + enrich ──────────────────────────────────────────
     const { allPmids, totalCount, source, droppedNoPmid = 0, reachCapped = false } = providerResult;
     ctx.enrich({ source });
-    ctx.enrich.total(totalCount);
     // A provider that failed before another one answered still shapes how far
     // this reference set was actually checked.
     if (coverageFailures.length > 0) ctx.enrich({ coverageFailures });
@@ -784,6 +796,7 @@ export const findRelatedTool = tool('pubmed_find_related', {
         relationship: input.relationship,
         offset: input.offset,
         articles: [],
+        totalCount,
       };
     }
 
@@ -823,6 +836,7 @@ export const findRelatedTool = tool('pubmed_find_related', {
         relationship: input.relationship,
         offset: input.offset,
         articles,
+        totalCount,
       };
     } catch (err) {
       if (ctx.signal.aborted) throw err;
@@ -838,6 +852,7 @@ export const findRelatedTool = tool('pubmed_find_related', {
         relationship: input.relationship,
         offset: input.offset,
         articles: window.map((pmid) => ({ pmid })),
+        totalCount,
       };
     }
   },
@@ -846,7 +861,7 @@ export const findRelatedTool = tool('pubmed_find_related', {
     const lines = [
       `# Related Articles for PMID ${result.sourcePmid}`,
       `**Relationship:** ${result.relationship}`,
-      `**Returned:** ${result.articles.length} | **Offset:** ${result.offset}`,
+      `**Returned:** ${result.articles.length} of ${result.totalCount} | **Offset:** ${result.offset}`,
     ];
     if (result.articles.length === 0) {
       lines.push('No related articles found.');
@@ -860,7 +875,10 @@ export const findRelatedTool = tool('pubmed_find_related', {
         // A Bookshelf record has no journal: its book and publisher stand in
         // for the source so the row still names a venue. (#114)
         const book = [a.bookTitle, a.publisherName].filter(Boolean).join(' — ');
-        const meta = [a.source, book, a.docType, a.pubDate].filter(Boolean).join(', ');
+        // `citation` is every ordinary journal article; the segment earns its
+        // place only when it flags a Bookshelf chapter or book. (#146)
+        const docType = a.docType === 'citation' ? undefined : a.docType;
+        const meta = [a.source, book, docType, a.pubDate].filter(Boolean).join(', ');
         if (meta) lines.push(`  ${meta}`);
       }
     }

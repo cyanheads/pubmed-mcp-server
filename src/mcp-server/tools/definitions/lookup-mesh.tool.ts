@@ -1,7 +1,7 @@
 /**
  * @fileoverview MeSH (Medical Subject Headings) vocabulary lookup tool.
  * Searches the NCBI MeSH database with offset pagination and optionally
- * retrieves detailed records.
+ * retrieves detailed records. `limit` is accepted as an alias for `maxResults`.
  * @module src/mcp-server/tools/definitions/lookup-mesh.tool
  */
 
@@ -128,6 +128,9 @@ export const lookupMeshTool = tool('pubmed_lookup_mesh', {
     'https://github.com/cyanheads/pubmed-mcp-server/blob/main/src/mcp-server/tools/definitions/lookup-mesh.tool.ts',
 
   errors: [...NCBI_SERVICE_ERRORS, ...NCBI_QUERY_INPUT_ERRORS] as const,
+
+  // Never advertised; rewritten to the canonical key before the schema parses. (#156)
+  inputAliases: { limit: 'maxResults' },
 
   input: z.object({
     query: z

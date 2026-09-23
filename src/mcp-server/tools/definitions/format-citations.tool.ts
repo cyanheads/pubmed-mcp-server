@@ -1,6 +1,8 @@
 /**
  * @fileoverview PubMed citation tool — generates formatted citations (APA, MLA,
- * BibTeX, RIS, Vancouver) for one or more PubMed articles.
+ * BibTeX, RIS, Vancouver) for one or more PubMed articles. A zero-padded PMID
+ * is fetched and matched as the PMID it spells; `ids` is accepted as an alias
+ * for `pmids`.
  * @module src/mcp-server/tools/definitions/format-citations.tool
  */
 
@@ -13,7 +15,7 @@ import {
 import { getNcbiService } from '@/services/ncbi/ncbi-service.js';
 import { parseArticleSet } from '@/services/ncbi/parsing/article-parser.js';
 import { conceptMeta, EDAM_DATA_FORMATTING, SCHEMA_CREATIVE_WORK } from './_concepts.js';
-import { pmidStringSchema } from './_schemas.js';
+import { normalizePmid, pmidStringSchema } from './_schemas.js';
 
 const CitationStyleEnum = z.enum(['apa', 'mla', 'bibtex', 'ris', 'vancouver']);
 
@@ -37,6 +39,9 @@ export const formatCitationsTool = tool('pubmed_format_citations', {
     'https://github.com/cyanheads/pubmed-mcp-server/blob/main/src/mcp-server/tools/definitions/format-citations.tool.ts',
 
   errors: [...NCBI_SERVICE_ERRORS] as const,
+
+  // Never advertised; rewritten to the canonical key before the schema parses. (#156)
+  inputAliases: { ids: 'pmids' },
 
   input: z.object({
     pmids: z.array(pmidStringSchema).min(1).max(50).describe('PubMed IDs to cite'),
@@ -100,9 +105,13 @@ export const formatCitationsTool = tool('pubmed_format_citations', {
       pmids: input.pmids,
       formats,
     });
+    // NCBI reads `00000001` as PMID 1 and answers with `<PMID>1</PMID>`, so the
+    // request and the unavailability diff below both use the canonical form;
+    // `unavailablePmids` still reports the caller's own spelling. (#161)
+    const requested = [...new Set(input.pmids.map(normalizePmid))];
     const raw = await getNcbiService().eFetch(
-      { db: 'pubmed', id: input.pmids.join(','), retmode: 'xml' },
-      { retmode: 'xml', usePost: input.pmids.length >= 25, signal: ctx.signal },
+      { db: 'pubmed', id: requested.join(','), retmode: 'xml' },
+      { retmode: 'xml', usePost: requested.length >= 25, signal: ctx.signal },
     );
     // Reads both members of the set. Taking `PubmedArticleSet.PubmedArticle`
     // alone discards every NCBI Bookshelf record, leaving a chapter or book
@@ -114,7 +123,7 @@ export const formatCitationsTool = tool('pubmed_format_citations', {
     }));
 
     const returnedPmids = new Set(citations.map((entry) => entry.pmid));
-    const unavailablePmids = input.pmids.filter((pmid) => !returnedPmids.has(pmid));
+    const unavailablePmids = input.pmids.filter((pmid) => !returnedPmids.has(normalizePmid(pmid)));
 
     if (citations.length === 0) {
       ctx.enrich.notice(

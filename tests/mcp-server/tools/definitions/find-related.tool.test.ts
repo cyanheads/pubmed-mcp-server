@@ -1,6 +1,7 @@
 /**
- * @fileoverview Tests for the find-related tool — offset pagination (#36) and
- * multi-source provider fallback (#63).
+ * @fileoverview Tests for the find-related tool — offset pagination (#36),
+ * multi-source provider fallback (#63), the total match count in the header on
+ * every return path (#147), and Doc Type rendering (#146).
  * @module tests/mcp-server/tools/definitions/find-related.tool.test
  */
 
@@ -213,18 +214,18 @@ describe('findRelatedTool', () => {
     expect(result.offset).toBe(3);
   });
 
-  it('format() header includes "Returned: N | Offset: Z"', () => {
+  it('format() header includes "Returned: N of T | Offset: Z"', () => {
     const blocks = textBlocks(
       findRelatedTool.format!({
         sourcePmid: '12345',
         relationship: 'similar',
         offset: 5,
+        totalCount: 6,
         articles: [{ pmid: '111', title: 'A', authors: 'B', source: 'C', pubDate: '2024' }],
       }),
     );
     const text = blocks[0]?.text ?? '';
-    expect(text).toContain('**Returned:** 1');
-    expect(text).toContain('**Offset:** 5');
+    expect(text).toContain('**Returned:** 1 of 6 | **Offset:** 5');
     expect(text).toContain('**Relationship:** similar');
   });
 
@@ -269,7 +270,7 @@ describe('findRelatedTool', () => {
     expect(getEnrichment(ctx).source).toBe('europepmc');
     expect(getEnrichment(ctx).notice).toBeDefined();
     expect(getEnrichment(ctx).notice).toContain('Europe PMC');
-    expect(getEnrichment(ctx).totalCount).toBe(2); // a page shorter than requested exhausts upstream, so the total is exact
+    expect(result.totalCount).toBe(2); // a page shorter than requested exhausts upstream, so the total is exact
     expect(result.articles[0]?.pmid).toBe('333');
   });
 
@@ -347,7 +348,7 @@ describe('findRelatedTool', () => {
 
     expect(result.articles).toEqual([]);
     expect(getEnrichment(ctx).source).toBe('openalex');
-    expect(getEnrichment(ctx).totalCount).toBe(0);
+    expect(result.totalCount).toBe(0);
     expect(getEnrichment(ctx).notice).not.toContain('All providers failed');
     // No PMIDs to enrich — the eSummary round-trip is skipped entirely.
     expect(mockESummary).not.toHaveBeenCalled();
@@ -509,7 +510,7 @@ describe('findRelatedTool', () => {
 
     expect(result.articles).toEqual([]);
     expect(getEnrichment(ctx).source).toBe('europepmc');
-    expect(getEnrichment(ctx).totalCount).toBe(0);
+    expect(result.totalCount).toBe(0);
     expect(String(getEnrichment(ctx).notice)).toContain('Europe PMC');
   });
 
@@ -758,7 +759,7 @@ describe('findRelatedTool', () => {
       // Offsets index PMID-addressable rows across pages, never raw upstream rows.
       expect(result.articles.map((a) => a.pmid)).toEqual(['9001', '9002']);
       // A short final page means upstream is exhausted, so the total is exact.
-      expect(getEnrichment(ctx).totalCount).toBe(1003);
+      expect(result.totalCount).toBe(1003);
     });
 
     it('pulls further pages when dropped rows leave the window unfilled (issue #101)', async () => {
@@ -787,7 +788,7 @@ describe('findRelatedTool', () => {
       expect(mockEpmcCitations).toHaveBeenNthCalledWith(1, '12345', 85, 1, expect.any(AbortSignal));
       expect(mockEpmcCitations).toHaveBeenNthCalledWith(2, '12345', 85, 2, expect.any(AbortSignal));
       expect(result.articles.map((a) => a.pmid)).toEqual(['2000', '2001', '2002', '2003', '2004']);
-      expect(getEnrichment(ctx).totalCount).toBe(2055);
+      expect(result.totalCount).toBe(2055);
       const notice = String(getEnrichment(ctx).notice);
       expect(notice).toContain('170 upstream rows');
       expect(notice).toContain('6 with no PubMed PMID');
@@ -839,12 +840,12 @@ describe('findRelatedTool', () => {
 
       const ctx = createMockContext({ errors: findRelatedTool.errors });
       const input = findRelatedTool.input.parse({ pmid: '12345', relationship: 'cited_by' });
-      await findRelatedTool.handler(input, ctx);
+      const result = await findRelatedTool.handler(input, ctx);
 
       const notice = String(getEnrichment(ctx).notice);
       expect(notice).toContain('6');
       expect(notice).toContain('no PubMed PMID');
-      expect(getEnrichment(ctx).totalCount).toBe(2);
+      expect(result.totalCount).toBe(2);
     });
 
     it('never returns an empty window on a served page without an explanatory notice', async () => {
@@ -1029,7 +1030,7 @@ describe('findRelatedTool', () => {
 
       expect(mockOaReferences).toHaveBeenCalledWith('37952131', 145, expect.any(AbortSignal));
       expect(result.articles.map((a) => a.pmid)).toEqual(['4140', '4141', '4142', '4143', '4144']);
-      expect(getEnrichment(ctx).totalCount).toBe(150);
+      expect(result.totalCount).toBe(150);
       expect(String(getEnrichment(ctx).notice)).toContain('12 with no PubMed PMID');
     });
   });
@@ -1209,7 +1210,7 @@ describe('findRelatedTool', () => {
     const result = await findRelatedTool.handler(input, ctx);
 
     expect(result.articles).toEqual([]);
-    expect(getEnrichment(ctx).totalCount).toBe(0);
+    expect(result.totalCount).toBe(0);
     expect(getEnrichment(ctx).notice).toBeUndefined();
   });
 
@@ -1223,7 +1224,7 @@ describe('findRelatedTool', () => {
       const input = findRelatedTool.input.parse({ pmid: '99999999999' });
       const result = await findRelatedTool.handler(input, ctx);
 
-      expect(getEnrichment(ctx).totalCount).toBe(0);
+      expect(result.totalCount).toBe(0);
       expect(result.articles).toEqual([]);
       expect(getEnrichment(ctx).notice).toContain('99999999999');
       expect(getEnrichment(ctx).notice).toContain('not found in PubMed');
@@ -1238,9 +1239,9 @@ describe('findRelatedTool', () => {
 
       const ctx = createMockContext({ errors: findRelatedTool.errors });
       const input = findRelatedTool.input.parse({ pmid: '12345' });
-      await findRelatedTool.handler(input, ctx);
+      const result = await findRelatedTool.handler(input, ctx);
 
-      expect(getEnrichment(ctx).totalCount).toBe(0);
+      expect(result.totalCount).toBe(0);
       expect(getEnrichment(ctx).notice).toBeUndefined();
     });
   });
@@ -1300,7 +1301,7 @@ describe('findRelatedTool', () => {
       { db: 'pubmed', version: '2.0', retmode: 'xml', id: '222,111' },
       expect.objectContaining({ signal: expect.any(AbortSignal) }),
     );
-    expect(getEnrichment(ctx).totalCount).toBe(2);
+    expect(result.totalCount).toBe(2);
     expect(result.articles).toEqual([
       {
         pmid: '222',
@@ -1375,7 +1376,7 @@ describe('findRelatedTool', () => {
 
     const ctx = createMockContext({ errors: findRelatedTool.errors });
     const input = findRelatedTool.input.parse({ pmid: '12345', relationship: 'references' });
-    await findRelatedTool.handler(input, ctx);
+    const result = await findRelatedTool.handler(input, ctx);
 
     expect(mockELink).toHaveBeenCalledWith(
       {
@@ -1388,7 +1389,7 @@ describe('findRelatedTool', () => {
       },
       expect.objectContaining({ signal: expect.any(AbortSignal) }),
     );
-    expect(getEnrichment(ctx).totalCount).toBe(0);
+    expect(result.totalCount).toBe(0);
   });
 
   describe('references coverage for non-PMC sources (issues #42, #63)', () => {
@@ -1414,7 +1415,7 @@ describe('findRelatedTool', () => {
       const result = await findRelatedTool.handler(input, ctx);
 
       expect(getEnrichment(ctx).source).toBe('europepmc');
-      expect(getEnrichment(ctx).totalCount).toBe(2); // a page shorter than requested exhausts upstream, so the total is exact
+      expect(result.totalCount).toBe(2); // a page shorter than requested exhausts upstream, so the total is exact
       expect(getEnrichment(ctx).notice).toContain('Europe PMC');
       expect(result.articles.map((a) => a.pmid)).toEqual(['888', '999']);
       // EPMC served first — OpenAlex is not consulted.
@@ -1460,12 +1461,12 @@ describe('findRelatedTool', () => {
 
       const ctx = createMockContext({ errors: findRelatedTool.errors });
       const input = findRelatedTool.input.parse({ pmid: '37952131', relationship: 'references' });
-      await findRelatedTool.handler(input, ctx);
+      const result = await findRelatedTool.handler(input, ctx);
 
       // EPMC + OpenAlex were both consulted before giving up.
       expect(mockEpmcReferences).toHaveBeenCalled();
       expect(mockOaReferences).toHaveBeenCalled();
-      expect(getEnrichment(ctx).totalCount).toBe(0);
+      expect(result.totalCount).toBe(0);
       expect(getEnrichment(ctx).notice).toContain('37952131');
       expect(getEnrichment(ctx).notice).toContain('OpenAlex');
       expect(getEnrichment(ctx).notice).toContain('pubmed_fetch_articles');
@@ -1552,9 +1553,9 @@ describe('findRelatedTool', () => {
 
       const ctx = createMockContext({ errors: findRelatedTool.errors });
       const input = findRelatedTool.input.parse({ pmid: '12345', relationship: 'references' });
-      await findRelatedTool.handler(input, ctx);
+      const result = await findRelatedTool.handler(input, ctx);
 
-      expect(getEnrichment(ctx).totalCount).toBe(0);
+      expect(result.totalCount).toBe(0);
       expect(getEnrichment(ctx).notice).toBeUndefined();
     });
 
@@ -1582,6 +1583,7 @@ describe('findRelatedTool', () => {
           sourcePmid: '37952131',
           relationship: 'references',
           offset: 0,
+          totalCount: 0,
           articles: [],
         }),
       );
@@ -1597,6 +1599,7 @@ describe('findRelatedTool', () => {
         sourcePmid: '12345',
         relationship: 'similar',
         offset: 0,
+        totalCount: 1,
         articles: [
           {
             pmid: '111',
@@ -1621,6 +1624,7 @@ describe('findRelatedTool', () => {
         sourcePmid: '12345',
         relationship: 'cited_by',
         offset: 0,
+        totalCount: 0,
         articles: [],
       }),
     );
@@ -1637,7 +1641,7 @@ describe('findRelatedTool', () => {
       const input = findRelatedTool.input.parse({ pmid: '99999999999', relationship });
       const result = await findRelatedTool.handler(input, ctx);
 
-      expect(getEnrichment(ctx).totalCount).toBe(0);
+      expect(result.totalCount).toBe(0);
       expect(result.articles).toEqual([]);
       expect(getEnrichment(ctx).notice).toContain('99999999999');
       expect(getEnrichment(ctx).notice).toContain('not found in PubMed');
@@ -1680,9 +1684,9 @@ describe('findRelatedTool', () => {
 
       const ctx = createMockContext({ errors: findRelatedTool.errors });
       const input = findRelatedTool.input.parse({ pmid: '12345', relationship: 'similar' });
-      await findRelatedTool.handler(input, ctx);
+      const result = await findRelatedTool.handler(input, ctx);
 
-      expect(getEnrichment(ctx).totalCount).toBe(0);
+      expect(result.totalCount).toBe(0);
       expect(getEnrichment(ctx).notice).toBeUndefined();
     });
   });
@@ -1750,5 +1754,185 @@ describe('findRelatedTool Bookshelf summaries (issue #114)', () => {
       expect.objectContaining({ db: 'pubmed', version: '2.0' }),
       expect.anything(),
     );
+  });
+});
+
+/** Every text block of a contract run, joined — the header, the rows, and the trailer. */
+const contractText = (result: Awaited<ReturnType<typeof runToolContract>>) =>
+  textBlocks(result.content as ContentBlock[])
+    .map((b) => b.text)
+    .join('\n');
+
+/** A structured payload's total match count, read off the real returned result. */
+const totalOf = (result: Awaited<ReturnType<typeof runToolContract>>) =>
+  (result.structuredContent as { totalCount?: number }).totalCount;
+
+describe('findRelatedTool total match count in the header (issue #147)', () => {
+  beforeEach(() => {
+    mockELink.mockReset();
+    mockESummary.mockReset();
+    mockExtractBriefSummaries.mockReset();
+    mockExtractBriefSummaries.mockResolvedValue([]);
+    mockEpmcCitations.mockReset();
+    mockEpmcReferences.mockReset();
+    mockOaSimilar.mockReset();
+    mockOaCitedBy.mockReset();
+    mockOaReferences.mockReset();
+    mockGetEpmcService.mockReturnValue(epmcService);
+    mockGetOaService.mockReturnValue(oaService);
+  });
+
+  /** NCBI answers empty and the source-PMID ESummary resolves the source as valid. */
+  function validSourceWithNoLinks() {
+    mockELink.mockResolvedValue({ eLinkResult: [{ LinkSet: {} }] });
+    mockESummary.mockResolvedValue({ eSummaryResult: {} });
+    mockExtractBriefSummaries.mockResolvedValue([{ pmid: '12345', title: 'Source' }]);
+  }
+
+  /** The header and trailer shape every return path shares. */
+  function expectHeader(
+    result: Awaited<ReturnType<typeof runToolContract>>,
+    header: string,
+    total: number,
+  ) {
+    expect(result.isError).toBeFalsy();
+    expect(totalOf(result)).toBe(total);
+    const text = contractText(result);
+    expect(text).toContain(header);
+    expect(text).not.toMatch(/\*\*\d+ total\*\*/);
+    expect(text).not.toContain('Total Found');
+  }
+
+  it('ESummary-enriched window: N of the full neighbor set', async () => {
+    mockELink.mockResolvedValue(eLinkResponse(['101', '102', '103']));
+    mockESummary.mockResolvedValue({ eSummaryResult: {} });
+    mockExtractBriefSummaries.mockResolvedValue([
+      { pmid: '101', title: 'A' },
+      { pmid: '102', title: 'B' },
+    ]);
+
+    const result = await runToolContract(findRelatedTool, { pmid: '12345', maxResults: 2 });
+
+    expectHeader(result, '**Returned:** 2 of 3 | **Offset:** 0', 3);
+  });
+
+  it('fallback provider: the header carries the upstream total, not the window', async () => {
+    mockELink.mockRejectedValue(new McpError(JsonRpcErrorCode.ServiceUnavailable, 'NCBI down'));
+    mockOaSimilar.mockResolvedValue({ pmids: ['555', '666'], totalCount: 10 });
+    mockESummary.mockResolvedValue({ eSummaryResult: {} });
+
+    const result = await runToolContract(findRelatedTool, { pmid: '12345', maxResults: 2 });
+
+    expectHeader(result, '**Returned:** 2 of 10 | **Offset:** 0', 10);
+    expect(result.structuredContent).toMatchObject({ source: 'openalex' });
+    expect(contractText(result)).toContain('**Source:** openalex');
+  });
+
+  it('source confirmed missing: 0 of 0 with the not-found notice', async () => {
+    mockELink.mockResolvedValue({ eLinkResult: [{ LinkSet: {} }] });
+    mockESummary.mockResolvedValue({ eSummaryResult: {} });
+
+    const result = await runToolContract(findRelatedTool, { pmid: '99999999' });
+
+    expectHeader(result, '**Returned:** 0 of 0 | **Offset:** 0', 0);
+    expect(contractText(result)).toContain('Source PMID 99999999 not found in PubMed');
+  });
+
+  it('references with no fallback answer: 0 of 0 with the no-reference-list notice', async () => {
+    validSourceWithNoLinks();
+    mockEpmcReferences.mockResolvedValue({ pmids: [], hitCount: 0, droppedNoPmid: 0 });
+    mockOaReferences.mockResolvedValue({ pmids: [], totalCount: 0 });
+
+    const result = await runToolContract(findRelatedTool, {
+      pmid: '12345',
+      relationship: 'references',
+    });
+
+    expectHeader(result, '**Returned:** 0 of 0 | **Offset:** 0', 0);
+    expect(contractText(result)).toContain('No reference list available for PMID 12345');
+  });
+
+  it.each(['similar', 'cited_by'] as const)(
+    '%s empty for a valid source: 0 of 0 with no notice',
+    async (relationship) => {
+      validSourceWithNoLinks();
+
+      const result = await runToolContract(findRelatedTool, { pmid: '12345', relationship });
+
+      expectHeader(result, '**Returned:** 0 of 0 | **Offset:** 0', 0);
+      expect((result.structuredContent as { notice?: string }).notice).toBeUndefined();
+    },
+  );
+
+  it('window past the end: 0 of the total at the requested offset', async () => {
+    mockELink.mockResolvedValue(eLinkResponse(['101', '102', '103']));
+
+    const result = await runToolContract(findRelatedTool, { pmid: '12345', offset: 10 });
+
+    expectHeader(result, '**Returned:** 0 of 3 | **Offset:** 10', 3);
+    expect(contractText(result)).toContain('Offset 10 exceeds totalCount (3)');
+    expect(mockESummary).not.toHaveBeenCalled();
+  });
+
+  it('ESummary degraded: bare PMIDs, N of the total', async () => {
+    mockELink.mockResolvedValue(eLinkResponse(['101', '102']));
+    mockESummary.mockRejectedValue(new McpError(JsonRpcErrorCode.ServiceUnavailable, 'NCBI down'));
+
+    const result = await runToolContract(findRelatedTool, { pmid: '12345' });
+
+    expectHeader(result, '**Returned:** 2 of 2 | **Offset:** 0', 2);
+    expect(contractText(result)).toContain('Article metadata is temporarily unavailable');
+  });
+});
+
+describe('findRelatedTool Doc Type rendering (issue #146)', () => {
+  beforeEach(() => {
+    mockELink.mockReset();
+    mockESummary.mockReset();
+    mockExtractBriefSummaries.mockReset();
+    mockGetEpmcService.mockReturnValue(epmcService);
+    mockGetOaService.mockReturnValue(oaService);
+    mockELink.mockResolvedValue(eLinkResponse(['111', '20301425', '222']));
+    mockESummary.mockResolvedValue({ eSummaryResult: {} });
+  });
+
+  /** Journal rows around one Bookshelf row, as a mixed ESummary page arrives. */
+  const run = (bookDocType: string) => {
+    mockExtractBriefSummaries.mockResolvedValue([
+      { pmid: '111', title: 'Journal A', source: 'Nature', docType: 'citation', pubDate: '2021' },
+      {
+        pmid: '20301425',
+        title: 'Book record',
+        bookTitle: 'GeneReviews(®)',
+        publisherName: 'University of Washington, Seattle',
+        docType: bookDocType,
+        pubDate: '1993',
+      },
+      { pmid: '222', title: 'Journal B', source: 'Science', docType: 'citation', pubDate: '2022' },
+    ]);
+    return runToolContract(findRelatedTool, { pmid: '34265844', relationship: 'cited_by' });
+  };
+
+  it('drops the citation segment from journal rows and keeps the Bookshelf one', async () => {
+    const text = contractText(await run('chapter'));
+
+    expect(text).toContain('  Nature, 2021\n');
+    expect(text).toContain('  Science, 2022');
+    expect(text).not.toContain('citation');
+    expect(text).toContain('  GeneReviews(®) — University of Washington, Seattle, chapter, 1993');
+  });
+
+  it('leaves structuredContent.articles[].docType untouched, citation included', async () => {
+    const result = await run('chapter');
+
+    const { articles } = result.structuredContent as { articles: { docType?: string }[] };
+    expect(articles.map((a) => a.docType)).toEqual(['citation', 'chapter', 'citation']);
+  });
+
+  it.each(['book', 'report'])('keeps rendering any other value (%s)', async (docType) => {
+    const text = contractText(await run(docType));
+
+    expect(text).toContain(`University of Washington, Seattle, ${docType}, 1993`);
+    expect(text).not.toContain('citation');
   });
 });

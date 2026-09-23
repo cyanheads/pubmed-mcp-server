@@ -1,6 +1,8 @@
 /**
  * @fileoverview PubMed fetch tool. Fetches full article metadata by PubMed IDs,
- * including abstracts, authors, journal info, and MeSH terms.
+ * including abstracts, authors, journal info, and MeSH terms. A zero-padded
+ * PMID is fetched and matched as the PMID it spells; `ids` is accepted as an
+ * alias for `pmids`.
  * @module src/mcp-server/tools/definitions/fetch-articles.tool
  */
 
@@ -16,7 +18,7 @@ import {
   EDAM_PUBMED_ID,
   SCHEMA_SCHOLARLY_ARTICLE,
 } from './_concepts.js';
-import { pmidStringSchema } from './_schemas.js';
+import { normalizePmid, pmidStringSchema } from './_schemas.js';
 import { escapeMarkdownInline } from './_text.js';
 
 const AuthorSchema = z
@@ -304,6 +306,9 @@ export const fetchArticlesTool = tool('pubmed_fetch_articles', {
     },
   ] as const,
 
+  // Never advertised; rewritten to the canonical key before the schema parses. (#156)
+  inputAliases: { ids: 'pmids' },
+
   input: z.object({
     pmids: z.array(pmidStringSchema).min(1).max(200).describe('PubMed IDs to fetch'),
     includeMesh: z.boolean().default(true).describe('Include MeSH terms'),
@@ -356,9 +361,14 @@ export const fetchArticlesTool = tool('pubmed_fetch_articles', {
   async handler(input, ctx) {
     ctx.log.info('Executing pubmed_fetch', { pmidCount: input.pmids.length });
 
+    // NCBI reads `00000001` as PMID 1 and answers with `<PMID>1</PMID>`, so the
+    // request and the unavailability diff below both use the canonical form;
+    // `unavailablePmids` still reports the caller's own spelling. (#161)
+    const requested = [...new Set(input.pmids.map(normalizePmid))];
+
     const xmlData = await getNcbiService().eFetch(
-      { db: 'pubmed', id: input.pmids.join(','), retmode: 'xml' },
-      { retmode: 'xml', usePost: input.pmids.length >= 100, signal: ctx.signal },
+      { db: 'pubmed', id: requested.join(','), retmode: 'xml' },
+      { retmode: 'xml', usePost: requested.length >= 100, signal: ctx.signal },
     );
 
     if (!xmlData || !('PubmedArticleSet' in xmlData)) {
@@ -384,7 +394,7 @@ export const fetchArticlesTool = tool('pubmed_fetch_articles', {
     }));
 
     const returnedPmids = new Set(articles.map((a) => a.pmid).filter(Boolean));
-    const unavailable = input.pmids.filter((id) => !returnedPmids.has(id));
+    const unavailable = input.pmids.filter((id) => !returnedPmids.has(normalizePmid(id)));
 
     // Whole-response budget: fill with complete records in response order and
     // hand the remainder back as PMIDs the caller can re-submit. Without

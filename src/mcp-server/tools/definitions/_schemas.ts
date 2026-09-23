@@ -1,5 +1,6 @@
 /**
- * @fileoverview Shared Zod schemas reused across tool definitions.
+ * @fileoverview Shared Zod schemas reused across tool definitions, plus the
+ * normalizer for the PMID form {@link pmidStringSchema} accepts.
  * @module src/mcp-server/tools/definitions/_schemas
  */
 
@@ -18,6 +19,18 @@ export const pmidStringSchema = z
     /^\d+$/,
     'PMID must be a numeric identifier (e.g. "13054692"). Remove any whitespace, commas, or non-digit characters — provide each PMID separately.',
   );
+
+/**
+ * Canonical form of a PMID {@link pmidStringSchema} accepted: leading zeros
+ * stripped, `0` kept for an all-zero input. NCBI reads `00000001` as PMID 1 and
+ * answers with `<PMID>1</PMID>`, so a handler sends this form upstream and
+ * compares upstream PMIDs against it — the schema itself stays as advertised,
+ * since tool schemas carry no transforms. `0` is still no UID, so an all-zero
+ * list keeps NCBI's empty-list answer. (#161)
+ */
+export function normalizePmid(pmid: string): string {
+  return pmid.replace(/^0+(?=\d)/, '');
+}
 
 /**
  * Zod string schema for a single PMC ID. Digits, with the "PMC" prefix optional

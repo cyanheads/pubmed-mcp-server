@@ -1,6 +1,9 @@
 /**
  * @fileoverview Article ID conversion tool. Converts between DOI, PMID, and PMCID
  * using the NCBI PMC ID Converter API for deterministic, batch-friendly resolution.
+ * Every submitted element gets its own record, in submission order, with the
+ * caller's own spelling as `requestedId`; a zero-padded PMID is converted as the
+ * PMID it spells.
  * @module src/mcp-server/tools/definitions/convert-ids.tool
  */
 
@@ -8,7 +11,7 @@ import { tool, z } from '@cyanheads/mcp-ts-core';
 import { NCBI_ID_INPUT_ERRORS, NCBI_SERVICE_ERRORS } from '@/services/error-contracts.js';
 import { getNcbiService } from '@/services/ncbi/ncbi-service.js';
 import { conceptMeta, EDAM_ACCESSION, EDAM_ID_MAPPING } from './_concepts.js';
-import { doiStringSchema, pmcidStringSchema, pmidStringSchema } from './_schemas.js';
+import { doiStringSchema, normalizePmid, pmcidStringSchema, pmidStringSchema } from './_schemas.js';
 
 /**
  * NCBI's PMC ID Converter returns this exact wording for any non-PMC ID — even
@@ -36,6 +39,27 @@ const ID_ELEMENT_SCHEMAS = {
 
 /** Cap the offending value echoed back so an oversized element can't bloat the error. */
 const MAX_ECHOED_ID_LENGTH = 120;
+
+/** A submitted element the converter's answer carries no record for. */
+const NO_RECORD_ERRMSG =
+  'The PMC ID Converter returned no record for this ID. Article may still exist in PubMed — try pubmed_search_articles.';
+
+/**
+ * The form the PMC ID Converter echoes an identifier in, so each element can be
+ * matched to its answer: a PMID's canonical digits, a PMCID PMC-prefixed and
+ * upper-cased, a DOI lower-cased — DOIs are case-insensitive, and the converter
+ * echoes one casing for DOIs that differ only in case.
+ */
+function matchKey(id: string, idType: 'pmid' | 'pmcid' | 'doi'): string {
+  switch (idType) {
+    case 'pmid':
+      return normalizePmid(id);
+    case 'pmcid':
+      return (/^\d+$/.test(id) ? `PMC${id}` : id).toUpperCase();
+    case 'doi':
+      return id.toLowerCase();
+  }
+}
 
 export const convertIdsTool = tool('pubmed_convert_ids', {
   description: `Convert between article identifiers (DOI, PMID, PMCID). Accepts up to 50 IDs of a single type per request. Only resolves articles indexed in PubMed Central — for articles not in PMC, use pubmed_search_articles instead.`,
@@ -110,29 +134,44 @@ export const convertIdsTool = tool('pubmed_convert_ids', {
       );
     }
 
-    const raw = await getNcbiService().idConvert(input.ids, input.idType, { signal: ctx.signal });
+    // The converter parses `0023193287` as PMID 23193287 yet answers "not found
+    // in PMC" for it, so a PMID is sent in its canonical form. (#161)
+    const ids = input.idType === 'pmid' ? [...new Set(input.ids.map(normalizePmid))] : input.ids;
+    const raw = await getNcbiService().idConvert(ids, input.idType, { signal: ctx.signal });
 
     // NCBI returns pmid as a number in JSON — coerce all ID fields to strings
-    const records = raw.map((r) => {
-      const requestedId = String(r['requested-id']);
+    const conversions = new Map<
+      string,
+      { pmid?: string; pmcid?: string; doi?: string; errmsg?: string }
+    >();
+    for (const r of raw) {
+      const requested = String(r['requested-id']);
       let errmsg: string | undefined;
       if (r.errmsg !== undefined) {
         const original = String(r.errmsg);
         if (PMC_NOT_FOUND_RE.test(original)) {
-          ctx.log.debug('Rewriting PMC-not-found errmsg', { requestedId, original });
+          ctx.log.debug('Rewriting PMC-not-found errmsg', { requestedId: requested, original });
           errmsg = PMC_NOT_FOUND_REWRITE;
         } else {
           errmsg = original;
         }
       }
-      return {
-        requestedId,
+      conversions.set(matchKey(requested, input.idType), {
         ...(r.pmid !== undefined && { pmid: String(r.pmid) }),
         ...(r.pmcid !== undefined && { pmcid: String(r.pmcid) }),
         ...(r.doi !== undefined && { doi: String(r.doi) }),
         ...(errmsg !== undefined && { errmsg }),
-      };
-    });
+      });
+    }
+
+    // The converter answers a repeated identifier once and echoes the form it
+    // was sent in — PMC-prefixed, upper-cased, or with another element's DOI
+    // casing — so each element is matched to its answer by that key and
+    // reported under its own spelling. (#165)
+    const records = input.ids.map((requestedId) => ({
+      requestedId,
+      ...(conversions.get(matchKey(requestedId, input.idType)) ?? { errmsg: NO_RECORD_ERRMSG }),
+    }));
 
     const totalConverted = records.filter((r) => !r.errmsg).length;
     ctx.log.info('pubmed_convert_ids completed', {

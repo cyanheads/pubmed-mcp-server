@@ -36,12 +36,17 @@ const { fetchFulltextTool } = await import('@/mcp-server/tools/definitions/fetch
 
 /** Syntactically valid, but no PubMed UID — NCBI rejects the whole list. */
 const INVALID = '00000000';
+/**
+ * The form the tools send {@link INVALID} in — leading zeros stripped, `0` kept
+ * (#161). NCBI answers `id=0` with the same `ID list is empty!` envelope.
+ */
+const INVALID_SENT = '0';
 /** Well-formed and unassigned — NCBI answers with an empty set. */
 const UNKNOWN = '99999999';
 
-/** NCBI's replies, verbatim apart from whitespace, for each ID above. */
+/** NCBI's replies, verbatim apart from whitespace, keyed by the ID each tool sends. */
 const EFETCH_REPLIES: Record<string, { body: string; status: number }> = {
-  [INVALID]: {
+  [INVALID_SENT]: {
     status: 400,
     body: '<?xml version="1.0" encoding="UTF-8" ?>\n<!DOCTYPE eEfetchResult PUBLIC "-//NLM//DTD efetch 20131226//EN" "https://eutils.ncbi.nlm.nih.gov/eutils/dtd/20131226/efetch.dtd">\n<eFetchResult>\n\t<ERROR>ID list is empty! Possibly it has no correct IDs.</ERROR>\n</eFetchResult>\n',
   },
@@ -107,7 +112,7 @@ describe('pubmed_fetch_articles with an all-invalid PMID list (issue #155)', () 
       unavailablePmids: [INVALID],
     });
     expect(getEnrichment(ctx)?.notice).toMatch(/No articles were returned/);
-    expect(efetchCallsFor(INVALID)).toBe(1);
+    expect(efetchCallsFor(INVALID_SENT)).toBe(1);
   });
 
   it('reads the same as an unknown well-formed PMID on both surfaces', async () => {

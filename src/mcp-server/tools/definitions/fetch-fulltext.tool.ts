@@ -6,6 +6,8 @@
  *   - `pmcids` — fetch directly by PMC ID. Articles not in PMC fall through to
  *     EPMC by PMC ID, then to Unpaywall when the DOI is available.
  *   - `pmids` — resolve PMID → PMCID via PMC ID Converter, then run the chain.
+ *     A zero-padded PMID runs as the PMID it spells; `unavailable[]` and
+ *     `deferred.ids` report it as the caller wrote it.
  *   - `dois` — resolve DOI → PMCID via the PMC ID Converter (mirroring `pmids`),
  *     then run the chain. DOIs with no PMC counterpart fall through to EPMC
  *     search-by-DOI → fullTextXML, then Unpaywall (EPMC-only OA, preprints).
@@ -54,7 +56,7 @@ import {
 } from '@/services/unpaywall/unpaywall-service.js';
 import { fitWholeItems } from './_budget.js';
 import { conceptMeta, EDAM_DATA_RETRIEVAL, SCHEMA_SCHOLARLY_ARTICLE } from './_concepts.js';
-import { doiStringSchema, pmcidStringSchema, pmidStringSchema } from './_schemas.js';
+import { doiStringSchema, normalizePmid, pmcidStringSchema, pmidStringSchema } from './_schemas.js';
 import { escapeMarkdownInline, escapeMarkdownTableCell, sliceCodeUnits } from './_text.js';
 
 function normalizePmcId(id: string): string {
@@ -1615,6 +1617,11 @@ export const fetchFulltextTool = tool('pubmed_fetch_fulltext', {
     // caller can re-submit rather than whatever id the article happens to
     // carry — a `pmids` request recovers articles keyed by PMCID. (#100)
     const inputIdByArticle = new Map<FulltextArticle, string>();
+    // The caller's own spellings of each chain key, so `unavailable[]` and
+    // `deferred.ids` report what was submitted. Only the `pmids` branch fills
+    // it — a PMID's chain runs on its canonical form — and any other key is its
+    // own spelling. (#161)
+    const callerIds = new Map<string, string[]>();
 
     const budget: BudgetOptions = {
       overflowMode: input.overflowMode,
@@ -1633,9 +1640,19 @@ export const fetchFulltextTool = tool('pubmed_fetch_fulltext', {
     let doiCandidates: DoiCandidate[] = [];
 
     if (input.pmids) {
-      for (const id of input.pmids) chainByInput.set(id, []);
+      // The ID Converter parses `00000001` as PMID 1 yet reports it "not found
+      // in PMC", and every later stage answers with NCBI's own PMID, so the chain
+      // runs once per distinct PMID in its canonical form. (#161)
+      for (const id of input.pmids) {
+        const pmid = normalizePmid(id);
+        const spellings = callerIds.get(pmid) ?? [];
+        if (!spellings.includes(id)) spellings.push(id);
+        callerIds.set(pmid, spellings);
+      }
+      const pmids = [...callerIds.keys()];
+      for (const id of pmids) chainByInput.set(id, []);
       const records = await getNcbiService().idConvert(
-        input.pmids,
+        pmids,
         'pmid',
         ctx.signal ? { signal: ctx.signal } : undefined,
       );
@@ -1658,7 +1675,7 @@ export const fetchFulltextTool = tool('pubmed_fetch_fulltext', {
           pmidFallbackCandidates.push({ pmid, ...(r.doi && { doi: r.doi }) });
         }
       }
-      for (const requested of input.pmids) {
+      for (const requested of pmids) {
         if (!seen.has(requested)) {
           chainByInput.get(requested)?.push({
             tier: 'pmc',
@@ -2126,13 +2143,15 @@ export const fetchFulltextTool = tool('pubmed_fetch_fulltext', {
     for (const [id, chain] of chainByInput) {
       if (recoveredIds.has(id)) continue;
       const unqueried = unqueriedByInput.get(id);
-      unavailable.push({
-        id,
-        idType,
-        reason: reasonFromChain(chain),
-        triedTiers: chain,
-        ...(unqueried?.size && { unqueriedTiers: [...unqueried] }),
-      });
+      for (const callerId of callerIds.get(id) ?? [id]) {
+        unavailable.push({
+          id: callerId,
+          idType,
+          reason: reasonFromChain(chain),
+          triedTiers: chain,
+          ...(unqueried?.size && { unqueriedTiers: [...unqueried] }),
+        });
+      }
     }
 
     // Whole-response budget: fill with complete records in response order and
@@ -2154,7 +2173,10 @@ export const fetchFulltextTool = tool('pubmed_fetch_fulltext', {
             idType,
             // Every recovery site records the input id; `articleDisplayId` is
             // the total-function fallback, not an expected path.
-            ids: fit.deferred.map((a) => inputIdByArticle.get(a) ?? articleDisplayId(a)),
+            ids: fit.deferred.map((a) => {
+              const id = inputIdByArticle.get(a) ?? articleDisplayId(a);
+              return callerIds.get(id)?.[0] ?? id;
+            }),
             nextDeferredCharacters,
           }
         : undefined;
