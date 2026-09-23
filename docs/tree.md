@@ -1,6 +1,6 @@
 # pubmed-mcp-server - Directory Structure
 
-Generated on: 2026-09-22 23:00:25
+Generated on: 2026-09-23 01:24:24
 
 ```text
 pubmed-mcp-server/
@@ -223,13 +223,16 @@ pubmed-mcp-server/
 │   │       └── definitions/
 │   │           ├── _budget.test.ts
 │   │           ├── _fuzz-helpers.ts
+│   │           ├── _schemas.test.ts
 │   │           ├── _text.test.ts
+│   │           ├── convert-ids-per-element.test.ts
 │   │           ├── convert-ids.tool.test.ts
 │   │           ├── europepmc-search-failures.test.ts
 │   │           ├── fetch-articles.tool.test.ts
 │   │           ├── fetch-fulltext.tool.test.ts
 │   │           ├── find-related.tool.test.ts
 │   │           ├── format-citations.tool.test.ts
+│   │           ├── input-aliases.test.ts
 │   │           ├── lookup-citation.tool.test.ts
 │   │           ├── lookup-mesh.tool.test.ts
 │   │           ├── pubmed-europepmc-fetch.tool.test.ts
@@ -238,7 +241,8 @@ pubmed-mcp-server/
 │   │           ├── security.test.ts
 │   │           ├── spell-check.tool.test.ts
 │   │           ├── tools.fuzz.test.ts
-│   │           └── unknown-pmid-envelope.test.ts
+│   │           ├── unknown-pmid-envelope.test.ts
+│   │           └── zero-padded-pmid.test.ts
 │   ├── services/
 │   │   ├── europe-pmc/
 │   │   │   └── europe-pmc-service.test.ts

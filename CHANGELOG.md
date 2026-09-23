@@ -2,6 +2,10 @@
 
 All notable changes to this project. Each entry links to its full per-version file in [changelog/](changelog/).
 
+## [2.10.16](changelog/2.10.x/2.10.16.md) — 2026-09-22
+
+Normalizes a zero-padded PMID to the PMID it spells across every ID-diffing tool, and adds snake_case/synonym parameter aliases (ids, limit, max_results, citation) across the tool surface.
+
 ## [2.10.15](changelog/2.10.x/2.10.15.md) — 2026-09-22
 
 Retries NCBI's proxy_stream() backend relays and Europe PMC's empty-envelope and outage responses instead of surfacing them as caller errors, and closes the NCBI request queue on a 429 for every caller at once.
