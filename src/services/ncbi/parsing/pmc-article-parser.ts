@@ -462,9 +462,42 @@ function renderBlock(node: JatsNode): string {
 /**
  * The `<graphic>`/`<media>` pointer an asset hangs its file on, and the element
  * a deposit may hang the label and caption on instead of on the asset itself.
+ *
+ * A direct child wins, a `<graphic>` before a `<media>`. Without one, the
+ * pointer is read from the asset's `<alternatives>`, where publishers offer the
+ * same figure in several file formats — the fallback `<table-wrap>` and
+ * `<disp-formula>` already apply to their own `<alternatives>` children. (#142)
  */
 function assetPointer(node: JatsNode): JatsNode | undefined {
-  return findOne(node, 'graphic') ?? findOne(node, 'media');
+  return (
+    findOne(node, 'graphic') ??
+    findOne(node, 'media') ??
+    alternativePointer(findOne(node, 'alternatives'))
+  );
+}
+
+/** Pointer elements an asset's `<alternatives>` can offer its file through. */
+const ASSET_POINTER_TAGS: ReadonlySet<string> = new Set(['graphic', 'media']);
+
+/**
+ * The `<graphic>`/`<media>` an `<alternatives>` offers for display: one whose
+ * `@specific-use` names the web (`web`, `web-version`, `web-only`), else the
+ * first in document order. JATS4R marks the renderings of one figure `web` and
+ * `print` exactly this way, and keying on that attribute needs no list of file
+ * formats to rank, which would have to track every publisher's spelling of
+ * them. Not {@link selectAlternative}: that picks the rendering whose *text*
+ * stands for the element, and a pointer carries a file reference, not text.
+ * (#142)
+ */
+function alternativePointer(alternatives: JatsNode | undefined): JatsNode | undefined {
+  if (!alternatives) return;
+  const pointers = childrenOf(alternatives).filter((child) =>
+    ASSET_POINTER_TAGS.has(tagNameOf(child) ?? ''),
+  );
+  return (
+    pointers.find((pointer) => attrOf(pointer, 'specific-use')?.toLowerCase().includes('web')) ??
+    pointers[0]
+  );
 }
 
 /**
@@ -500,13 +533,16 @@ function assetMarker(node: JatsNode, kind: 'Figure' | 'Supplementary'): string {
  * `<title>` takes a line of its own above the items, and a `<list>` or
  * `<def-list>` nested inside a `<list-item>` — both in the JATS content model —
  * indents one level per depth. (#130)
+ *
+ * `withTitle: false` leaves the title out, for a list whose title has become
+ * the heading of the section it forms (see {@link extractBodySections}).
  */
-function renderList(list: JatsNode, depth: number): string {
+function renderList(list: JatsNode, depth: number, withTitle = true): string {
   const pad = NESTED_LIST_INDENT.repeat(depth);
   const listType = attrOf(list, 'list-type');
   const lines: string[] = [];
 
-  const title = textContent(findOne(list, 'title'));
+  const title = withTitle ? textContent(findOne(list, 'title')) : '';
   if (title) lines.push(`${pad}${title}`);
 
   let ordinal = 0;
@@ -530,12 +566,16 @@ function renderList(list: JatsNode, depth: number): string {
   return lines.join('\n');
 }
 
-/** Render a `<def-list>`: its title on a line of its own, then `- term — definition` per item. */
-function renderDefList(defList: JatsNode, depth: number): string {
+/**
+ * Render a `<def-list>`: its title on a line of its own, then
+ * `- term — definition` per item. `withTitle: false` leaves the title out, as
+ * {@link renderList} does.
+ */
+function renderDefList(defList: JatsNode, depth: number, withTitle = true): string {
   const pad = NESTED_LIST_INDENT.repeat(depth);
   const lines: string[] = [];
 
-  const title = textContent(findOne(defList, 'title'));
+  const title = withTitle ? textContent(findOne(defList, 'title')) : '';
   if (title) lines.push(`${pad}${title}`);
 
   for (const item of findAll(defList, 'def-item')) {
@@ -567,12 +607,23 @@ function renderDispQuote(quote: JatsNode): string {
  * container rather than a captioned box — 13 of the 14 in a 68-record draw carry
  * `<sec>` children and nothing else — so rendering it as a caption plus
  * paragraphs would drop the nested headings entirely. (#130)
+ *
+ * The `<caption>`'s `<title>` and `<p>`s are statements of their own and render
+ * as separate blocks, never run together. (#169)
+ *
+ * `withTitle: false` leaves out the `<caption>`'s `<title>` — the box's title in
+ * the JATS content model — for a box whose title has become the heading of the
+ * section it forms (see {@link extractBodySections}).
  */
-function renderBoxedText(boxedText: JatsNode): string {
+function renderBoxedText(boxedText: JatsNode, withTitle = true): string {
   const blocks: string[] = [];
   for (const child of childrenOf(boxedText)) {
-    if (tagNameOf(child) === 'sec') blocks.push(...flattenSec(child));
-    else blocks.push(...flowBlocks([child]));
+    const tag = tagNameOf(child);
+    if (tag === 'sec') blocks.push(...flattenSec(child));
+    else if (tag === 'caption') {
+      const parts = childrenOf(child).filter((c) => withTitle || tagNameOf(c) !== 'title');
+      blocks.push(...flowBlocks(parts, STATEMENT_BLOCK_TAGS));
+    } else blocks.push(...flowBlocks([child]));
   }
   return blocks.join('\n\n');
 }
@@ -651,6 +702,14 @@ function renderDispFormula(formula: JatsNode): string {
  * reads as an article with no body at all. Legacy
  * `<preformat preformat-type="pmc-ocr-text">` deposits, which put the entire
  * article in one such element, are the case that matters. (#130)
+ *
+ * A body-level block that carries a title of its own — a `<def-list>` or
+ * `<list>` `<title>`, a `<boxed-text>` `<caption>` title — forms a section of
+ * its own under that title, and the title leaves the block's text. PMC13546078
+ * opens its `<body>` with its abbreviations `<def-list>` this way; reporting it
+ * as an untitled section left `content[]` with no heading to separate the list
+ * from the abstract above it. Untitled blocks on either side of it are not its
+ * content and stay in untitled sections of their own. (#148)
  */
 export function extractBodySections(body: JatsNode | undefined): ParsedPmcSection[] {
   if (!body) return [];
@@ -672,6 +731,12 @@ export function extractBodySections(body: JatsNode | undefined): ParsedPmcSectio
       if (section) sections.push(section);
       continue;
     }
+    const title = ownBlockTitle(child);
+    if (title) {
+      flushPending();
+      sections.push({ title, text: renderBlockWithoutTitle(child) });
+      continue;
+    }
     pendingBlocks.push(...flowBlocks([child]));
   }
   flushPending();
@@ -680,13 +745,87 @@ export function extractBodySections(body: JatsNode | undefined): ParsedPmcSectio
 }
 
 /**
+ * The title a block carries of its own, where the JATS content model puts one:
+ * a direct `<title>` on a `<def-list>` or `<list>`, the `<caption>` title on a
+ * `<boxed-text>`. Undefined for every other element. (#148)
+ */
+function ownBlockTitle(node: JatsNode): string | undefined {
+  switch (tagNameOf(node)) {
+    case 'def-list':
+    case 'list':
+      return textContent(findOne(node, 'title')) || undefined;
+    case 'boxed-text':
+      return textContent(findOne(findOne(node, 'caption'), 'title')) || undefined;
+    default:
+      return;
+  }
+}
+
+/** A `<sec>`'s own metadata children, which carry no body content. */
+const SECTION_META_TAGS: ReadonlySet<string> = new Set(['title', 'label']);
+
+/**
+ * The titled `<def-list>`, `<list>` or `<boxed-text>` an untitled `<sec>`
+ * carries as its only content — its `<label>` and an empty `<title>` aside —
+ * and that block's title. A `<sec>` holding nothing but its abbreviations list
+ * (PMC12696417) is that list; the list's title is the section's title the way
+ * a body-level block's is. Undefined for a `<sec>` with a title of its own or
+ * any other content. (#148, #169)
+ */
+function loneTitledBlock(sec: JatsNode): { node: JatsNode; title: string } | undefined {
+  if (textContent(findOne(sec, 'title'))) return;
+  const content = childrenOf(sec).filter((child) =>
+    isTextNode(child)
+      ? textOf(child).trim() !== ''
+      : !SECTION_META_TAGS.has(tagNameOf(child) ?? ''),
+  );
+  const [node] = content;
+  if (content.length !== 1 || !node || isTextNode(node)) return;
+  const title = ownBlockTitle(node);
+  return title ? { node, title } : undefined;
+}
+
+/**
+ * The title a `<sec>` goes by in the output: its own `<title>`, else the one
+ * {@link loneTitledBlock} lifts. {@link extractSection} titles the section and
+ * {@link collectSectioned} names the tables and assets inside it from this one
+ * rule, so a `sections` filter keeps them together. (#169)
+ */
+function secTitle(sec: JatsNode): string | undefined {
+  return textContent(findOne(sec, 'title')) || loneTitledBlock(sec)?.title;
+}
+
+/** A block whose {@link ownBlockTitle} became its section's title, rendered without it. */
+function renderBlockWithoutTitle(node: JatsNode): string {
+  switch (tagNameOf(node)) {
+    case 'def-list':
+      return renderDefList(node, 0, false);
+    case 'list':
+      return renderList(node, 0, false);
+    case 'boxed-text':
+      return renderBoxedText(node, false);
+    default:
+      return renderBlock(node);
+  }
+}
+
+/**
  * Read one `<sec>`, walking every child in document order. The first `<title>`
  * and `<label>` are the section's own metadata, a `<sec>` is a subsection, and
  * everything else — `<p>` and block elements alike — contributes text at the
  * position it occupies. Reading `<p>` and `<sec>` alone is what dropped a
  * section's lists, figures, formulae and boxed text outright. (#130)
+ *
+ * An untitled `<sec>` whose only content is a titled block takes that block's
+ * title, and the block renders without it (see {@link loneTitledBlock}). (#169)
  */
 function extractSection(sec: JatsNode): ParsedPmcSection | null {
+  const lone = loneTitledBlock(sec);
+  if (lone) {
+    const label = textContent(findOne(sec, 'label')) || undefined;
+    return { title: lone.title, ...(label && { label }), text: renderBlockWithoutTitle(lone.node) };
+  }
+
   let title: string | undefined;
   let label: string | undefined;
   const textParts: string[] = [];
@@ -757,10 +896,18 @@ export function extractPmcTables(root: JatsNode | undefined): ParsedPmcTable[] {
 
 /**
  * Walk a subtree in document order, collecting whatever `take` recognizes and
- * carrying the innermost enclosing `<sec>` title down to it. An untitled `<sec>`
- * keeps its parent's title rather than dropping the reader's only positional
- * cue, and an element inside no `<sec>` at all gets none. A recognized element
- * is not descended into — it parses its own subtree.
+ * carrying the title of the innermost enclosing section down to it. An untitled
+ * `<sec>` keeps its parent's title rather than dropping the reader's only
+ * positional cue, and an element inside no section at all gets none. A
+ * recognized element is not descended into — it parses its own subtree.
+ *
+ * A section here is whatever {@link extractBodySections} reports as one, under
+ * the title it reports: a `<sec>` by {@link secTitle}, and a titled block
+ * sitting directly in `<body>` by its own title — so a figure in a titled
+ * body-level box names the box, and a `sections` filter on the box keeps it.
+ * A `<sec>` inside a `<boxed-text>` is no section: the box flattens it into its
+ * text (see {@link renderBoxedText}), so what sits in it names the section the
+ * box belongs to. (#169)
  *
  * Shared by the table and asset walks so the section-title rule has one
  * definition and cannot drift between them.
@@ -770,7 +917,9 @@ function collectSectioned<T>(
   sectionTitle: string | undefined,
   out: T[],
   take: (child: JatsNode, tag: string, sectionTitle: string | undefined) => T | undefined,
+  inBox = false,
 ): void {
+  const inBody = tagNameOf(node) === 'body';
   for (const child of childrenOf(node)) {
     const tag = tagNameOf(child);
     if (!tag) continue;
@@ -779,9 +928,14 @@ function collectSectioned<T>(
       out.push(collected);
       continue;
     }
-    const nested =
-      tag === 'sec' ? textContent(findOne(child, 'title')) || sectionTitle : sectionTitle;
-    collectSectioned(child, nested, out, take);
+    const own = inBox
+      ? undefined
+      : tag === 'sec'
+        ? secTitle(child)
+        : inBody
+          ? ownBlockTitle(child)
+          : undefined;
+    collectSectioned(child, own || sectionTitle, out, take, inBox || tag === 'boxed-text');
   }
 }
 
@@ -965,7 +1119,8 @@ function parseAsset(
 ): ParsedPmcAsset {
   const id = attrOf(node, 'id');
   // Both `fig` and `supplementary-material` carry the pointer on a child
-  // element: a `<graphic>` for images, a `<media>` for everything else.
+  // element — a `<graphic>` for images, a `<media>` for everything else — or on
+  // one of the renderings their `<alternatives>` offers.
   const pointer = assetPointer(node);
   const href = pointer ? attrOf(pointer, 'xlink:href') : undefined;
   // `label?, caption?` are in the JATS content model of `<media>` and

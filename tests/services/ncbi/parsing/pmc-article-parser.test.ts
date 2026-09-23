@@ -263,24 +263,28 @@ describe('extractBodySections', () => {
     expect(extractBodySections(body)).toEqual([{ title: 'Introduction', text: 'Intro text.' }]);
   });
 
-  it('renders a def-list as a title line and one entry per def-item (#130)', () => {
+  it('renders a def-list as one entry per def-item, its title lifted onto an untitled <sec> (#130, #169)', () => {
     // PMC12696417's ABBREVIATIONS: a <def-list> is the untitled <sec>'s only
-    // child, so reading <p> and <sec> alone dropped the section outright.
-    const body = el('body', [
-      el('sec', [
-        el('def-list', [
-          el('title', [t('ABBREVIATIONS')]),
-          el('def-item', [
-            el('term', [t('ANOVA')]),
-            el('def', [el('p', [t('analysis of variance')])]),
-          ]),
-          el('def-item', [el('term', [t('SNP')]), el('def', [el('p', [t('single nucleotide')])])]),
-        ]),
-      ]),
+    // child, so reading <p> and <sec> alone dropped the section outright. The
+    // list's title is the section's title, the way a body-level list's is.
+    const defList = el('def-list', [
+      el('title', [t('ABBREVIATIONS')]),
+      el('def-item', [el('term', [t('ANOVA')]), el('def', [el('p', [t('analysis of variance')])])]),
+      el('def-item', [el('term', [t('SNP')]), el('def', [el('p', [t('single nucleotide')])])]),
     ]);
 
-    expect(extractBodySections(body)).toEqual([
+    expect(extractBodySections(el('body', [el('sec', [defList])]))).toEqual([
       {
+        title: 'ABBREVIATIONS',
+        text: '- ANOVA — analysis of variance\n- SNP — single nucleotide',
+      },
+    ]);
+    // Under a titled <sec> the list keeps its title as a line of its own.
+    expect(
+      extractBodySections(el('body', [el('sec', [el('title', [t('Glossary')]), defList])])),
+    ).toEqual([
+      {
+        title: 'Glossary',
         text: 'ABBREVIATIONS\n- ANOVA — analysis of variance\n- SNP — single nucleotide',
       },
     ]);
@@ -418,6 +422,83 @@ describe('extractBodySections', () => {
     // The double space between "CME" and "Infectious" is OCR column spacing that
     // textContent()'s whitespace collapse would have destroyed.
     expect(sections[0]?.text).toContain('CME  Infectious');
+  });
+
+  it('titles a body-level def-list section with the def-list own title (#148)', () => {
+    // PMC13546078's <body> opens with its abbreviations <def-list>, before any
+    // <sec>. The title used to be rendered as the first line of an untitled
+    // section's text, so content[] printed no heading and the list ran on from
+    // the abstract above it.
+    const body = el('body', [
+      el('def-list', [
+        el('title', [t('Abbreviations')]),
+        el('def-item', [el('term', [t('BS')]), el('def', [el('p', [t('bariatric surgery')])])]),
+        el('def-item', [el('term', [t('CV')]), el('def', [el('p', [t('cardiovascular')])])]),
+      ]),
+      el('sec', [el('title', [t('Introduction')]), el('p', [t('Intro text.')])]),
+    ]);
+
+    expect(extractBodySections(body)).toEqual([
+      { title: 'Abbreviations', text: '- BS — bariatric surgery\n- CV — cardiovascular' },
+      { title: 'Introduction', text: 'Intro text.' },
+    ]);
+  });
+
+  it('titles body-level list and boxed-text sections the same way (#148)', () => {
+    // A <list> carries its title as a direct <title>; a <boxed-text> carries it
+    // in <caption><title>, the only place its JATS content model puts one.
+    const body = el('body', [
+      el('list', [el('title', [t('Key points')]), el('list-item', [el('p', [t('Point one.')])])], {
+        '@_list-type': 'bullet',
+      }),
+      el('boxed-text', [
+        el('caption', [el('title', [t('Box 1. Study at a glance')])]),
+        el('sec', [el('title', [t('Design')]), el('p', [t('Randomized.')])]),
+      ]),
+    ]);
+
+    expect(extractBodySections(body)).toEqual([
+      { title: 'Key points', text: '- Point one.' },
+      { title: 'Box 1. Study at a glance', text: 'Design\nRandomized.' },
+    ]);
+  });
+
+  it('gives a titled body-level block its own section inside a run of untitled blocks (#148)', () => {
+    // Prose on either side of the titled list is not the list's content, so it
+    // stays in untitled sections of its own rather than under the list heading.
+    const body = el('body', [
+      el('p', [t('Opening paragraph.')]),
+      el('list', [el('title', [t('Key points')]), el('list-item', [el('p', [t('Point.')])])], {
+        '@_list-type': 'bullet',
+      }),
+      el('p', [t('Closing paragraph.')]),
+      el('sec', [el('title', [t('Methods')]), el('p', [t('Methods text.')])]),
+    ]);
+
+    expect(extractBodySections(body)).toEqual([
+      { text: 'Opening paragraph.' },
+      { title: 'Key points', text: '- Point.' },
+      { text: 'Closing paragraph.' },
+      { title: 'Methods', text: 'Methods text.' },
+    ]);
+  });
+
+  it('keeps a run of untitled body-level blocks in one untitled section (#148)', () => {
+    // Characterization: a block with no title of its own gives the section no
+    // title — the tool layer labels it — and a run of them stays together.
+    const body = el('body', [
+      el('p', [t('Opening paragraph.')]),
+      el('list', [el('list-item', [el('p', [t('Untitled point.')])])], {
+        '@_list-type': 'bullet',
+      }),
+      el('boxed-text', [el('sec', [el('title', [t('Core Ideas')]), el('p', [t('Boxed.')])])]),
+      el('sec', [el('title', [t('Methods')]), el('p', [t('Methods text.')])]),
+    ]);
+
+    expect(extractBodySections(body)).toEqual([
+      { text: 'Opening paragraph.\n\n- Untitled point.\n\nCore Ideas\nBoxed.' },
+      { title: 'Methods', text: 'Methods text.' },
+    ]);
   });
 
   it('renders a p-nested disp-formula at block position with its label (#130)', () => {
@@ -1411,6 +1492,134 @@ describe('extractPmcAssets', () => {
     expect(sections).not.toContain('warranted.Fig. 1Comparison');
     expect(sections).not.toContain('Comparison of apparent resistivity');
     expect(sections).toContain('[Figure: Fig. 1]');
+  });
+
+  describe('a pointer wrapped in <alternatives> (#142)', () => {
+    /**
+     * No figure of this shape turned up in a ~2,000-figure live sample, so these
+     * cases are pinned against fixtures built from the JATS content model and
+     * JATS4R's display-object recommendation, not against a live PMCID.
+     */
+    const graphic = (href: string, attrs: Record<string, string> = {}, children: JatsNode[] = []) =>
+      el('graphic', children, { '@_xlink:href': href, ...attrs });
+
+    /** An article whose one section holds a single `<fig id="Fig1">` with these children. */
+    const articleWithFig = (...children: JatsNode[]) =>
+      el('article', [
+        el('body', [
+          el('sec', [el('title', [t('Results')]), el('fig', children, { '@_id': 'Fig1' })]),
+        ]),
+      ]);
+
+    it('takes the first pointer in document order when none is marked for the web', () => {
+      const article = articleWithFig(
+        el('label', [t('Figure 1')]),
+        el('caption', [el('p', [t('Study design.')])]),
+        el('alternatives', [
+          graphic('fig1.tif', { '@_mimetype': 'image', '@_mime-subtype': 'tiff' }),
+          graphic('fig1.jpg', { '@_mimetype': 'image', '@_mime-subtype': 'jpeg' }),
+        ]),
+      );
+
+      expect(extractPmcAssets(article)).toEqual([
+        {
+          assetType: 'figure',
+          id: 'Fig1',
+          label: 'Figure 1',
+          caption: 'Study design.',
+          sectionTitle: 'Results',
+          href: 'fig1.tif',
+        },
+      ]);
+    });
+
+    it('prefers the pointer whose specific-use names the web over a print one before it', () => {
+      const article = articleWithFig(
+        el('label', [t('Figure 1')]),
+        el('alternatives', [
+          graphic('fig1-print.tif', { '@_specific-use': 'print' }),
+          graphic('fig1-web.jpg', { '@_specific-use': 'web' }),
+        ]),
+      );
+
+      expect(extractPmcAssets(article)[0]?.href).toBe('fig1-web.jpg');
+    });
+
+    it('matches a specific-use value that contains web, on a <media> as well as a <graphic>', () => {
+      const article = articleWithFig(
+        el('label', [t('Movie 1')]),
+        el('alternatives', [
+          el('media', [], { '@_xlink:href': 'movie1.mov', '@_specific-use': 'print-only' }),
+          el('media', [], { '@_xlink:href': 'movie1.mp4', '@_specific-use': 'Web-Version' }),
+        ]),
+      );
+
+      expect(extractPmcAssets(article)[0]?.href).toBe('movie1.mp4');
+    });
+
+    it('reads a label and caption hung on the wrapped pointer and names the marker with it', () => {
+      // `label?, caption?` are in the content model of <graphic>; a label hung
+      // there rather than on the <fig> must reach both the asset and the marker
+      // the tool layer rebuilds from it.
+      const article = articleWithFig(
+        el('alternatives', [
+          graphic('fig2.jpg', { '@_specific-use': 'web' }, [
+            el('label', [t('Figure 2')]),
+            el('caption', [el('p', [t('Enrollment flow.')])]),
+          ]),
+          graphic('fig2.tif', { '@_specific-use': 'print' }),
+        ]),
+      );
+
+      expect(extractPmcAssets(article)).toEqual([
+        {
+          assetType: 'figure',
+          id: 'Fig1',
+          label: 'Figure 2',
+          caption: 'Enrollment flow.',
+          sectionTitle: 'Results',
+          href: 'fig2.jpg',
+        },
+      ]);
+      expect(parsePmcArticle(article).sections[0]?.text).toBe('[Figure: Figure 2]');
+    });
+
+    it('keeps a direct pointer ahead of any under <alternatives>', () => {
+      // Characterization: the direct child resolves first, <graphic> before
+      // <media>, exactly as before the <alternatives> fallback existed.
+      const direct = articleWithFig(
+        el('label', [t('Figure 1')]),
+        graphic('direct.jpg'),
+        el('alternatives', [graphic('wrapped.jpg', { '@_specific-use': 'web' })]),
+      );
+      const directMedia = articleWithFig(
+        el('media', [], { '@_xlink:href': 'direct.mp4' }),
+        el('alternatives', [graphic('wrapped.jpg', { '@_specific-use': 'web' })]),
+      );
+
+      expect(extractPmcAssets(direct)[0]?.href).toBe('direct.jpg');
+      expect(extractPmcAssets(directMedia)[0]?.href).toBe('direct.mp4');
+    });
+
+    it('reports no href when neither the figure nor its <alternatives> holds a pointer', () => {
+      // Characterization: an <alternatives> of renderings that name no file
+      // still leaves the figure without an href — nothing is fabricated.
+      const article = articleWithFig(
+        el('label', [t('Figure 3')]),
+        el('caption', [el('p', [t('Schematic.')])]),
+        el('alternatives', [texMath('x^2'), el('textual-form', [t('A parabola.')])]),
+      );
+
+      expect(extractPmcAssets(article)).toEqual([
+        {
+          assetType: 'figure',
+          id: 'Fig1',
+          label: 'Figure 3',
+          caption: 'Schematic.',
+          sectionTitle: 'Results',
+        },
+      ]);
+    });
   });
 });
 
