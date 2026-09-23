@@ -2,6 +2,10 @@
 
 All notable changes to this project. Each entry links to its full per-version file in [changelog/](changelog/).
 
+## [2.10.17](changelog/2.10.x/2.10.17.md) — 2026-09-23
+
+Fixes pubmed_fetch_fulltext body parsing (alternatives figures, titled body-level blocks), word-boundary truncation with per-subsection accounting, Unpaywall title/journal/year, and case-insensitive DOI and zero-padded PMC ID matching.
+
 ## [2.10.16](changelog/2.10.x/2.10.16.md) — 2026-09-22
 
 Normalizes a zero-padded PMID to the PMID it spells across every ID-diffing tool, and adds snake_case/synonym parameter aliases (ids, limit, max_results, citation) across the tool surface.

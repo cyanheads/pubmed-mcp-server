@@ -1,6 +1,6 @@
 # pubmed-mcp-server - Directory Structure
 
-Generated on: 2026-09-23 01:24:24
+Generated on: 2026-09-23 04:42:19
 
 ```text
 pubmed-mcp-server/
@@ -229,6 +229,8 @@ pubmed-mcp-server/
 │   │           ├── convert-ids.tool.test.ts
 │   │           ├── europepmc-search-failures.test.ts
 │   │           ├── fetch-articles.tool.test.ts
+│   │           ├── fetch-fulltext-jats-sections.test.ts
+│   │           ├── fetch-fulltext-routing.test.ts
 │   │           ├── fetch-fulltext.tool.test.ts
 │   │           ├── find-related.tool.test.ts
 │   │           ├── format-citations.tool.test.ts
