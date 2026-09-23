@@ -12,7 +12,7 @@ const ServerConfigSchema = z.object({
   apiKey: z.string().optional().describe('NCBI API key'),
   toolIdentifier: z.string().default('pubmed-mcp-server').describe('NCBI tool identifier'),
   adminEmail: z.email().optional().describe('Admin contact email'),
-  requestDelayMs: z.coerce.number().min(50).max(5000).default(334).describe('Request delay in ms'),
+  requestDelayMs: z.coerce.number().min(50).max(5000).default(400).describe('Request delay in ms'),
   maxConcurrent: z.coerce
     .number()
     .min(1)
@@ -97,9 +97,13 @@ export function getServerConfig(): ServerConfig {
     });
     /**
      * An API key raises NCBI's rate ceiling from ~3 req/s to ~10 req/s. If the
-     * operator hasn't explicitly overridden the delay, tighten from the 334ms
-     * safe default to 100ms when a key is present. A set-but-blank delay counts
+     * operator hasn't explicitly overridden the delay, tighten from the 400ms
+     * keyless default to 100ms when a key is present. A set-but-blank delay counts
      * as not overridden, matching how `parseEnvConfig` reads it.
+     *
+     * The keyless default sits above the 334ms that 3 req/s works out to, leaving
+     * margin for arrival jitter: spaced at exactly the ceiling, a small burst of
+     * concurrent calls draws 429s.
      */
     _config =
       parsed.apiKey && !process.env.NCBI_REQUEST_DELAY_MS?.trim()

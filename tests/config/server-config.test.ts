@@ -32,7 +32,7 @@ describe('getServerConfig', () => {
     const config = getServerConfig();
 
     expect(config.toolIdentifier).toBe('pubmed-mcp-server');
-    expect(config.requestDelayMs).toBe(334);
+    expect(config.requestDelayMs).toBe(400);
     expect(config.maxRetries).toBe(6);
     expect(config.timeoutMs).toBe(30000);
     expect(config.apiKey).toBeUndefined();
@@ -138,6 +138,22 @@ describe('getServerConfig', () => {
     const config = getServerConfig();
 
     expect(config.requestDelayMs).toBe(100);
+  });
+
+  it('keeps an explicit NCBI_REQUEST_DELAY_MS over the default without a key', async () => {
+    delete process.env.NCBI_API_KEY;
+    vi.stubEnv('NCBI_REQUEST_DELAY_MS', '334');
+
+    const getServerConfig = await loadModule();
+    expect(getServerConfig().requestDelayMs).toBe(334);
+  });
+
+  it('reads a set-but-empty NCBI_REQUEST_DELAY_MS without a key as the 400 ms default', async () => {
+    delete process.env.NCBI_API_KEY;
+    vi.stubEnv('NCBI_REQUEST_DELAY_MS', '');
+
+    const getServerConfig = await loadModule();
+    expect(getServerConfig().requestDelayMs).toBe(400);
   });
 
   it('caches the config on repeated calls', async () => {

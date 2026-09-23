@@ -323,7 +323,7 @@ Key environment variables:
 | `STORAGE_PROVIDER_TYPE` | Storage backend: `in-memory`, `filesystem`, `supabase`, `cloudflare-kv/r2/d1` | `in-memory` |
 | `NCBI_API_KEY` | NCBI API key for higher rate limits (10 req/s vs 3 req/s) | none |
 | `NCBI_ADMIN_EMAIL` | Contact email sent with NCBI requests (recommended by NCBI) | none |
-| `NCBI_REQUEST_DELAY_MS` | Minimum gap between NCBI request starts in ms | 334 (100 with key) |
+| `NCBI_REQUEST_DELAY_MS` | Minimum gap between NCBI request starts in ms | 400 (100 with key) |
 | `NCBI_MAX_CONCURRENT` | Max concurrent in-flight NCBI requests | `8` |
 | `NCBI_MAX_RETRIES` | Retry attempts for failed NCBI requests | 6 |
 | `NCBI_TIMEOUT_MS` | Per-request HTTP timeout in ms | `30000` |
