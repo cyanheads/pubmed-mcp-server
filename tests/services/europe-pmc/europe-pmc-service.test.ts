@@ -157,6 +157,31 @@ describe('EuropePmcService.search', () => {
     expect(decoded).toContain('SRC:"PPR"');
   });
 
+  it('returns the query Europe PMC echoes back as the effective query', async () => {
+    mockFetchWithTimeout.mockResolvedValue(
+      jsonResponse({ hitCount: 2595, request: { queryString: '(alphafold) AND (SRC:"PPR")' } }),
+    );
+
+    const result = await makeService().search({ query: 'alphafold', sources: ['PPR'] });
+
+    expect(result.query).toBe('(alphafold) AND (SRC:"PPR")');
+  });
+
+  it.each([
+    ['no `request` echo at all', {}],
+    ['a `request` echo with no `queryString`', { request: { cursorMark: '*' } }],
+  ])('falls back to the query it sent, source filter included, on %s', async (_label, echo) => {
+    mockFetchWithTimeout.mockResolvedValue(jsonResponse({ hitCount: 3, ...echo }));
+
+    const result = await makeService().search({ query: ' alphafold ', sources: ['MED', 'PPR'] });
+
+    const sent = new URL(mockFetchWithTimeout.mock.calls[0]?.[0] as string).searchParams.get(
+      'query',
+    );
+    expect(result.query).toBe('(alphafold) AND (SRC:"MED" OR SRC:"PPR")');
+    expect(result.query).toBe(sent);
+  });
+
   it('sends an unfiltered query when sources is omitted', async () => {
     mockFetchWithTimeout.mockResolvedValue(jsonResponse({ hitCount: 0 }));
     const service = makeService();

@@ -1,9 +1,11 @@
 /**
- * @fileoverview Low-level HTTP client for Europe PMC's REST API. Builds URLs,
- * injects the optional contact email, and exposes single-attempt search,
- * fullTextXML, and citation-link calls. Classifies each endpoint's HTTP
- * failures — a failed search as `europepmc_unreachable`, a missing fullTextXML
- * as `not-available` — while retry logic lives in `EuropePmcService`.
+ * @fileoverview Low-level HTTP client for Europe PMC's REST API. Builds URLs and
+ * the source-filtered search query (`buildSearchQuery`, shared with the service
+ * so it can report the query it sent), injects the optional contact email, and
+ * exposes single-attempt search, fullTextXML, and citation-link calls.
+ * Classifies each endpoint's HTTP failures — a failed search as
+ * `europepmc_unreachable`, a missing fullTextXML as `not-available` — while
+ * retry logic lives in `EuropePmcService`.
  * @module src/services/europe-pmc/api-client
  */
 
@@ -210,7 +212,7 @@ export class EuropePmcApiClient {
 
   private buildSearchUrl(params: EuropePmcSearchParams): string {
     const finalParams: Record<string, string> = {
-      query: this.buildQueryString(params),
+      query: buildSearchQuery(params),
       format: 'json',
       resultType: params.resultType ?? 'core',
       pageSize: String(params.pageSize ?? 25),
@@ -221,16 +223,17 @@ export class EuropePmcApiClient {
 
     return `${EUROPEPMC_API_BASE}/search?${new URLSearchParams(finalParams).toString()}`;
   }
+}
 
-  /**
-   * Combine the caller's query with an optional source filter. EPMC's query
-   * syntax supports `SRC:"X"` field tokens — we OR-join the requested sources
-   * into a parenthesized clause and AND it with the user's query.
-   */
-  private buildQueryString(params: EuropePmcSearchParams): string {
-    const base = params.query.trim();
-    if (!params.sources || params.sources.length === 0) return base;
-    const sourceClause = params.sources.map((s) => `SRC:"${s}"`).join(' OR ');
-    return `(${base}) AND (${sourceClause})`;
-  }
+/**
+ * The query string a search sends: the caller's query combined with an
+ * optional source filter. EPMC's query syntax supports `SRC:"X"` field tokens —
+ * the requested sources are OR-joined into a parenthesized clause and ANDed
+ * with the caller's query.
+ */
+export function buildSearchQuery(params: Pick<EuropePmcSearchParams, 'query' | 'sources'>): string {
+  const base = params.query.trim();
+  if (!params.sources || params.sources.length === 0) return base;
+  const sourceClause = params.sources.map((s) => `SRC:"${s}"`).join(' OR ');
+  return `(${base}) AND (${sourceClause})`;
 }

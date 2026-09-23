@@ -3,7 +3,10 @@
  * can't reach: preprints (source `PPR`), Agricola (`AGR`), patents (`PAT`),
  * and EPMC-only OA articles. Uses EPMC's cursor-based pagination
  * (`cursorMark`) — unlike `pubmed_search_articles`'s offset-based paging,
- * because EPMC's search API doesn't support offset.
+ * because EPMC's search API doesn't support offset. `max_results` and `limit`
+ * are accepted as aliases for `pageSize`. The total hit count rides in
+ * `output` so `format()` can state it in the header, and `searchUrl` opens the
+ * source-filtered query Europe PMC actually ran.
  *
  * Only registered when `EUROPEPMC_ENABLED=true` (the default). The handler
  * fails fast with a configuration error if the service is unset, since the
@@ -61,12 +64,16 @@ export const pubmedEuropepmcSearchTool = tool('pubmed_europepmc_search', {
     },
   ] as const,
 
+  // Never advertised; rewritten to the canonical key before the schema parses.
+  // `pageSize` is this tool's only count parameter, so both map to it. (#156)
+  inputAliases: { max_results: 'pageSize', limit: 'pageSize' },
+
   input: z.object({
     query: z
       .string()
       .min(1)
       .describe(
-        'Europe PMC search query. Supports field tokens like `AUTH:"<name>"`, `JOURNAL:"<title>"`, `TITLE:"<words>"`, `PUB_YEAR:[2020 TO 2024]`, `DOI:"..."`, `EXT_ID:<pmid> AND SRC:MED`, `PMCID:PMC<digits>`. Identifier tokens combined with `AND SRC:` must be unquoted — the quoted form matches nothing. Free text is matched broadly across abstract/title/keywords.',
+        'Europe PMC search query. Supports field tokens like `AUTH:"<name>"`, `JOURNAL:"<title>"`, `TITLE:"<words>"`, `PUB_YEAR:[2020 TO 2024]`, `DOI:"..."`, `EXT_ID:<pmid> AND SRC:MED`, `PMCID:PMC<digits>`. Identifier tokens may be quoted or unquoted — this tool wraps every query with its `sources` filter, and Europe PMC honors a quoted identifier inside that wrapper. A PubMed-indexed article resolves under `SRC:MED`, not `SRC:PMC`, whichever identifier is used. Free text is matched broadly across abstract/title/keywords.',
       ),
     pageSize: z
       .number()
@@ -180,14 +187,16 @@ export const pubmedEuropepmcSearchTool = tool('pubmed_europepmc_search', {
       .optional()
       .describe('Cursor to pass back as `cursorMark` for the next page. Absent on the final page.'),
     searchUrl: z.string().describe("Europe PMC's website search URL for this query"),
+    // A domain field, not enrichment: format() sees only this payload, and the
+    // header states the total beside the returned count. (#147)
+    totalCount: z.number().describe('Total matching records across all pages'),
   }),
 
-  // Result-set context the agent reasons with — the query as EPMC echoed it, the total
-  // match count, the sources actually queried, and recovery guidance for empty pages.
-  // Surfaced via ctx.enrich(...) to structuredContent and content[]; out of the return.
+  // Result-set context the agent reasons with — the query as EPMC echoed it, the
+  // sources actually queried, and recovery guidance for empty pages. Surfaced via
+  // ctx.enrich(...) to structuredContent and content[]; out of the return.
   enrichment: {
     query: z.string().describe('Effective query string echoed by Europe PMC'),
-    totalCount: z.number().describe('Total matching records across all pages'),
     appliedSources: z
       .array(SourceEnum)
       .describe('Sources the query was filtered against (defaults applied)'),
@@ -201,7 +210,6 @@ export const pubmedEuropepmcSearchTool = tool('pubmed_europepmc_search', {
   // carries the full structured value; this only shapes the human-facing trailer line.
   enrichmentTrailer: {
     query: { label: 'Effective Query' },
-    totalCount: { label: 'Total Hits' },
     appliedSources: {
       render: (sources) => `**Sources:** ${sources.join(', ')}`,
     },
@@ -293,21 +301,23 @@ export const pubmedEuropepmcSearchTool = tool('pubmed_europepmc_search', {
       query: result.query,
       appliedSources: [...sources] as ('MED' | 'PMC' | 'PPR' | 'PAT' | 'AGR')[],
     });
-    ctx.enrich.total(result.hitCount);
     if (notice) ctx.enrich.notice(notice);
 
     return {
       hits,
       cursorMark: result.cursorMark ?? '*',
       ...(result.nextCursorMark && { nextCursorMark: result.nextCursorMark }),
-      searchUrl: `https://europepmc.org/search?query=${encodeURIComponent(input.query)}`,
+      // The query Europe PMC ran, source wrapper included — `input.query` alone
+      // opens an unfiltered search with a different hit count. (#150)
+      searchUrl: `https://europepmc.org/search?query=${encodeURIComponent(result.query)}`,
+      totalCount: result.hitCount,
     };
   },
 
   format: (result) => {
     const lines = [
       '## Europe PMC Search Results',
-      `**Returned:** ${result.hits.length}`,
+      `**Returned:** ${result.hits.length} of ${result.totalCount}`,
       `**Cursor:** ${result.cursorMark}${result.nextCursorMark ? ` → \`${result.nextCursorMark}\` (next page)` : ' (final page)'}`,
       `**Search URL:** ${result.searchUrl}`,
     ];

@@ -3,7 +3,8 @@
  * @module tests/mcp-server/tools/definitions/pubmed-europepmc-search.tool.test
  */
 
-import { createMockContext, getEnrichment } from '@cyanheads/mcp-ts-core/testing';
+import type { ContentBlock } from '@cyanheads/mcp-ts-core';
+import { createMockContext, getEnrichment, runToolContract } from '@cyanheads/mcp-ts-core/testing';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { textBlocks } from '../../../_helpers.js';
@@ -319,6 +320,7 @@ describe('pubmedEuropepmcSearchTool', () => {
           ],
           cursorMark: '*',
           searchUrl: 'https://europepmc.org/search?query=x',
+          totalCount: 1,
         }),
       )[0]?.text ?? '';
 
@@ -502,6 +504,7 @@ describe('pubmedEuropepmcSearchTool', () => {
           cursorMark: '*',
           nextCursorMark: 'NEXT',
           searchUrl: 'https://europepmc.org/search?query=cancer',
+          totalCount: 1,
         }),
       );
       const text = blocks[0]?.text ?? '';
@@ -523,10 +526,140 @@ describe('pubmedEuropepmcSearchTool', () => {
           hits: [],
           cursorMark: 'CURSOR_X',
           searchUrl: 'https://europepmc.org/search?query=x',
+          totalCount: 0,
         }),
       );
       const text = blocks[0]?.text ?? '';
       expect(text).toContain('final page');
     });
+  });
+});
+
+/** Every text block of a contract run, joined — the header, the hits, and the trailer. */
+const contractText = (result: Awaited<ReturnType<typeof runToolContract>>) =>
+  textBlocks(result.content as ContentBlock[])
+    .map((b) => b.text)
+    .join('\n');
+
+/** A search page as the service returns it: EPMC's echo carries the source wrapper. */
+const page = (hitCount: number, hits: unknown[], query: string) => ({
+  hits,
+  hitCount,
+  cursorMark: '*',
+  query,
+});
+
+describe('pubmedEuropepmcSearchTool searchUrl (issue #150)', () => {
+  beforeEach(() => {
+    mockSearch.mockReset();
+    mockGetEpmc.mockReset();
+    mockGetEpmc.mockReturnValue({ search: mockSearch });
+  });
+
+  it('encodes the source-wrapped query Europe PMC ran, not the caller’s bare query', async () => {
+    mockSearch.mockResolvedValue(page(2595, [], '(alphafold) AND (SRC:"PPR")'));
+
+    const result = await runToolContract(pubmedEuropepmcSearchTool, {
+      query: 'alphafold',
+      sources: ['PPR'],
+      pageSize: 2,
+      resultType: 'lite',
+    });
+
+    const structured = result.structuredContent as { searchUrl: string; query: string };
+    expect(structured.searchUrl).toBe(
+      'https://europepmc.org/search?query=(alphafold)%20AND%20(SRC%3A%22PPR%22)',
+    );
+    expect(new URL(structured.searchUrl).searchParams.get('query')).toBe(structured.query);
+    expect(contractText(result)).toContain(`**Search URL:** ${structured.searchUrl}`);
+  });
+
+  it('carries the default source wrapper when no sources are passed', async () => {
+    mockSearch.mockResolvedValue(
+      page(12, [], '(alphafold) AND (SRC:"MED" OR SRC:"PMC" OR SRC:"PPR")'),
+    );
+
+    const result = await runToolContract(pubmedEuropepmcSearchTool, { query: 'alphafold' });
+
+    const { searchUrl } = result.structuredContent as { searchUrl: string };
+    expect(new URL(searchUrl).searchParams.get('query')).toBe(
+      '(alphafold) AND (SRC:"MED" OR SRC:"PMC" OR SRC:"PPR")',
+    );
+  });
+});
+
+describe('pubmedEuropepmcSearchTool total match count in the header (issue #147)', () => {
+  beforeEach(() => {
+    mockSearch.mockReset();
+    mockGetEpmc.mockReset();
+    mockGetEpmc.mockReturnValue({ search: mockSearch });
+  });
+
+  const hit = (id: string) => ({ id, source: 'PPR', title: `Preprint ${id}` });
+
+  it('puts the total beside Returned and keeps it on structuredContent', async () => {
+    mockSearch.mockResolvedValue(
+      page(2595, [hit('PPR1'), hit('PPR2')], '(alphafold) AND (SRC:"PPR")'),
+    );
+
+    const result = await runToolContract(pubmedEuropepmcSearchTool, {
+      query: 'alphafold',
+      sources: ['PPR'],
+      pageSize: 2,
+    });
+
+    expect(result.isError).toBeFalsy();
+    expect(result.structuredContent).toMatchObject({ totalCount: 2595 });
+    const text = contractText(result);
+    expect(text).toContain('**Returned:** 2 of 2595\n');
+    expect(text).not.toContain('Total Hits');
+    expect(text).not.toContain('2595 total');
+    expect(text.match(/2595/g)).toHaveLength(1);
+    // The rest of the trailer stays.
+    expect(text).toContain('**Effective Query:** (alphafold) AND (SRC:"PPR")');
+    expect(text).toContain('**Sources:** PPR');
+  });
+
+  it('reads 0 of 0 on an empty page, with the empty-result notice intact', async () => {
+    mockSearch.mockResolvedValue(page(0, [], '(zzqx) AND (SRC:"MED" OR SRC:"PMC" OR SRC:"PPR")'));
+
+    const result = await runToolContract(pubmedEuropepmcSearchTool, { query: 'zzqx' });
+
+    expect(result.structuredContent).toMatchObject({ hits: [], totalCount: 0 });
+    const text = contractText(result);
+    expect(text).toContain('**Returned:** 0 of 0\n');
+    expect(text).toContain('No results matched your Europe PMC query');
+  });
+
+  it('reads the page size of the full total on the last page of a cursor walk', async () => {
+    mockSearch.mockResolvedValue({
+      ...page(3, [hit('PPR3')], '(alphafold) AND (SRC:"PPR")'),
+      cursorMark: 'CURSOR_2',
+    });
+
+    const result = await runToolContract(pubmedEuropepmcSearchTool, {
+      query: 'alphafold',
+      sources: ['PPR'],
+      pageSize: 2,
+      cursorMark: 'CURSOR_2',
+    });
+
+    const text = contractText(result);
+    expect(text).toContain('**Returned:** 1 of 3\n');
+    expect(text).toContain('(final page)');
+  });
+});
+
+describe('pubmedEuropepmcSearchTool query description (issue #149)', () => {
+  const description = pubmedEuropepmcSearchTool.input.shape.query.description ?? '';
+
+  it('no longer tells the caller identifier tokens must be unquoted', () => {
+    expect(description).not.toMatch(/must be unquoted/i);
+    expect(description).not.toMatch(/quoted form matches nothing/i);
+    expect(description).toMatch(/may be quoted or unquoted/i);
+  });
+
+  it('says a PubMed-indexed article resolves under SRC:MED, not SRC:PMC', () => {
+    expect(description).toContain('resolves under `SRC:MED`, not `SRC:PMC`');
   });
 });

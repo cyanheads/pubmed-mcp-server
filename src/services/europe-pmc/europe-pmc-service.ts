@@ -10,6 +10,8 @@
  * A search's retry boundary covers fetch and response classification, so
  * Europe PMC's intermittent empty `{ version }` envelope is retried like an
  * HTTP outage; only a sort or cursor that explains it is reported as bad input.
+ * A search reports the effective query Europe PMC echoes back, or — with no
+ * echo — the source-filtered query it sent.
  *
  * Optional service: only constructed when `EUROPEPMC_ENABLED=true` (the
  * default). `getEuropePmcService()` returns `undefined` when disabled so
@@ -35,7 +37,7 @@ import { recoveryFor } from '@/services/error-contracts.js';
 import { ORDERED_XML_PARSER_OPTIONS } from '@/services/ncbi/parsing/ordered-xml-parser-options.js';
 import type { JatsNode, JatsNodeList } from '@/services/ncbi/parsing/pmc-xml-helpers.js';
 import { ensureArray } from '@/services/ncbi/parsing/xml-helpers.js';
-import { EuropePmcApiClient } from './api-client.js';
+import { buildSearchQuery, EuropePmcApiClient } from './api-client.js';
 import { EuropePmcRequestQueue } from './request-queue.js';
 import type {
   EuropePmcFullTextResult,
@@ -266,7 +268,9 @@ export class EuropePmcService {
     }
 
     const hits = ensureArray<EuropePmcSearchHit>(parsed.resultList?.result);
-    const echoed = parsed.request?.queryString ?? params.query;
+    // Without an echo, report the query actually sent — source filter included —
+    // not the caller's bare query, which searches every source. (#150)
+    const echoed = parsed.request?.queryString ?? buildSearchQuery(params);
 
     // EPMC's `request.cursorMark` echo is URL-encoded (the wire form), while
     // `nextCursorMark` in the JSON body is raw. Use the caller's input as the
