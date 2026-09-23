@@ -1,6 +1,7 @@
 /**
- * @fileoverview PubMed spell-check tool. Uses NCBI's ESpell service
- * to suggest corrections for search queries.
+ * @fileoverview PubMed spell-check tool. Uses NCBI's ESpell service to correct
+ * every misspelled token of a PubMed search query in one call — the recovery
+ * step after a zero-hit or thin `pubmed_search_articles` result.
  * @module src/mcp-server/tools/definitions/spell-check.tool
  */
 
@@ -11,7 +12,7 @@ import { conceptMeta, SCHEMA_SEARCH_ACTION } from './_concepts.js';
 
 export const spellCheckTool = tool('pubmed_spell_check', {
   description:
-    "Spell-check a query and get NCBI's suggested correction. Useful for refining search queries.",
+    'Spell-check a PubMed search query against NCBI ESpell and get the corrected query back. Use after a zero-hit or thin `pubmed_search_articles` result, or when a drug, gene, disease, or author name may be misspelled — every misspelled token is corrected in one call (`alzhiemer diseese treatmnt outcomse` → `alzheimer disease treatment outcomes`), and `hasSuggestion` is false when NCBI has no change to offer. Re-run the search with `corrected`.',
   annotations: { readOnlyHint: true, openWorldHint: true },
   _meta: conceptMeta([SCHEMA_SEARCH_ACTION]),
   sourceUrl:

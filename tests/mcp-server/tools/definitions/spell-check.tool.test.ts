@@ -169,3 +169,42 @@ describe('spellCheckTool', () => {
     expect(blocks[0]?.text).toContain('No suggestion');
   });
 });
+
+describe('spellCheckTool description (issue #151)', () => {
+  const { description } = spellCheckTool;
+
+  it('names PubMed and ESpell', () => {
+    expect(description).toContain('PubMed');
+    expect(description).toContain('ESpell');
+  });
+
+  it('says when to reach for it and what to do with the answer', () => {
+    expect(description).toContain('zero-hit or thin `pubmed_search_articles` result');
+    expect(description).toContain('`hasSuggestion` is false');
+    expect(description).toContain('Re-run the search with `corrected`');
+  });
+
+  it('carries a worked example that matches ESpell’s own answer', async () => {
+    const example = description.match(/`([^`]+)` → `([^`]+)`/);
+    expect(example?.slice(1)).toEqual([
+      'alzhiemer diseese treatmnt outcomse',
+      'alzheimer disease treatment outcomes',
+    ]);
+    // Run the example through the tool against ESpell's recorded answer.
+    mockESpell.mockResolvedValue({
+      original: 'alzhiemer diseese treatmnt outcomse',
+      corrected: 'alzheimer disease treatment outcomes',
+      hasSuggestion: true,
+    });
+    const result = await runToolContract(spellCheckTool, {
+      query: 'alzhiemer diseese treatmnt outcomse',
+    });
+    expect(result.structuredContent).toMatchObject({
+      corrected: example?.[2],
+      hasSuggestion: true,
+    });
+    expect(textBlocks(result.content as ContentBlock[])[0]?.text).toContain(
+      `**Suggestion:** "${example?.[2]}"`,
+    );
+  });
+});
