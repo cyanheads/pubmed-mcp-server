@@ -2,6 +2,10 @@
 
 All notable changes to this project. Each entry links to its full per-version file in [changelog/](changelog/).
 
+## [2.10.18](changelog/2.10.x/2.10.18.md) — 2026-09-22
+
+Widens the unkeyed NCBI request-delay default to 400ms, moves Europe PMC's request queue onto the framework pacer so retry backoff no longer holds a concurrency slot, and limits OpenAlex's openalex_unreachable reason to exhausted ServiceUnavailable errors.
+
 ## [2.10.17](changelog/2.10.x/2.10.17.md) — 2026-09-23
 
 Fixes pubmed_fetch_fulltext body parsing (alternatives figures, titled body-level blocks), word-boundary truncation with per-subsection accounting, Unpaywall title/journal/year, and case-insensitive DOI and zero-padded PMC ID matching.
