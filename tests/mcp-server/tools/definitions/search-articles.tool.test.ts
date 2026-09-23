@@ -288,7 +288,7 @@ describe('searchArticlesTool', () => {
     const result = await searchArticlesTool.handler(input, ctx);
 
     const enrichment = getEnrichment(ctx);
-    expect(enrichment.totalCount).toBe(100);
+    expect(result.totalCount).toBe(100);
     expect(result.pmids).toEqual(['111', '222', '333']);
     expect(result.query).toBe('cancer');
     expect(enrichment.effectiveQuery).toBe('cancer');
@@ -527,6 +527,120 @@ describe('searchArticlesTool', () => {
 
       expect(mockESearch.mock.calls[0]?.[0]?.term).toBe('AND');
       expect(getEnrichment(ctx).notice).toContain('pubmed_spell_check');
+    });
+  });
+
+  describe('field-tag-only and parenthesis-only queries (issue #145)', () => {
+    // A bare field tag reaches NCBI as a zero-hit search that sends the caller
+    // to spell-check, and `()` draws the same embedded blank-term <ERROR> #122
+    // fixed, which classifies as a retryable outage. Neither carries a term.
+    it.each([
+      ['a bare field tag', '[pdat]'],
+      ['empty parentheses', '()'],
+      ['nested parentheses around a field tag', '( [mesh] )'],
+      ['several bare field tags', '[ti][tiab]'],
+      ['a field tag with a multi-word name', '[Publication Type]'],
+      ['a field tag in capitals', '[AU]'],
+      ['a field tag with a search modifier', '[mh:noexp]'],
+      ['a field tag with a proximity modifier', '[tiab:~3]'],
+      ['an E-utilities field name', '[Date - Publication]'],
+      ['empty brackets', '[ ]'],
+    ])('rejects %s as blank_query without calling NCBI', async (_label, query) => {
+      const ctx = createMockContext({ errors: searchArticlesTool.errors });
+      const input = searchArticlesTool.input.parse({ query });
+
+      await expect(searchArticlesTool.handler(input, ctx)).rejects.toMatchObject({
+        code: JsonRpcErrorCode.ValidationError,
+        data: { reason: 'blank_query', recovery: { hint: expect.stringMatching(/nonblank/i) } },
+      });
+      expect(mockESearch).not.toHaveBeenCalled();
+    });
+
+    it('names the stripped field tags and parentheses on both error surfaces', async () => {
+      const result = await runToolContract(searchArticlesTool, { query: '[pdat]' });
+
+      expect(result.isError).toBe(true);
+      expect(result.structuredContent).toMatchObject({
+        error: { code: JsonRpcErrorCode.ValidationError, data: { reason: 'blank_query' } },
+      });
+      const text = textBlocks(result.content as ContentBlock[])
+        .map((b) => b.text)
+        .join('\n');
+      expect(text).toMatch(/field tag/i);
+      expect(text).toMatch(/parenthes/i);
+      expect(text).toMatch(/Recovery:/);
+      expect(mockESearch).not.toHaveBeenCalled();
+    });
+
+    it('describes the rejection in the advertised `query` description', () => {
+      const description = searchArticlesTool.input.shape.query.description ?? '';
+
+      expect(description).toMatch(/field tag/i);
+      expect(description).toMatch(/parenthes/i);
+      expect(description).toContain('rejected');
+    });
+
+    // Only brackets and parentheses are stripped, never boolean operators:
+    // NCBI reads an operand-less `NOT[ti]` as literal title text and returns
+    // real matches, so it must still be searched.
+    it('still searches an operator glued to a field tag (NOT[ti])', async () => {
+      mockESearch.mockResolvedValue({
+        count: 389552,
+        idList: ['27889000'],
+        retmax: 20,
+        retstart: 0,
+      });
+      const ctx = createMockContext({ errors: searchArticlesTool.errors });
+      const result = await searchArticlesTool.handler(
+        searchArticlesTool.input.parse({ query: 'NOT[ti]' }),
+        ctx,
+      );
+
+      expect(mockESearch.mock.calls[0]?.[0]?.term).toBe('NOT[ti]');
+      expect(result.pmids).toEqual(['27889000']);
+    });
+
+    // PubMed searches the content of a bracket that is not a field tag as text:
+    // live, `[18F]` returns 42,247 matches, `[cancer]` 5,706,079, `[smith j]`
+    // 36,294 (as an author), and `[ti][ab]` 1,003,647 (`ab` is not a PubMed
+    // field tag). Each carries a term, so each must reach NCBI.
+    it.each([
+      ['a bare radiolabel', '[18F]'],
+      ['a bracketed word', '[cancer]'],
+      ['a bracketed author name', '[smith j]'],
+      ['a field tag beside a bracketed non-tag', '[ti][ab]'],
+      ['a modifier with no field name', '[:noexp]'],
+    ])('sends %s to NCBI rather than rejecting it', async (_label, query) => {
+      mockESearch.mockResolvedValue({ count: 1, idList: ['1'], retmax: 20, retstart: 0 });
+      const ctx = createMockContext({ errors: searchArticlesTool.errors });
+      const result = await searchArticlesTool.handler(
+        searchArticlesTool.input.parse({ query }),
+        ctx,
+      );
+
+      expect(mockESearch.mock.calls[0]?.[0]?.term).toBe(query);
+      expect(result.pmids).toEqual(['1']);
+    });
+
+    it.each([
+      ['2020[pdat]'],
+      ['"cancer"[ti]'],
+      ['asthma NOT children'],
+      ['2020[pdat] AND cancer'],
+      ['(asthma[mesh]) AND (children)'],
+    ])('sends %s to NCBI with the query intact', async (query) => {
+      mockESearch.mockResolvedValue({ count: 1, idList: ['1'], retmax: 20, retstart: 0 });
+      const ctx = createMockContext({ errors: searchArticlesTool.errors });
+      await searchArticlesTool.handler(searchArticlesTool.input.parse({ query }), ctx);
+
+      expect(mockESearch.mock.calls[0]?.[0]?.term).toBe(query);
+      expect(getEnrichment(ctx).effectiveQuery).toBe(query);
+    });
+
+    it('describes a bare field tag and empty parentheses in the blank_query contract', () => {
+      const entry = searchArticlesTool.errors?.find((e) => e.reason === 'blank_query');
+      expect(entry?.when).toContain('[pdat]');
+      expect(entry?.when).toContain('()');
     });
   });
 
@@ -830,6 +944,7 @@ describe('searchArticlesTool', () => {
         pmids: ['111', '222'],
         summaries: [],
         searchUrl: 'https://pubmed.ncbi.nlm.nih.gov/?term=cancer',
+        totalCount: 2,
       }),
     );
     expect(blocks[0]?.text).toContain('PubMed Search Results');
@@ -851,6 +966,7 @@ describe('searchArticlesTool', () => {
             { pmid: '5', title: 'E', pubmedUrl: 'https://pubmed.ncbi.nlm.nih.gov/5/' },
           ],
           searchUrl: 'https://pubmed.ncbi.nlm.nih.gov/?term=glp-1',
+          totalCount: 10,
         }),
       );
       const text = blocks[0]?.text ?? '';
@@ -869,6 +985,7 @@ describe('searchArticlesTool', () => {
             { pmid: '2', title: 'B', pubmedUrl: 'https://pubmed.ncbi.nlm.nih.gov/2/' },
           ],
           searchUrl: 'https://pubmed.ncbi.nlm.nih.gov/?term=glp-1',
+          totalCount: 2,
         }),
       );
       expect(blocks[0]?.text).not.toContain('Summaries shown for top');
@@ -882,6 +999,7 @@ describe('searchArticlesTool', () => {
           pmids: ['1', '2'],
           summaries: [],
           searchUrl: 'https://pubmed.ncbi.nlm.nih.gov/?term=glp-1',
+          totalCount: 2,
         }),
       );
       expect(blocks[0]?.text).not.toContain('Summaries shown for top');
@@ -905,6 +1023,7 @@ describe('searchArticlesTool', () => {
             pmids: pmids(60),
             summaries: summaries(50),
             searchUrl: 'https://pubmed.ncbi.nlm.nih.gov/?term=glp-1',
+            totalCount: 60,
           }),
         );
         const text = blocks[0]?.text ?? '';
@@ -922,6 +1041,7 @@ describe('searchArticlesTool', () => {
             pmids: pmids(60),
             summaries: summaries(49),
             searchUrl: 'https://pubmed.ncbi.nlm.nih.gov/?term=glp-1',
+            totalCount: 60,
           }),
         );
         const text = blocks[0]?.text ?? '';
@@ -951,6 +1071,7 @@ describe('searchArticlesTool', () => {
           },
         ],
         searchUrl: 'https://pubmed.ncbi.nlm.nih.gov/?term=asthma',
+        totalCount: 1,
       }),
     );
 
@@ -983,6 +1104,7 @@ describe('searchArticlesTool format() heading escaping (issue #102)', () => {
           },
         ],
         searchUrl: 'https://pubmed.ncbi.nlm.nih.gov/?term=cancer',
+        totalCount: 1,
       }),
     )[0]?.text ?? '';
 
@@ -1064,5 +1186,124 @@ describe('searchArticlesTool Bookshelf summaries (issue #114)', () => {
     expect(text).toContain('**Doc Type:** chapter');
     expect(text).toContain('**Authors:** Petrucelli N, Daly MB, Pal T');
     expect(text).not.toContain('**Source:**');
+  });
+});
+
+/** Every text block of a contract run, joined — the header, the rows, and the trailer. */
+const contractText = (result: Awaited<ReturnType<typeof runToolContract>>) =>
+  textBlocks(result.content as ContentBlock[])
+    .map((b) => b.text)
+    .join('\n');
+
+describe('searchArticlesTool total match count in the header (issue #147)', () => {
+  beforeEach(() => {
+    mockESearch.mockReset();
+    mockESummary.mockReset();
+    mockExtractBriefSummaries.mockReset();
+    mockExtractBriefSummaries.mockResolvedValue([]);
+  });
+
+  const search = (count: number, idList: string[], input: Record<string, unknown> = {}) => {
+    mockESearch.mockResolvedValue({ count, idList, retmax: 20, retstart: 0 });
+    return runToolContract(searchArticlesTool, { query: 'alphafold protein structure', ...input });
+  };
+
+  it('puts the total beside Returned on a page capped below it', async () => {
+    const result = await search(2924, ['111', '222', '333'], { maxResults: 3 });
+
+    expect(result.isError).toBeFalsy();
+    expect(result.structuredContent).toMatchObject({
+      pmids: ['111', '222', '333'],
+      totalCount: 2924,
+    });
+    const text = contractText(result);
+    expect(text).toContain('**Returned:** 3 of 2924 | **Offset:** 0');
+    // Stated once, in the header — never again as a trailer line.
+    expect(text).not.toContain('2924 total');
+    expect(text.match(/2924/g)).toHaveLength(1);
+  });
+
+  it('reads 0 of 0 on an empty result, with the empty-result notice intact', async () => {
+    const result = await search(0, []);
+
+    expect(result.structuredContent).toMatchObject({ pmids: [], totalCount: 0 });
+    const text = contractText(result);
+    expect(text).toContain('**Returned:** 0 of 0 | **Offset:** 0');
+    expect(text).toContain('No results matched your query');
+    expect(text).not.toContain('0 total');
+  });
+
+  it('reads 0 of the total when the offset is past the end', async () => {
+    const result = await search(100, [], { offset: 200 });
+
+    expect(result.structuredContent).toMatchObject({ pmids: [], offset: 200, totalCount: 100 });
+    const text = contractText(result);
+    expect(text).toContain('**Returned:** 0 of 100 | **Offset:** 200');
+    expect(text).toContain('Offset 200 exceeds totalCount (100)');
+  });
+
+  it('keeps the rest of the trailer — effective query and applied filters', async () => {
+    const result = await search(5, ['111'], { author: 'Smith J' });
+
+    const text = contractText(result);
+    expect(text).toContain('**Returned:** 1 of 5 | **Offset:** 0');
+    expect(text).toContain('**Effective Query:** alphafold protein structure AND Smith J[Author]');
+    expect(text).toContain('- **Author:** Smith J');
+  });
+});
+
+describe('searchArticlesTool Doc Type rendering (issue #146)', () => {
+  beforeEach(() => {
+    mockESearch.mockReset();
+    mockESummary.mockReset();
+    mockExtractBriefSummaries.mockReset();
+    mockESummary.mockResolvedValue({ eSummaryResult: {} });
+  });
+
+  /** Journal rows around one Bookshelf row, as a mixed ESummary page arrives. */
+  const run = (bookDocType: string) => {
+    mockESearch.mockResolvedValue({
+      count: 3,
+      idList: ['111', '20301425', '222'],
+      retmax: 20,
+      retstart: 0,
+    });
+    mockExtractBriefSummaries.mockResolvedValue([
+      { pmid: '111', title: 'Journal A', source: 'Nature', docType: 'citation' },
+      {
+        pmid: '20301425',
+        title: 'Book record',
+        bookTitle: 'GeneReviews(®)',
+        publisherName: 'University of Washington, Seattle',
+        docType: bookDocType,
+      },
+      { pmid: '222', title: 'Journal B', source: 'Science', docType: 'citation' },
+    ]);
+    return runToolContract(searchArticlesTool, { query: 'brca1', summaryCount: 3 });
+  };
+
+  it('drops the line for an ordinary journal row and keeps it for the Bookshelf row', async () => {
+    const result = await run('chapter');
+
+    const text = contractText(result);
+    expect(text).not.toContain('**Doc Type:** citation');
+    expect(text.match(/\*\*Doc Type:\*\*/g)).toHaveLength(1);
+    expect(text).toContain('**Doc Type:** chapter');
+    expect(text).toContain('**Source:** Nature');
+    expect(text).toContain('**Source:** Science');
+  });
+
+  it('leaves structuredContent.summaries[].docType untouched, citation included', async () => {
+    const result = await run('chapter');
+
+    const { summaries } = result.structuredContent as { summaries: { docType?: string }[] };
+    expect(summaries.map((s) => s.docType)).toEqual(['citation', 'chapter', 'citation']);
+  });
+
+  it.each(['book', 'report'])('keeps rendering any other value (%s)', async (docType) => {
+    const text = contractText(await run(docType));
+
+    expect(text).toContain(`**Doc Type:** ${docType}`);
+    expect(text).not.toContain('**Doc Type:** citation');
   });
 });

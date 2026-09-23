@@ -88,9 +88,9 @@ export const NCBI_QUERY_INPUT_ERRORS = [
   {
     reason: 'blank_query',
     code: JsonRpcErrorCode.ValidationError,
-    when: 'The query holds no search term once whitespace, and any markup the tool strips first, are removed — so NCBI would receive a blank term.',
+    when: 'The query holds no search term once whitespace, and anything the tool strips before searching, are removed — so NCBI would receive a blank term. pubmed_search_articles strips markup, bracketed field tags, and parentheses, so a bare field tag such as `[pdat]` or empty parentheses `()` count as blank there.',
     recovery:
-      'Supply a nonblank search term; NCBI cannot search a blank term and retrying the same input will not help.',
+      'Supply a nonblank search term — a bare field tag or empty parentheses carry none; NCBI cannot search a blank term and retrying the same input will not help.',
     retryable: false,
   },
 ] as const;

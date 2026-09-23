@@ -486,6 +486,7 @@ describe('format() output sanitization', () => {
         pmids: ['12345'],
         summaries: [],
         searchUrl: 'https://pubmed.ncbi.nlm.nih.gov/?term=cancer',
+        totalCount: 1,
       }),
     );
     const text = blocks[0]?.text ?? '';
@@ -620,6 +621,7 @@ describe('format() output sanitization', () => {
           },
         ],
         searchUrl: 'https://pubmed.ncbi.nlm.nih.gov/?term=cancer',
+        totalCount: 1,
       }),
     );
     const text = blocks[0]?.text ?? '';

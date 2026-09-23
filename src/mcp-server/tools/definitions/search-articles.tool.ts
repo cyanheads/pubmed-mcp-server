@@ -1,6 +1,12 @@
 /**
  * @fileoverview PubMed search tool. Searches PubMed with full query syntax,
  * field-specific filters, date ranges, pagination, and optional brief summaries.
+ * A query with no search term — blank, markup only, a bare field tag, or empty
+ * parentheses — is rejected before NCBI is called. `limit` is accepted as an
+ * alias for `maxResults`. The total match count rides in `output` so `format()`
+ * can state it in the header beside the returned count, and a summary's
+ * `docType` is rendered only when it marks something other than an ordinary
+ * journal article (`citation`).
  * @module src/mcp-server/tools/definitions/search-articles.tool
  */
 
@@ -31,6 +37,52 @@ const DATE_RE = /^$|^\d{4}([/\-.]\d{1,2}([/\-.]\d{1,2})?)?$/;
  * still act on it. The limit is db-specific — it does not apply to db=mesh.
  */
 const OFFSET_MAX = 9998;
+
+/**
+ * PubMed search field tags, lowercased: the tags in PubMed's search-field help,
+ * their full names, and ESearch's own field names, each confirmed live to be
+ * read as a field tag — a bare `[pdat]` returns "No items found." PubMed searches
+ * the content of any other bracket as text (`[18F]`, `[cancer]`, `[smith j]`, and
+ * `[ab]` all return matches), so the blank-term check treats only these as
+ * carrying no term. A tag missing here fails safe: its bare form is sent and
+ * answered as an ordinary zero-hit search.
+ */
+const PUBMED_FIELD_TAGS = new Set(
+  [
+    '1au|ad|aid|all|au|auid|book|cn|cois|crdt|dcom|doi|dp|ed|edat|fau|filter|fir|gr|ip|ir',
+    'isbn|jid|la|lastau|lid|lr|majr|mh|mhda|nm|ot|pa|pg|pl|pmid|ps|pt|pubn|rn|sb|sh|si|so',
+    'ta|ti|tiab|tt|tw|vi|affl|aucl|auth|cdat|cnty|coln|ecno|eid|epdat|epdt|faut|filt|finv',
+    'full|grnt|iss|jour|lang|laut|mdat|mesh|otrm|page|papx|pdat|pid|ppdat|ppdt|ptyp|subh',
+    'subs|titl|vol|word|author|editor|issue|subset|title|volume',
+    'keyword|affiliation|all fields|author - corporate|author - first|author - identifier',
+    'author - last|author cluster id|completion date|conflict of interest statements',
+    'corporate author|create date|date - completion|date - create|date - entry|date - mesh',
+    'date - modification|date - publication|ec/rn number|electronic publication date',
+    'entry date|extended pmid|first author name|full author name|full investigator name',
+    'grants and funding|investigator|journal|language|last author name|location id',
+    'mesh date|mesh major topic|mesh subheading|mesh terms|modification date|other term',
+    'pagination|personal name as subject|pharmacological action|place of publication',
+    'print publication date|publication date|publication type|publisher|publisher id',
+    'secondary source id|subheading|subject - personal name|supplementary concept|text word',
+    'title/abstract|transliterated title',
+  ]
+    .join('|')
+    .split('|'),
+);
+
+/**
+ * The query with every parenthesis and every bracketed field tag removed — what
+ * the blank-term check tests. A tag's search modifier (`[mh:noexp]`,
+ * `[tiab:~3]`) does not change what it is; an empty bracket carries no term.
+ */
+function withoutTermlessMarkup(query: string): string {
+  return query
+    .replace(/\[([^\]]*)\]/g, (bracket, content: string) => {
+      const tag = content.trim().toLowerCase();
+      return tag === '' || PUBMED_FIELD_TAGS.has(tag.replace(/\s*:.*$/, '')) ? '' : bracket;
+    })
+    .replace(/[()]/g, '');
+}
 
 /** Upper bound on brief summaries fetched per call; shared by the schema and the format() cap message. */
 const SUMMARY_COUNT_MAX = 50;
@@ -158,12 +210,16 @@ export const searchArticlesTool = tool('pubmed_search_articles', {
 
   errors: [...NCBI_SERVICE_ERRORS, ...NCBI_QUERY_INPUT_ERRORS] as const,
 
+  // Never advertised; rewritten to the canonical key before the schema parses.
+  // `max_results` needs no entry — the framework's case-style repair maps it. (#156)
+  inputAliases: { limit: 'maxResults' },
+
   input: z.object({
     query: z
       .string()
       .min(1)
       .describe(
-        'PubMed search query (supports full NCBI syntax). Must carry a search term: a value that is blank once markup is stripped is rejected rather than sent to PubMed as an empty term.',
+        'PubMed search query (supports full NCBI syntax). Must carry a search term: a value that is blank once markup, bracketed field tags (`[pdat]`), and parentheses are removed is rejected rather than sent to PubMed as an empty term.',
       ),
     maxResults: z.number().int().min(1).max(1000).default(20).describe('Maximum results to return'),
     offset: z
@@ -286,17 +342,19 @@ export const searchArticlesTool = tool('pubmed_search_articles', {
       )
       .describe('Brief summaries (empty array when summaryCount is 0)'),
     searchUrl: z.string().describe('PubMed search URL'),
+    // A domain field, not enrichment: format() sees only this payload, and the
+    // header states the total beside the returned count. (#147)
+    totalCount: z.number().describe('Total matching articles'),
   }),
 
   // Result-set context the agent reasons with — the query as PubMed parsed it, the
-  // total match count, the normalized filters, and recovery guidance for empty or
-  // overshot pages. Populated via ctx.enrich(...) so it reaches structuredContent and
-  // content[] alike; kept out of the domain return.
+  // normalized filters, and recovery guidance for empty or overshot pages.
+  // Populated via ctx.enrich(...) so it reaches structuredContent and content[]
+  // alike; kept out of the domain return.
   enrichment: {
     effectiveQuery: z
       .string()
       .describe('Sanitized query sent to PubMed after applying all active filters'),
-    totalCount: z.number().describe('Total matching articles'),
     appliedFilters: AppliedFiltersSchema.describe(
       'Normalized filter values that were applied to the PubMed query',
     ),
@@ -312,7 +370,6 @@ export const searchArticlesTool = tool('pubmed_search_articles', {
   // carries the full structured value; this only shapes the human-facing trailer line.
   enrichmentTrailer: {
     effectiveQuery: { label: 'Effective Query' },
-    totalCount: { label: 'Total Found' },
     appliedFilters: {
       render: (filters) => {
         const lines: string[] = [];
@@ -352,10 +409,16 @@ export const searchArticlesTool = tool('pubmed_search_articles', {
     // "Search is temporarily unavailable", which classifies as a retryable
     // outage — the caller would spend the whole retry deadline on a
     // deterministic input mistake. Reject before the call instead. (#122)
-    if (effectiveQuery.trim().length === 0) {
+    //
+    // A bare field tag (`[pdat]`) or empty parentheses carry no term either, so
+    // the check runs on a copy with those removed; `effectiveQuery` itself is
+    // sent as written. A bracket that is not a field tag (`[18F]`) is a term, and
+    // boolean operators are kept: NCBI reads an operand-less `NOT[ti]` as
+    // literal text and returns real matches. (#145)
+    if (withoutTermlessMarkup(effectiveQuery).trim().length === 0) {
       throw ctx.fail(
         'blank_query',
-        'The `query` carries no search term — it is blank after markup is stripped.',
+        'The `query` carries no search term — it is blank once markup, bracketed field tags, and parentheses are removed.',
         { ...ctx.recoveryFor('blank_query') },
       );
     }
@@ -515,7 +578,6 @@ export const searchArticlesTool = tool('pubmed_search_articles', {
     });
 
     ctx.enrich({ effectiveQuery, appliedFilters });
-    ctx.enrich.total(esResult.count);
     if (notice) ctx.enrich.notice(notice);
 
     return {
@@ -524,6 +586,7 @@ export const searchArticlesTool = tool('pubmed_search_articles', {
       pmids,
       summaries,
       searchUrl,
+      totalCount: esResult.count,
     };
   },
 
@@ -531,7 +594,7 @@ export const searchArticlesTool = tool('pubmed_search_articles', {
     const lines = [
       `## PubMed Search Results`,
       `**Query:** ${result.query}`,
-      `**Returned:** ${result.pmids.length} | **Offset:** ${result.offset}`,
+      `**Returned:** ${result.pmids.length} of ${result.totalCount} | **Offset:** ${result.offset}`,
       `**Search URL:** ${result.searchUrl}`,
     ];
     if (result.pmids.length > 0) lines.push(`\n**PMIDs:** ${result.pmids.join(', ')}`);
@@ -560,7 +623,9 @@ export const searchArticlesTool = tool('pubmed_search_articles', {
         if (s.bookTitle || s.publisherName) {
           lines.push(`**Book:** ${[s.bookTitle, s.publisherName].filter(Boolean).join(' — ')}`);
         }
-        if (s.docType) lines.push(`**Doc Type:** ${s.docType}`);
+        // `citation` is every ordinary journal article; the line earns its
+        // place only when it flags a Bookshelf chapter or book. (#146)
+        if (s.docType && s.docType !== 'citation') lines.push(`**Doc Type:** ${s.docType}`);
         if (s.pubDate) lines.push(`**Published:** ${s.pubDate}`);
         if (s.doi) lines.push(`**DOI:** ${s.doi}`);
         if (s.pmcId) lines.push(`**PMCID:** ${s.pmcId}`);
