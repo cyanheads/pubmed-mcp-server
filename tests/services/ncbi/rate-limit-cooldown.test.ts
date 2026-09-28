@@ -237,7 +237,6 @@ describe('deadline-aware shedding (issue #157)', () => {
           reason: 'queue_full',
           endpoint: 'esearch',
           retryAfter: 6,
-          recovery: { hint: expect.stringContaining('retryAfter') },
         },
       },
     });
@@ -271,5 +270,72 @@ describe('deadline-aware shedding (issue #157)', () => {
       },
     });
     expect(starts).toHaveLength(4);
+  });
+});
+
+describe('a throttled retry loop that stops before its deadline fires', () => {
+  it('surfaces the 429 itself when the Retry-After it names outlasts the time left', async () => {
+    // A 3s Retry-After is honored once (0 → 3000); the second cannot fit the 2s left of
+    // a 5s deadline, so the loop stops on that 429 with its window intact.
+    stubFetch([{ status: 429, retryAfter: '3' }]);
+    const service = await buildService({ delayMs: 50, deadlineMs: 5000, maxRetries: 3 });
+
+    const outcome = await driveUntilSettled(track(search(service, 'a')));
+
+    // Code, message, and Retry-After stay the attempt's own; the reason is added.
+    expect(outcome).toMatchObject({
+      ok: false,
+      error: {
+        code: JsonRpcErrorCode.RateLimited,
+        message: 'NCBI returned HTTP 429.',
+        data: { reason: 'ncbi_rate_limited', status: 429, retryAfter: '3', endpoint: 'esearch' },
+      },
+    });
+    expect((outcome as { error: McpError }).error.data).not.toHaveProperty('attempts');
+    expect(starts).toEqual([0, 3000]);
+    expect(Date.now() - T0).toBe(3000);
+  });
+
+  it('reports a 429 whose next backoff cannot fit as the rate limit it was, not an expiry (#174)', async () => {
+    // No Retry-After: the loop backs off 1s, then 2s, and each 429 closes the shared gate
+    // (1s, then 2s), so every attempt starts as the gate reopens. The 4s backoff after the
+    // third 429 cannot fit the 2s left of a 5s deadline, so the loop stops there — before
+    // the deadline fires.
+    stubFetch([{ status: 429 }]);
+    const service = await buildService({ delayMs: 50, deadlineMs: 5000, maxRetries: 3 });
+
+    const outcome = await driveUntilSettled(track(search(service, 'a')));
+
+    expect(outcome).toMatchObject({
+      ok: false,
+      error: {
+        code: JsonRpcErrorCode.RateLimited,
+        message: 'NCBI returned HTTP 429. (failed after 3 attempts)',
+        data: { reason: 'ncbi_rate_limited', endpoint: 'esearch', attempts: 3 },
+      },
+    });
+    // NCBI named no Retry-After, so there is none to pass on.
+    expect((outcome as { error: McpError }).error.data).not.toHaveProperty('retryAfter');
+    expect(starts).toEqual([0, 1000, 3000]);
+    // Settled on the third 429, not at the 5s deadline.
+    expect(Date.now() - T0).toBeLessThan(3100);
+  });
+
+  it('passes on the Retry-After of the last 429 when retries run out', async () => {
+    // The 1s Retry-After is honored once; the second 429 is the last attempt.
+    stubFetch([{ status: 429, retryAfter: '1' }]);
+    const service = await buildService({ delayMs: 50, deadlineMs: 60_000, maxRetries: 1 });
+
+    const outcome = await driveUntilSettled(track(search(service, 'a')));
+
+    expect(outcome).toMatchObject({
+      ok: false,
+      error: {
+        code: JsonRpcErrorCode.RateLimited,
+        message: 'NCBI returned HTTP 429. (failed after 2 attempts)',
+        data: { reason: 'ncbi_rate_limited', endpoint: 'esearch', attempts: 2, retryAfter: '1' },
+      },
+    });
+    expect(starts).toEqual([0, 1000]);
   });
 });

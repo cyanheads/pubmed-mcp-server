@@ -19,6 +19,7 @@ vi.mock('@cyanheads/mcp-ts-core/utils', async () => {
 
 const { OpenAlexApiClient } = await import('@/services/openalex/api-client.js');
 const { OpenAlexService } = await import('@/services/openalex/openalex-service.js');
+const { OPENALEX_SERVICE_ERRORS } = await import('@/services/error-contracts.js');
 
 function jsonResponse(body: unknown, init: ResponseInit = {}) {
   return new Response(JSON.stringify(body), {
@@ -644,6 +645,31 @@ describe('OpenAlexService upstream request shape', () => {
     const batchUrl = decodeURIComponent(mockFetchWithTimeout.mock.calls[1]?.[0] as string);
     expect(batchUrl).toContain('filter=openalex:W500|W600|W700');
     expect(result.pmids).toEqual(['55555', '66666', '77777']);
+  });
+});
+
+/**
+ * Every client call that parses a body throws `openalex_invalid_response` on a
+ * non-JSON one, under the code the contract declares for that reason.
+ */
+describe('openalex_invalid_response contract alignment', () => {
+  beforeEach(() => mockFetchWithTimeout.mockReset());
+
+  const declared = OPENALEX_SERVICE_ERRORS.find((e) => e.reason === 'openalex_invalid_response');
+  const client = () => new OpenAlexApiClient({ timeoutMs: 20000 });
+
+  it.each([
+    ['getWorkByPmid', () => client().getWorkByPmid('31295471')],
+    ['getCitedBy', () => client().getCitedBy('W1234', 5, 1)],
+    ['resolveOaIdsToPmids', () => client().resolveOaIdsToPmids(['W500'])],
+  ])('%s throws it under the declared code', async (_label, call) => {
+    mockFetchWithTimeout.mockResolvedValue(new Response('<html>not json</html>', { status: 200 }));
+
+    const err = (await call().catch((e: unknown) => e)) as McpError;
+
+    expect(err).toBeInstanceOf(McpError);
+    expect(err.data?.reason).toBe('openalex_invalid_response');
+    expect(err.code).toBe(declared?.code);
   });
 });
 

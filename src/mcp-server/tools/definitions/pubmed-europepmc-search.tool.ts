@@ -4,9 +4,11 @@
  * and EPMC-only OA articles. Uses EPMC's cursor-based pagination
  * (`cursorMark`) — unlike `pubmed_search_articles`'s offset-based paging,
  * because EPMC's search API doesn't support offset. `max_results` and `limit`
- * are accepted as aliases for `pageSize`. The total hit count rides in
- * `output` so `format()` can state it in the header, and `searchUrl` opens the
- * source-filtered query Europe PMC actually ran.
+ * are accepted as aliases for `pageSize`. A `query` with no search term (`()`,
+ * `<b></b>`) or a blank `cursorMark` is rejected before Europe PMC is called.
+ * The total hit count rides in `output` so `format()` can state it in the
+ * header, and `searchUrl` opens the source-filtered query Europe PMC actually
+ * ran.
  *
  * Only registered when `EUROPEPMC_ENABLED=true` (the default). The handler
  * fails fast with a configuration error if the service is unset, since the
@@ -17,7 +19,8 @@
 
 import { tool, z } from '@cyanheads/mcp-ts-core';
 import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
-import { EUROPEPMC_SERVICE_ERRORS } from '@/services/error-contracts.js';
+import { sanitization } from '@cyanheads/mcp-ts-core/utils';
+import { EUROPEPMC_SERVICE_ERRORS, QUERY_INPUT_ERRORS } from '@/services/error-contracts.js';
 import { getEuropePmcService } from '@/services/europe-pmc/europe-pmc-service.js';
 import {
   EUROPEPMC_ALL_SOURCES,
@@ -32,6 +35,7 @@ import {
   SCHEMA_SEARCH_ACTION,
 } from './_concepts.js';
 import { escapeMarkdownInline, sliceCodeUnits } from './_text.js';
+import { hasVisibleText } from './_visible-text.js';
 
 const SourceEnum = z.enum(['MED', 'PMC', 'PPR', 'PAT', 'AGR']);
 
@@ -56,6 +60,15 @@ export const pubmedEuropepmcSearchTool = tool('pubmed_europepmc_search', {
 
   errors: [
     ...EUROPEPMC_SERVICE_ERRORS,
+    ...QUERY_INPUT_ERRORS,
+    {
+      reason: 'blank_cursor',
+      code: JsonRpcErrorCode.ValidationError,
+      when: 'The `cursorMark` holds only whitespace or invisible characters such as a zero-width space. Europe PMC cannot read it and answers with the HTTP 503 it also uses for an outage.',
+      recovery:
+        "Omit `cursorMark` or pass `*` for the first page, or pass the previous response's `nextCursorMark` verbatim for the next page.",
+      retryable: false,
+    },
     {
       reason: 'europepmc_disabled',
       code: JsonRpcErrorCode.ConfigurationError,
@@ -73,7 +86,7 @@ export const pubmedEuropepmcSearchTool = tool('pubmed_europepmc_search', {
       .string()
       .min(1)
       .describe(
-        'Europe PMC search query. Supports field tokens like `AUTH:"<name>"`, `JOURNAL:"<title>"`, `TITLE:"<words>"`, `PUB_YEAR:[2020 TO 2024]`, `DOI:"..."`, `EXT_ID:<pmid> AND SRC:MED`, `PMCID:PMC<digits>`. Identifier tokens may be quoted or unquoted — this tool wraps every query with its `sources` filter, and Europe PMC honors a quoted identifier inside that wrapper. A PubMed-indexed article resolves under `SRC:MED`, not `SRC:PMC`, whichever identifier is used. Free text is matched broadly across abstract/title/keywords.',
+        'Europe PMC search query. Supports field tokens like `AUTH:"<name>"`, `JOURNAL:"<title>"`, `TITLE:"<words>"`, `PUB_YEAR:[2020 TO 2024]`, `DOI:"..."`, `EXT_ID:<pmid> AND SRC:MED`, `PMCID:PMC<digits>`. Identifier tokens may be quoted or unquoted — this tool wraps every query with its `sources` filter, and Europe PMC honors a quoted identifier inside that wrapper. A PubMed-indexed article resolves under `SRC:MED`, not `SRC:PMC`, whichever identifier is used. Free text is matched broadly across abstract/title/keywords. A query with no search term — blank once HTML entities are decoded and markup, parentheses, and invisible characters are disregarded, such as `()` or `<b></b>` — is rejected; any other query is sent as written.',
       ),
     pageSize: z
       .number()
@@ -86,7 +99,7 @@ export const pubmedEuropepmcSearchTool = tool('pubmed_europepmc_search', {
       .string()
       .default('*')
       .describe(
-        "Pagination cursor. Use `*` (default) for the first page; pass the previous response's `nextCursorMark` for subsequent pages.",
+        "Pagination cursor. Use `*` (default) for the first page; pass the previous response's `nextCursorMark` verbatim for subsequent pages. A whitespace-only cursor, invisible characters included, is rejected before the request, and a cursor Europe PMC cannot read fails with `europepmc_invalid_input` once a retry of it fails again while the first page of the same query is served.",
       ),
     sources: z
       .array(SourceEnum)
@@ -217,12 +230,35 @@ export const pubmedEuropepmcSearchTool = tool('pubmed_europepmc_search', {
 
   async handler(input, ctx) {
     ctx.log.info('Executing pubmed_europepmc_search', { query: input.query });
+    // `min(1)` counts whitespace, and the source wrapper trims a blank query to
+    // `() AND (SRC:"MED")`, which Europe PMC answers with every record of that
+    // source. The check runs on the caller's query, before the wrapper, and
+    // applies pubmed_search_articles' rule: markup stripped, entities decoded,
+    // parentheses and invisible characters disregarded. Europe PMC would search
+    // `<b></b>` as the word `b`, but that is no term the caller wrote. The
+    // sanitized copy only decides blankness; the query is sent as written. (#176)
+    const checkedQuery = await sanitization.sanitizeString(input.query, { context: 'text' });
+    if (!hasVisibleText(checkedQuery.replace(/[()]/g, ''))) {
+      throw ctx.fail(
+        'blank_query',
+        'The `query` contains no search term — it is blank once HTML entities are decoded and markup, parentheses, and invisible characters are disregarded.',
+      );
+    }
+    // Europe PMC answers a blank cursor — whitespace or invisible characters —
+    // with the HTTP 503 it uses for an outage, which would be retried as one.
+    // An exactly-empty cursor reads as the first page upstream and passes
+    // through. (#180)
+    if (input.cursorMark !== '' && !hasVisibleText(input.cursorMark)) {
+      throw ctx.fail(
+        'blank_cursor',
+        'The `cursorMark` holds only whitespace or invisible characters, which Europe PMC cannot read as a page position.',
+      );
+    }
     const epmc = getEuropePmcService();
     if (!epmc) {
       throw ctx.fail(
         'europepmc_disabled',
         'Europe PMC service is not available. Set EUROPEPMC_ENABLED=true to use this tool.',
-        { ...ctx.recoveryFor('europepmc_disabled') },
       );
     }
 

@@ -12,7 +12,8 @@
  * @module tests/mcp-server/tools/definitions/convert-ids-per-element.test
  */
 
-import { createMockContext } from '@cyanheads/mcp-ts-core/testing';
+import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
+import { createMockContext, runToolContract } from '@cyanheads/mcp-ts-core/testing';
 import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { textBlocks } from '../../../_helpers.js';
@@ -183,5 +184,47 @@ describe('pubmed_convert_ids answers every submitted element (issue #165)', () =
     expect(result.records.map((r) => r.requestedId)).toEqual(['10.1093/nar/gks1195', DROPPED_DOI]);
     expect(result.records[1]?.errmsg).toMatch(/no record/i);
     expect(result).toMatchObject({ totalConverted: 1, totalSubmitted: 2 });
+  });
+});
+
+/**
+ * Last in the file: the 429 closes the shared NCBI cooldown gate, which would
+ * hold any test after it.
+ */
+describe('pubmed_convert_ids throttled by the ID Converter', () => {
+  /**
+   * The ID Converter request carries no `api_key`, so the hint may only claim the
+   * key raises the E-utilities ceiling. A Retry-After past the backoff cap stops
+   * the loop on this one 429, which keeps the header as NCBI sent it: an HTTP date.
+   */
+  it('reports ncbi_rate_limited with a hint that holds for this endpoint', async () => {
+    const retryAfter = new Date(Date.now() + 120_000).toUTCString();
+    fetchSpy.mockImplementationOnce(() =>
+      Promise.resolve(new Response('', { status: 429, headers: { 'retry-after': retryAfter } })),
+    );
+
+    const result = await runToolContract(convertIdsTool, { ids: ['23193287'], idType: 'pmid' });
+
+    expect(result.isError).toBe(true);
+    const { error } = result.structuredContent as {
+      error: {
+        code: number;
+        data: { reason: string; retryAfter: string; recovery: { hint: string } };
+      };
+    };
+    expect(error.code).toBe(JsonRpcErrorCode.RateLimited);
+    expect(error.data).toMatchObject({ reason: 'ncbi_rate_limited', retryAfter });
+    const { hint } = error.data.recovery;
+    expect(hint).toContain('NCBI_API_KEY');
+    expect(hint).toContain('E-utilities ceiling');
+    expect(hint).toContain('HTTP date');
+    expect(hint).not.toMatch(/NCBI's ceiling|number of seconds in `retryAfter`/);
+
+    const text = textBlocks(result.content)
+      .map((b) => b.text)
+      .join('\n');
+    expect(text).toContain(`Recovery: ${hint}`);
+    expect(text).toContain('reason ncbi_rate_limited');
+    expect(converterRequests()).toHaveLength(1);
   });
 });

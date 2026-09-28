@@ -6,7 +6,7 @@
  */
 
 import { tool, z } from '@cyanheads/mcp-ts-core';
-import { NCBI_QUERY_INPUT_ERRORS, NCBI_SERVICE_ERRORS } from '@/services/error-contracts.js';
+import { NCBI_SERVICE_ERRORS, QUERY_INPUT_ERRORS } from '@/services/error-contracts.js';
 import { getNcbiService } from '@/services/ncbi/ncbi-service.js';
 import { ensureArray, getText } from '@/services/ncbi/parsing/xml-helpers.js';
 import {
@@ -16,6 +16,7 @@ import {
   SCHEMA_DEFINED_TERM,
   SCHEMA_DEFINED_TERM_SET,
 } from './_concepts.js';
+import { hasVisibleText } from './_visible-text.js';
 
 // ─── MeSH eSummary parsing helpers ───────────────────────────────────────────
 
@@ -127,7 +128,7 @@ export const lookupMeshTool = tool('pubmed_lookup_mesh', {
   sourceUrl:
     'https://github.com/cyanheads/pubmed-mcp-server/blob/main/src/mcp-server/tools/definitions/lookup-mesh.tool.ts',
 
-  errors: [...NCBI_SERVICE_ERRORS, ...NCBI_QUERY_INPUT_ERRORS] as const,
+  errors: [...NCBI_SERVICE_ERRORS, ...QUERY_INPUT_ERRORS] as const,
 
   // Never advertised; rewritten to the canonical key before the schema parses. (#156)
   inputAliases: { limit: 'maxResults' },
@@ -137,7 +138,7 @@ export const lookupMeshTool = tool('pubmed_lookup_mesh', {
       .string()
       .min(1)
       .describe(
-        'MeSH descriptor name or free-text term to look up. Must carry a term: a blank or whitespace-only value is rejected rather than searched.',
+        'MeSH descriptor name or free-text term to look up. Must carry a term: a value of only whitespace or invisible characters, such as a zero-width space, is rejected rather than searched.',
       ),
     maxResults: z.number().int().min(1).max(50).default(10).describe('Maximum results'),
     offset: z
@@ -214,11 +215,10 @@ export const lookupMeshTool = tool('pubmed_lookup_mesh', {
 
     // ESearch on db=mesh answers a blank term with Count=0 and a WarningList
     // rather than an error, so the empty-result branch would report "no MeSH
-    // descriptors matched" for a term that was never really searched. (#133)
-    if (query.trim().length === 0) {
-      throw ctx.fail('blank_query', 'The `query` is blank — there is no term to look up.', {
-        ...ctx.recoveryFor('blank_query'),
-      });
+    // descriptors matched" for a term that was never really searched. Invisible
+    // characters such as a zero-width space count as blank. (#133, #176)
+    if (!hasVisibleText(query)) {
+      throw ctx.fail('blank_query', 'The `query` is blank — there is no term to look up.');
     }
 
     const hasFieldTag = /\[.+\]/.test(query);

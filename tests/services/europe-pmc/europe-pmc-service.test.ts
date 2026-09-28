@@ -259,6 +259,7 @@ describe('EuropePmcService.search', () => {
     await expect(service.search({ query: '' })).rejects.toMatchObject({
       data: {
         reason: 'europepmc_invalid_input',
+        retryable: false,
         epmcErrCode: 400,
         epmcErrMsg: expect.stringContaining('No search criteria'),
         recovery: { hint: expect.stringContaining('No search criteria') },
@@ -308,9 +309,83 @@ describe('EuropePmcService.search', () => {
     await expect(service.search({ query: 'foo' })).rejects.toMatchObject({
       data: {
         reason: 'europepmc_unreachable',
-        recovery: { hint: expect.stringContaining('Europe PMC was unreachable') },
       },
     });
+  });
+
+  it('sends an exactly-empty cursorMark as written (Europe PMC reads it as the first page)', async () => {
+    mockFetchWithTimeout.mockResolvedValue(jsonResponse({ hitCount: 0 }));
+    const result = await makeService().search({ query: 'malaria', cursorMark: '' });
+
+    const url = new URL(String(mockFetchWithTimeout.mock.calls[0]?.[0]));
+    expect(url.searchParams.get('cursorMark')).toBe('');
+    expect(result.cursorMark).toBe('');
+  });
+});
+
+/**
+ * Europe PMC matches nothing when a query is exactly one `EXT_ID` clause ANDed
+ * with one `SRC` clause and either value is quoted, so a one-entry `sources`
+ * list repeats its source (#175). Asserted on the query as it reaches the wire.
+ */
+describe('EuropePmcService.search — source clause (#175)', () => {
+  beforeEach(() => {
+    mockFetchWithTimeout.mockReset();
+    mockFetchWithTimeout.mockImplementation(() => Promise.resolve(jsonResponse({ hitCount: 0 })));
+  });
+
+  const sentQuery = () =>
+    new URL(String(mockFetchWithTimeout.mock.calls[0]?.[0])).searchParams.get('query');
+
+  /** A lone EXT_ID clause ANDed with a lone SRC clause — the shape Europe PMC answers with 0. */
+  const BARE_EXT_ID_SRC_PAIR = /^\(EXT_ID:[^()]*\) AND \(SRC:"?[A-Z]+"?\)$/;
+
+  it.each(['MED', 'PMC', 'PPR', 'PAT', 'AGR'] as const)(
+    'repeats a lone %s source, so the sent query is never a bare EXT_ID + SRC pair',
+    async (source) => {
+      await makeService().search({ query: 'EXT_ID:32669217', sources: [source] });
+
+      expect(sentQuery()).toBe(`(EXT_ID:32669217) AND (SRC:"${source}" OR SRC:"${source}")`);
+      expect(sentQuery()).not.toMatch(BARE_EXT_ID_SRC_PAIR);
+    },
+  );
+
+  it.each([
+    ['an unquoted EXT_ID', 'EXT_ID:32669217', '(EXT_ID:32669217) AND (SRC:"MED" OR SRC:"MED")'],
+    ['a quoted EXT_ID', 'EXT_ID:"32669217"', '(EXT_ID:"32669217") AND (SRC:"MED" OR SRC:"MED")'],
+    ['free text', ' malaria ', '(malaria) AND (SRC:"MED" OR SRC:"MED")'],
+  ])('gives %s the same single-source shape', async (_label, query, expected) => {
+    await makeService().search({ query, sources: ['MED'] });
+    expect(sentQuery()).toBe(expected);
+  });
+
+  it('reports the repeated clause it sent when Europe PMC echoes no query', async () => {
+    const result = await makeService().search({ query: 'EXT_ID:PPR1283828', sources: ['PPR'] });
+
+    expect(result.query).toBe('(EXT_ID:PPR1283828) AND (SRC:"PPR" OR SRC:"PPR")');
+    expect(result.query).toBe(sentQuery());
+  });
+
+  it.each([
+    [['MED', 'PMC'], '(EXT_ID:32669217) AND (SRC:"MED" OR SRC:"PMC")'],
+    [['MED', 'PMC', 'PPR'], '(EXT_ID:32669217) AND (SRC:"MED" OR SRC:"PMC" OR SRC:"PPR")'],
+    [
+      ['MED', 'PMC', 'PPR', 'PAT', 'AGR'],
+      '(EXT_ID:32669217) AND (SRC:"MED" OR SRC:"PMC" OR SRC:"PPR" OR SRC:"PAT" OR SRC:"AGR")',
+    ],
+  ] as const)('leaves a multi-source clause byte-identical for %j', async (sources, expected) => {
+    await makeService().search({ query: 'EXT_ID:32669217', sources });
+    expect(sentQuery()).toBe(expected);
+  });
+
+  it('sends the trimmed query with no source clause when sources is omitted or empty', async () => {
+    await makeService().search({ query: ' EXT_ID:32669217 ' });
+    await makeService().search({ query: 'EXT_ID:32669217', sources: [] });
+
+    const sent = mockFetchWithTimeout.mock.calls.map((call) =>
+      new URL(String(call[0])).searchParams.get('query'),
+    );
+    expect(sent).toEqual(['EXT_ID:32669217', 'EXT_ID:32669217']);
   });
 });
 
@@ -324,8 +399,6 @@ describe('EuropePmcService.search', () => {
 describe('EuropePmcService.search — upstream failures and empty envelopes (#152, #159)', () => {
   const MAX_RETRIES = 3;
   const EXHAUSTED = MAX_RETRIES + 1;
-  const UNREACHABLE_HINT =
-    'Retry after a brief delay; Europe PMC was unreachable. NCBI PMC and Unpaywall remain available.';
 
   const envelope = () => jsonResponse({ version: '6.9' });
   const results = () =>
@@ -362,7 +435,7 @@ describe('EuropePmcService.search — upstream failures and empty envelopes (#15
         message: expect.stringMatching(
           new RegExp(`Status: 404.*\\(failed after ${EXHAUSTED} attempts\\)$`),
         ),
-        data: { reason: 'europepmc_unreachable', recovery: { hint: UNREACHABLE_HINT } },
+        data: { reason: 'europepmc_unreachable' },
       });
       expect(mockFetchWithTimeout).toHaveBeenCalledTimes(EXHAUSTED);
     });
@@ -376,22 +449,19 @@ describe('EuropePmcService.search — upstream failures and empty envelopes (#15
       expect(mockFetchWithTimeout).toHaveBeenCalledTimes(2);
     });
 
-    it.each([500, 503])(
-      'retries a %i and ends as europepmc_unreachable with the hint',
-      async (status) => {
-        mockFetchWithTimeout.mockRejectedValue(
-          httpErrorRejection(status, JsonRpcErrorCode.ServiceUnavailable, 'down'),
-        );
-        await expect(service().search({ query: 'cancer' })).rejects.toMatchObject({
-          code: JsonRpcErrorCode.ServiceUnavailable,
-          message: expect.stringMatching(
-            new RegExp(`Status: ${status}.*\\(failed after ${EXHAUSTED} attempts\\)$`),
-          ),
-          data: { reason: 'europepmc_unreachable', recovery: { hint: UNREACHABLE_HINT } },
-        });
-        expect(mockFetchWithTimeout).toHaveBeenCalledTimes(EXHAUSTED);
-      },
-    );
+    it.each([500, 503])('retries a %i and ends as europepmc_unreachable', async (status) => {
+      mockFetchWithTimeout.mockRejectedValue(
+        httpErrorRejection(status, JsonRpcErrorCode.ServiceUnavailable, 'down'),
+      );
+      await expect(service().search({ query: 'cancer' })).rejects.toMatchObject({
+        code: JsonRpcErrorCode.ServiceUnavailable,
+        message: expect.stringMatching(
+          new RegExp(`Status: ${status}.*\\(failed after ${EXHAUSTED} attempts\\)$`),
+        ),
+        data: { reason: 'europepmc_unreachable' },
+      });
+      expect(mockFetchWithTimeout).toHaveBeenCalledTimes(EXHAUSTED);
+    });
 
     it('carries a 503 Retry-After through to the terminal error', async () => {
       mockFetchWithTimeout.mockRejectedValue(
@@ -520,13 +590,11 @@ describe('EuropePmcService.search — upstream failures and empty envelopes (#15
         expect(err).toBeInstanceOf(McpError);
         expect(err.code).toBe(JsonRpcErrorCode.ServiceUnavailable);
         expect(err.data?.reason).toBe('europepmc_unreachable');
-        expect(err.data?.recovery).toEqual({ hint: UNREACHABLE_HINT });
+        expect(err.data?.recovery).toBeUndefined();
         expect(err.message).toMatch(new RegExp(`\\(failed after ${EXHAUSTED} attempts\\)$`));
         // Upstream noise — never blame the caller's input.
         expect(err.message).not.toMatch(/sort|CITED|AUTH_FIRST|CRISPR|query/i);
         expect(err.data?.sort).toBeUndefined();
-        // #75: the diagnosis and the next step stay distinct.
-        expect(err.data?.recovery).not.toEqual({ hint: err.message });
         expect(defaultIsTransient(err)).toBe(true);
         expect(mockFetchWithTimeout).toHaveBeenCalledTimes(EXHAUSTED);
       },
@@ -551,6 +619,7 @@ describe('EuropePmcService.search — upstream failures and empty envelopes (#15
       expect(err).toBeInstanceOf(McpError);
       expect(err.code).toBe(JsonRpcErrorCode.ValidationError);
       expect(err.data?.reason).toBe('europepmc_invalid_input');
+      expect(err.data?.retryable).toBe(false);
       expect(err.data?.sort).toBe(sort);
       expect(err.message).toContain(`"${sort}"`);
       const hint = (err.data?.recovery as { hint?: string } | undefined)?.hint;
@@ -568,7 +637,7 @@ describe('EuropePmcService.search — upstream failures and empty envelopes (#15
       expect(mockFetchWithTimeout).toHaveBeenCalledTimes(1);
     });
 
-    it('blames a pagination cursor only once the envelope persists through every attempt', async () => {
+    it('blames a pagination cursor once the envelope reaches the last attempt', async () => {
       mockFetchWithTimeout.mockImplementation(() => Promise.resolve(envelope()));
       await expect(
         service().search({ query: 'CRISPR', cursorMark: 'AoIIQDeiFSg1' }),
@@ -577,6 +646,7 @@ describe('EuropePmcService.search — upstream failures and empty envelopes (#15
         message: expect.stringContaining('"AoIIQDeiFSg1"'),
         data: {
           reason: 'europepmc_invalid_input',
+          retryable: false,
           cursorMark: 'AoIIQDeiFSg1',
           recovery: { hint: expect.stringContaining('cursorMark') },
         },
@@ -623,6 +693,258 @@ describe('EuropePmcService.search — upstream failures and empty envelopes (#15
       const hits = await service().fetchRecords([{ source: 'MED', epmcId: '1' }]);
       expect(hits).toHaveLength(1);
       expect(mockFetchWithTimeout).toHaveBeenCalledTimes(2);
+    });
+  });
+
+  /**
+   * Europe PMC answers a cursor it cannot decode with the same HTTP 503 it uses
+   * for an outage. The first 503 on a caller-supplied cursor triggers one
+   * first-page probe of the same query and a retry of the cursor; a later 503
+   * convicts the cursor only when that probe was served (#180).
+   */
+  describe('HTTP 503 on a caller-supplied cursor (#180)', () => {
+    /** Europe PMC's actual answer to an unreadable cursor. */
+    const cursor503 = () =>
+      httpErrorRejection(
+        503,
+        JsonRpcErrorCode.ServiceUnavailable,
+        '{"errMsg":"Search service is temporarily unavailable. Please retry later."}',
+      );
+
+    /** The URL parameters of every request sent, in order. */
+    const sent = () =>
+      mockFetchWithTimeout.mock.calls.map((call) => new URL(String(call[0])).searchParams);
+    const sentCursors = () => sent().map((params) => params.get('cursorMark'));
+
+    /**
+     * Answers by cursor: a first-page (`*`) request draws from `firstPage`, any
+     * other from `cursorPage`; each list's last entry repeats.
+     */
+    function routeByCursor(
+      cursorPage: Array<() => Promise<Response>>,
+      firstPage: Array<() => Promise<Response>>,
+    ) {
+      let cursorCalls = 0;
+      let firstPageCalls = 0;
+      mockFetchWithTimeout.mockImplementation((url: string) => {
+        const isFirstPage = new URL(url).searchParams.get('cursorMark') === '*';
+        const replies = isFirstPage ? firstPage : cursorPage;
+        const index = isFirstPage ? firstPageCalls++ : cursorCalls++;
+        return (replies[Math.min(index, replies.length - 1)] as () => Promise<Response>)();
+      });
+    }
+
+    const reject503 = () => Promise.reject(cursor503());
+    const resolveResults = () => Promise.resolve(results());
+    const resolveEnvelope = () => Promise.resolve(envelope());
+
+    const settle = (promise: Promise<unknown>) =>
+      promise.then(
+        () => undefined,
+        (e: unknown) => e as McpError,
+      );
+
+    it('fails as a non-retryable europepmc_invalid_input when the cursor draws a second 503 after the probe serves the first page', async () => {
+      routeByCursor([reject503], [resolveResults]);
+
+      const err = await settle(
+        service().search({
+          query: 'malaria',
+          sources: ['MED'],
+          cursorMark: 'abc',
+          pageSize: 10,
+          sort: 'CITED desc',
+        }),
+      );
+
+      expect(err).toBeInstanceOf(McpError);
+      expect(err?.code).toBe(JsonRpcErrorCode.ValidationError);
+      expect(err?.message).toContain('cursorMark "abc"');
+      expect(err?.data).toMatchObject({
+        reason: 'europepmc_invalid_input',
+        cursorMark: 'abc',
+        retryable: false,
+      });
+      const hint = (err?.data?.recovery as { hint?: string } | undefined)?.hint ?? '';
+      expect(hint).toContain('`nextCursorMark`');
+      expect(hint).toContain('`*`');
+      expect(hint).not.toBe(err?.message);
+      expect(defaultIsTransient(err)).toBe(false);
+
+      // The cursor request, one probe, then one retry of the cursor that
+      // confirms it — the rest of the retry budget goes unspent.
+      expect(mockFetchWithTimeout).toHaveBeenCalledTimes(3);
+      const [original, probe, retry] = sent();
+      expect(original?.get('cursorMark')).toBe('abc');
+      expect(probe?.get('cursorMark')).toBe('*');
+      expect(probe?.get('pageSize')).toBe('1');
+      // The same query: source clause and sort included.
+      expect(probe?.get('query')).toBe(original?.get('query'));
+      expect(probe?.get('sort')).toBe('CITED desc');
+      expect(retry?.toString()).toBe(original?.toString());
+    });
+
+    it('returns the cursor page when one 503 clears on the retry after the probe serves the first page', async () => {
+      routeByCursor([reject503, resolveResults], [resolveResults]);
+
+      const result = await service().search({ query: 'malaria', cursorMark: 'abc' });
+
+      expect(result.hitCount).toBe(1);
+      expect(result.cursorMark).toBe('abc');
+      expect(sentCursors()).toEqual(['abc', '*', 'abc']);
+    });
+
+    it('convicts on the next 503 after a served probe, even with another failure between', async () => {
+      routeByCursor([reject503, resolveEnvelope, reject503], [resolveResults]);
+
+      const err = await settle(service().search({ query: 'malaria', cursorMark: 'abc' }));
+
+      expect(err?.code).toBe(JsonRpcErrorCode.ValidationError);
+      expect(err?.data?.reason).toBe('europepmc_invalid_input');
+      expect(sentCursors()).toEqual(['abc', '*', 'abc', 'abc']);
+    });
+
+    it('skips the probe when the first 503 lands on the last attempt', async () => {
+      routeByCursor(
+        [resolveEnvelope, resolveEnvelope, resolveEnvelope, reject503],
+        [resolveResults],
+      );
+
+      const err = await settle(service().search({ query: 'malaria', cursorMark: 'abc' }));
+
+      expect(err?.code).toBe(JsonRpcErrorCode.ServiceUnavailable);
+      expect(err?.data?.reason).toBe('europepmc_unreachable');
+      expect(sentCursors()).toEqual(Array(EXHAUSTED).fill('abc'));
+    });
+
+    it('skips the probe with no retries configured, ending as europepmc_unreachable', async () => {
+      routeByCursor([reject503], [resolveResults]);
+
+      const err = await settle(
+        makeService({ maxRetries: 0 }).search({ query: 'malaria', cursorMark: 'abc' }),
+      );
+
+      expect(err?.code).toBe(JsonRpcErrorCode.ServiceUnavailable);
+      expect(err?.data?.reason).toBe('europepmc_unreachable');
+      expect(err?.data?.attempts).toBe(1);
+      expect(sentCursors()).toEqual(['abc']);
+    });
+
+    it('keeps the retry path, probing once, when the first page fails too', async () => {
+      routeByCursor([reject503], [reject503]);
+
+      const err = await settle(service().search({ query: 'malaria', cursorMark: 'abc' }));
+
+      expect(err?.code).toBe(JsonRpcErrorCode.ServiceUnavailable);
+      expect(err?.data?.reason).toBe('europepmc_unreachable');
+      expect(err?.data?.attempts).toBe(EXHAUSTED);
+      expect(err?.message).toMatch(
+        new RegExp(`Status: 503.*\\(failed after ${EXHAUSTED} attempts\\)$`),
+      );
+      // Every attempt of the cursor request plus one probe, right after the first failure.
+      expect(sentCursors()).toEqual(['abc', '*', 'abc', 'abc', 'abc']);
+    });
+
+    it('blames the cursor for an envelope on the last attempt after earlier 503s, naming the last attempt only', async () => {
+      routeByCursor([reject503, reject503, reject503, resolveEnvelope], [reject503]);
+
+      const err = await settle(service().search({ query: 'malaria', cursorMark: 'abc' }));
+
+      expect(err?.code).toBe(JsonRpcErrorCode.ValidationError);
+      expect(err?.data).toMatchObject({
+        reason: 'europepmc_invalid_input',
+        cursorMark: 'abc',
+        retryable: false,
+      });
+      expect(err?.message).toBe(
+        'Europe PMC answered the last attempt for cursorMark "abc" with an empty response — the cursor is most likely invalid or expired.',
+      );
+      expect(sentCursors()).toEqual(['abc', '*', 'abc', 'abc', 'abc']);
+    });
+
+    it('returns the cursor page when a retry clears the 503 after a failed probe', async () => {
+      routeByCursor([reject503, resolveResults], [reject503]);
+
+      const result = await service().search({ query: 'malaria', cursorMark: 'abc' });
+
+      expect(result.hitCount).toBe(1);
+      expect(sentCursors()).toEqual(['abc', '*', 'abc']);
+    });
+
+    it('probes on the first 503 even when it lands on a later attempt', async () => {
+      routeByCursor([resolveEnvelope, reject503], [resolveResults]);
+
+      const err = await settle(service().search({ query: 'malaria', cursorMark: 'abc' }));
+
+      expect(err?.code).toBe(JsonRpcErrorCode.ValidationError);
+      expect(err?.data?.reason).toBe('europepmc_invalid_input');
+      expect(sentCursors()).toEqual(['abc', 'abc', '*', 'abc']);
+    });
+
+    it('treats a probe answered with an empty envelope as a failed probe', async () => {
+      routeByCursor([reject503], [resolveEnvelope]);
+
+      const err = await settle(service().search({ query: 'malaria', cursorMark: 'abc' }));
+
+      expect(err?.code).toBe(JsonRpcErrorCode.ServiceUnavailable);
+      expect(err?.data?.reason).toBe('europepmc_unreachable');
+      expect(sentCursors()).toEqual(['abc', '*', 'abc', 'abc', 'abc']);
+    });
+
+    it.each([
+      ['an explicit `*`', '*', '*'],
+      ['an omitted cursor', undefined, '*'],
+      ['an exactly-empty cursor', '', ''],
+    ])(
+      'never probes a first-page request: a 503 on %s keeps today’s europepmc_unreachable',
+      async (_label, cursorMark, wire) => {
+        mockFetchWithTimeout.mockImplementation(reject503);
+
+        const err = await settle(
+          service().search({ query: 'malaria', ...(cursorMark !== undefined && { cursorMark }) }),
+        );
+
+        expect(err?.code).toBe(JsonRpcErrorCode.ServiceUnavailable);
+        expect(err?.data?.reason).toBe('europepmc_unreachable');
+        expect(err?.message).toMatch(
+          new RegExp(`Status: 503.*\\(failed after ${EXHAUSTED} attempts\\)$`),
+        );
+        expect(sentCursors()).toEqual(Array(EXHAUSTED).fill(wire));
+        expect(sent().every((params) => params.get('pageSize') === '25')).toBe(true);
+      },
+    );
+
+    it('probes on a 503 only: a caller cursor drawing a 502 keeps today’s path', async () => {
+      mockFetchWithTimeout.mockRejectedValue(
+        httpErrorRejection(502, JsonRpcErrorCode.ServiceUnavailable, 'Bad Gateway'),
+      );
+
+      const err = await settle(service().search({ query: 'malaria', cursorMark: 'abc' }));
+
+      expect(err?.data?.reason).toBe('europepmc_unreachable');
+      expect(sentCursors()).toEqual(Array(EXHAUSTED).fill('abc'));
+    });
+
+    it('propagates a caller abort during the probe as cancellation, with no further request', async () => {
+      const controller = new AbortController();
+      const reason = new Error('caller went away');
+      mockFetchWithTimeout.mockImplementation(
+        (url: string, _timeoutMs: number, _ctx: unknown, init?: RequestInit) => {
+          if (new URL(url).searchParams.get('cursorMark') !== '*') return reject503();
+          // The probe is in flight: the caller cancels, and the fetch honors its signal.
+          return new Promise<Response>((_resolve, reject) => {
+            init?.signal?.addEventListener('abort', () => reject(init.signal?.reason), {
+              once: true,
+            });
+            controller.abort(reason);
+          });
+        },
+      );
+
+      await expect(
+        service().search({ query: 'malaria', cursorMark: 'abc', signal: controller.signal }),
+      ).rejects.toBe(reason);
+      expect(sentCursors()).toEqual(['abc', '*']);
     });
   });
 });
@@ -819,6 +1141,26 @@ describe('EuropePmcService request pacing', () => {
 
     await expect(call).resolves.toMatchObject({ hitCount: 1 });
     expect(starts).toEqual([0, 3_000]);
+  });
+
+  it('paces the first-page probe for a 503 cursor through the queue like any request (#180)', async () => {
+    mockFetchWithTimeout.mockImplementation((url: string) => {
+      starts.push(Date.now() - t0);
+      return new URL(url).searchParams.get('cursorMark') === '*'
+        ? Promise.resolve(results())
+        : Promise.reject(unavailable());
+    });
+    const service = makeService({ maxRetries: 3, minStartGapMs: 200 });
+
+    const outcome = expect(service.search({ query: 'a', cursorMark: 'abc' })).rejects.toMatchObject(
+      { code: JsonRpcErrorCode.ValidationError, data: { reason: 'europepmc_invalid_input' } },
+    );
+    await vi.advanceTimersByTimeAsync(60_000);
+    await outcome;
+
+    // The probe waits out the start gap instead of riding the failed request's
+    // slot; the retry that confirms the cursor follows the 1 s backoff.
+    expect(starts).toEqual([0, 200, 1_200]);
   });
 
   it('fails fast with the 429 and its retryAfter when Retry-After exceeds the 30 s backoff cap', async () => {
@@ -1055,10 +1397,11 @@ describe('EuropePmcService.fullTextXml', () => {
       httpErrorRejection(404, JsonRpcErrorCode.NotFound, 'nope'),
     );
     const service = makeService();
+    // No retries configured: one attempt, reported in the singular.
     await expect(service.search({ query: 'foo' })).rejects.toMatchObject({
       code: JsonRpcErrorCode.ServiceUnavailable,
-      message: expect.stringMatching(/Status: 404.*\(failed after 1 attempts\)$/),
-      data: { reason: 'europepmc_unreachable' },
+      message: expect.stringMatching(/Status: 404.*\(failed after 1 attempt\)$/),
+      data: { reason: 'europepmc_unreachable', attempts: 1 },
     });
   });
 
@@ -1232,6 +1575,7 @@ describe('EuropePmcService.citations', () => {
       code: JsonRpcErrorCode.ValidationError,
       data: {
         reason: 'europepmc_invalid_input',
+        retryable: false,
         epmcErrCode: 20,
         epmcErrMsg: 'pageSize must be between 1 and 1000',
         recovery: { hint: expect.stringContaining('pageSize must be between 1 and 1000') },

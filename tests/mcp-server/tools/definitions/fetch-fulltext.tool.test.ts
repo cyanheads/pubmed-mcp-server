@@ -217,6 +217,7 @@ describe('fetchFulltextTool', () => {
       expect(fetchFulltextTool.errors?.map((entry) => entry.reason)).toEqual([
         'queue_full',
         'ncbi_unreachable',
+        'ncbi_rate_limited',
         'ncbi_deadline_exceeded',
         'ncbi_invalid_response',
         'ncbi_resource_not_found',

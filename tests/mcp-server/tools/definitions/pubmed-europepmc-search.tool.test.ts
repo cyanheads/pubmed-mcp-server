@@ -4,6 +4,7 @@
  */
 
 import type { ContentBlock } from '@cyanheads/mcp-ts-core';
+import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
 import { createMockContext, getEnrichment, runToolContract } from '@cyanheads/mcp-ts-core/testing';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
@@ -63,6 +64,16 @@ describe('pubmedEuropepmcSearchTool', () => {
     await expect(promise).rejects.toMatchObject({
       data: { reason: 'europepmc_disabled' },
     });
+  });
+
+  it('passes a padded query to the service as written (issue #176)', async () => {
+    mockSearch.mockResolvedValue({ hits: [], hitCount: 3, cursorMark: '*', query: 'malaria' });
+    const ctx = createMockContext({ errors: pubmedEuropepmcSearchTool.errors });
+    await pubmedEuropepmcSearchTool.handler(
+      pubmedEuropepmcSearchTool.input.parse({ query: '  malaria  ' }),
+      ctx,
+    );
+    expect(mockSearch).toHaveBeenCalledWith(expect.objectContaining({ query: '  malaria  ' }));
   });
 
   it('passes default sources (MED, PMC, PPR) when none provided', async () => {
@@ -647,6 +658,183 @@ describe('pubmedEuropepmcSearchTool total match count in the header (issue #147)
     const text = contractText(result);
     expect(text).toContain('**Returned:** 1 of 3\n');
     expect(text).toContain('(final page)');
+  });
+});
+
+describe('pubmedEuropepmcSearchTool blank query rejection (issue #176)', () => {
+  beforeEach(() => {
+    mockSearch.mockReset();
+    mockGetEpmc.mockReset();
+    mockGetEpmc.mockReturnValue({ search: mockSearch });
+  });
+
+  // The source wrapper trims a blank query to `() AND (SRC:"MED")`, which
+  // Europe PMC answers with every record of that source — so the check runs on
+  // the caller's query, before the wrapper ever sees it.
+  it.each([
+    ['the default sources', { query: '   ' }],
+    ['an explicit MED source', { query: '   ', sources: ['MED' as const] }],
+    ['tabs and newlines', { query: '\t\n ' }],
+  ])(
+    'rejects a whitespace-only query with %s without calling Europe PMC',
+    async (_label, input) => {
+      const result = await runToolContract(pubmedEuropepmcSearchTool, { ...input, pageSize: 1 });
+
+      expect(result.isError).toBe(true);
+      expect(result.structuredContent).toMatchObject({
+        error: {
+          code: JsonRpcErrorCode.ValidationError,
+          data: { reason: 'blank_query', retryable: false },
+        },
+      });
+      const text = contractText(result);
+      expect(text).toContain('`query`');
+      expect(text).toMatch(/Recovery:/);
+      expect(text).toMatch(/nonblank/i);
+      expect(mockSearch).not.toHaveBeenCalled();
+    },
+  );
+
+  // Europe PMC answers `()` with every record of the source, and searches the
+  // tag name of `<b></b>` and the entity text of `&nbsp;` as words. None of
+  // them is a search term the caller wrote, so each is rejected the way
+  // pubmed_search_articles rejects it: after markup is stripped and entities
+  // are decoded, with parentheses disregarded.
+  it.each([
+    ['empty parentheses', '()'],
+    ['parentheses around a space', '( )'],
+    ['parentheses around a zero-width space', '(​)'],
+    ['nested parentheses', '(( ))'],
+    ['markup with no text', '<b></b>'],
+    ['a comment', '<!-- note -->'],
+    ['a no-break space entity', '&nbsp;'],
+    ['a zero-width space entity', '&#8203;'],
+    ['a zero-width space', '​'],
+    ['a next-line character (U+0085)', '\u0085'],
+    ['a control character (U+0001)', '\u0001'],
+  ])('rejects %s as blank_query without calling Europe PMC', async (_label, query) => {
+    const result = await runToolContract(pubmedEuropepmcSearchTool, { query, pageSize: 1 });
+
+    expect(result.isError).toBe(true);
+    expect(result.structuredContent).toMatchObject({
+      error: {
+        code: JsonRpcErrorCode.ValidationError,
+        message: expect.stringMatching(/no search term/),
+        data: { reason: 'blank_query', retryable: false },
+      },
+    });
+    const text = contractText(result);
+    expect(text).toContain('`query`');
+    expect(text).toMatch(/no search term/);
+    // Europe PMC searches `b` and `nbsp` as words, so nothing may say it would
+    // receive or treat the query as a blank term.
+    expect(text).not.toMatch(/Europe PMC (would )?(receive|treat)/i);
+    expect(mockSearch).not.toHaveBeenCalled();
+  });
+
+  // The sanitized copy only decides blankness; the caller's query is what runs.
+  it.each([
+    ['a parenthesized query with a source filter', '(asthma) AND (SRC:"MED")'],
+    ['markup around a term', '<i>Plasmodium</i> falciparum'],
+    ['an entity beside a term', 'Crohn&apos;s disease'],
+    ['a term beside a zero-width space', '​malaria'],
+  ])('sends %s to Europe PMC exactly as written', async (_label, query) => {
+    mockSearch.mockResolvedValue({ hits: [], hitCount: 3, cursorMark: '*', query });
+
+    const result = await runToolContract(pubmedEuropepmcSearchTool, { query, pageSize: 1 });
+
+    expect(result.isError).toBeFalsy();
+    expect(mockSearch).toHaveBeenCalledTimes(1);
+    expect(mockSearch).toHaveBeenCalledWith(expect.objectContaining({ query }));
+  });
+
+  it('declares blank_query as a non-retryable input error', () => {
+    expect(pubmedEuropepmcSearchTool.errors?.find((e) => e.reason === 'blank_query')).toMatchObject(
+      { code: JsonRpcErrorCode.ValidationError, retryable: false },
+    );
+  });
+
+  it('describes the rejection in the advertised `query` description', () => {
+    const description = pubmedEuropepmcSearchTool.input.shape.query.description ?? '';
+    expect(description).toMatch(/no search term/i);
+    expect(description).toContain('`()`');
+    expect(description).toContain('`<b></b>`');
+    expect(description).toMatch(/rejected/);
+    expect(description).toMatch(/sent as written/);
+  });
+});
+
+describe('pubmedEuropepmcSearchTool blank cursorMark rejection (issue #180)', () => {
+  beforeEach(() => {
+    mockSearch.mockReset();
+    mockGetEpmc.mockReset();
+    mockGetEpmc.mockReturnValue({ search: mockSearch });
+  });
+
+  // Europe PMC answers a whitespace cursor with HTTP 503, its outage status —
+  // and an invisible one the same way, which `.trim()` does not catch.
+  it.each([
+    ['spaces', '   '],
+    ['a tab', '\t'],
+    ['a newline between spaces', ' \n '],
+    ['a next-line character (U+0085)', '\u0085'],
+    ['a zero-width space', '​'],
+    ['a word joiner between spaces', ' ⁠ '],
+    ['a control character (U+0001)', '\u0001'],
+  ])('rejects a cursorMark of %s without calling Europe PMC', async (_label, cursorMark) => {
+    const result = await runToolContract(pubmedEuropepmcSearchTool, {
+      query: 'malaria',
+      cursorMark,
+      pageSize: 1,
+    });
+
+    expect(result.isError).toBe(true);
+    expect(result.structuredContent).toMatchObject({
+      error: {
+        code: JsonRpcErrorCode.ValidationError,
+        message: expect.stringContaining('`cursorMark`'),
+        data: {
+          reason: 'blank_cursor',
+          retryable: false,
+          recovery: { hint: expect.stringContaining('`nextCursorMark`') },
+        },
+      },
+    });
+    const text = contractText(result);
+    expect(text).toContain('`cursorMark`');
+    expect(text).toMatch(/Recovery: .*`nextCursorMark`/);
+    expect(text).toContain('(reason blank_cursor · not retryable');
+    expect(mockSearch).not.toHaveBeenCalled();
+  });
+
+  it('passes an exactly-empty cursorMark to the service as written', async () => {
+    mockSearch.mockResolvedValue({ hits: [], hitCount: 0, cursorMark: '', query: 'malaria' });
+
+    const result = await runToolContract(pubmedEuropepmcSearchTool, {
+      query: 'malaria',
+      cursorMark: '',
+    });
+
+    expect(result.isError).toBeFalsy();
+    expect(mockSearch).toHaveBeenCalledWith(expect.objectContaining({ cursorMark: '' }));
+  });
+
+  it('declares blank_cursor as a non-retryable input error', () => {
+    expect(
+      pubmedEuropepmcSearchTool.errors?.find((e) => e.reason === 'blank_cursor'),
+    ).toMatchObject({ code: JsonRpcErrorCode.ValidationError, retryable: false });
+  });
+
+  it('counts invisible characters as blank in the blank_cursor contract', () => {
+    const entry = pubmedEuropepmcSearchTool.errors?.find((e) => e.reason === 'blank_cursor');
+    expect(entry?.when).toMatch(/invisible/i);
+  });
+
+  it('describes cursor handling in the advertised `cursorMark` description', () => {
+    const description = pubmedEuropepmcSearchTool.input.shape.cursorMark.description ?? '';
+    expect(description).toMatch(/whitespace-only/i);
+    expect(description).toContain('europepmc_invalid_input');
+    expect(description).toMatch(/verbatim/);
   });
 });
 

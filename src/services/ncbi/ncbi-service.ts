@@ -24,7 +24,6 @@ import {
 } from '@cyanheads/mcp-ts-core/utils';
 
 import { getServerConfig } from '@/config/server-config.js';
-import { recoveryFor } from '@/services/error-contracts.js';
 import { NcbiApiClient } from './api-client.js';
 import { createNcbiRequestQueue } from './request-queue.js';
 import {
@@ -123,18 +122,76 @@ const QUEUE_WAIT_MARGIN_MS = 1;
 const isTransient = (error: unknown): boolean =>
   error instanceof McpError && defaultIsTransient(error);
 
+/** The reason each code a retry loop can end on is stamped with; a Timeout gets none. */
+const REASON_BY_CODE = new Map<JsonRpcErrorCode, string>([
+  [JsonRpcErrorCode.ServiceUnavailable, 'ncbi_unreachable'],
+  [JsonRpcErrorCode.RateLimited, 'ncbi_rate_limited'],
+]);
+
+/**
+ * A retry loop that ran out, reported as its last attempt's failure: that attempt's
+ * code with `endpoint`, `attempts`, and NCBI's `ncbiErrors` when the attempt carried
+ * them. A ServiceUnavailable is stamped `ncbi_unreachable`; a RateLimited is stamped
+ * `ncbi_rate_limited` and keeps the `retryAfter` its 429 named; a Timeout keeps its
+ * code with no reason.
+ */
+function retriesSpent(
+  last: McpError,
+  message: string,
+  attempts: number,
+  endpoint: string,
+  cause: unknown,
+): McpError {
+  const reason = REASON_BY_CODE.get(last.code);
+  const retryAfter = last.code === JsonRpcErrorCode.RateLimited ? last.data?.retryAfter : undefined;
+  return new McpError(
+    last.code,
+    message,
+    {
+      ...(reason && { reason }),
+      endpoint,
+      attempts,
+      ...(last.data?.ncbiErrors !== undefined && { ncbiErrors: last.data.ncbiErrors }),
+      ...(retryAfter !== undefined && { retryAfter }),
+    },
+    { cause },
+  );
+}
+
+/** What {@link toServiceError} needs to know about the retry loop that threw. */
+interface LoopOutcome {
+  /** Whether that deadline fired — the loop's own signal, never inferred from the error. */
+  deadlineFired: boolean;
+  /** The loop's total deadline. */
+  deadlineMs: number;
+  /**
+   * NCBI's diagnostics from the latest attempt that carried any. An expiry that aborts a
+   * later attempt in flight or in the queue arrives without them. (#174)
+   */
+  ncbiErrors: unknown;
+}
+
 /**
  * Maps what the retry loop throws onto this service's declared failure reasons. Runs
  * outside the loop, so the loop itself still sees the framework's `pacer_shed` — which
  * it never retries — and `retry_deadline_exceeded`.
  *
  * - `pacer_shed` → `queue_full` (RateLimited), keeping the shed's `retryAfter`.
- * - `retry_deadline_exceeded` → `ncbi_deadline_exceeded` (Timeout).
- * - Retries exhausted → the last attempt's code and message with `endpoint` and
- *   `attempts`; a ServiceUnavailable is stamped `ncbi_unreachable`.
+ * - `retry_deadline_exceeded` with the deadline fired — mid-request, in the queue, or
+ *   mid-backoff → `ncbi_deadline_exceeded` (Timeout), with NCBI's `ncbiErrors` from the
+ *   latest attempt that carried any, wherever the timer landed.
+ * - `retry_deadline_exceeded` with the deadline not fired — the loop stopped because
+ *   the next backoff would not fit the time left → retries spent, as below. The error's
+ *   own cause or timing cannot tell the two apart (a request aborted mid-flight fails as
+ *   the client's ServiceUnavailable, and timers can fire early), so `deadlineFired` — the
+ *   loop's own signal — does. (#174)
+ * - Retries exhausted → retries spent: the last attempt's code and message (the
+ *   framework appends the attempt count) with `endpoint`, `attempts`, and `ncbiErrors`.
+ * - A 429 never retried because its `Retry-After` outlasts the time left or the backoff
+ *   cap → the attempt's own error, stamped `ncbi_rate_limited`.
  * - Anything else — a failure that was never retried — passes through unchanged.
  */
-function toServiceError(error: unknown, endpoint: string, deadlineMs: number): unknown {
+function toServiceError(error: unknown, endpoint: string, loop: LoopOutcome): unknown {
   if (!(error instanceof McpError)) return error;
   const data = error.data ?? {};
 
@@ -146,35 +203,47 @@ function toServiceError(error: unknown, endpoint: string, deadlineMs: number): u
         endpoint,
         queueSize: data.queueDepth,
         retryAfter: data.retryAfter,
-        ...recoveryFor('queue_full'),
       },
       { cause: error },
     );
   }
 
   if (data.reason === 'retry_deadline_exceeded') {
+    const last = error.cause;
+    const attempts = data.retryAttempts;
+    if (!loop.deadlineFired && last instanceof McpError && typeof attempts === 'number') {
+      const count = `${attempts} attempt${attempts > 1 ? 's' : ''}`;
+      return retriesSpent(
+        last,
+        `${last.message} (failed after ${count})`,
+        attempts,
+        endpoint,
+        error,
+      );
+    }
     return timeout(
-      `NCBI request deadline (${deadlineMs}ms) exceeded`,
-      { reason: 'ncbi_deadline_exceeded', deadlineMs, ...recoveryFor('ncbi_deadline_exceeded') },
+      `NCBI request deadline (${loop.deadlineMs}ms) exceeded`,
+      {
+        reason: 'ncbi_deadline_exceeded',
+        deadlineMs: loop.deadlineMs,
+        ...(loop.ncbiErrors !== undefined && { ncbiErrors: loop.ncbiErrors }),
+      },
       { cause: error },
     );
   }
 
-  if (typeof data.retryAttempts !== 'number') return error;
-  // Other retryable codes (Timeout, RateLimited) keep their code with no reason.
-  const reason =
-    error.code === JsonRpcErrorCode.ServiceUnavailable ? 'ncbi_unreachable' : undefined;
-  return new McpError(
-    error.code,
-    error.message,
-    {
-      ...(reason && { reason, ...recoveryFor(reason) }),
-      endpoint,
-      attempts: data.retryAttempts,
-      ...(data.ncbiErrors !== undefined && { ncbiErrors: data.ncbiErrors }),
-    },
-    { cause: error.cause ?? error },
-  );
+  if (typeof data.retryAttempts === 'number') {
+    return retriesSpent(error, error.message, data.retryAttempts, endpoint, error.cause ?? error);
+  }
+  if (error.code === JsonRpcErrorCode.RateLimited) {
+    return new McpError(
+      error.code,
+      error.message,
+      { ...data, reason: 'ncbi_rate_limited' },
+      { cause: error },
+    );
+  }
+  return error;
 }
 
 /**
@@ -430,7 +499,6 @@ export class NcbiService {
         {
           reason: 'ncbi_invalid_response',
           responseSnippet: text.substring(0, 200),
-          ...recoveryFor('ncbi_invalid_response'),
         },
         { cause: error },
       );
@@ -448,7 +516,8 @@ export class NcbiService {
    * a call that cannot start in time is shed at once instead of waiting it out.
    *
    * A caller abort rethrows the caller's own reason; every other failure is mapped
-   * onto this service's reasons by {@link toServiceError}, after the loop.
+   * onto this service's reasons by {@link toServiceError}, after the loop. Once the
+   * caller is ruled out, the loop's signal has aborted only if the deadline fired.
    */
   private async runPaced<T>(
     endpoint: string,
@@ -456,13 +525,19 @@ export class NcbiService {
     execute: (signal: AbortSignal) => Promise<T>,
   ): Promise<T> {
     let attempt = 0;
+    let loopSignal: AbortSignal | undefined;
+    let ncbiErrors: unknown;
     try {
       return await withRetry(
         ({ signal, remainingMs }) => {
+          loopSignal = signal;
           attempt += 1;
           return this.queue
             .run(execute, { signal, maxWaitMs: remainingMs + QUEUE_WAIT_MARGIN_MS })
             .catch((error: unknown) => {
+              if (error instanceof McpError && error.data?.ncbiErrors !== undefined) {
+                ncbiErrors = error.data.ncbiErrors;
+              }
               if (attempt <= this.maxRetries && isTransient(error)) {
                 logger.warning(
                   `NCBI request to ${endpoint} failed on attempt ${attempt} of ${this.maxRetries + 1}.`,
@@ -490,7 +565,11 @@ export class NcbiService {
       );
     } catch (error: unknown) {
       if (callerSignal?.aborted) throw callerSignal.reason;
-      throw toServiceError(error, endpoint, this.totalDeadlineMs);
+      throw toServiceError(error, endpoint, {
+        deadlineMs: this.totalDeadlineMs,
+        deadlineFired: loopSignal?.aborted === true,
+        ncbiErrors,
+      });
     }
   }
 

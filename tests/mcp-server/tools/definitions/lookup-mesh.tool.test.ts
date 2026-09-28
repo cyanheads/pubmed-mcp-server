@@ -618,7 +618,25 @@ describe('lookupMeshTool', () => {
       const promise = lookupMeshTool.handler(input, ctx);
       await expect(promise).rejects.toMatchObject({
         code: JsonRpcErrorCode.ValidationError,
-        data: { reason: 'blank_query', recovery: { hint: expect.stringMatching(/nonblank/i) } },
+        data: { reason: 'blank_query' },
+      });
+      expect(mockESearch).not.toHaveBeenCalled();
+    });
+
+    // `.trim()` keeps U+0085 and format characters such as U+200B.
+    it.each([
+      ['a next-line character (U+0085)', '\u0085'],
+      ['a zero-width space', '​'],
+      ['a word joiner between spaces', ' ⁠ '],
+    ])('rejects a query of %s without calling ESearch', async (_label, query) => {
+      const result = await runToolContract(lookupMeshTool, { query });
+
+      expect(result.isError).toBe(true);
+      expect(result.structuredContent).toMatchObject({
+        error: {
+          code: JsonRpcErrorCode.ValidationError,
+          data: { reason: 'blank_query', retryable: false },
+        },
       });
       expect(mockESearch).not.toHaveBeenCalled();
     });

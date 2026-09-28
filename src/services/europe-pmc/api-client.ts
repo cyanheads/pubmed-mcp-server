@@ -12,7 +12,6 @@
 import { JsonRpcErrorCode, McpError, serviceUnavailable } from '@cyanheads/mcp-ts-core/errors';
 import { fetchWithTimeout, logger, requestContextService } from '@cyanheads/mcp-ts-core/utils';
 
-import { recoveryFor } from '@/services/error-contracts.js';
 import { EUROPEPMC_API_BASE, type EuropePmcSearchParams } from './types.js';
 
 const USER_AGENT = 'pubmed-mcp-server (+https://github.com/cyanheads/pubmed-mcp-server)';
@@ -51,8 +50,8 @@ export class EuropePmcApiClient {
    * query is HTTP 200 with `hitCount: 0`. A 404 is reclassified from its
    * status-mapped `NotFound` to `ServiceUnavailable` so the service retries it.
    * A retryable 5xx keeps its code, so a 504 stays `Timeout`. Only a failure
-   * that ends up `ServiceUnavailable` carries `europepmc_unreachable` and its
-   * recovery hint, the one code that reason is declared for. An upstream
+   * that ends up `ServiceUnavailable` carries `europepmc_unreachable`, the one
+   * code that reason is declared for. An upstream
    * `retryAfter` is kept. A 429 and every other 4xx pass through unchanged, as
    * does a 501, whose `data.retryable: false` keeps it out of the retry loop.
    * (#152)
@@ -84,7 +83,6 @@ export class EuropePmcApiClient {
           {
             ...(code === JsonRpcErrorCode.ServiceUnavailable && {
               reason: 'europepmc_unreachable',
-              ...recoveryFor('europepmc_unreachable'),
             }),
             status,
             ...(error.data?.retryAfter !== undefined && { retryAfter: error.data.retryAfter }),
@@ -95,7 +93,7 @@ export class EuropePmcApiClient {
       const msg = error instanceof Error ? error.message : String(error);
       throw serviceUnavailable(
         `Europe PMC search request failed: ${msg}`,
-        { reason: 'europepmc_unreachable', ...recoveryFor('europepmc_unreachable') },
+        { reason: 'europepmc_unreachable' },
         { cause: error },
       );
     }
@@ -140,7 +138,7 @@ export class EuropePmcApiClient {
       const msg = error instanceof Error ? error.message : String(error);
       throw serviceUnavailable(
         `Europe PMC fullTextXML request failed: ${msg}`,
-        { reason: 'europepmc_unreachable', epmcId, ...recoveryFor('europepmc_unreachable') },
+        { reason: 'europepmc_unreachable', epmcId },
         { cause: error },
       );
     }
@@ -202,7 +200,7 @@ export class EuropePmcApiClient {
       const msg = error instanceof Error ? error.message : String(error);
       throw serviceUnavailable(
         `Europe PMC links request failed: ${msg}`,
-        { reason: 'europepmc_unreachable', ...recoveryFor('europepmc_unreachable') },
+        { reason: 'europepmc_unreachable' },
         { cause: error },
       );
     }
@@ -230,10 +228,18 @@ export class EuropePmcApiClient {
  * optional source filter. EPMC's query syntax supports `SRC:"X"` field tokens —
  * the requested sources are OR-joined into a parenthesized clause and ANDed
  * with the caller's query.
+ *
+ * A single source is repeated (`SRC:"MED" OR SRC:"MED"`). Europe PMC matches
+ * nothing when a query is exactly one `EXT_ID` clause ANDed with one `SRC`
+ * clause and either value is quoted; the repeated clause matches quoted and
+ * unquoted `EXT_ID` alike and returns the same total as a lone clause for any
+ * other query. Multi-source clauses are sent as they are. (#175)
  */
 export function buildSearchQuery(params: Pick<EuropePmcSearchParams, 'query' | 'sources'>): string {
   const base = params.query.trim();
   if (!params.sources || params.sources.length === 0) return base;
-  const sourceClause = params.sources.map((s) => `SRC:"${s}"`).join(' OR ');
+  const sources =
+    params.sources.length === 1 ? [...params.sources, ...params.sources] : params.sources;
+  const sourceClause = sources.map((s) => `SRC:"${s}"`).join(' OR ');
   return `(${base}) AND (${sourceClause})`;
 }

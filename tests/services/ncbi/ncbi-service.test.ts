@@ -776,7 +776,7 @@ describe('NcbiService.idConvert', () => {
     });
   });
 
-  it('SerializationError on idConvert carries reason ncbi_invalid_response + recovery', async () => {
+  it('SerializationError on idConvert carries reason ncbi_invalid_response', async () => {
     const { service, mockApiClient } = createIdConvertService();
     (mockApiClient.makeExternalRequest as ReturnType<typeof vi.fn>).mockResolvedValue('not json');
 
@@ -784,7 +784,6 @@ describe('NcbiService.idConvert', () => {
       code: JsonRpcErrorCode.SerializationError,
       data: {
         reason: 'ncbi_invalid_response',
-        recovery: { hint: expect.stringContaining('Retry the request') },
       },
     });
   });
@@ -1127,7 +1126,7 @@ describe('NcbiService retry behavior', () => {
     expect(makeRequest).toHaveBeenCalledTimes(3);
   });
 
-  it('exhausted retries stamp reason ncbi_unreachable + recovery on the wire', async () => {
+  it('exhausted retries stamp reason ncbi_unreachable', async () => {
     const { service, mockApiClient } = createRetryService(1);
     const makeRequest = mockApiClient.makeRequest as ReturnType<typeof vi.fn>;
     makeRequest.mockRejectedValue(new McpError(JsonRpcErrorCode.ServiceUnavailable, 'down'));
@@ -1138,25 +1137,88 @@ describe('NcbiService retry behavior', () => {
         reason: 'ncbi_unreachable',
         endpoint: 'esearch',
         attempts: 2,
-        recovery: { hint: expect.stringContaining('NCBI was unreachable') },
       },
     });
   });
 
-  it('exhausted retries on Timeout/RateLimited do not stamp ncbi_unreachable', async () => {
+  it('exhausted retries on RateLimited stamp ncbi_rate_limited with the last Retry-After', async () => {
+    const { service, mockApiClient } = createRetryService(1);
+    const makeRequest = mockApiClient.makeRequest as ReturnType<typeof vi.fn>;
+    makeRequest
+      .mockRejectedValueOnce(
+        new McpError(JsonRpcErrorCode.RateLimited, 'too many', { status: 429, retryAfter: '4' }),
+      )
+      .mockRejectedValueOnce(
+        new McpError(JsonRpcErrorCode.RateLimited, 'too many', { status: 429, retryAfter: '2' }),
+      );
+
+    const error = (await service
+      .eSearch({ db: 'pubmed', term: 'test' })
+      .catch((e: unknown) => e)) as McpError;
+
+    expect(error).toMatchObject({
+      code: JsonRpcErrorCode.RateLimited,
+      message: 'too many (failed after 2 attempts)',
+      data: { reason: 'ncbi_rate_limited', endpoint: 'esearch', attempts: 2, retryAfter: '2' },
+    });
+  });
+
+  it('exhausted retries on RateLimited without a Retry-After carry no retryAfter', async () => {
     const { service, mockApiClient } = createRetryService(1);
     const makeRequest = mockApiClient.makeRequest as ReturnType<typeof vi.fn>;
     makeRequest.mockRejectedValue(new McpError(JsonRpcErrorCode.RateLimited, 'too many'));
 
-    await expect(service.eSearch({ db: 'pubmed', term: 'test' })).rejects.toMatchObject({
+    const error = (await service
+      .eSearch({ db: 'pubmed', term: 'test' })
+      .catch((e: unknown) => e)) as McpError;
+
+    expect(error).toMatchObject({
       code: JsonRpcErrorCode.RateLimited,
+      data: { reason: 'ncbi_rate_limited', endpoint: 'esearch', attempts: 2 },
+    });
+    expect(error.data).not.toHaveProperty('retryAfter');
+  });
+
+  it('exhausted retries on Timeout keep the code with no reason', async () => {
+    const { service, mockApiClient } = createRetryService(1);
+    const makeRequest = mockApiClient.makeRequest as ReturnType<typeof vi.fn>;
+    makeRequest.mockRejectedValue(new McpError(JsonRpcErrorCode.Timeout, 'slow'));
+
+    const error = (await service
+      .eSearch({ db: 'pubmed', term: 'test' })
+      .catch((e: unknown) => e)) as McpError;
+
+    expect(error).toMatchObject({
+      code: JsonRpcErrorCode.Timeout,
       data: { endpoint: 'esearch', attempts: 2 },
     });
-    // Only ServiceUnavailable retries-exhausted gets stamped — RateLimited has its own
-    // queue_full reason that's stamped at the queue-rejection site.
-    await expect(service.eSearch({ db: 'pubmed', term: 'test' })).rejects.not.toMatchObject({
-      data: { reason: 'ncbi_unreachable' },
+    expect(error.data).not.toHaveProperty('reason');
+  });
+
+  it('keeps the error text of a JSON response as ncbiErrors when retries run out', async () => {
+    const failure = 'Search Backend failed: Cannot connect to SOLR';
+    const makeRequest = vi.fn().mockResolvedValue(JSON.stringify({ error: failure }));
+    const service = new NcbiService(
+      { makeRequest } as unknown as NcbiApiClient,
+      idleQueue(),
+      new NcbiResponseHandler(),
+      1,
+      TEST_DEADLINE_MS,
+    );
+
+    await expect(
+      service.eSummary({ db: 'pubmed', id: '1', version: '2.0', retmode: 'json' }),
+    ).rejects.toMatchObject({
+      code: JsonRpcErrorCode.ServiceUnavailable,
+      message: `NCBI API Error: ${failure} (failed after 2 attempts)`,
+      data: {
+        reason: 'ncbi_unreachable',
+        endpoint: 'esummary',
+        attempts: 2,
+        ncbiErrors: [failure],
+      },
     });
+    expect(makeRequest).toHaveBeenCalledTimes(2);
   });
 
   it('applies capped exponential backoff with jitter', async () => {
@@ -1216,7 +1278,7 @@ describe('NcbiService retry behavior', () => {
     expect(makeRequest).not.toHaveBeenCalled();
   });
 
-  it('deadline-fired error stamps reason ncbi_deadline_exceeded + recovery on the wire', async () => {
+  it('deadline-fired error stamps reason ncbi_deadline_exceeded', async () => {
     const { service, mockApiClient } = createRetryService(3, 1);
     const makeRequest = mockApiClient.makeRequest as ReturnType<typeof vi.fn>;
     makeRequest.mockRejectedValue(new McpError(JsonRpcErrorCode.ServiceUnavailable, 'down'));
@@ -1226,7 +1288,6 @@ describe('NcbiService retry behavior', () => {
       data: {
         reason: 'ncbi_deadline_exceeded',
         deadlineMs: 1,
-        recovery: { hint: expect.stringContaining('Reduce batch size') },
       },
     });
   });
@@ -1297,24 +1358,58 @@ describe('NcbiService signal wiring during backoff sleep', () => {
   }
 
   it('throws Timeout when deadline expires during backoff sleep', async () => {
-    // Backoff for attempt 0 is 750–1250ms (1000ms ±25% jitter). A 200ms
-    // deadline always expires while the retry loop is sleeping.
+    // The loop only sleeps a backoff that fits in the time left, so a deadline can
+    // interrupt one only when the two land on the same instant. On a fake clock
+    // with jitter pinned, the first backoff is exactly the 1000ms deadline; the
+    // deadline's timer was armed first and fires first, mid-sleep.
+    vi.useFakeTimers();
+    const random = vi.spyOn(Math, 'random').mockReturnValue(0.5);
+    try {
+      const { service, mockApiClient } = createRealTimerService(3, 1000);
+      const makeRequest = mockApiClient.makeRequest as ReturnType<typeof vi.fn>;
+      makeRequest.mockRejectedValue(new McpError(JsonRpcErrorCode.ServiceUnavailable, 'down'));
+
+      const settled = service.eSearch({ db: 'pubmed', term: 'test' }).catch((e: unknown) => e);
+      await vi.advanceTimersByTimeAsync(1000);
+
+      expect(await settled).toMatchObject({
+        code: JsonRpcErrorCode.Timeout,
+        message: expect.stringMatching(/deadline.*exceeded/i),
+        data: { reason: 'ncbi_deadline_exceeded', deadlineMs: 1000 },
+      });
+
+      // Only one attempt fired; the chain was cancelled during the first sleep.
+      expect(makeRequest).toHaveBeenCalledTimes(1);
+    } finally {
+      random.mockRestore();
+      vi.useRealTimers();
+    }
+  });
+
+  it('gives up with the last attempt’s error when the next backoff cannot fit the deadline (#174)', async () => {
+    // Backoff for attempt 0 is 750–1250ms (1000ms ±25% jitter), which never fits a
+    // 200ms deadline. The loop stops without sleeping and before the deadline fires:
+    // every attempt made failed, so this is retry exhaustion, not an expiry.
     const { service, mockApiClient } = createRealTimerService(3, 200);
     const makeRequest = mockApiClient.makeRequest as ReturnType<typeof vi.fn>;
-
-    // First attempt fails fast with a retryable error so the loop enters the sleep.
-    makeRequest.mockRejectedValue(new McpError(JsonRpcErrorCode.ServiceUnavailable, 'down'));
+    makeRequest.mockRejectedValue(
+      new McpError(JsonRpcErrorCode.ServiceUnavailable, 'down', { ncbiErrors: ['backend down'] }),
+    );
 
     const started = Date.now();
     await expect(service.eSearch({ db: 'pubmed', term: 'test' })).rejects.toMatchObject({
-      code: JsonRpcErrorCode.Timeout,
-      message: expect.stringMatching(/deadline.*exceeded/i),
+      code: JsonRpcErrorCode.ServiceUnavailable,
+      message: 'down (failed after 1 attempt)',
+      data: {
+        reason: 'ncbi_unreachable',
+        endpoint: 'esearch',
+        attempts: 1,
+        ncbiErrors: ['backend down'],
+      },
     });
-    const elapsed = Date.now() - started;
 
-    // Must exit at the deadline (≤ ~500ms), not after the full backoff (≥ 750ms).
-    expect(elapsed).toBeLessThan(500);
-    // Only one attempt fired; the chain was cancelled during the first sleep.
+    // Exits at once, not after the backoff (≥ 750ms) or the deadline (200ms).
+    expect(Date.now() - started).toBeLessThan(150);
     expect(makeRequest).toHaveBeenCalledTimes(1);
   }, 2000);
 
@@ -1339,21 +1434,47 @@ describe('NcbiService signal wiring during backoff sleep', () => {
   }, 2000);
 
   it('idConvert honors deadline during backoff sleep', async () => {
-    // Same race as above, but through the separate runWithDeadline invocation
-    // in idConvert (external-API code path).
+    // Same race as above, but through idConvert's own call into the retry loop
+    // (external-API code path).
+    vi.useFakeTimers();
+    const random = vi.spyOn(Math, 'random').mockReturnValue(0.5);
+    try {
+      const { service, mockApiClient } = createRealTimerService(3, 1000);
+      const makeExternalRequest = mockApiClient.makeExternalRequest as ReturnType<typeof vi.fn>;
+      makeExternalRequest.mockRejectedValue(
+        new McpError(JsonRpcErrorCode.ServiceUnavailable, 'down'),
+      );
+
+      const settled = service.idConvert(['123'], 'pmid').catch((e: unknown) => e);
+      await vi.advanceTimersByTimeAsync(1000);
+
+      expect(await settled).toMatchObject({
+        code: JsonRpcErrorCode.Timeout,
+        message: expect.stringMatching(/deadline.*exceeded/i),
+        data: { reason: 'ncbi_deadline_exceeded' },
+      });
+
+      expect(makeExternalRequest).toHaveBeenCalledTimes(1);
+    } finally {
+      random.mockRestore();
+      vi.useRealTimers();
+    }
+  });
+
+  it('idConvert gives up with the last attempt’s error when the next backoff cannot fit (#174)', async () => {
     const { service, mockApiClient } = createRealTimerService(3, 200);
     const makeExternalRequest = mockApiClient.makeExternalRequest as ReturnType<typeof vi.fn>;
-
     makeExternalRequest.mockRejectedValue(
-      new McpError(JsonRpcErrorCode.ServiceUnavailable, 'down'),
+      new McpError(JsonRpcErrorCode.ServiceUnavailable, 'NCBI returned HTTP 503.'),
     );
 
     const started = Date.now();
     await expect(service.idConvert(['123'], 'pmid')).rejects.toMatchObject({
-      code: JsonRpcErrorCode.Timeout,
-      message: expect.stringMatching(/deadline.*exceeded/i),
+      code: JsonRpcErrorCode.ServiceUnavailable,
+      message: 'NCBI returned HTTP 503. (failed after 1 attempt)',
+      data: { reason: 'ncbi_unreachable', endpoint: 'idconv', attempts: 1 },
     });
-    expect(Date.now() - started).toBeLessThan(500);
+    expect(Date.now() - started).toBeLessThan(150);
     expect(makeExternalRequest).toHaveBeenCalledTimes(1);
   }, 2000);
 
@@ -1418,7 +1539,7 @@ describe('NcbiService signal wiring during backoff sleep', () => {
 
     // The 1s backoff cannot fit a 200ms deadline, so the call fails after one attempt.
     await expect(service.eSearch({ db: 'pubmed', term: 'cancer' })).rejects.toMatchObject({
-      data: { reason: 'ncbi_deadline_exceeded' },
+      data: { reason: 'ncbi_unreachable', attempts: 1 },
     });
 
     expect(logger.warning).toHaveBeenCalledWith(
@@ -1498,6 +1619,29 @@ describe('NcbiService signal wiring during backoff sleep', () => {
       data: { reason: 'ncbi_deadline_exceeded' },
     });
     expect(Date.now() - started).toBeLessThan(500);
+    expect(mockApiClient.makeRequest).not.toHaveBeenCalled();
+  }, 2000);
+
+  it('a deadline that expires in the queue before any request carries no ncbiErrors (#174)', async () => {
+    const mockApiClient = { makeRequest: vi.fn() } as unknown as NcbiApiClient;
+    const service = new NcbiService(
+      mockApiClient,
+      saturatedQueue(),
+      { parseAndHandleResponse: vi.fn() } as unknown as NcbiResponseHandler,
+      3,
+      100,
+    );
+
+    const error = (await service
+      .eSearch({ db: 'pubmed', term: 'test' })
+      .catch((e) => e)) as McpError;
+
+    expect(error).toMatchObject({
+      code: JsonRpcErrorCode.Timeout,
+      data: { reason: 'ncbi_deadline_exceeded', deadlineMs: 100 },
+    });
+    expect(error.data).not.toHaveProperty('ncbiErrors');
+    expect(error.data).not.toHaveProperty('attempts');
     expect(mockApiClient.makeRequest).not.toHaveBeenCalled();
   }, 2000);
 
@@ -1820,7 +1964,6 @@ describe('NcbiService integration with real queue', () => {
         endpoint: 'esearch',
         queueSize: 1,
         retryAfter: expect.any(Number),
-        recovery: { hint: expect.stringContaining('retryAfter') },
       },
     });
     // Rejected at the queue: the overflowing call never reached the upstream, and

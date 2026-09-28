@@ -6,7 +6,7 @@
 import type { ContentBlock } from '@cyanheads/mcp-ts-core';
 import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
 import { createMockContext, getEnrichment, runToolContract } from '@cyanheads/mcp-ts-core/testing';
-import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import type { ParsedBriefSummary } from '@/services/ncbi/types.js';
 
@@ -33,6 +33,12 @@ const { extractBriefSummaries: realExtractBriefSummaries } = await vi.importActu
 const { searchArticlesTool } = await import(
   '@/mcp-server/tools/definitions/search-articles.tool.js'
 );
+
+/** Every text block of a contract run, joined — the header, the rows, and the trailer. */
+const contractText = (result: Awaited<ReturnType<typeof runToolContract>>) =>
+  textBlocks(result.content as ContentBlock[])
+    .map((b) => b.text)
+    .join('\n');
 
 describe('searchArticlesTool', () => {
   beforeEach(() => {
@@ -250,6 +256,165 @@ describe('searchArticlesTool', () => {
       const calledTerm = mockESearch.mock.calls.at(-1)?.[0]?.term as string;
       expect(calledTerm).toContain('2020/01/01[pdat]');
       expect(calledTerm).toContain('2024/12/31[pdat]');
+    });
+
+    describe('accepted ranges keep their normalized clause (issue #177)', () => {
+      // The regression floor for calendar and ordering validation: every range
+      // here reaches ESearch exactly as it did before, for every dateType.
+      it.each(
+        (['pdat', 'mdat', 'edat'] as const).flatMap((dateType) =>
+          [
+            ['2024', '2024', '2024', '2024'],
+            ['2024/06', '2024/06', '2024/06', '2024/06'],
+            ['2024/1/5', '2024/1/5', '2024/1/5', '2024/1/5'],
+            ['2024-01-15', '2024-01-15', '2024/01/15', '2024/01/15'],
+            ['2024.01.15', '2024.01.15', '2024/01/15', '2024/01/15'],
+            ['2024/02/29', '2024/02/29', '2024/02/29', '2024/02/29'],
+            ['2024/1/5', '2024/01/05', '2024/1/5', '2024/01/05'],
+            ['2024/06', '2024', '2024/06', '2024'],
+            ['2024/06/15', '2024/06', '2024/06/15', '2024/06'],
+            ['2024/06', '2024/06/01', '2024/06', '2024/06/01'],
+            ['1800', '3000', '1800', '3000'],
+          ].map(([minDate, maxDate, sentMin, sentMax]) => ({
+            dateType,
+            minDate,
+            maxDate,
+            sentMin,
+            sentMax,
+          })),
+        ),
+      )(
+        'sends $minDate → $maxDate ($dateType) as $sentMin : $sentMax',
+        async ({ dateType, minDate, maxDate, sentMin, sentMax }) => {
+          mockESearch.mockResolvedValue({ count: 1, idList: ['1'], retmax: 20, retstart: 0 });
+          const ctx = createMockContext({ errors: searchArticlesTool.errors });
+          await searchArticlesTool.handler(
+            searchArticlesTool.input.parse({
+              query: 'cancer',
+              dateRange: { minDate, maxDate, dateType },
+            }),
+            ctx,
+          );
+
+          expect(mockESearch.mock.calls[0]?.[0]?.term).toBe(
+            `cancer AND (${sentMin}[${dateType}] : ${sentMax}[${dateType}])`,
+          );
+          expect(getEnrichment(ctx).appliedFilters).toEqual({
+            dateRange: { minDate: sentMin, maxDate: sentMax, dateType },
+          });
+          expect(getEnrichment(ctx).notice).toBeUndefined();
+        },
+      );
+    });
+
+    describe('impossible dates and reversed ranges (issue #177)', () => {
+      // PubMed answers either with HTTP 200, Count 0, and a FieldNotFound for the
+      // valid date tag, so the check has to land before ESearch is called.
+      const MIN = 'dateRange.minDate';
+      const MAX = 'dateRange.maxDate';
+
+      it.each(
+        (['pdat', 'mdat', 'edat'] as const).flatMap((dateType) =>
+          (
+            [
+              ['month 00', '2024/00', '2024/12', [MIN], /not a real calendar date/],
+              ['month 13', '2024', '2024/13', [MAX], /not a real calendar date/],
+              // Day 00 names no day at all; the month's day count is not the problem.
+              ['day 00', '2024/06/00', '2024/12', [MIN], /calendar date: day 00 is not a day\b/],
+              ['day 0', '2024/6/0', '2024/12', [MIN], /calendar date: day 0 is not a day\b/],
+              ['day 32', '2024/01', '2024/01/32', [MAX], /not a real calendar date/],
+              ['2023/02/29', '2023/02/29', '2023/12', [MIN], /2023\/02 has 28 days/],
+              ['2023/02/30', '2023/01', '2023/02/30', [MAX], /2023\/02 has 28 days/],
+              ['2024/02/30 in a leap year', '2024/02/30', '2024/12', [MIN], /has 29 days/],
+              ['1900/02/29 in a century year', '1900/02/29', '1900/12', [MIN], /has 28 days/],
+              ['2024/04/31', '2024/01', '2024/04/31', [MAX], /has 30 days/],
+              ['both bounds impossible', '2024/99/99', '2025/99/99', [MIN, MAX], /month 99/],
+              ['mixed separators', '2023-02-29', '2023.03.01', [MIN], /has 28 days/],
+              ['an impossible min with an empty max', '2024/13', '', [MIN], /month 13/],
+              ['an impossible max with an empty min', '', '2023/02/29', [MAX], /has 28 days/],
+              ['whole years reversed', '2025', '2020', [MIN, MAX], /falls after/],
+              ['days reversed', '2024/06/15', '2024/06/01', [MIN, MAX], /falls after/],
+              ['a month after a day', '2024/07', '2024/06/30', [MIN, MAX], /falls after/],
+            ] as const
+          ).map(([label, minDate, maxDate, fields, message]) => ({
+            label,
+            dateType,
+            minDate,
+            maxDate,
+            fields,
+            message,
+          })),
+        ),
+      )(
+        'rejects $label ($dateType) as invalid_date_range without calling NCBI',
+        async ({ dateType, minDate, maxDate, fields, message }) => {
+          const result = await runToolContract(searchArticlesTool, {
+            query: 'asthma',
+            dateRange: { minDate, maxDate, dateType },
+          });
+
+          expect(result.isError).toBe(true);
+          expect(result.structuredContent).toMatchObject({
+            error: {
+              code: JsonRpcErrorCode.ValidationError,
+              message: expect.stringMatching(message),
+              data: { reason: 'invalid_date_range', retryable: false, fields: [...fields] },
+            },
+          });
+          const text = contractText(result);
+          for (const field of fields) expect(text).toContain(`\`${field}\``);
+          expect(text).toMatch(message);
+          expect(text).toMatch(/Recovery:/);
+          expect(mockESearch).not.toHaveBeenCalled();
+        },
+      );
+
+      it('shows how PubMed expands each partial bound in a reversed range', async () => {
+        const result = await runToolContract(searchArticlesTool, {
+          query: 'asthma',
+          dateRange: { minDate: '2025', maxDate: '2020' },
+        });
+
+        const text = contractText(result);
+        expect(text).toContain('2025/01/01');
+        expect(text).toContain('2020/12/31');
+      });
+
+      it('accepts 2000/02/29, a leap day in a year divisible by 400', async () => {
+        mockESearch.mockResolvedValue({ count: 1, idList: ['1'], retmax: 20, retstart: 0 });
+        const ctx = createMockContext({ errors: searchArticlesTool.errors });
+        await searchArticlesTool.handler(
+          searchArticlesTool.input.parse({
+            query: 'asthma',
+            dateRange: { minDate: '2000/02/29', maxDate: '2000/03' },
+          }),
+          ctx,
+        );
+
+        expect(mockESearch.mock.calls[0]?.[0]?.term).toBe(
+          'asthma AND (2000/02/29[pdat] : 2000/03[pdat])',
+        );
+      });
+
+      it('declares invalid_date_range as a non-retryable input error', () => {
+        const entry = searchArticlesTool.errors?.find((e) => e.reason === 'invalid_date_range');
+        expect(entry).toMatchObject({ code: JsonRpcErrorCode.ValidationError, retryable: false });
+      });
+
+      it('names every impossible date in the invalid_date_range contract, day 00 included', () => {
+        const entry = searchArticlesTool.errors?.find((e) => e.reason === 'invalid_date_range');
+        expect(entry?.when).toMatch(/month outside 01–12/);
+        expect(entry?.when).toMatch(/day 00/);
+        expect(entry?.when).toMatch(/past the end of its month/);
+      });
+
+      it('describes calendar and ordering rules on the dateRange fields', () => {
+        const { dateRange } = searchArticlesTool.input.shape;
+        const inner = dateRange.unwrap().shape;
+        expect(inner.minDate.description).toMatch(/real calendar date/i);
+        expect(inner.maxDate.description).toMatch(/real calendar date/i);
+        expect(dateRange.description).toMatch(/minDate.*after.*maxDate/i);
+      });
     });
 
     it('converts dash-delimited dates to slashes for NCBI', async () => {
@@ -480,9 +645,50 @@ describe('searchArticlesTool', () => {
       const promise = searchArticlesTool.handler(input, ctx);
       await expect(promise).rejects.toMatchObject({
         code: JsonRpcErrorCode.ValidationError,
-        data: { reason: 'blank_query', recovery: { hint: expect.stringMatching(/nonblank/i) } },
+        data: { reason: 'blank_query' },
       });
       expect(mockESearch).not.toHaveBeenCalled();
+    });
+
+    // `.trim()` keeps U+0085 and every format character (`\p{Cf}`), and the
+    // sanitizer decodes an entity to the character it names, so each of these
+    // reached PubMed as an invisible term.
+    it.each([
+      ['a next-line character (U+0085)', '\u0085'],
+      ['a zero-width space', '​'],
+      ['a word joiner beside spaces', ' ⁠ '],
+      ['a soft hyphen', '­'],
+      ['a Mongolian vowel separator', '᠎'],
+      ['a zero-width space entity', '&#8203;'],
+      ['a hex word-joiner entity', '&#x2060;'],
+      ['a no-break space entity', '&nbsp;'],
+      ['a zero-width space in parentheses', '(​)'],
+      ['a field tag beside a zero-width joiner', '[pdat]‍'],
+      ['brackets around a zero-width space', '[​]'],
+      ['a Hangul choseong filler (U+115F)', 'ᅟ'],
+    ])('rejects a query of %s as blank_query without calling NCBI', async (_label, query) => {
+      const result = await runToolContract(searchArticlesTool, { query });
+
+      expect(result.isError).toBe(true);
+      expect(result.structuredContent).toMatchObject({
+        error: {
+          code: JsonRpcErrorCode.ValidationError,
+          data: { reason: 'blank_query', retryable: false },
+        },
+      });
+      expect(contractText(result)).toContain('`query`');
+      expect(mockESearch).not.toHaveBeenCalled();
+    });
+
+    it('still searches a term wrapped in invisible characters, as written', async () => {
+      mockESearch.mockResolvedValue({ count: 1, idList: ['1'], retmax: 20, retstart: 0 });
+      const ctx = createMockContext({ errors: searchArticlesTool.errors });
+      await searchArticlesTool.handler(
+        searchArticlesTool.input.parse({ query: '​asthma\u0085' }),
+        ctx,
+      );
+
+      expect(mockESearch.mock.calls[0]?.[0]?.term).toBe('​asthma\u0085');
     });
 
     it('mirrors the reason and recovery hint onto both error surfaces', async () => {
@@ -551,7 +757,7 @@ describe('searchArticlesTool', () => {
 
       await expect(searchArticlesTool.handler(input, ctx)).rejects.toMatchObject({
         code: JsonRpcErrorCode.ValidationError,
-        data: { reason: 'blank_query', recovery: { hint: expect.stringMatching(/nonblank/i) } },
+        data: { reason: 'blank_query' },
       });
       expect(mockESearch).not.toHaveBeenCalled();
     });
@@ -641,6 +847,233 @@ describe('searchArticlesTool', () => {
       const entry = searchArticlesTool.errors?.find((e) => e.reason === 'blank_query');
       expect(entry?.when).toContain('[pdat]');
       expect(entry?.when).toContain('()');
+    });
+  });
+
+  describe('filter values (issue #176)', () => {
+    beforeEach(() => {
+      mockESearch.mockResolvedValue({ count: 2, idList: ['1', '2'], retmax: 20, retstart: 0 });
+    });
+
+    /** Runs the handler with `asthma` plus the given filters; returns the term sent and the context. */
+    const search = async (filters: Record<string, unknown>) => {
+      const ctx = createMockContext({ errors: searchArticlesTool.errors });
+      await searchArticlesTool.handler(
+        searchArticlesTool.input.parse({ query: 'asthma', ...filters }),
+        ctx,
+      );
+      return { term: mockESearch.mock.calls[0]?.[0]?.term as string, ctx };
+    };
+
+    it.each([
+      ['author', { author: '  Smith J  ' }, 'asthma AND   Smith J  [Author]'],
+      ['journal', { journal: '  Thorax  ' }, 'asthma AND "  Thorax  "[Journal]'],
+      ['language', { language: '  english  ' }, 'asthma AND   english  [Language]'],
+      [
+        'publicationTypes',
+        { publicationTypes: ['  Review  '] },
+        'asthma AND ("  Review  "[Publication Type])',
+      ],
+      [
+        'meshTerms',
+        { meshTerms: ['  Adult  ', 'Child'] },
+        'asthma AND ("  Adult  "[MeSH Terms] AND "Child"[MeSH Terms])',
+      ],
+    ])('still searches a padded %s value as written', async (_label, filters, term) => {
+      const result = await search(filters);
+
+      expect(result.term).toBe(term);
+      expect(getEnrichment(result.ctx).appliedFilters).toEqual(filters);
+    });
+
+    it('sends a markup-wrapped filter value as its text', async () => {
+      const result = await search({ author: '<b>Smith J</b>', meshTerms: ['<i>Asthma</i>'] });
+
+      expect(result.term).toBe('asthma AND Smith J[Author] AND ("Asthma"[MeSH Terms])');
+      expect(getEnrichment(result.ctx).appliedFilters).toEqual({
+        author: 'Smith J',
+        meshTerms: ['Asthma'],
+      });
+    });
+
+    // Parentheses, brackets, and quotes beside a term are part of the value, so
+    // the blank check that disregards them never strips them from what is sent.
+    it.each([
+      ['author', { author: '"Smith J"' }, 'asthma AND "Smith J"[Author]'],
+      [
+        'journal',
+        { journal: 'Cell (Cambridge, Mass.)' },
+        'asthma AND "Cell (Cambridge, Mass.)"[Journal]',
+      ],
+      ['language', { language: '(english)' }, 'asthma AND (english)[Language]'],
+      [
+        'publicationTypes element',
+        { publicationTypes: ['[Review]'] },
+        'asthma AND ("[Review]"[Publication Type])',
+      ],
+      ['meshTerms element', { meshTerms: ['"Asthma"'] }, 'asthma AND (""Asthma""[MeSH Terms])'],
+    ])(
+      'still searches a %s holding syntax characters beside a term',
+      async (_label, filters, term) => {
+        const result = await search(filters);
+
+        expect(result.term).toBe(term);
+        expect(getEnrichment(result.ctx).appliedFilters).toEqual(filters);
+      },
+    );
+
+    it.each([
+      ['author', { author: '' }],
+      ['journal', { journal: '' }],
+      ['language', { language: '' }],
+      ['publicationTypes list', { publicationTypes: [] }],
+      ['meshTerms list', { meshTerms: [] }],
+      [
+        'value in every filter at once',
+        { author: '', journal: '', language: '', publicationTypes: [], meshTerms: [] },
+      ],
+    ])('applies no filter for an empty %s', async (_label, filters) => {
+      const result = await search(filters);
+
+      expect(result.term).toBe('asthma');
+      expect(getEnrichment(result.ctx).appliedFilters).toEqual({});
+      expect(getEnrichment(result.ctx).notice).toBeUndefined();
+    });
+
+    // An exactly-empty list element is the same "no filter" signal as an
+    // exactly-empty scalar, so it is dropped rather than sent as `""[Tag]`.
+    it.each([
+      ['publicationTypes element', { publicationTypes: [''] }, 'asthma', {}],
+      ['meshTerms element', { meshTerms: [''] }, 'asthma', {}],
+      [
+        'element beside real values',
+        { publicationTypes: ['', 'Review'], meshTerms: ['Adult', ''] },
+        'asthma AND ("Review"[Publication Type]) AND ("Adult"[MeSH Terms])',
+        { publicationTypes: ['Review'], meshTerms: ['Adult'] },
+      ],
+    ])('drops an empty %s', async (_label, filters, term, appliedFilters) => {
+      const result = await search(filters);
+
+      expect(result.term).toBe(term);
+      expect(getEnrichment(result.ctx).appliedFilters).toEqual(appliedFilters);
+    });
+
+    /**
+     * PubMed reads parentheses, brackets, and double quotes as query syntax, so
+     * a filter of only those carries no term: `asthma AND ()[Author]` answers
+     * with every `asthma` match and a notice that the Author tag went
+     * unrecognized. Each value is tried on every filter the check covers.
+     */
+    const syntaxOnlyRows = ['()', '[]', '""', '( )'].flatMap(
+      (value): [string, Record<string, unknown>, string[]][] => [
+        [`author of ${value}`, { author: value }, ['author']],
+        [`journal of ${value}`, { journal: value }, ['journal']],
+        [`language of ${value}`, { language: value }, ['language']],
+        [
+          `publicationTypes element of ${value}`,
+          { publicationTypes: ['Review', value] },
+          ['publicationTypes.1'],
+        ],
+        [`meshTerms element of ${value}`, { meshTerms: [value] }, ['meshTerms.0']],
+      ],
+    );
+
+    it.each<[string, Record<string, unknown>, string[]]>([
+      ['author', { author: '   ' }, ['author']],
+      ['journal', { journal: '   ' }, ['journal']],
+      ['language', { language: '   ' }, ['language']],
+      ['author emptied by the sanitizer', { author: '<b></b>' }, ['author']],
+      ['journal left as whitespace by the sanitizer', { journal: '<i> </i>' }, ['journal']],
+      ['publicationTypes element', { publicationTypes: ['   '] }, ['publicationTypes.0']],
+      ['meshTerms element', { meshTerms: ['  '] }, ['meshTerms.0']],
+      ['later meshTerms element', { meshTerms: ['Adult', '  '] }, ['meshTerms.1']],
+      ['element after an empty one', { publicationTypes: ['', '<b></b>'] }, ['publicationTypes.1']],
+      [
+        'value in several filters',
+        { author: '\t', journal: 'Thorax', meshTerms: ['Adult', ' '] },
+        ['author', 'meshTerms.1'],
+      ],
+      // Invisible to `.trim()`: U+0085, format characters, and the entities the
+      // sanitizer decodes to them.
+      ['author of a zero-width space', { author: '​' }, ['author']],
+      ['journal of a zero-width space entity', { journal: '&#8203;' }, ['journal']],
+      ['language of a word joiner', { language: '⁠' }, ['language']],
+      ['meshTerms element of a next-line character', { meshTerms: ['\u0085'] }, ['meshTerms.0']],
+      [
+        'publicationTypes element of a soft hyphen in markup',
+        { publicationTypes: ['Review', '<i>­</i>'] },
+        ['publicationTypes.1'],
+      ],
+      ['author of a Hangul filler (U+3164)', { author: 'ㅤ' }, ['author']],
+      ...syntaxOnlyRows,
+      // Syntax characters left once the sanitizer strips markup or decodes an entity.
+      ['author of parentheses in markup', { author: '<b>( )</b>' }, ['author']],
+      ['journal of quote entities', { journal: '&quot;&quot;' }, ['journal']],
+      [
+        'meshTerms element of a zero-width space in brackets',
+        { meshTerms: ['Adult', '[​]'] },
+        ['meshTerms.1'],
+      ],
+    ])(
+      'rejects a blank %s as blank_filter without calling NCBI',
+      async (_label, filters, fields) => {
+        const result = await runToolContract(searchArticlesTool, { query: 'asthma', ...filters });
+
+        expect(result.isError).toBe(true);
+        expect(result.structuredContent).toMatchObject({
+          error: {
+            code: JsonRpcErrorCode.ValidationError,
+            data: { reason: 'blank_filter', retryable: false, fields },
+          },
+        });
+        const text = contractText(result);
+        for (const field of fields) expect(text).toContain(`\`${field}\``);
+        expect(text).toMatch(/Recovery:/);
+        expect(mockESearch).not.toHaveBeenCalled();
+      },
+    );
+
+    it('declares blank_filter as a non-retryable input error', () => {
+      expect(searchArticlesTool.errors?.find((e) => e.reason === 'blank_filter')).toMatchObject({
+        code: JsonRpcErrorCode.ValidationError,
+        retryable: false,
+      });
+    });
+
+    it('counts invisible characters as blank in the blank_filter contract', () => {
+      const entry = searchArticlesTool.errors?.find((e) => e.reason === 'blank_filter');
+      expect(entry?.when).toMatch(/invisible/i);
+      expect(entry?.when).toMatch(/zero-width space/i);
+    });
+
+    it('counts parentheses, brackets, and double quotes as blank in the contract and the message', async () => {
+      const entry = searchArticlesTool.errors?.find((e) => e.reason === 'blank_filter');
+      for (const syntax of [/parenthes/i, /bracket/i, /double quote/i]) {
+        expect(entry?.when).toMatch(syntax);
+      }
+
+      const text = contractText(
+        await runToolContract(searchArticlesTool, { query: 'asthma', author: '()' }),
+      );
+      for (const syntax of [/parenthes/i, /bracket/i, /double quote/i]) {
+        expect(text).toMatch(syntax);
+      }
+    });
+
+    it('describes the empty-string and blank-value rules on each filter', () => {
+      const { shape } = searchArticlesTool.input;
+      for (const field of [
+        'author',
+        'journal',
+        'language',
+        'publicationTypes',
+        'meshTerms',
+      ] as const) {
+        const description = shape[field].description ?? '';
+        expect(description, field).toMatch(/empty string/i);
+        expect(description, field).toMatch(/rejected/i);
+        expect(description, field).toMatch(/parentheses, brackets, or double quotes/i);
+      }
     });
   });
 
@@ -1189,12 +1622,6 @@ describe('searchArticlesTool Bookshelf summaries (issue #114)', () => {
   });
 });
 
-/** Every text block of a contract run, joined — the header, the rows, and the trailer. */
-const contractText = (result: Awaited<ReturnType<typeof runToolContract>>) =>
-  textBlocks(result.content as ContentBlock[])
-    .map((b) => b.text)
-    .join('\n');
-
 describe('searchArticlesTool total match count in the header (issue #147)', () => {
   beforeEach(() => {
     mockESearch.mockReset();
@@ -1306,4 +1733,277 @@ describe('searchArticlesTool Doc Type rendering (issue #146)', () => {
     expect(text).toContain(`**Doc Type:** ${docType}`);
     expect(text).not.toContain('**Doc Type:** citation');
   });
+});
+
+/**
+ * NCBI failing every ESearch attempt, through the real NCBI service — client, response
+ * handler, request queue, and retry loop — on a fake clock. Whether the loop stops after
+ * its last retry or because the next backoff would overrun the total deadline, the caller
+ * gets NCBI's own message as `ncbi_unreachable`; only a deadline that actually fires is
+ * `ncbi_deadline_exceeded`. (#174)
+ */
+describe('searchArticlesTool against a failing NCBI backend (issue #174)', () => {
+  const BACKEND_FAILURE =
+    'Search Backend failed: An error occurred while processing request. Status: 500. Source: /api/search/?r= Details: Search is temporarily unavailable. Please try again later. Details: Cannot connect to SOLR';
+  /** NCBI's search-backend-failure envelope, answered with HTTP 200. */
+  const ENVELOPE = `<?xml version="1.0" encoding="UTF-8" ?>\n<!DOCTYPE eSearchResult PUBLIC "-//NLM//DTD esearch 20060628//EN" "https://eutils.ncbi.nlm.nih.gov/eutils/dtd/20060628/esearch.dtd">\n<eSearchResult>\n\t<ERROR>${BACKEND_FAILURE}</ERROR>\n</eSearchResult>\n`;
+
+  /**
+   * The tool bound to the real NCBI service. Every NCBI setting the case does not name is
+   * blanked, which the config reads as unset, so it takes its default.
+   */
+  async function loadTool(env: Record<string, string>) {
+    vi.resetModules();
+    vi.doUnmock('@/services/ncbi/ncbi-service.js');
+    vi.doUnmock('@/services/ncbi/parsing/esummary-parser.js');
+    const settings = {
+      NCBI_API_KEY: '',
+      NCBI_REQUEST_DELAY_MS: '',
+      NCBI_MAX_CONCURRENT: '',
+      NCBI_MAX_RETRIES: '',
+      NCBI_TIMEOUT_MS: '',
+      NCBI_TOTAL_DEADLINE_MS: '',
+      ...env,
+    };
+    for (const [name, value] of Object.entries(settings)) vi.stubEnv(name, value);
+    const { initNcbiService } = await import('@/services/ncbi/ncbi-service.js');
+    initNcbiService();
+    const module = await import('@/mcp-server/tools/definitions/search-articles.tool.js');
+    return module.searchArticlesTool;
+  }
+
+  beforeEach(() => {
+    vi.useFakeTimers();
+  });
+
+  afterEach(() => {
+    vi.useRealTimers();
+    vi.restoreAllMocks();
+    vi.unstubAllEnvs();
+  });
+
+  it.each([
+    { settings: 'default settings', env: {}, jitter: 'low', random: 0, attempts: 7 },
+    { settings: 'default settings', env: {}, jitter: 'high', random: 0.999, attempts: 6 },
+    {
+      settings: 'NCBI_TOTAL_DEADLINE_MS=20000',
+      env: { NCBI_TOTAL_DEADLINE_MS: '20000' },
+      jitter: 'low',
+      random: 0,
+      attempts: 5,
+    },
+    {
+      settings: 'NCBI_TOTAL_DEADLINE_MS=20000',
+      env: { NCBI_TOTAL_DEADLINE_MS: '20000' },
+      jitter: 'high',
+      random: 0.999,
+      attempts: 5,
+    },
+  ])(
+    'returns NCBI’s message as ncbi_unreachable at $settings with $jitter backoff jitter',
+    async ({ env, random, attempts }) => {
+      vi.spyOn(Math, 'random').mockReturnValue(random);
+      const fetchSpy = vi
+        .spyOn(globalThis, 'fetch')
+        .mockImplementation(() => Promise.resolve(new Response(ENVELOPE, { status: 200 })));
+      const tool = await loadTool(env);
+
+      const pending = runToolContract(tool, { query: 'asthma', maxResults: 1 });
+      await vi.advanceTimersByTimeAsync(61_000);
+      const result = await pending;
+
+      expect(result.isError).toBe(true);
+      expect(result.structuredContent).toMatchObject({
+        error: {
+          code: JsonRpcErrorCode.ServiceUnavailable,
+          message: `NCBI API Error: ${BACKEND_FAILURE} (failed after ${attempts} attempts)`,
+          data: {
+            reason: 'ncbi_unreachable',
+            endpoint: 'esearch',
+            attempts,
+            ncbiErrors: [BACKEND_FAILURE],
+            recovery: {
+              hint: expect.stringContaining('NCBI failed on every attempt this call made'),
+            },
+          },
+        },
+      });
+      const text = contractText(result);
+      expect(text).toContain(BACKEND_FAILURE);
+      expect(text).toContain('NCBI failed on every attempt this call made');
+      expect(text).not.toMatch(/deadline/i);
+      expect(fetchSpy).toHaveBeenCalledTimes(attempts);
+    },
+  );
+
+  it('reports a request the deadline aborts in flight as ncbi_deadline_exceeded, leading its hint with a retry', async () => {
+    const fetchSpy = vi.spyOn(globalThis, 'fetch').mockImplementation(
+      (_url, init) =>
+        new Promise<Response>((_, reject) => {
+          const signal = init?.signal as AbortSignal;
+          signal.addEventListener('abort', () => reject(signal.reason), { once: true });
+        }),
+    );
+    const tool = await loadTool({ NCBI_TOTAL_DEADLINE_MS: '5000' });
+
+    const pending = runToolContract(tool, { query: 'asthma', maxResults: 1 });
+    await vi.advanceTimersByTimeAsync(5000);
+    const result = await pending;
+
+    expect(result.isError).toBe(true);
+    expect(result.structuredContent).toMatchObject({
+      error: {
+        code: JsonRpcErrorCode.Timeout,
+        message: 'NCBI request deadline (5000ms) exceeded',
+        data: {
+          reason: 'ncbi_deadline_exceeded',
+          deadlineMs: 5000,
+          recovery: { hint: expect.stringMatching(/^Retry\b/) },
+        },
+      },
+    });
+    const { hint } = (
+      result.structuredContent as { error: { data: { recovery: { hint: string } } } }
+    ).error.data.recovery;
+    // A single search has no batch to reduce: batch size is only a conditional.
+    expect(hint).toMatch(/For a large batch, /);
+    expect(hint).not.toMatch(/^Reduce batch size/);
+    expect(contractText(result)).toContain(hint);
+    expect(fetchSpy).toHaveBeenCalledTimes(1);
+  });
+
+  /** A request that never answers: it rejects with the signal's reason once that aborts. */
+  const hangUntilAborted = (init?: RequestInit) =>
+    new Promise<Response>((_, reject) => {
+      const signal = init?.signal as AbortSignal;
+      signal.addEventListener('abort', () => reject(signal.reason), { once: true });
+    });
+
+  const deadlineWithNcbiErrors = {
+    error: {
+      code: JsonRpcErrorCode.Timeout,
+      message: 'NCBI request deadline (5000ms) exceeded',
+      data: {
+        reason: 'ncbi_deadline_exceeded',
+        deadlineMs: 5000,
+        ncbiErrors: [BACKEND_FAILURE],
+      },
+    },
+  };
+
+  it('keeps NCBI’s diagnostics when the deadline aborts a later attempt in flight', async () => {
+    // Attempt 1 answers the envelope at once. After its 1s backoff, attempt 2 hangs until
+    // the 5s deadline aborts it, and that abort carries no NCBI diagnostics of its own.
+    vi.spyOn(Math, 'random').mockReturnValue(0.5);
+    let calls = 0;
+    const fetchSpy = vi
+      .spyOn(globalThis, 'fetch')
+      .mockImplementation((_url, init) =>
+        calls++ === 0
+          ? Promise.resolve(new Response(ENVELOPE, { status: 200 }))
+          : hangUntilAborted(init),
+      );
+    const tool = await loadTool({ NCBI_TOTAL_DEADLINE_MS: '5000' });
+
+    const pending = runToolContract(tool, { query: 'asthma', maxResults: 1 });
+    await vi.advanceTimersByTimeAsync(5000);
+    const result = await pending;
+
+    expect(result.isError).toBe(true);
+    expect(result.structuredContent).toMatchObject(deadlineWithNcbiErrors);
+    expect(fetchSpy).toHaveBeenCalledTimes(2);
+  });
+
+  it('keeps NCBI’s diagnostics when the deadline expires while a later attempt is queued', async () => {
+    // One request slot. Attempt 1 answers the envelope at once; during its 1s backoff a
+    // second call takes the slot with a request that never settles, so attempt 2 waits in
+    // the queue until the 5s deadline expires there.
+    vi.spyOn(Math, 'random').mockReturnValue(0.5);
+    const fetchSpy = vi
+      .spyOn(globalThis, 'fetch')
+      .mockImplementation((url) =>
+        String(url).includes('term=blocker')
+          ? new Promise<Response>(() => {})
+          : Promise.resolve(new Response(ENVELOPE, { status: 200 })),
+      );
+    const tool = await loadTool({ NCBI_TOTAL_DEADLINE_MS: '5000', NCBI_MAX_CONCURRENT: '1' });
+
+    const pending = runToolContract(tool, { query: 'asthma', maxResults: 1 });
+    await vi.advanceTimersByTimeAsync(100);
+    void runToolContract(tool, { query: 'blocker' });
+    await vi.advanceTimersByTimeAsync(4900);
+    const result = await pending;
+
+    expect(result.isError).toBe(true);
+    expect(result.structuredContent).toMatchObject(deadlineWithNcbiErrors);
+    // Attempt 2 never left the queue: the call under test reached NCBI once.
+    const own = fetchSpy.mock.calls.filter(([url]) => !String(url).includes('term=blocker'));
+    expect(own).toHaveLength(1);
+    expect(fetchSpy).toHaveBeenCalledTimes(2);
+  });
+
+  /**
+   * NCBI throttling every attempt with HTTP 429. However the loop stops on the 429 —
+   * retries spent, or a Retry-After longer than the backoff cap — the caller gets
+   * `ncbi_rate_limited`, NCBI's Retry-After, and a recovery naming the server's API-key
+   * setting, on both surfaces.
+   */
+  const RATE_LIMIT_BODY = '{"error":"API rate limit exceeded","count":"4","limit":"3"}';
+
+  it.each([
+    {
+      path: 'retries are spent',
+      env: { NCBI_MAX_RETRIES: '1' },
+      retryAfter: '1',
+      message: 'NCBI returned HTTP 429. (failed after 2 attempts)',
+      fetches: 2,
+    },
+    {
+      path: 'its Retry-After outlasts the backoff cap',
+      env: {},
+      retryAfter: '40',
+      message: 'NCBI returned HTTP 429.',
+      fetches: 1,
+    },
+  ])(
+    'reports a throttled NCBI as ncbi_rate_limited with its hint when $path',
+    async ({ env, retryAfter, message, fetches }) => {
+      vi.spyOn(Math, 'random').mockReturnValue(0.5);
+      const fetchSpy = vi.spyOn(globalThis, 'fetch').mockImplementation(() =>
+        Promise.resolve(
+          new Response(RATE_LIMIT_BODY, {
+            status: 429,
+            headers: { 'content-type': 'application/json', 'retry-after': retryAfter },
+          }),
+        ),
+      );
+      const tool = await loadTool(env);
+
+      const pending = runToolContract(tool, { query: 'asthma', maxResults: 1 });
+      await vi.advanceTimersByTimeAsync(5000);
+      const result = await pending;
+
+      expect(result.isError).toBe(true);
+      expect(result.structuredContent).toMatchObject({
+        error: {
+          code: JsonRpcErrorCode.RateLimited,
+          message,
+          data: {
+            reason: 'ncbi_rate_limited',
+            endpoint: 'esearch',
+            retryAfter,
+            recovery: { hint: expect.stringContaining('NCBI_API_KEY') },
+          },
+        },
+      });
+      const { hint } = (
+        result.structuredContent as { error: { data: { recovery: { hint: string } } } }
+      ).error.data.recovery;
+      const text = contractText(result);
+      expect(text).toContain(message);
+      expect(text).toContain(hint);
+      expect(text).toContain('reason ncbi_rate_limited');
+      expect(fetchSpy).toHaveBeenCalledTimes(fetches);
+    },
+  );
 });

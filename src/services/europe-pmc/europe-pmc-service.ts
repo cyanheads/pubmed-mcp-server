@@ -14,6 +14,10 @@
  * A search's retry boundary covers fetch and response classification, so
  * Europe PMC's intermittent empty `{ version }` envelope is retried like an
  * HTTP outage; only a sort or cursor that explains it is reported as bad input.
+ * Europe PMC answers an unreadable cursor with the HTTP 503 it uses for an
+ * outage, so a 503 on a caller-supplied cursor is checked against the first
+ * page of the same query, and the cursor is blamed only when a retry draws
+ * the 503 again while that first page was served.
  * A search reports the effective query Europe PMC echoes back, or — with no
  * echo — the source-filtered query it sent.
  *
@@ -42,7 +46,6 @@ import {
 import { XMLParser, XMLValidator } from 'fast-xml-parser';
 
 import { getServerConfig } from '@/config/server-config.js';
-import { recoveryFor } from '@/services/error-contracts.js';
 import { ORDERED_XML_PARSER_OPTIONS } from '@/services/ncbi/parsing/ordered-xml-parser-options.js';
 import type { JatsNode, JatsNodeList } from '@/services/ncbi/parsing/pmc-xml-helpers.js';
 import { ensureArray } from '@/services/ncbi/parsing/xml-helpers.js';
@@ -76,8 +79,8 @@ const isTransient = (error: unknown): boolean =>
  * Reshapes an error whose retries ran out: the last attempt's code and message with
  * the attempt count appended, `label`, `attempts`, and the upstream `retryAfter`, so a
  * 429 still tells the caller how long to wait. Only a `ServiceUnavailable` gains
- * `europepmc_unreachable` and its hint; a `Timeout` or `RateLimited` keeps its code
- * with no reason, as the NCBI service reports them. Anything never retried — a
+ * `europepmc_unreachable`; a `Timeout` or `RateLimited` keeps its code with no
+ * reason, as the OpenAlex service reports them. Anything never retried — a
  * non-transient failure, or a `Retry-After` longer than the backoff cap — passes
  * through unchanged.
  */
@@ -87,11 +90,10 @@ function toServiceError(error: unknown, label: string): unknown {
   const attempts = error.data.retryAttempts;
   return new McpError(
     error.code,
-    `${last.message} (failed after ${attempts} attempts)`,
+    `${last.message} (failed after ${attempts} attempt${attempts === 1 ? '' : 's'})`,
     {
       ...(error.code === JsonRpcErrorCode.ServiceUnavailable && {
         reason: 'europepmc_unreachable',
-        ...recoveryFor('europepmc_unreachable'),
       }),
       label,
       attempts,
@@ -123,6 +125,18 @@ function recordLookupQuery({ epmcId, source }: EuropePmcRecordRef): string {
   const extIdClause = `(EXT_ID:${epmcId} AND SRC:${source})`;
   return source === 'PMC' ? `${extIdClause} OR (PMCID:${epmcId})` : extIdClause;
 }
+
+/**
+ * The caller's cursor when it asks for a page past the first. `*` and an
+ * exactly-empty cursor both read as the first page upstream.
+ */
+function callerCursor({ cursorMark }: EuropePmcSearchParams): string | undefined {
+  return cursorMark && cursorMark !== '*' ? cursorMark : undefined;
+}
+
+/** Next step for a cursor Europe PMC cannot read, whichever way it signals that. */
+const CURSOR_RECOVERY_HINT =
+  "Pass the previous response's `nextCursorMark` verbatim as `cursorMark`, or `*` to restart from the first page.";
 
 /** The sort fields Europe PMC documents. */
 const DOCUMENTED_SORT_FIELDS = new Set(['P_PDATE_D', 'CITED', 'AUTH_FIRST', 'PUB_YEAR']);
@@ -184,17 +198,73 @@ export class EuropePmcService {
    * The retry boundary covers the fetch and the response classification
    * together, so an empty envelope retries like any other transient failure
    * rather than surfacing after the loop has already returned. (#159)
+   *
+   * The first HTTP 503 on a caller-supplied cursor draws one probe of the same
+   * query's first page, and the cursor is retried either way: one 503 is not
+   * enough to tell a bad cursor from a transient outage. A later 503 fails the
+   * search at once as non-retryable input only when that probe was served;
+   * otherwise it goes on through the ordinary retry path. A 503 with no retry
+   * left is never probed, since nothing could use the answer. (#180)
    */
   search(params: EuropePmcSearchParams): Promise<EuropePmcSearchResult> {
-    return this.runPaced('search', params.signal, (attempt) =>
-      this.searchOnce(params, attempt === this.maxRetries + 1),
+    const cursorMark = callerCursor(params);
+    let firstPage: 'unknown' | 'served' | 'failed' = 'unknown';
+    return this.runPaced(
+      'search',
+      params.signal,
+      (attempt) => this.searchOnce(params, attempt === this.maxRetries + 1),
+      cursorMark === undefined
+        ? undefined
+        : async (error, signal, attempt) => {
+            if (!(error instanceof McpError) || error.data?.status !== 503) return error;
+            if (firstPage === 'unknown') {
+              if (attempt <= this.maxRetries) {
+                firstPage = (await this.firstPageServed(params, signal)) ? 'served' : 'failed';
+              }
+              return error;
+            }
+            if (firstPage === 'failed') return error;
+            return validationError(
+              `Europe PMC answered cursorMark "${cursorMark}" with HTTP 503 twice but served the first page of the same query — the cursor is most likely invalid or expired.`,
+              {
+                reason: 'europepmc_invalid_input',
+                cursorMark,
+                status: 503,
+                retryable: false,
+                recovery: { hint: CURSOR_RECOVERY_HINT },
+              },
+              { cause: error },
+            );
+          },
     );
   }
 
   /**
+   * Whether Europe PMC serves the first page of the search in `params`: one
+   * request (`cursorMark: '*'`, `pageSize: 1`), paced like any other, with no
+   * retries of its own. Any failure reads as not served — except the caller's
+   * cancellation, which propagates.
+   */
+  private async firstPageServed(
+    params: EuropePmcSearchParams,
+    signal: AbortSignal,
+  ): Promise<boolean> {
+    try {
+      await this.queue.run(
+        () => this.searchOnce({ ...params, cursorMark: '*', pageSize: 1, signal }, false),
+        { signal },
+      );
+      return true;
+    } catch (error: unknown) {
+      if (signal.aborted) throw error;
+      return false;
+    }
+  }
+
+  /**
    * One search attempt: fetch, parse, and classify the body. `isLastAttempt`
-   * lets an empty envelope that has persisted through the whole retry budget
-   * be attributed to a caller-supplied cursor.
+   * lets an empty envelope on the last attempt the retry budget allows be
+   * attributed to a caller-supplied cursor.
    */
   private async searchOnce(
     params: EuropePmcSearchParams,
@@ -211,7 +281,6 @@ export class EuropePmcService {
         {
           reason: 'europepmc_invalid_response',
           responseSnippet: text.substring(0, 200),
-          ...recoveryFor('europepmc_invalid_response'),
         },
         { cause: error },
       );
@@ -226,6 +295,7 @@ export class EuropePmcService {
     if (errMsg) {
       throw validationError(`Europe PMC rejected the request: ${errMsg}`, {
         reason: 'europepmc_invalid_input',
+        retryable: false,
         epmcErrCode: parsed.errCode,
         epmcErrMsg: errMsg,
         recovery: { hint: `Europe PMC reported: "${errMsg}". Fix the input and retry.` },
@@ -240,30 +310,32 @@ export class EuropePmcService {
      *
      * - A sort that EPMC rejects every time (see `sortExplainsEnvelope`) fails
      *   fast as non-retryable input — retrying only adds backoff.
-     * - A non-default cursor that draws it on every attempt is most likely
-     *   invalid or expired; EPMC rejects a malformed cursor every time.
+     * - A non-default cursor that draws it on the last attempt the retry budget
+     *   allows is most likely invalid or expired; EPMC rejects a malformed
+     *   cursor every time. Earlier attempts may have failed another way.
      * - Otherwise it is intermittent upstream noise — valid requests, with or
      *   without a documented sort, draw it on a fraction of calls and succeed
      *   when repeated — so it is thrown as a transient `europepmc_unreachable`
      *   for the retry loop, and never names the caller's input. (#159)
      *
      * Each throw keeps the diagnosis (message) apart from the next step
-     * (recovery hint): the framework mirrors `data.recovery.hint` into
-     * `content[]`, and one string passed as both renders byte-identical
-     * Error:/Recovery: blocks. (#75)
+     * (recovery hint): the framework renders `data.recovery.hint` in
+     * `content[]` as a `Recovery:` line only when the message does not already
+     * contain it, so one string passed as both would leave the caller the
+     * diagnosis and no separate next step. (#75)
      */
     if (
       parsed.hitCount === undefined &&
       parsed.request === undefined &&
       parsed.resultList === undefined
     ) {
-      const cursorMark =
-        params.cursorMark && params.cursorMark !== '*' ? params.cursorMark : undefined;
+      const cursorMark = callerCursor(params);
       if (params.sort && sortExplainsEnvelope(params.sort)) {
         throw validationError(
           `Europe PMC silently rejected the request — most likely the sort "${params.sort}", which needs a documented field and an asc/desc direction.`,
           {
             reason: 'europepmc_invalid_input',
+            retryable: false,
             sort: params.sort,
             ...(cursorMark && { cursorMark }),
             responseSnippet: text.substring(0, 200),
@@ -275,20 +347,19 @@ export class EuropePmcService {
       }
       if (cursorMark && isLastAttempt) {
         throw validationError(
-          `Europe PMC answered every attempt for cursorMark "${cursorMark}" with an empty response — the cursor is most likely invalid or expired.`,
+          `Europe PMC answered the last attempt for cursorMark "${cursorMark}" with an empty response — the cursor is most likely invalid or expired.`,
           {
             reason: 'europepmc_invalid_input',
+            retryable: false,
             cursorMark,
             responseSnippet: text.substring(0, 200),
-            recovery: {
-              hint: 'Restart from the first page with `cursorMark: "*"`, or pass the exact `nextCursorMark` from the previous response.',
-            },
+            recovery: { hint: CURSOR_RECOVERY_HINT },
           },
         );
       }
       throw serviceUnavailable(
         'Europe PMC returned an empty response with no hit count or result list.',
-        { reason: 'europepmc_unreachable', ...recoveryFor('europepmc_unreachable') },
+        { reason: 'europepmc_unreachable' },
       );
     }
 
@@ -439,7 +510,6 @@ export class EuropePmcService {
         {
           reason: 'europepmc_invalid_response',
           responseSnippet: text.substring(0, 200),
-          ...recoveryFor('europepmc_invalid_response'),
         },
         { cause: error },
       );
@@ -455,6 +525,7 @@ export class EuropePmcService {
     if (errMsg) {
       throw validationError(`Europe PMC rejected the ${kind} request: ${errMsg}`, {
         reason: 'europepmc_invalid_input',
+        retryable: false,
         epmcErrCode: parsed.errCode,
         epmcErrMsg: errMsg,
         recovery: { hint: `Europe PMC reported: "${errMsg}". Fix the input and retry.` },
@@ -502,7 +573,6 @@ export class EuropePmcService {
       throw serializationError('Received invalid XML from Europe PMC.', {
         reason: 'europepmc_invalid_response',
         responseSnippet: xml.substring(0, 200),
-        ...recoveryFor('europepmc_invalid_response'),
       });
     }
 
@@ -517,7 +587,6 @@ export class EuropePmcService {
           reason: 'europepmc_invalid_response',
           parserError,
           responseSnippet: xml.substring(0, 200),
-          ...recoveryFor('europepmc_invalid_response'),
         },
         { cause: error },
       );
@@ -536,6 +605,11 @@ export class EuropePmcService {
    * signal reaches the queue wait and the backoff sleep. `execute` receives the
    * one-based attempt number.
    *
+   * `reclassify`, when given, sees each failed attempt after its queue slot is
+   * released and before the retry decision, with the attempt's signal and its
+   * one-based number. The error it returns is the one the loop judges, so it
+   * can end the retries by returning a non-transient error.
+   *
    * A caller abort rethrows the caller's own reason; an exhausted failure is
    * reshaped by {@link toServiceError}, after the loop.
    */
@@ -543,6 +617,7 @@ export class EuropePmcService {
     label: string,
     signal: AbortSignal | undefined,
     execute: (attempt: number) => Promise<T>,
+    reclassify?: (error: unknown, signal: AbortSignal, attempt: number) => Promise<unknown>,
   ): Promise<T> {
     let attempt = 0;
     try {
@@ -551,7 +626,10 @@ export class EuropePmcService {
           const current = ++attempt;
           return this.queue
             .run(() => execute(current), { signal: attemptSignal })
-            .catch((error: unknown) => {
+            .catch(async (failure: unknown) => {
+              const error = reclassify
+                ? await reclassify(failure, attemptSignal, current)
+                : failure;
               if (current <= this.maxRetries && isTransient(error)) {
                 logger.warning(
                   `Europe PMC ${label} failed on attempt ${current} of ${this.maxRetries + 1}.`,

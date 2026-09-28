@@ -119,7 +119,12 @@ export interface EuropePmcSearchParams {
   signal?: AbortSignal;
   /** Optional sort spec, e.g. `FIRST_PIDATE desc`. */
   sort?: string;
-  /** Allowed sources, comma-joined into the query as `(SRC:"MED" OR ...)`. */
+  /**
+   * Allowed sources, OR-joined into a `(SRC:"MED" OR ...)` clause ANDed with the
+   * query. A single source is repeated (`SRC:"MED" OR SRC:"MED"`), since Europe
+   * PMC matches nothing for a lone quoted `EXT_ID` clause ANDed with a lone `SRC`
+   * clause. (#175)
+   */
   sources?: readonly EuropePmcSource[];
 }
 

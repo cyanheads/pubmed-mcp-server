@@ -1,18 +1,21 @@
 /**
  * @fileoverview PubMed search tool. Searches PubMed with full query syntax,
  * field-specific filters, date ranges, pagination, and optional brief summaries.
- * A query with no search term — blank, markup only, a bare field tag, or empty
- * parentheses — is rejected before NCBI is called. `limit` is accepted as an
- * alias for `maxResults`. The total match count rides in `output` so `format()`
- * can state it in the header beside the returned count, and a summary's
- * `docType` is rendered only when it marks something other than an ordinary
- * journal article (`citation`).
+ * A query with no search term — blank, invisible characters only, markup only, a
+ * bare field tag, or empty parentheses — is rejected before NCBI is called, as
+ * is a filter value with no term once sanitized (`"   "`, `"()"`), a
+ * `dateRange` bound that is no real calendar date, and a range whose `minDate`
+ * falls after its `maxDate`. `limit` is accepted as an alias for `maxResults`.
+ * The total match count rides in `output` so `format()` can state it in the
+ * header beside the returned count, and a summary's `docType` is rendered only
+ * when it marks something other than an ordinary journal article (`citation`).
  * @module src/mcp-server/tools/definitions/search-articles.tool
  */
 
 import { tool, z } from '@cyanheads/mcp-ts-core';
+import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
 import { sanitization } from '@cyanheads/mcp-ts-core/utils';
-import { NCBI_QUERY_INPUT_ERRORS, NCBI_SERVICE_ERRORS } from '@/services/error-contracts.js';
+import { NCBI_SERVICE_ERRORS, QUERY_INPUT_ERRORS } from '@/services/error-contracts.js';
 import { getNcbiService } from '@/services/ncbi/ncbi-service.js';
 import { extractBriefSummaries } from '@/services/ncbi/parsing/esummary-parser.js';
 import type { ESearchErrorList, ESearchWarningList } from '@/services/ncbi/types.js';
@@ -23,13 +26,141 @@ import {
   SCHEMA_SEARCH_ACTION,
 } from './_concepts.js';
 import { escapeMarkdownInline } from './_text.js';
+import { hasVisibleText } from './_visible-text.js';
 
 /**
  * Accepts empty strings (treated as "no filter" by the handler) or dates in
  * YYYY, YYYY/MM, or YYYY/MM/DD form with `/`, `-`, or `.` separators.
  * Catches obvious typos at the edge so they don't degrade silently to 0 results.
+ * Calendar validity and bound order are checked in the handler
+ * ({@link dateRangeProblem}).
  */
 const DATE_RE = /^$|^\d{4}([/\-.]\d{1,2}([/\-.]\d{1,2})?)?$/;
+
+/**
+ * Days in `month` (1–12) of `year`, leap years included. `setUTCFullYear` reads
+ * the year literally, where `Date.UTC` would map 0–99 onto 1900–1999.
+ */
+function daysInMonth(year: number, month: number): number {
+  const date = new Date(0);
+  date.setUTCFullYear(year, month, 0);
+  return date.getUTCDate();
+}
+
+/**
+ * The first and last day a `dateRange` bound covers, as zero-padded
+ * `YYYY/MM/DD` strings that sort in calendar order — PubMed reads a partial
+ * date as its whole year or month — or why the bound names no real date. The
+ * value has already matched {@link DATE_RE}, so it splits into one to three
+ * numbers with a four-digit year.
+ */
+function dateBoundSpan(value: string): { first: string; last: string } | { problem: string } {
+  const [yearText = '', monthText, dayText] = value.split(/[/\-.]/);
+  const year = Number(yearText);
+  const month = monthText === undefined ? undefined : Number(monthText);
+  const day = dayText === undefined ? undefined : Number(dayText);
+  const ymd = (m: number, d: number) =>
+    `${yearText}/${String(m).padStart(2, '0')}/${String(d).padStart(2, '0')}`;
+
+  if (month !== undefined && (month < 1 || month > 12)) {
+    return { problem: `month ${monthText} is outside 01–12` };
+  }
+  if (month !== undefined && day !== undefined) {
+    if (day < 1) return { problem: `day ${dayText} is not a day; days start at 01` };
+    const monthDays = daysInMonth(year, month);
+    if (day > monthDays) {
+      return { problem: `${ymd(month, 1).slice(0, 7)} has ${monthDays} days` };
+    }
+  }
+  return {
+    first: ymd(month ?? 1, day ?? 1),
+    last: ymd(month ?? 12, day ?? daysInMonth(year, month ?? 12)),
+  };
+}
+
+/**
+ * Why a `dateRange` names no real span, or `undefined` when it does. Every
+ * non-empty bound must be a real calendar date, even beside an empty bound that
+ * drops the filter, and `minDate` must not fall after `maxDate` once each is
+ * expanded the way PubMed reads a partial date: `minDate` from the start of its
+ * year or month, `maxDate` to the end. `2024/06 : 2024` is a range;
+ * `2024/07 : 2024/06/30` is reversed. PubMed answers either mistake with zero
+ * hits and reports the valid date tag as unrecognized. (#177)
+ */
+function dateRangeProblem(
+  minDate: string,
+  maxDate: string,
+): { fields: string[]; message: string } | undefined {
+  const min = minDate ? dateBoundSpan(minDate) : undefined;
+  const max = maxDate ? dateBoundSpan(maxDate) : undefined;
+
+  const fields: string[] = [];
+  const problems: string[] = [];
+  for (const [field, value, span] of [
+    ['dateRange.minDate', minDate, min],
+    ['dateRange.maxDate', maxDate, max],
+  ] as const) {
+    if (span && 'problem' in span) {
+      fields.push(field);
+      problems.push(`\`${field}\` "${value}" is not a real calendar date: ${span.problem}.`);
+    }
+  }
+  if (fields.length > 0) return { fields, message: problems.join(' ') };
+
+  if (min && max && 'first' in min && 'last' in max && min.first > max.last) {
+    return {
+      fields: ['dateRange.minDate', 'dateRange.maxDate'],
+      message: `\`dateRange.minDate\` "${minDate}" (from ${min.first}) falls after \`dateRange.maxDate\` "${maxDate}" (through ${max.last}), so the range covers no dates.`,
+    };
+  }
+  return;
+}
+
+/**
+ * PubMed query syntax a filter value can hold without holding a term:
+ * grouping parentheses, field-tag brackets, and phrase quotes.
+ */
+const FILTER_SYNTAX = /[()[\]"]/g;
+
+/**
+ * Sanitizes one filter value, recording `path` in `blank` when it holds no term
+ * once {@link FILTER_SYNTAX} is disregarded (`"   "`, `"<b></b>"`, `"&#8203;"`,
+ * `"()"`): sent as written, it would put a field clause with no term in the
+ * query PubMed runs, and PubMed answers `asthma AND ()[Author]` with every
+ * `asthma` match. A value that passes is returned sanitized, syntax characters
+ * included. An exactly-empty string sets no filter — form clients send one for a
+ * field left untouched (#14) — so it returns `undefined`, like an omitted field.
+ * (#176)
+ */
+async function sanitizeFilter(
+  value: string | undefined,
+  path: string,
+  blank: string[],
+): Promise<string | undefined> {
+  if (!value) return;
+  const sanitized = await sanitization.sanitizeString(value, { context: 'text' });
+  if (hasVisibleText(sanitized.replace(FILTER_SYNTAX, ''))) return sanitized;
+  blank.push(path);
+  return;
+}
+
+/**
+ * {@link sanitizeFilter} for each list element, naming a blank one by its
+ * index in the framework's dotted path style (`meshTerms.1`) and dropping an
+ * empty one. `undefined` when no element is left to filter on.
+ */
+async function sanitizeFilterList(
+  values: string[] | undefined,
+  path: string,
+  blank: string[],
+): Promise<string[] | undefined> {
+  const kept: string[] = [];
+  for (const [index, value] of (values ?? []).entries()) {
+    const sanitized = await sanitizeFilter(value, `${path}.${index}`, blank);
+    if (sanitized !== undefined) kept.push(sanitized);
+  }
+  return kept.length > 0 ? kept : undefined;
+}
 
 /**
  * NCBI's eSearch serves `retstart` up to 9998 for PubMed and fails the whole
@@ -73,13 +204,16 @@ const PUBMED_FIELD_TAGS = new Set(
 /**
  * The query with every parenthesis and every bracketed field tag removed — what
  * the blank-term check tests. A tag's search modifier (`[mh:noexp]`,
- * `[tiab:~3]`) does not change what it is; an empty bracket carries no term.
+ * `[tiab:~3]`) does not change what it is; a bracket with no visible text
+ * carries no term.
  */
 function withoutTermlessMarkup(query: string): string {
   return query
     .replace(/\[([^\]]*)\]/g, (bracket, content: string) => {
       const tag = content.trim().toLowerCase();
-      return tag === '' || PUBMED_FIELD_TAGS.has(tag.replace(/\s*:.*$/, '')) ? '' : bracket;
+      return !hasVisibleText(content) || PUBMED_FIELD_TAGS.has(tag.replace(/\s*:.*$/, ''))
+        ? ''
+        : bracket;
     })
     .replace(/[()]/g, '');
 }
@@ -208,7 +342,26 @@ export const searchArticlesTool = tool('pubmed_search_articles', {
   sourceUrl:
     'https://github.com/cyanheads/pubmed-mcp-server/blob/main/src/mcp-server/tools/definitions/search-articles.tool.ts',
 
-  errors: [...NCBI_SERVICE_ERRORS, ...NCBI_QUERY_INPUT_ERRORS] as const,
+  errors: [
+    ...NCBI_SERVICE_ERRORS,
+    ...QUERY_INPUT_ERRORS,
+    {
+      reason: 'invalid_date_range',
+      code: JsonRpcErrorCode.ValidationError,
+      when: 'A `dateRange` bound is not a real calendar date — a month outside 01–12, day 00, or a day past the end of its month such as `2023/02/29` — or `minDate` falls after `maxDate` once PubMed expands each partial date: `minDate` from the start of its year or month, `maxDate` to the end.',
+      recovery:
+        'Correct the named bound to a real calendar date, or swap the bounds so minDate does not fall after maxDate; the same range will be rejected again.',
+      retryable: false,
+    },
+    {
+      reason: 'blank_filter',
+      code: JsonRpcErrorCode.ValidationError,
+      when: 'An `author`, `journal`, or `language` value, or a `publicationTypes` or `meshTerms` element, holds no term once markup is removed and HTML entities are decoded — only whitespace, invisible characters such as a zero-width space, parentheses, brackets, or double quotes are left, as in `()` or `""` — so its field clause would carry no term. An exactly-empty string is not blank here; it sets no filter.',
+      recovery:
+        'Give each named filter a value, or pass an empty string or omit it for no filter; the same blank value will be rejected again.',
+      retryable: false,
+    },
+  ] as const,
 
   // Never advertised; rewritten to the canonical key before the schema parses.
   // `max_results` needs no entry — the framework's case-style repair maps it. (#156)
@@ -219,7 +372,7 @@ export const searchArticlesTool = tool('pubmed_search_articles', {
       .string()
       .min(1)
       .describe(
-        'PubMed search query (supports full NCBI syntax). Must carry a search term: a value that is blank once markup, bracketed field tags (`[pdat]`), and parentheses are removed is rejected rather than sent to PubMed as an empty term.',
+        'PubMed search query (supports full NCBI syntax). Must carry a search term: a value that is blank once markup, bracketed field tags (`[pdat]`), parentheses, and invisible characters such as a zero-width space are disregarded is rejected rather than sent to PubMed.',
       ),
     maxResults: z.number().int().min(1).max(1000).default(20).describe('Maximum results to return'),
     offset: z
@@ -240,11 +393,15 @@ export const searchArticlesTool = tool('pubmed_search_articles', {
         minDate: z
           .string()
           .regex(DATE_RE, 'Date must be YYYY, YYYY/MM, or YYYY/MM/DD (/, -, or . separators)')
-          .describe('Start date (YYYY/MM/DD, YYYY/MM, or YYYY); empty string disables this bound'),
+          .describe(
+            'Start date (YYYY/MM/DD, YYYY/MM, or YYYY); empty string disables this bound. Must be a real calendar date — `2023/02/29` is rejected.',
+          ),
         maxDate: z
           .string()
           .regex(DATE_RE, 'Date must be YYYY, YYYY/MM, or YYYY/MM/DD (/, -, or . separators)')
-          .describe('End date (YYYY/MM/DD, YYYY/MM, or YYYY); empty string disables this bound'),
+          .describe(
+            'End date (YYYY/MM/DD, YYYY/MM, or YYYY); empty string disables this bound. Must be a real calendar date — `2023/02/29` is rejected.',
+          ),
         dateType: z
           .enum(['pdat', 'mdat', 'edat'])
           .default('pdat')
@@ -252,21 +409,38 @@ export const searchArticlesTool = tool('pubmed_search_articles', {
       })
       .optional()
       .describe(
-        'Filter by date range. The filter is applied only when both `minDate` and `maxDate` are non-empty; either one empty disables the entire date range.',
+        'Filter by date range. The filter is applied only when both `minDate` and `maxDate` are non-empty; either one empty disables the entire date range. A partial date covers its whole year or month, and a range whose `minDate` falls after its `maxDate` is rejected: `2024/06` to `2024` is valid, `2024/07` to `2024/06/30` is not.',
       ),
     publicationTypes: z
       .array(z.string())
       .optional()
       .describe(
-        'Filter by publication type (e.g. "Review", "Clinical Trial", "Meta-Analysis"). Multiple values are OR\'d — any match qualifies.',
+        'Filter by publication type (e.g. "Review", "Clinical Trial", "Meta-Analysis"). Multiple values are OR\'d — any match qualifies. Empty strings are skipped; an element of only whitespace, invisible characters, markup, parentheses, brackets, or double quotes is rejected.',
       ),
-    author: z.string().optional().describe('Filter by author name (e.g. "Smith J")'),
-    journal: z.string().optional().describe('Filter by journal name'),
+    author: z
+      .string()
+      .optional()
+      .describe(
+        'Filter by author name (e.g. "Smith J"). An empty string applies no filter; a value of only whitespace, invisible characters, markup, parentheses, brackets, or double quotes is rejected.',
+      ),
+    journal: z
+      .string()
+      .optional()
+      .describe(
+        'Filter by journal name. An empty string applies no filter; a value of only whitespace, invisible characters, markup, parentheses, brackets, or double quotes is rejected.',
+      ),
     meshTerms: z
       .array(z.string())
       .optional()
-      .describe("Filter by MeSH terms. Multiple terms are AND'd — all must match."),
-    language: z.string().optional().describe('Filter by language (e.g. "english")'),
+      .describe(
+        "Filter by MeSH terms. Multiple terms are AND'd — all must match. Empty strings are skipped; an element of only whitespace, invisible characters, markup, parentheses, brackets, or double quotes is rejected.",
+      ),
+    language: z
+      .string()
+      .optional()
+      .describe(
+        'Filter by language (e.g. "english"). An empty string applies no filter; a value of only whitespace, invisible characters, markup, parentheses, brackets, or double quotes is rejected.',
+      ),
     hasAbstract: z.boolean().optional().describe('Only include articles with abstracts'),
     freeFullText: z.boolean().optional().describe('Only include free full text articles'),
     species: z.enum(['humans', 'animals']).optional().describe('Filter by species'),
@@ -415,11 +589,42 @@ export const searchArticlesTool = tool('pubmed_search_articles', {
     // sent as written. A bracket that is not a field tag (`[18F]`) is a term, and
     // boolean operators are kept: NCBI reads an operand-less `NOT[ti]` as
     // literal text and returns real matches. (#145)
-    if (withoutTermlessMarkup(effectiveQuery).trim().length === 0) {
+    //
+    // Invisible characters carry no term either, including those the sanitizer
+    // decodes from an entity (`&#8203;`). (#176)
+    if (!hasVisibleText(withoutTermlessMarkup(effectiveQuery))) {
       throw ctx.fail(
         'blank_query',
-        'The `query` carries no search term — it is blank once markup, bracketed field tags, and parentheses are removed.',
-        { ...ctx.recoveryFor('blank_query') },
+        'The `query` carries no search term — it is blank once markup, bracketed field tags, parentheses, and invisible characters are disregarded.',
+      );
+    }
+
+    const { dateRange } = input;
+    const minDate = dateRange?.minDate.trim() ?? '';
+    const maxDate = dateRange?.maxDate.trim() ?? '';
+    const dateProblem = dateRangeProblem(minDate, maxDate);
+    if (dateProblem) {
+      throw ctx.fail('invalid_date_range', dateProblem.message, { fields: dateProblem.fields });
+    }
+
+    // Every filter is sanitized and checked before any clause is built, so a
+    // blank one fails the call instead of reaching PubMed as an empty field
+    // clause (`asthma AND    [Author]`). (#176)
+    const blankFilters: string[] = [];
+    const sanitizedPubTypes = await sanitizeFilterList(
+      input.publicationTypes,
+      'publicationTypes',
+      blankFilters,
+    );
+    const sanitizedAuthor = await sanitizeFilter(input.author, 'author', blankFilters);
+    const sanitizedJournal = await sanitizeFilter(input.journal, 'journal', blankFilters);
+    const sanitizedMeshTerms = await sanitizeFilterList(input.meshTerms, 'meshTerms', blankFilters);
+    const sanitizedLanguage = await sanitizeFilter(input.language, 'language', blankFilters);
+    if (blankFilters.length > 0) {
+      throw ctx.fail(
+        'blank_filter',
+        `${quoteClauses(blankFilters)} ${blankFilters.length === 1 ? 'holds' : 'hold'} no term once markup, whitespace, invisible characters, parentheses, brackets, and double quotes are disregarded, so the field clause would carry no term.`,
+        { fields: blankFilters },
       );
     }
 
@@ -427,9 +632,6 @@ export const searchArticlesTool = tool('pubmed_search_articles', {
     let normalizedDateRange:
       | { minDate: string; maxDate: string; dateType: 'pdat' | 'mdat' | 'edat' }
       | undefined;
-    const { dateRange } = input;
-    const minDate = dateRange?.minDate.trim() ?? '';
-    const maxDate = dateRange?.maxDate.trim() ?? '';
     if (dateRange && minDate && maxDate) {
       normalizedDateRange = {
         minDate: minDate.replace(/[-.]/g, '/'),
@@ -447,39 +649,15 @@ export const searchArticlesTool = tool('pubmed_search_articles', {
           ? ({ name: 'maxDate', value: maxDate } as const)
           : undefined;
 
-    let sanitizedPubTypes: string[] | undefined;
-    if (input.publicationTypes?.length) {
-      sanitizedPubTypes = await Promise.all(
-        input.publicationTypes.map((pt) => sanitization.sanitizeString(pt, { context: 'text' })),
-      );
+    if (sanitizedPubTypes) {
       effectiveQuery += ` AND (${sanitizedPubTypes.map((pt) => `"${pt}"[Publication Type]`).join(' OR ')})`;
     }
-
-    let sanitizedAuthor: string | undefined;
-    if (input.author) {
-      sanitizedAuthor = await sanitization.sanitizeString(input.author, { context: 'text' });
-      effectiveQuery += ` AND ${sanitizedAuthor}[Author]`;
-    }
-
-    let sanitizedJournal: string | undefined;
-    if (input.journal) {
-      sanitizedJournal = await sanitization.sanitizeString(input.journal, { context: 'text' });
-      effectiveQuery += ` AND "${sanitizedJournal}"[Journal]`;
-    }
-
-    let sanitizedMeshTerms: string[] | undefined;
-    if (input.meshTerms?.length) {
-      sanitizedMeshTerms = await Promise.all(
-        input.meshTerms.map((term) => sanitization.sanitizeString(term, { context: 'text' })),
-      );
+    if (sanitizedAuthor) effectiveQuery += ` AND ${sanitizedAuthor}[Author]`;
+    if (sanitizedJournal) effectiveQuery += ` AND "${sanitizedJournal}"[Journal]`;
+    if (sanitizedMeshTerms) {
       effectiveQuery += ` AND (${sanitizedMeshTerms.map((term) => `"${term}"[MeSH Terms]`).join(' AND ')})`;
     }
-
-    let sanitizedLanguage: string | undefined;
-    if (input.language) {
-      sanitizedLanguage = await sanitization.sanitizeString(input.language, { context: 'text' });
-      effectiveQuery += ` AND ${sanitizedLanguage}[Language]`;
-    }
+    if (sanitizedLanguage) effectiveQuery += ` AND ${sanitizedLanguage}[Language]`;
 
     if (input.hasAbstract) effectiveQuery += ' AND hasabstract[text word]';
     if (input.freeFullText) effectiveQuery += ' AND free full text[filter]';
@@ -553,10 +731,10 @@ export const searchArticlesTool = tool('pubmed_search_articles', {
     const searchUrl = `https://pubmed.ncbi.nlm.nih.gov/?term=${encodeURIComponent(effectiveQuery)}`;
     const appliedFilters = {
       ...(normalizedDateRange && { dateRange: normalizedDateRange }),
-      ...(sanitizedPubTypes?.length && { publicationTypes: sanitizedPubTypes }),
+      ...(sanitizedPubTypes && { publicationTypes: sanitizedPubTypes }),
       ...(sanitizedAuthor && { author: sanitizedAuthor }),
       ...(sanitizedJournal && { journal: sanitizedJournal }),
-      ...(sanitizedMeshTerms?.length && { meshTerms: sanitizedMeshTerms }),
+      ...(sanitizedMeshTerms && { meshTerms: sanitizedMeshTerms }),
       ...(sanitizedLanguage && { language: sanitizedLanguage }),
       ...(input.hasAbstract && { hasAbstract: true }),
       ...(input.freeFullText && { freeFullText: true }),

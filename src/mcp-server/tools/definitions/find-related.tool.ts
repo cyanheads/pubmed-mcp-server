@@ -71,8 +71,11 @@ const UNCLASSIFIED_ERROR = 'unclassified_error';
 
 /**
  * Label for a provider failure that carries no declared reason, named by its code.
- * Each service declares its `*_unreachable` reason for `ServiceUnavailable` only, so
- * an exhausted rate limit or timeout reaches the chain with its code and no reason.
+ * NCBI stamps `ncbi_unreachable` on a `ServiceUnavailable` and `ncbi_rate_limited` on
+ * a `RateLimited`, and that reason wins; Europe PMC and OpenAlex declare their
+ * `*_unreachable` reason for `ServiceUnavailable` only. So an exhausted timeout from
+ * any provider, or an exhausted Europe PMC or OpenAlex rate limit, reaches the chain
+ * with its code and no reason.
  */
 const REASON_BY_CODE = new Map<JsonRpcErrorCode, string>([
   [JsonRpcErrorCode.RateLimited, 'rate_limited'],
@@ -525,9 +528,10 @@ export const findRelatedTool = tool('pubmed_find_related', {
     // Europe PMC's served-but-empty answer, held so a later OpenAlex failure
     // falls back to it: an answer of zero is still an answer, not an outage.
     let epmcEmpty: ProviderResult | null = null;
-    // Every provider the chain actually reached, with its outcome. Structurally
-    // ineligible providers (Europe PMC for `similar`) and unconfigured ones are
-    // never attempted, so they never appear here.
+    // Every provider the chain tried, with its outcome. A structurally ineligible
+    // provider (Europe PMC for `similar`) is never tried and never appears here;
+    // an unconfigured one is tried, fails as `provider_disabled` without reaching
+    // its upstream, and is recorded like any other failure.
     const attempts: ProviderAttempt[] = [];
     // Records WHY a non-primary provider answered, so the provenance notice can
     // distinguish an NCBI outage from references coverage for a non-PMC source.
@@ -541,6 +545,7 @@ export const findRelatedTool = tool('pubmed_find_related', {
     try {
       providerResult = await ncbiProvider(canonicalPmid, input.relationship, ctx.signal);
     } catch (err) {
+      if (ctx.signal.aborted) throw err;
       ctx.log.warning('NCBI eLink failed, trying fallback providers', {
         pmid: input.pmid,
         err: describeError(err),
@@ -566,6 +571,7 @@ export const findRelatedTool = tool('pubmed_find_related', {
           epmcEmpty = epmcResult;
         }
       } catch (err) {
+        if (ctx.signal.aborted) throw err;
         ctx.log.warning('Europe PMC fallback failed, trying OpenAlex', {
           pmid: input.pmid,
           err: describeError(err),
@@ -585,6 +591,7 @@ export const findRelatedTool = tool('pubmed_find_related', {
         );
         fallbackKind = 'outage';
       } catch (err) {
+        if (ctx.signal.aborted) throw err;
         ctx.log.warning('OpenAlex fallback failed', {
           pmid: input.pmid,
           err: describeError(err),
@@ -632,6 +639,7 @@ export const findRelatedTool = tool('pubmed_find_related', {
         sourceSummary = summaries[0];
         if (!sourceSummary?.title) sourceConfirmedMissing = true;
       } catch (err) {
+        if (ctx.signal.aborted) throw err;
         ctx.log.debug('Source PMID ESummary failed', { err });
         const reason =
           err instanceof McpError
@@ -693,6 +701,7 @@ export const findRelatedTool = tool('pubmed_find_related', {
               break;
             }
           } catch (err) {
+            if (ctx.signal.aborted) throw err;
             ctx.log.warning('References fallback provider failed', {
               provider: attempt.provider,
               err: describeError(err),

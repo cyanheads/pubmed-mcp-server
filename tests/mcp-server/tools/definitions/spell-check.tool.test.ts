@@ -4,7 +4,7 @@
  */
 
 import type { ContentBlock } from '@cyanheads/mcp-ts-core';
-import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
+import { JsonRpcErrorCode, serviceUnavailable } from '@cyanheads/mcp-ts-core/errors';
 import { createMockContext, runToolContract } from '@cyanheads/mcp-ts-core/testing';
 import { describe, expect, it, vi } from 'vitest';
 
@@ -55,6 +55,26 @@ describe('spellCheckTool', () => {
     expect(ctx.signal).toBeInstanceOf(AbortSignal);
   });
 
+  it('fills the declared recovery hint onto a service throw that carries only its reason', async () => {
+    mockESpell.mockRejectedValue(
+      serviceUnavailable('NCBI request failed: socket hang up', { reason: 'ncbi_unreachable' }),
+    );
+    const result = await runToolContract(spellCheckTool, { query: 'astma' });
+
+    expect(result.isError).toBe(true);
+    expect(result.structuredContent).toMatchObject({
+      error: {
+        code: JsonRpcErrorCode.ServiceUnavailable,
+        data: {
+          reason: 'ncbi_unreachable',
+          recovery: {
+            hint: expect.stringContaining('NCBI failed on every attempt this call made'),
+          },
+        },
+      },
+    });
+  });
+
   it('returns original when no suggestion', async () => {
     mockESpell.mockResolvedValue({
       original: 'cancer',
@@ -100,7 +120,25 @@ describe('spellCheckTool', () => {
       const promise = spellCheckTool.handler(input, ctx);
       await expect(promise).rejects.toMatchObject({
         code: JsonRpcErrorCode.ValidationError,
-        data: { reason: 'blank_query', recovery: { hint: expect.stringMatching(/nonblank/i) } },
+        data: { reason: 'blank_query' },
+      });
+      expect(mockESpell).not.toHaveBeenCalled();
+    });
+
+    // `.trim()` keeps U+0085 and format characters such as U+200B.
+    it.each([
+      ['next-line characters (U+0085)', '\u0085\u0085'],
+      ['zero-width spaces', '​​'],
+      ['a word joiner and a soft hyphen between spaces', ' ⁠­ '],
+    ])('rejects a query of %s without calling ESpell', async (_label, query) => {
+      const result = await runToolContract(spellCheckTool, { query });
+
+      expect(result.isError).toBe(true);
+      expect(result.structuredContent).toMatchObject({
+        error: {
+          code: JsonRpcErrorCode.ValidationError,
+          data: { reason: 'blank_query', retryable: false },
+        },
       });
       expect(mockESpell).not.toHaveBeenCalled();
     });

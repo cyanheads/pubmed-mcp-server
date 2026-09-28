@@ -1,17 +1,22 @@
 /**
- * @fileoverview Canonical error contracts. Single source of truth for the
- * failure modes services throw and tools declare in `errors[]`, plus the
- * input rejections shared by the tools that forward a free-text query
- * upstream.
+ * @fileoverview Canonical error contracts: the failure modes the NCBI, Europe
+ * PMC, and OpenAlex services throw and tools declare in `errors[]`, plus the
+ * input rejections some tools raise before any upstream call. Unpaywall has no
+ * array here: its one caller, `pubmed_fetch_fulltext`, catches every Unpaywall
+ * failure and reports it as a tier outcome, so no Unpaywall reason reaches a
+ * caller as an error.
  *
- * Service-layer code can't reach `ctx.recoveryFor` (no Context), so it spreads
- * `recoveryFor(reason)` from this module into the error factory's `data` arg.
- * The framework mirrors `data.recovery.hint` into the wire payload's
- * `content[]` text, so clients get the same actionable hint they would from a
- * handler-level `ctx.fail`.
+ * Service-layer code stamps `data: { reason }` on its throws, adding its own
+ * `data.recovery` only where the hint depends on runtime detail. When a failure
+ * with no hint of its own reaches a tool or resource that declares the reason,
+ * the framework fills that entry's `recovery` in as `data.recovery.hint` — the
+ * same hint a handler-level `ctx.fail` gets. A tool's error also renders the
+ * hint as a `Recovery:` line in its `content[]` text (dropped when the message
+ * already contains it); a resource's carries it only in the JSON-RPC error's
+ * `data`.
  *
- * Tool definitions import the contract arrays directly and spread them into
- * their `errors: [...]` declarations to surface the failure modes to the LLM.
+ * Definitions import the contract arrays directly and spread them into their
+ * `errors: [...]` declarations to surface the failure modes to the LLM.
  * Every service-array entry carries `thrownBy: 'service'` so the linter's
  * `error-contract-unthrown` check skips it while still checking the handler's
  * own reasons. Spread a service array only into a tool whose handler lets that
@@ -41,16 +46,26 @@ export const NCBI_SERVICE_ERRORS = [
   {
     reason: 'ncbi_unreachable',
     code: JsonRpcErrorCode.ServiceUnavailable,
-    when: 'NCBI E-utilities is unreachable after all retry attempts.',
-    recovery: 'Retry after a brief delay; NCBI was unreachable across all retry attempts.',
+    when: 'NCBI E-utilities failed on every attempt the retry budget allowed — retries ran out, or the next backoff would overrun the total deadline.',
+    recovery: 'Retry after a brief delay; NCBI failed on every attempt this call made.',
+    retryable: true,
+    thrownBy: 'service',
+  },
+  {
+    reason: 'ncbi_rate_limited',
+    code: JsonRpcErrorCode.RateLimited,
+    when: 'NCBI answered HTTP 429 (too many requests) and the call stopped on it — retries ran out, the next backoff would overrun the total deadline, or the Retry-After NCBI named outlasts the time left or the 30-second backoff cap.',
+    recovery:
+      "Wait as long as `retryAfter` says when present (a number of seconds or an HTTP date), otherwise a few seconds, then retry; NCBI is throttling this server's requests. If the server runs without NCBI_API_KEY, setting it raises the E-utilities ceiling from about 3 to about 10 requests per second and shortens the default gap between requests — an operator setting in the server's environment, not a tool input.",
     retryable: true,
     thrownBy: 'service',
   },
   {
     reason: 'ncbi_deadline_exceeded',
     code: JsonRpcErrorCode.Timeout,
-    when: 'Total request deadline expired before NCBI returned a response.',
-    recovery: 'Reduce batch size or retry; NCBI may be under temporary load.',
+    when: 'The total NCBI request deadline expired before NCBI answered successfully — mid-request, while queued, or during a retry backoff.',
+    recovery:
+      'Retry after a brief delay; NCBI may be under temporary load. For a large batch, split it into smaller calls.',
     retryable: true,
     thrownBy: 'service',
   },
@@ -74,36 +89,33 @@ export const NCBI_SERVICE_ERRORS = [
 ] as const;
 
 /**
- * Input failure the NCBI query tools reject before any call is made. Declared
- * here rather than inside `NCBI_SERVICE_ERRORS` so only the tools that actually
- * throw it advertise it — a tool that takes no free-text query can never
- * produce it, and declaring it there would advertise a failure mode that
- * cannot happen.
+ * Input failure the free-text query tools reject before any call is made —
+ * the NCBI query tools and `pubmed_europepmc_search` alike. Declared here
+ * rather than inside a service array so only the tools that actually throw it
+ * advertise it — a tool that takes no free-text query can never produce it,
+ * and declaring it there would advertise a failure mode that cannot happen.
  *
  * Unlike the service arrays in this module, this one is thrown from a tool
- * handler via `ctx.fail('blank_query', …)`, so its recovery hint resolves
- * through `ctx.recoveryFor` and it stays out of {@link ServiceErrorReason}.
+ * handler via `ctx.fail('blank_query', …)`, so its entry carries no `thrownBy`.
  */
-export const NCBI_QUERY_INPUT_ERRORS = [
+export const QUERY_INPUT_ERRORS = [
   {
     reason: 'blank_query',
     code: JsonRpcErrorCode.ValidationError,
-    when: 'The query holds no search term once whitespace, and anything the tool strips before searching, are removed — so NCBI would receive a blank term. pubmed_search_articles strips markup, bracketed field tags, and parentheses, so a bare field tag such as `[pdat]` or empty parentheses `()` count as blank there.',
-    recovery:
-      'Supply a nonblank search term — a bare field tag or empty parentheses carry none; NCBI cannot search a blank term and retrying the same input will not help.',
+    when: 'The query contains no search term: nothing is left once whitespace and invisible characters such as a zero-width space are disregarded. pubmed_search_articles and pubmed_europepmc_search first decode HTML entities and also disregard markup and parentheses, so `()`, `<b></b>`, and `&nbsp;` hold no term there; pubmed_search_articles also disregards bracketed field tags such as `[pdat]`.',
+    recovery: 'Supply a nonblank search term; retrying the same blank input will not help.',
     retryable: false,
   },
 ] as const;
 
 /**
  * Input failure the identifier-conversion path rejects before any call is made.
- * Separate from {@link NCBI_QUERY_INPUT_ERRORS} for the same reason that array
+ * Separate from {@link QUERY_INPUT_ERRORS} for the same reason that array
  * is separate from the service contracts: only a tool that takes caller-supplied
  * identifiers can produce it.
  *
- * Thrown from a tool handler via `ctx.fail('malformed_id', …)`, so its recovery
- * hint resolves through `ctx.recoveryFor` and it stays out of
- * {@link ServiceErrorReason}.
+ * Thrown from a tool handler via `ctx.fail('malformed_id', …)`, so its entry
+ * carries no `thrownBy`.
  */
 export const NCBI_ID_INPUT_ERRORS = [
   {
@@ -113,25 +125,6 @@ export const NCBI_ID_INPUT_ERRORS = [
     recovery:
       'Submit one identifier per `ids` element, in the declared idType format; the same packed value will be rejected again.',
     retryable: false,
-  },
-] as const;
-
-/**
- * Failure modes the Unpaywall service layer can surface. A tool whose handler
- * lets `getUnpaywallService()` failures propagate spreads these into its
- * `errors[]`. None does today: `pubmed_fetch_fulltext`, the only consumer,
- * folds every Unpaywall failure into its tier chain, so the entries serve the
- * service's own `recoveryFor` hints.
- */
-export const UNPAYWALL_SERVICE_ERRORS = [
-  {
-    reason: 'unpaywall_unreachable',
-    code: JsonRpcErrorCode.ServiceUnavailable,
-    when: 'Unpaywall was unreachable when resolving a DOI or fetching content.',
-    recovery:
-      'Retry after a brief delay; Unpaywall was unreachable. The PMC source remains the primary path.',
-    retryable: true,
-    thrownBy: 'service',
   },
 ] as const;
 
@@ -152,7 +145,7 @@ export const OPENALEX_SERVICE_ERRORS = [
   },
   {
     reason: 'openalex_invalid_response',
-    code: JsonRpcErrorCode.SerializationError,
+    code: JsonRpcErrorCode.ServiceUnavailable,
     when: 'OpenAlex returned a body that could not be parsed (invalid JSON).',
     recovery: 'Retry the request; OpenAlex returned a malformed response that could not be parsed.',
     retryable: true,
@@ -187,51 +180,10 @@ export const EUROPEPMC_SERVICE_ERRORS = [
   {
     reason: 'europepmc_invalid_input',
     code: JsonRpcErrorCode.ValidationError,
-    when: 'Europe PMC rejected the request input — an error message such as an empty query, an empty response to a sort with an undocumented field or no asc/desc direction, or an empty response to a pagination cursor on every attempt.',
+    when: 'Europe PMC rejected the request input — an error message in place of results, an empty response to a sort with an undocumented field or no asc/desc direction, or a pagination cursor it cannot read (an empty response on the last attempt the retry budget allows, or a second HTTP 503 when the first page of the same query is served).',
     recovery:
-      'Adjust the input — the query, the sort, or the cursorMark — before retrying; the same input will be rejected again.',
+      "Fix the rejected input before retrying — the query, the sort, or the cursorMark (pass the previous response's `nextCursorMark` verbatim, or `*` to restart); the same input will most likely be rejected again.",
     retryable: false,
     thrownBy: 'service',
   },
 ] as const;
-
-/**
- * Reason identifier union for type-safe authoring on the service layer.
- * Tool handlers get a tighter typed union from `ctx.fail` / `ctx.recoveryFor`
- * via the framework — this is the service-side fallback.
- */
-export type ServiceErrorReason =
-  | (typeof NCBI_SERVICE_ERRORS)[number]['reason']
-  | (typeof UNPAYWALL_SERVICE_ERRORS)[number]['reason']
-  | (typeof EUROPEPMC_SERVICE_ERRORS)[number]['reason']
-  | (typeof OPENALEX_SERVICE_ERRORS)[number]['reason'];
-
-const REASON_TO_RECOVERY = new Map<ServiceErrorReason, string>(
-  [
-    ...NCBI_SERVICE_ERRORS,
-    ...UNPAYWALL_SERVICE_ERRORS,
-    ...EUROPEPMC_SERVICE_ERRORS,
-    ...OPENALEX_SERVICE_ERRORS,
-  ].map((entry) => [entry.reason, entry.recovery]),
-);
-
-/**
- * Service-layer counterpart to `ctx.recoveryFor`. Returns `{ recovery: { hint } }`
- * for the contract reason. Use at every service throw that stamps a `reason` so
- * the wire payload carries the same actionable hint the LLM gets from
- * handler-level `ctx.fail`.
- *
- * The parameter is constrained to `ServiceErrorReason`, so typos fail at compile
- * time. The runtime guard catches the impossible case where the reason union
- * and the recovery map drift apart in future edits.
- *
- * @example
- *   throw serviceUnavailable(msg, { reason: 'ncbi_unreachable', ...recoveryFor('ncbi_unreachable') });
- */
-export function recoveryFor(reason: ServiceErrorReason): { recovery: { hint: string } } {
-  const hint = REASON_TO_RECOVERY.get(reason);
-  if (hint === undefined) {
-    throw new Error(`recoveryFor: no recovery hint registered for reason "${reason}"`);
-  }
-  return { recovery: { hint } };
-}

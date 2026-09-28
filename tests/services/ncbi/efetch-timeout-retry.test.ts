@@ -10,7 +10,7 @@
  * @module tests/services/ncbi/efetch-timeout-retry.test
  */
 
-import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
+import { JsonRpcErrorCode, type McpError } from '@cyanheads/mcp-ts-core/errors';
 import { createPacer } from '@cyanheads/mcp-ts-core/utils';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { NcbiApiClient } from '@/services/ncbi/api-client.js';
@@ -104,7 +104,6 @@ describe('EFetch backend-timeout envelope (issue #153)', () => {
           reason: 'ncbi_unreachable',
           attempts: 3,
           ncbiErrors: [TIMEOUT_MESSAGE],
-          recovery: { hint: expect.any(String) },
         },
       });
       expect(spy).toHaveBeenCalledTimes(3);
@@ -232,7 +231,6 @@ describe('EFetch proxy_stream() backend envelopes (issue #155)', () => {
           reason: 'ncbi_unreachable',
           attempts: 3,
           ncbiErrors: [expect.stringContaining('CEFetchPApplication::proxy_stream()')],
-          recovery: { hint: expect.any(String) },
         },
       });
       // Markup from the relayed page never reaches the caller-facing diagnostic.
@@ -328,23 +326,86 @@ describe('EFetch backend-timeout envelope under the service deadline (issue #153
   let randomSpy: ReturnType<typeof vi.spyOn>;
 
   beforeEach(() => {
-    // Remove backoff jitter: attempt 0 fails at ~0ms, sleeps 1000ms; attempt 1 fails at
-    // ~1000ms and sleeps 2000ms, which the 1500ms deadline interrupts.
+    // Remove backoff jitter: attempt 0 fails at ~0ms and sleeps 1000ms; attempt 1
+    // fails at ~1000ms, and its backoff is 2000ms.
     randomSpy = vi.spyOn(Math, 'random').mockReturnValue(0.5);
   });
 
   afterEach(() => {
     randomSpy.mockRestore();
+    vi.useRealTimers();
   });
 
   it('stops retrying when the total deadline expires mid-backoff', async () => {
+    // The 2000ms backoff after attempt 1 ends exactly at the 3000ms deadline, so it is
+    // slept, and the deadline's timer — armed first — interrupts it. A fake clock keeps
+    // the two on the same instant.
+    vi.useFakeTimers();
+    const spy = stubFetch({ body: TIMEOUT_ENVELOPE, status: 400 });
+    const service = buildService(10, 3000);
+
+    const settled = service.eFetch({ db: 'pubmed', id: PMID }).catch((e: unknown) => e);
+    await vi.advanceTimersByTimeAsync(3000);
+
+    expect(await settled).toMatchObject({
+      code: JsonRpcErrorCode.Timeout,
+      message: 'NCBI request deadline (3000ms) exceeded',
+      // An expiry mid-backoff keeps NCBI's diagnostics from the attempt it followed.
+      data: {
+        reason: 'ncbi_deadline_exceeded',
+        deadlineMs: 3000,
+        ncbiErrors: [TIMEOUT_MESSAGE],
+      },
+    });
+    expect(spy).toHaveBeenCalledTimes(2);
+  });
+
+  it('reports the envelope as retry exhaustion when the next backoff would overrun the deadline (#174)', async () => {
+    // Attempt 1 fails at ~1000ms; its 2000ms backoff cannot fit the ~500ms left of a
+    // 1500ms deadline, so the loop stops there, before the deadline fires.
     const spy = stubFetch({ body: TIMEOUT_ENVELOPE, status: 400 });
     const service = buildService(10, 1500);
 
     await expect(service.eFetch({ db: 'pubmed', id: PMID })).rejects.toMatchObject({
-      code: JsonRpcErrorCode.Timeout,
-      data: { reason: 'ncbi_deadline_exceeded', deadlineMs: 1500 },
+      code: JsonRpcErrorCode.ServiceUnavailable,
+      message: expect.stringMatching(/Status: Timeout \(failed after 2 attempts\)$/),
+      data: {
+        reason: 'ncbi_unreachable',
+        endpoint: 'efetch',
+        attempts: 2,
+        ncbiErrors: [TIMEOUT_MESSAGE],
+      },
     });
     expect(spy).toHaveBeenCalledTimes(2);
   }, 5000);
+
+  it('keeps an expiry that aborts a request in flight a Timeout (#174)', async () => {
+    // The real client uses plain fetch, so the deadline's abort surfaces from the attempt
+    // as the client's own ServiceUnavailable "NCBI request failed" — the same code a
+    // give-up carries. Only the fired deadline tells the two apart.
+    fetchSpy = vi.spyOn(globalThis, 'fetch').mockImplementation(
+      (_url, init) =>
+        new Promise<Response>((_, reject) => {
+          const signal = init?.signal as AbortSignal;
+          signal.addEventListener('abort', () => reject(signal.reason), { once: true });
+        }),
+    );
+    const service = buildService(10, 150);
+
+    const error = (await service.eFetch({ db: 'pubmed', id: PMID }).catch((e) => e)) as McpError;
+
+    expect(error).toMatchObject({
+      code: JsonRpcErrorCode.Timeout,
+      message: 'NCBI request deadline (150ms) exceeded',
+      data: { reason: 'ncbi_deadline_exceeded', deadlineMs: 150 },
+    });
+    expect(error.data).not.toHaveProperty('ncbiErrors');
+    // The attempt's own failure, under the framework's expiry.
+    expect((error.cause as McpError).cause).toMatchObject({
+      code: JsonRpcErrorCode.ServiceUnavailable,
+      message: expect.stringMatching(/^NCBI request failed: /),
+      data: { reason: 'ncbi_unreachable' },
+    });
+    expect(fetchSpy).toHaveBeenCalledTimes(1);
+  }, 2000);
 });
