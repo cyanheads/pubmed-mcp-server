@@ -47,14 +47,15 @@ an existing section instead if preferred.
 E-utilities API, complementing `paperscraperMCP` (which scrapes publications
 from multiple sources) with a native, schema-validated E-utilities integration:
 
-- **9 tools** covering ESearch, EFetch, ESummary, ELink, ESpell, EInfo,
-  ECitMatch, and the PMC ID Converter
+- **11 tools** covering ESearch, EFetch, ESummary, ELink, ESpell, ECitMatch,
+  the PMC ID Converter, and Europe PMC search and record fetch, plus a
+  resource over EInfo
 - **Full-text retrieval** from PubMed Central with section filtering
 - **MeSH vocabulary lookup** (tree numbers, scope notes, entry terms) —
   essential for building precise PubMed queries
-- **Citation formatting** in APA, MLA, BibTeX, RIS (zero deps, Workers-compatible)
+- **Citation formatting** in APA, MLA, BibTeX, RIS, Vancouver (zero deps, Workers-compatible)
 - **Deterministic citation matching** via ECitMatch for known references
-- Three transports: **stdio, Streamable HTTP, Cloudflare Workers**
+- Two transports: **stdio and Streamable HTTP**
 
 Distribution: [@cyanheads/pubmed-mcp-server on npm](https://www.npmjs.com/package/@cyanheads/pubmed-mcp-server),
 Docker image at `ghcr.io/cyanheads/pubmed-mcp-server`, and a public hosted
@@ -100,7 +101,7 @@ Externally-maintained MCP servers that align with the MCPmed mission but are hos
 
 | Repository | Description | Language | License |
 |------------|-------------|----------|---------|
-| **[cyanheads/pubmed-mcp-server](https://github.com/cyanheads/pubmed-mcp-server)** | MCP server for the NCBI E-utilities API. Nine tools covering PubMed search, article fetch, PMC full text, MeSH vocabulary lookup, citation formatting (APA/MLA/BibTeX/RIS), ECitMatch, and ID conversion (DOI/PMID/PMCID). Tool definitions carry ontology-backed concept tags (Schema.org, EDAM) via `_meta`. stdio, Streamable HTTP, and Cloudflare Workers transports. Published on npm and GHCR. | TypeScript | Apache 2.0 |
+| **[cyanheads/pubmed-mcp-server](https://github.com/cyanheads/pubmed-mcp-server)** | MCP server for the NCBI E-utilities API. Eleven tools covering PubMed search, article fetch, full text (PMC, with Europe PMC and Unpaywall fallbacks), related-article discovery, spell check, MeSH vocabulary lookup, citation formatting (APA/MLA/BibTeX/RIS/Vancouver), ECitMatch, ID conversion (DOI/PMID/PMCID), and Europe PMC search and record fetch. Tool definitions carry ontology-backed concept tags (Schema.org, EDAM) via `_meta`. stdio and Streamable HTTP transports. Published on npm and GHCR. | TypeScript | Apache 2.0 |
 ```
 
 ---
