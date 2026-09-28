@@ -296,7 +296,7 @@ cp .env.example .env
 | `NCBI_TOTAL_DEADLINE_MS` | Deadline for one NCBI call across queue wait, retries, and backoff, in ms. A call that can't start in time is rejected at once. | `60000` |
 | `UNPAYWALL_EMAIL` | Contact email for Unpaywall. Setting it enables the Unpaywall tier of `pubmed_fetch_fulltext` for non-PMC DOIs. | none |
 | `UNPAYWALL_TIMEOUT_MS` | Per-request timeout for Unpaywall lookups and content fetches, in ms. | `20000` |
-| `EUROPEPMC_ENABLED` | Set `false` to disable every Europe PMC call: both Europe PMC tools go unregistered and `pubmed_fetch_fulltext` skips that tier. | `true` |
+| `EUROPEPMC_ENABLED` | Set `false` to disable every Europe PMC call: both Europe PMC tools go unregistered, `pubmed_fetch_fulltext` skips that tier, and `pubmed_find_related` skips that fallback. | `true` |
 | `EUROPEPMC_EMAIL` | Optional contact email sent with Europe PMC requests. | none |
 | `EUROPEPMC_REQUEST_DELAY_MS` | Minimum gap between Europe PMC request starts, in ms. | `200` |
 | `EUROPEPMC_MAX_RETRIES` | Retry attempts for failed Europe PMC requests. | `3` |
