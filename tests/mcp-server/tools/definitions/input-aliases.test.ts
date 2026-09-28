@@ -6,8 +6,8 @@
  * services are stubbed; every case asserts the aliased value reached the service
  * call and both response surfaces carry the result.
  *
- * `pubmed_lookup_citation`'s `citation` alias is covered with its union schema in
- * `lookup-citation.tool.test.ts`.
+ * `pubmed_lookup_citation`'s `citation` alias is covered with its single-object
+ * handling in `lookup-citation.tool.test.ts`.
  * @module tests/mcp-server/tools/definitions/input-aliases.test
  */
 

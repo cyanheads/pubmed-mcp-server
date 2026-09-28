@@ -4,8 +4,10 @@
  */
 
 import type { ContentBlock } from '@cyanheads/mcp-ts-core';
+import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
 import { createMockContext, runToolContract } from '@cyanheads/mcp-ts-core/testing';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { toJSONSchema } from 'zod/v4/core';
 
 import { textBlocks } from '../../../_helpers.js';
 
@@ -964,9 +966,9 @@ describe('a single citation object and the `citation` alias (issue #156)', () =>
     );
   });
 
-  it('parses a single object under `citations`', () => {
+  it('parses a single object under `citations` into a one-element array (issue #173)', () => {
     const input = lookupCitationTool.input.parse({ citations: PNAS });
-    expect(input.citations).toEqual(PNAS);
+    expect(input.citations).toEqual([PNAS]);
   });
 
   it('handles a single `citations` object as a one-element batch', async () => {
@@ -1038,7 +1040,8 @@ describe('a single citation object and the `citation` alias (issue #156)', () =>
     expect(textOf(result)).toContain('Unrecognized key: "citation"');
   });
 
-  describe('validation messages survive the union', () => {
+  describe('validation messages for either shape', () => {
+    // A lone object is wrapped before validation, so its issues carry element index 0. (#173)
     it('names the field and the pipe rule for a single object', () => {
       const parsed = lookupCitationTool.input.safeParse({
         citations: { journal: 'N Engl|J Med', year: '2024' },
@@ -1046,7 +1049,7 @@ describe('a single citation object and the `citation` alias (issue #156)', () =>
 
       expect(parsed.success).toBe(false);
       expect(parsed.error?.issues).toHaveLength(1);
-      expect(parsed.error?.issues[0]?.path).toEqual(['citations', 'journal']);
+      expect(parsed.error?.issues[0]?.path).toEqual(['citations', 0, 'journal']);
       expect(parsed.error?.issues[0]?.message).toMatch(/pipe/i);
     });
 
@@ -1054,7 +1057,7 @@ describe('a single citation object and the `citation` alias (issue #156)', () =>
       const parsed = lookupCitationTool.input.safeParse({ citations: { authorName: 'smith j' } });
 
       expect(parsed.success).toBe(false);
-      expect(parsed.error?.issues[0]?.path).toEqual(['citations']);
+      expect(parsed.error?.issues[0]?.path).toEqual(['citations', 0]);
       expect(parsed.error?.issues[0]?.message).toMatch(/journal or year/);
     });
 
@@ -1079,22 +1082,143 @@ describe('a single citation object and the `citation` alias (issue #156)', () =>
       );
     });
 
-    // A wrong-typed value inside an element fails both branches outright, so it
-    // arrives as one union issue; the caller-facing text must still name the
-    // element, the field, and what was wrong with it.
+    /**
+     * A string has a `length`, so the array's length checks used to run after its
+     * type check failed and report the same shape message a second time.
+     */
+    it.each([
+      ['longer than 25 characters', 'Nature 2020;580:123-126 Smith J et al.'],
+      ['of 1–25 characters', 'Nature 2020'],
+      ['that is empty', ''],
+    ])('reports a string %s as one shape issue', (_label, citations) => {
+      const parsed = lookupCitationTool.input.safeParse({ citations });
+
+      expect(parsed.success).toBe(false);
+      expect(parsed.error?.issues).toHaveLength(1);
+      expect(parsed.error?.issues[0]).toMatchObject({
+        code: 'invalid_type',
+        expected: 'array',
+        path: ['citations'],
+        message: 'Invalid input: expected a citation object or an array of 1–25 citation objects',
+      });
+    });
+
+    it.each([
+      ['longer than 25 characters', 'Nature 2020;580:123-126 Smith J et al.'],
+      ['that is empty', ''],
+    ])(
+      'states the shape once, with the array recovery, for a string %s',
+      async (_label, citations) => {
+        const result = await callRaw({ citations });
+
+        expect(result.isError).toBe(true);
+        expect(result.structuredContent).toMatchObject({
+          error: {
+            code: JsonRpcErrorCode.InvalidParams,
+            data: {
+              reason: 'invalid_arguments',
+              recovery: { hint: 'Send citations as an array, not a string.' },
+            },
+          },
+        });
+        const text = textOf(result);
+        expect(text.split('expected a citation object or an array').length - 1).toBe(1);
+        expect(text).toContain('Recovery: Send citations as an array, not a string.');
+        expect(mockECitMatch).not.toHaveBeenCalled();
+      },
+    );
+
+    /**
+     * The caller-facing text must name the element, the field, and what was wrong
+     * with it. A boolean, because the framework repairs an integer sent for a string.
+     */
     it('names the element and field of a wrong-typed value inside an array', async () => {
-      const result = await callRaw({ citations: [NATURE, { journal: 5, year: '1991' }] });
+      const result = await callRaw({ citations: [NATURE, { journal: true, year: '1991' }] });
 
       expect(result.isError).toBe(true);
       const text = textOf(result);
-      expect(text).toContain('1.journal: Invalid input: expected string, received number');
+      expect(text).toContain(
+        'citations.1.journal: Invalid input: expected string, received boolean',
+      );
       expect(mockECitMatch).not.toHaveBeenCalled();
+    });
+
+    /**
+     * The repair reaches a field inside an array element. Behind a top-level union
+     * the whole value fails as one issue at `citations`, which it never reaches. (#173)
+     */
+    it('accepts an integer sent for a string field inside an array, as every tool does', async () => {
+      const result = await callRaw({ citations: [NATURE, { journal: 'Lancet', year: 1991 }] });
+
+      expect(result.isError).toBeFalsy();
+      expect(mockECitMatch.mock.calls[0]?.[0]?.[1]).toMatchObject({
+        journal: 'Lancet',
+        year: '1991',
+      });
     });
 
     it('still bounds the array at 25 citations and rejects an empty one', () => {
       const many = Array.from({ length: 26 }, () => NATURE);
       expect(lookupCitationTool.input.safeParse({ citations: many }).success).toBe(false);
       expect(lookupCitationTool.input.safeParse({ citations: [] }).success).toBe(false);
+    });
+  });
+
+  describe('`citations` advertised as an array (issue #173)', () => {
+    it('advertises `citations` as an array of 1–25 citation objects, with no anyOf', () => {
+      const emitted = toJSONSchema(lookupCitationTool.input as never, {
+        target: 'draft-7',
+        io: 'input',
+      }) as { properties?: Record<string, Record<string, unknown>>; required?: string[] };
+      const citations = emitted.properties?.citations;
+
+      expect(emitted.required).toEqual(['citations']);
+      expect(citations).toMatchObject({
+        type: 'array',
+        minItems: 1,
+        maxItems: 25,
+        items: {
+          type: 'object',
+          properties: { journal: { type: 'string', pattern: expect.any(String) } },
+        },
+      });
+      expect(citations).not.toHaveProperty('anyOf');
+      expect(citations?.description).toEqual(expect.any(String));
+    });
+
+    it('serves a lone object, the `citation` alias, and a one-element array identically', async () => {
+      const lone = await callRaw({ citations: PNAS });
+      const aliased = await callRaw({ citation: PNAS });
+      const wrapped = await callRaw({ citations: [PNAS] });
+
+      expect(wrapped.isError).toBeFalsy();
+      expect(lone).toEqual(wrapped);
+      expect(aliased).toEqual(wrapped);
+      expect(mockECitMatch.mock.calls.map((call) => call[0])).toEqual([
+        [{ ...PNAS, key: '1' }],
+        [{ ...PNAS, key: '1' }],
+        [{ ...PNAS, key: '1' }],
+      ]);
+    });
+
+    it('names both accepted shapes when `citations` is missing', async () => {
+      const result = await callRaw({});
+
+      expect(result.isError).toBe(true);
+      const text = textOf(result);
+      expect(text).toContain(
+        'citations: Invalid input: expected a citation object or an array of 1–25 citation objects',
+      );
+      expect(text).not.toContain('received undefined or');
+      expect(mockECitMatch).not.toHaveBeenCalled();
+    });
+
+    it('reports a bad field of a lone object under its element index', async () => {
+      const result = await callRaw({ citations: { journal: 'N Engl|J Med', year: '2024' } });
+
+      expect(result.isError).toBe(true);
+      expect(textOf(result)).toMatch(/citations\.0\.journal: Cannot contain a pipe/);
+      expect(mockECitMatch).not.toHaveBeenCalled();
     });
   });
 });

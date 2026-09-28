@@ -3,8 +3,9 @@
  * to PubMed IDs using NCBI's ECitMatch service, then verifies author agreement
  * against ESummary to catch cases where ECitMatch's journal+volume+page weighting
  * returns a PMID whose author roster doesn't contain the queried author.
- * `citations` takes an array or a single citation object, and `citation` is
- * accepted as an alias for it.
+ * `citations` is advertised as an array of 1–25 citations. A lone citation
+ * object is wrapped into a one-element array before validation, and `citation`
+ * is accepted as an alias for `citations`.
  * @module src/mcp-server/tools/definitions/lookup-citation.tool
  */
 
@@ -88,14 +89,18 @@ const CitationSchema = z
   });
 
 /**
- * The union issue's own message, in place of Zod's bare `Invalid input`. A value
- * that fails only a check inside one branch — a pipe in a field, a missing
- * journal and year — keeps that branch's issue and path. A value that fails both
- * branches outright (a string, or an array element of the wrong type) is one
- * union issue carrying this message, with each branch's issues nested under it.
+ * Message for a `citations` value the array check refuses (a string, a number, a
+ * missing field, or an array outside 1–25) in place of Zod's bare `expected
+ * array`, so the caller learns both shapes that parse. A lone object never
+ * reaches this check: it is wrapped first, and its own field issues report under
+ * `citations.0`.
  */
 const CITATIONS_SHAPE_ERROR =
   'Invalid input: expected a citation object or an array of 1–25 citation objects';
+
+/** A citation sent on its own rather than in an array. JSON input has no other object kind. */
+const isCitationObject = (value: unknown): value is Record<string, unknown> =>
+  typeof value === 'object' && value !== null && !Array.isArray(value);
 
 export const lookupCitationTool = tool('pubmed_lookup_citation', {
   description: `Look up PubMed IDs from partial bibliographic citations. Useful when you have a reference (journal, year, volume, page, author) and need the PMID — deterministic citation matching, more reliable than free-text search for structured references. Each citation must include at least journal or year (ECitMatch primary-keys on journal+volume+page; author-only or volume-only inputs guarantee no match); more fields = better match accuracy.`,
@@ -106,26 +111,42 @@ export const lookupCitationTool = tool('pubmed_lookup_citation', {
 
   errors: [...NCBI_SERVICE_ERRORS] as const,
 
-  // Never advertised; rewritten to the canonical key before the schema parses.
-  // A single object usually arrives under this name, which the union below
-  // accepts. (#156)
+  /**
+   * Never advertised; rewritten to the canonical key before the schema parses.
+   * A single object usually arrives under this name, and `citations` wraps it
+   * into a one-element array. (#156)
+   */
   inputAliases: { citation: 'citations' },
 
   input: z.object({
+    /**
+     * The wrap runs before validation and stays off the advertised schema, which
+     * remains a plain `type: "array"`. A top-level union would advertise
+     * `citations` with no `type` for a client to build the parameter from. (#173)
+     *
+     * A string is refused here, as one `invalid_type` issue: left to the array,
+     * its `length` runs the size checks after the type check fails and the shape
+     * message reports twice. The pipe stops on this issue, and its code keeps
+     * the framework's "Send citations as an array, not a string." recovery.
+     */
     citations: z
-      .union(
-        [
-          z
-            .array(CitationSchema)
-            .min(1)
-            .max(25)
-            .describe('Up to 25 citations, each matched independently.'),
-          CitationSchema,
-        ],
-        { error: CITATIONS_SHAPE_ERROR },
+      .preprocess(
+        (value, ctx) => {
+          if (typeof value === 'string') {
+            ctx.issues.push({
+              code: 'invalid_type',
+              expected: 'array',
+              input: value,
+              message: CITATIONS_SHAPE_ERROR,
+            });
+            return value;
+          }
+          return isCitationObject(value) ? [value] : value;
+        },
+        z.array(CitationSchema, { error: CITATIONS_SHAPE_ERROR }).min(1).max(25),
       )
       .describe(
-        'Citations to look up — an array of up to 25, or a single citation object. More fields = better match accuracy.',
+        'Citations to look up, 1–25, each matched independently. More fields = better match accuracy.',
       ),
   }),
 
@@ -183,10 +204,9 @@ export const lookupCitationTool = tool('pubmed_lookup_citation', {
   }),
 
   async handler(input, ctx) {
-    const submitted = Array.isArray(input.citations) ? input.citations : [input.citations];
-    ctx.log.info('Executing pubmed_lookup_citation', { count: submitted.length });
+    ctx.log.info('Executing pubmed_lookup_citation', { count: input.citations.length });
 
-    const citations: ECitMatchCitation[] = submitted.map((c, i) => ({
+    const citations: ECitMatchCitation[] = input.citations.map((c, i) => ({
       journal: c.journal,
       year: c.year,
       volume: c.volume,

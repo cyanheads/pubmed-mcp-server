@@ -84,6 +84,24 @@ function validConvertIds(raw: unknown): unknown {
   return { ...input, ids };
 }
 
+/**
+ * `zodToArbitrary` draws a random primitive for a `z.preprocess` field, so left
+ * raw every generated `citations` value is rejected before the handler runs
+ * (cyanheads/mcp-ts-core#592). Rewrite it into an array of one to three
+ * citations whose journal is the drawn value, minus the characters the schema
+ * refuses, keeping any extra keys the arbitrary planted.
+ */
+function citationArrays(raw: unknown): unknown {
+  if (typeof raw !== 'object' || raw === null) return raw;
+  const input = raw as { citations?: unknown };
+  const drawn = String(input.citations ?? '').replace(/[|\r\n]/g, ' ');
+  const citations = Array.from({ length: (drawn.length % 3) + 1 }, (_, i) => ({
+    journal: drawn.trim() || 'proc natl acad sci u s a',
+    year: String(1991 + i),
+  }));
+  return { ...input, citations };
+}
+
 describe('Tool fuzz coverage', () => {
   it('pubmed_spell_check survives fuzz', async () => {
     const report = await fuzzToolStrict(spellCheckTool, FUZZ_OPTIONS);
@@ -98,6 +116,10 @@ describe('Tool fuzz coverage', () => {
   it('pubmed_search_articles survives fuzz', async () => {
     const report = await fuzzToolStrict(searchArticlesTool, FUZZ_OPTIONS);
     assertClean(report);
+    // Arbitrary dates and filter strings often fail the handler's calendar and
+    // blank-value checks, which count as declared failures. Reaching ESearch
+    // is what keeps the phase from being only those rejections. (#176, #177)
+    expect(mockNcbi.eSearch).toHaveBeenCalled();
   });
 
   it('pubmed_fetch_articles survives fuzz', async () => {
@@ -112,6 +134,8 @@ describe('Tool fuzz coverage', () => {
       ctx,
     );
     expect(result.articles.map((a) => a.recordType)).toContain('book-chapter');
+    // Same check for the linked-notice branch of `format()`. (#178)
+    expect(result.articles.some((a) => a.commentsCorrections?.length)).toBe(true);
   });
 
   it('pubmed_fetch_fulltext survives fuzz', async () => {
@@ -142,11 +166,15 @@ describe('Tool fuzz coverage', () => {
   });
 
   it('pubmed_lookup_citation survives fuzz', async () => {
-    const report = await fuzzToolStrict(lookupCitationTool, FUZZ_OPTIONS);
+    const report = await fuzzToolStrict(lookupCitationTool, {
+      ...FUZZ_OPTIONS,
+      mapInput: citationArrays,
+    });
     assertClean(report);
-    // The five bibliographic fields now advertise a `pattern` an arbitrary
-    // drawing arbitrary strings can fail. Reaching ECitMatch is what keeps the
-    // phase from degenerating into a run of schema rejections. (#125)
+    // The five bibliographic fields advertise a `pattern` arbitrary strings can
+    // fail, and `citations` is a `z.preprocess` field the arbitrary cannot draw.
+    // Reaching ECitMatch is what keeps the phase from degenerating into a run of
+    // schema rejections. (#125, #173)
     expect(mockNcbi.eCitMatch).toHaveBeenCalled();
   });
 
