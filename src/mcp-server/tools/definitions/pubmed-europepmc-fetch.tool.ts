@@ -167,7 +167,6 @@ export const pubmedEuropepmcFetchTool = tool('pubmed_europepmc_fetch', {
       throw ctx.fail(
         'europepmc_disabled',
         'Europe PMC service is not available. Set EUROPEPMC_ENABLED=true to use this tool.',
-        { ...ctx.recoveryFor('europepmc_disabled') },
       );
     }
 

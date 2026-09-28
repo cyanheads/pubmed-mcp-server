@@ -59,6 +59,27 @@
  *      package's headline version on GitHub and npmjs.com and ships in the
  *      tarball, so a half-finished bump is publicly visible. Skipped when the
  *      README, the badge, or the package version is absent (issue #418).
+ *  13. npm `files` excludes the built bundle: when `manifest.json` exists and
+ *      `package.json` `files` covers `dist/` wholesale, it must also carry
+ *      `"!dist/*.mcpb"`. The `bundle` script writes the `.mcpb` into `dist/`,
+ *      so without the entry a release that bundles before publishing ships the
+ *      server and its production dependencies inside the npm tarball
+ *      (issue #469). Skipped when `manifest.json` or `files` is absent.
+ *  14. manifest.json version parity: `version` must equal `package.json`'s, the
+ *      same rule check 10 applies to the plugin manifests — the bundle's install
+ *      dialog shows it. Skipped when `manifest.json` or the package version is
+ *      absent.
+ *  15. Dockerfile build platform: a stage that does not start
+ *      `FROM --platform=$BUILDPLATFORM` must not run JavaScript while it
+ *      builds — no `RUN` invoking `bun` for anything but `install`/`add`
+ *      (`bun run build`, `bun -e`, a script, `bunx`), and no `bun install`/
+ *      `bun add` once `bunfig.toml` is in the stage, since its security scanner
+ *      runs as a Bun program. The non-native leg of a multi-arch `docker buildx`
+ *      build runs such a stage under QEMU, where bun >= 1.4 aborts and no image
+ *      publishes for either architecture — and the image publishes last, after
+ *      npm and the MCP Registry. `HEALTHCHECK`/`CMD`/`ENTRYPOINT` run at
+ *      container start and never count. One error per stage, naming each
+ *      offending line (issue #575). Skipped when there is no `Dockerfile`.
  *
  * Every check skips cleanly when its input is absent — consumers who deleted
  * `manifest.json` for an HTTP-only deploy, or who haven't built a bundle,
@@ -97,6 +118,7 @@ interface Manifest {
   name?: string;
   server?: { mcp_config?: { args?: unknown[]; env?: Record<string, string> } };
   user_config?: Record<string, ManifestUserConfigEntry>;
+  version?: unknown;
 }
 
 const USER_CONFIG_REF = /^\$\{user_config\.([\w-]+)\}$/;
@@ -166,10 +188,10 @@ function tryReadJson<T>(path: string): T | undefined {
  * to evaluate which paths survive the ignore rules. Returns an array of error
  * strings; empty means all checks passed.
  *
- * **Context note:** this guard runs inside the scaffolded server project, not
- * inside mcp-ts-core itself. `ignore` is listed in `templates/package.json`
- * devDependencies (`^7.0.5`) and is therefore available in the server's
- * `node_modules` when `bun run lint:packaging` is invoked there.
+ * **Context note:** `ignore` is a devDependency of the framework and of every
+ * scaffold (`templates/package.json`), so it resolves wherever
+ * `bun run lint:packaging` runs against an `.mcpbignore` — a server project, or
+ * mcp-ts-core itself. Where it cannot load, the guard is skipped.
  */
 interface IgnoreMatcher {
   add(patterns: string[]): IgnoreMatcher;
@@ -742,6 +764,232 @@ export function checkReadmeVersionBadge(readme: string, packageVersion?: string)
   ];
 }
 
+/** The `files` entry that keeps the `bundle` script's `dist/<name>.mcpb` out of the npm tarball. */
+const BUNDLE_EXCLUSION = '!dist/*.mcpb';
+
+/**
+ * Check 13: a `files` allowlist that covers `dist/` wholesale must exclude the
+ * `.mcpb` the `bundle` script writes there. npm and Bun both honor `!` entries
+ * in `files`, and both ignore `.npmignore` once `files` is set, so the entry is
+ * the only place the exclusion can live. The caller runs this only when
+ * `manifest.json` exists — a project without one never builds a bundle.
+ */
+export function checkBundleExcludedFromFiles(files: unknown): string[] {
+  if (!Array.isArray(files)) return [];
+  const entries = files.filter((entry): entry is string => typeof entry === 'string');
+
+  const coversDist = entries.some(
+    (entry) => entry.replace(/^\.\//, '').replace(/\/(?:\*\*(?:\/\*)?|\*)?$/, '') === 'dist',
+  );
+  if (!coversDist) return [];
+  if (entries.includes(BUNDLE_EXCLUSION) || entries.includes('!dist/**/*.mcpb')) return [];
+
+  return [
+    `package.json "files" covers dist/ without "${BUNDLE_EXCLUSION}" — the bundle script writes ` +
+      `dist/<name>.mcpb, so a release that bundles before publishing ships it in the npm tarball; ` +
+      `add "${BUNDLE_EXCLUSION}" to "files"`,
+  ];
+}
+
+/**
+ * Check 14: manifest.json `version` must equal `package.json`'s. Skipped when
+ * the package version is absent — the same fail-safe as checks 10 and 12.
+ */
+export function checkManifestVersion(manifest: Manifest, packageVersion?: string): string[] {
+  if (!packageVersion || manifest.version === packageVersion) return [];
+  return [
+    manifest.version === undefined
+      ? `manifest.json has no "version" — must declare the package.json version "${packageVersion}"`
+      : `manifest.json "version" is "${String(manifest.version)}" — must equal the package.json version "${packageVersion}"`,
+  ];
+}
+
+/** One Dockerfile instruction: continuations joined, a `RUN` heredoc body folded in. */
+interface DockerInstruction {
+  args: string;
+  keyword: string;
+  /** 1-based line the instruction starts on. */
+  line: number;
+  text: string;
+}
+
+const DOCKERFILE_SKIPPED_LINE = /^\s*(?:#|$)/;
+const DOCKERFILE_CONTINUATION = /\\\s*$/;
+const DOCKERFILE_HEREDOC = /<<-?(["']?)([A-Za-z_]\w*)\1/g;
+
+/**
+ * Splits a Dockerfile into instructions the way BuildKit reads it: a trailing
+ * `\` continues onto the next line, comment and blank lines inside a
+ * continuation are dropped, and a `RUN` heredoc's body belongs to its `RUN`.
+ */
+function dockerInstructions(dockerfile: string): DockerInstruction[] {
+  const lines = dockerfile.split(/\r?\n/);
+  const instructions: DockerInstruction[] = [];
+  for (let i = 0; i < lines.length; i++) {
+    if (DOCKERFILE_SKIPPED_LINE.test(lines[i] ?? '')) continue;
+    const line = i + 1;
+    let text = (lines[i] ?? '').trim();
+    while (DOCKERFILE_CONTINUATION.test(text) && i + 1 < lines.length) {
+      text = text.replace(DOCKERFILE_CONTINUATION, ' ');
+      do i++;
+      while (i < lines.length && DOCKERFILE_SKIPPED_LINE.test(lines[i] ?? ''));
+      text += (lines[i] ?? '').trim();
+    }
+    const keyword = (text.split(/\s/, 1)[0] ?? '').toUpperCase();
+    if (keyword === 'RUN') {
+      for (const [, , delimiter] of text.matchAll(DOCKERFILE_HEREDOC)) {
+        while (i + 1 < lines.length && (lines[++i] ?? '').trim() !== delimiter) {
+          text += `\n${lines[i]}`;
+        }
+      }
+    }
+    instructions.push({ keyword, args: text.slice(keyword.length).trim(), line, text });
+  }
+  return instructions;
+}
+
+/** Words that may precede the command itself in a simple shell command. */
+const SHELL_COMMAND_PREFIX = new Set([
+  '!',
+  'command',
+  'do',
+  'elif',
+  'else',
+  'env',
+  'exec',
+  'if',
+  'then',
+  'time',
+  'until',
+  'while',
+]);
+
+/** A `bun`/`bunx` invocation in a `RUN`: the command word and the words after it. */
+interface BunInvocation {
+  args: string[];
+  command: 'bun' | 'bunx';
+}
+
+function bunCommand(word: string | undefined): BunInvocation['command'] | undefined {
+  const name = word?.split('/').pop();
+  return name === 'bun' || name === 'bunx' ? name : undefined;
+}
+
+/**
+ * The `bun`/`bunx` invocations a `RUN` instruction's command makes, read from
+ * command position only — `chown bun:bun`, `/root/.bun/`, and a quoted
+ * mention are not invocations. Quoted strings are opaque, so a `bun -e '…'`
+ * program never splits into commands of its own.
+ */
+function bunInvocations(runArgs: string): BunInvocation[] {
+  const command = runArgs.replace(/^(?:--[\w-]+=\S+\s+)*/, '');
+  if (command.startsWith('[')) {
+    try {
+      const argv: unknown = JSON.parse(command);
+      if (Array.isArray(argv)) {
+        const name = bunCommand(String(argv[0]));
+        return name ? [{ command: name, args: argv.slice(1).map(String) }] : [];
+      }
+    } catch {
+      // Not a JSON exec form: fall through and read it as shell.
+    }
+  }
+  return command
+    .replace(/'[^']*'|"(?:\\.|[^"\\])*"/g, "'…'")
+    .split(/&&|\|\||[;|&(){}`\n]/)
+    .flatMap((segment) => {
+      const words = segment.trim().split(/\s+/);
+      const start = words.findIndex(
+        (word) => !SHELL_COMMAND_PREFIX.has(word) && !/^[A-Za-z_]\w*=/.test(word),
+      );
+      const name = bunCommand(words[start]);
+      return name ? [{ command: name, args: words.slice(start + 1) }] : [];
+    });
+}
+
+const DOCKERFILE_BUILD_PLATFORM = /--platform=\$\{?BUILDPLATFORM\}?(?:\s|$)/;
+const BUN_INSTALL_SUBCOMMANDS = new Set(['install', 'i', 'add', 'a']);
+const BUNFIG_SOURCE = /(?:^|[\s/"'[,])bunfig\.toml(?=[\s"',\]]|$)/;
+
+/** Whether a `COPY`/`ADD` brings `bunfig.toml` into the stage, by name or with the whole context. */
+function copiesBunfig(args: string): boolean {
+  if (BUNFIG_SOURCE.test(args)) return true;
+  const words = args.split(/\s+/);
+  if (words.some((word) => word.startsWith('--from='))) return false;
+  const sources = words.filter((word) => !word.startsWith('--')).slice(0, -1);
+  return sources.some((source) => source === '.' || source === './');
+}
+
+/**
+ * Check 15: a Dockerfile stage built for the target platform must not run
+ * JavaScript while it builds. A multi-arch `docker buildx` build runs every
+ * such stage under QEMU on the non-native leg, where bun >= 1.4 aborts, and the
+ * image publishes last — after npm and the MCP Registry. A stage counts as
+ * running JavaScript when a `RUN` invokes `bun` for anything but
+ * `install`/`add` (`bun run build`, `bun -e`, a script, `bunx`), or runs
+ * `bun install`/`bun add` once `bunfig.toml` is in the stage, since its
+ * `[install.security]` scanner runs as a Bun program. A stage whose `FROM`
+ * carries `--platform=$BUILDPLATFORM` is exempt, and so are `HEALTHCHECK`,
+ * `CMD`, and `ENTRYPOINT`, which run at container start on the real target.
+ * One error per stage, naming each offending line.
+ */
+export function checkDockerfileBuildPlatform(dockerfile: string): string[] {
+  const stages: {
+    alias: string | undefined;
+    bunfig: boolean;
+    findings: string[];
+    from: DockerInstruction;
+    pinned: boolean;
+  }[] = [];
+
+  for (const instruction of dockerInstructions(dockerfile)) {
+    if (instruction.keyword === 'FROM') {
+      const [image = '', , alias] = instruction.args
+        .toLowerCase()
+        .split(/\s+/)
+        .filter((word) => !word.startsWith('--'));
+      stages.push({
+        alias,
+        // A stage built FROM an earlier one starts with that stage's files.
+        bunfig: stages.find((earlier) => earlier.alias === image)?.bunfig ?? false,
+        findings: [],
+        from: instruction,
+        pinned: DOCKERFILE_BUILD_PLATFORM.test(instruction.args),
+      });
+      continue;
+    }
+    const stage = stages.at(-1);
+    if (!stage) continue;
+    if (instruction.keyword === 'COPY' || instruction.keyword === 'ADD') {
+      stage.bunfig ||= copiesBunfig(instruction.args);
+    } else if (instruction.keyword === 'RUN' && !stage.pinned) {
+      const finding = bunInvocations(instruction.args)
+        .map(({ command, args }) => {
+          const subcommand = args.find((arg) => !arg.startsWith('-'));
+          if (command === 'bun' && BUN_INSTALL_SUBCOMMANDS.has(subcommand ?? '')) {
+            return stage.bunfig
+              ? `\`bun ${subcommand}\` after bunfig.toml is in the stage, which starts its security scanner as a Bun program`
+              : undefined;
+          }
+          return `\`${[command, args[0]].filter(Boolean).join(' ')}\``;
+        })
+        .find(Boolean);
+      if (finding) stage.findings.push(`Dockerfile:${instruction.line} runs ${finding}`);
+    }
+  }
+
+  return stages
+    .filter((stage) => stage.findings.length > 0)
+    .map(
+      ({ from, findings }) =>
+        `Dockerfile:${from.line} "${from.text}" builds for the target platform but runs JavaScript while ` +
+        `building — ${findings.join('; ')}. A multi-arch buildx build runs that under QEMU on the non-native ` +
+        `leg, where bun aborts and no image publishes. Move these steps into a stage that starts ` +
+        `"FROM --platform=$BUILDPLATFORM" (cross-install with \`bun install --os=<os> --cpu=<x64|arm64>\`) and ` +
+        `copy their output (dist/, node_modules/) into this stage`,
+    );
+}
+
 /** Read `packaging.pluginManifests` from devcheck.config.json; default on. */
 function pluginManifestsEnabled(): boolean {
   const cfg = tryReadJson<{ packaging?: { pluginManifests?: boolean } }>(
@@ -755,7 +1003,9 @@ async function main(): Promise<void> {
   const warnings: string[] = [];
   const notes: string[] = [];
 
-  const pkg = tryReadJson<{ name?: string; version?: string }>(resolve('package.json'));
+  const pkg = tryReadJson<{ files?: unknown; name?: string; version?: string }>(
+    resolve('package.json'),
+  );
   const unscopedName = pkg?.name?.split('/').pop();
 
   // ── Manifest-dependent checks (1–4 + manifest identity) ──
@@ -826,6 +1076,9 @@ async function main(): Promise<void> {
     if (unscopedName) {
       errors.push(...checkManifestIdentity(manifest, unscopedName));
     }
+
+    errors.push(...checkManifestVersion(manifest, pkg?.version));
+    errors.push(...checkBundleExcludedFromFiles(pkg?.files));
   } else {
     notes.push('No manifest.json — skipping manifest/server.json alignment checks.');
   }
@@ -872,6 +1125,12 @@ async function main(): Promise<void> {
       errors.push(...result.errors);
       warnings.push(...result.warnings);
     }
+  }
+
+  // ── Dockerfile build platform (check 15) ──
+  const dockerfilePath = resolve('Dockerfile');
+  if (existsSync(dockerfilePath)) {
+    errors.push(...checkDockerfileBuildPlatform(readFileSync(dockerfilePath, 'utf-8')));
   }
 
   // ── README version badge (check 12) ──

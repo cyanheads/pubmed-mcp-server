@@ -8,7 +8,6 @@
 import { McpError, serviceUnavailable } from '@cyanheads/mcp-ts-core/errors';
 import { httpErrorFromResponse, logger, requestContextService } from '@cyanheads/mcp-ts-core/utils';
 
-import { recoveryFor } from '@/services/error-contracts.js';
 import { NCBI_EUTILS_BASE_URL, type NcbiRequestOptions, type NcbiRequestParams } from './types.js';
 
 /** Maximum encoded query-string length before automatically switching to POST. */
@@ -72,7 +71,7 @@ export class NcbiApiClient {
       const msg = error instanceof Error ? error.message : String(error);
       throw serviceUnavailable(
         `NCBI request failed: ${msg}`,
-        { reason: 'ncbi_unreachable', endpoint, ...recoveryFor('ncbi_unreachable') },
+        { reason: 'ncbi_unreachable', endpoint },
         { cause: error },
       );
     }
@@ -128,7 +127,7 @@ export class NcbiApiClient {
       const msg = error instanceof Error ? error.message : String(error);
       throw serviceUnavailable(
         `NCBI request failed: ${msg}`,
-        { reason: 'ncbi_unreachable', url, ...recoveryFor('ncbi_unreachable') },
+        { reason: 'ncbi_unreachable', url },
         { cause: error },
       );
     }

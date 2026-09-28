@@ -6,6 +6,8 @@
 import { createMockContext } from '@cyanheads/mcp-ts-core/testing';
 import { describe, expect, it, vi } from 'vitest';
 
+import { NCBI_SERVICE_ERRORS } from '@/services/error-contracts.js';
+
 const mockEInfo = vi.fn();
 vi.mock('@/services/ncbi/ncbi-service.js', () => ({
   getNcbiService: () => ({ eInfo: mockEInfo }),
@@ -76,5 +78,11 @@ describe('databaseInfoResource', () => {
       uri: 'pubmed://database/info',
       name: 'PubMed Database Info',
     });
+  });
+
+  it('declares every NCBI service reason, so a service throw reaches the wire with its hint', () => {
+    expect(databaseInfoResource.errors?.map((e) => e.reason)).toEqual(
+      NCBI_SERVICE_ERRORS.map((e) => e.reason),
+    );
   });
 });

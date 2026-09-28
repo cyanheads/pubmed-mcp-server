@@ -31,6 +31,7 @@
  */
 
 import { type Context, tool, z } from '@cyanheads/mcp-ts-core';
+import { serializationError } from '@cyanheads/mcp-ts-core/errors';
 import { htmlExtractor, pdfParser } from '@cyanheads/mcp-ts-core/utils';
 import { getServerConfig } from '@/config/server-config.js';
 import { NCBI_SERVICE_ERRORS } from '@/services/error-contracts.js';
@@ -1921,7 +1922,7 @@ export const fetchFulltextTool = tool('pubmed_fetch_fulltext', {
 
         const articleSet = findOne(xmlData, 'pmc-articleset');
         if (!articleSet) {
-          throw new Error('PMC EFetch response missing pmc-articleset wrapper');
+          throw serializationError('PMC EFetch response missing pmc-articleset wrapper');
         }
 
         // A parsed article with no body sections is front matter only — PMC
@@ -1985,6 +1986,7 @@ export const fetchFulltextTool = tool('pubmed_fetch_fulltext', {
         }
         routePmcMissesToFallback(missing);
       } catch (error: unknown) {
+        if (ctx.signal.aborted) throw error;
         const detail = error instanceof Error ? error.message : String(error);
         ctx.log.warning('PMC EFetch failed; chain continues with next layer', {
           pmcIdCount: pmcIds.length,
@@ -2132,6 +2134,7 @@ export const fetchFulltextTool = tool('pubmed_fetch_fulltext', {
               return doi ? { ...c, doi } : c;
             });
           } catch (error: unknown) {
+            if (ctx.signal.aborted) throw error;
             pmcidDoiLookupFailure = error instanceof Error ? error.message : String(error);
             ctx.log.warning('Failed to resolve PMCID → DOI for the Unpaywall fallback', {
               error: pmcidDoiLookupFailure,
@@ -2193,6 +2196,7 @@ export const fetchFulltextTool = tool('pubmed_fetch_fulltext', {
             return doi ? { ...c, doi } : c;
           });
         } catch (error: unknown) {
+          if (ctx.signal.aborted) throw error;
           pmidDoiLookupFailure = error instanceof Error ? error.message : String(error);
           ctx.log.warning('Failed to batch-fetch DOIs from PubMed for Unpaywall fallback', {
             error: pmidDoiLookupFailure,
@@ -2746,6 +2750,7 @@ async function searchEpmcSafe(
     });
     return result.hits[0] ? { kind: 'hit', hit: result.hits[0] } : { kind: 'miss' };
   } catch (error: unknown) {
+    if (ctx.signal.aborted) throw error;
     const detail = error instanceof Error ? error.message : String(error);
     ctx.log.warning('Europe PMC search failed; chain continues with next layer', {
       query,
@@ -2847,6 +2852,7 @@ async function fetchEpmcArticle(
       }),
     };
   } catch (error: unknown) {
+    if (args.ctx.signal.aborted) throw error;
     const detail = error instanceof Error ? error.message : String(error);
     args.ctx.log.warning('Europe PMC fullTextXML failed; chain continues with next layer', {
       epmcId: hit.id,
@@ -2938,6 +2944,7 @@ async function resolveUnpaywall(
   try {
     resolution = await service.resolve(doi, ctx.signal);
   } catch (error: unknown) {
+    if (ctx.signal.aborted) throw error;
     const detail = error instanceof Error ? error.message : String(error);
     ctx.log.warning('Unpaywall DOI resolve failed', { doi, error: detail });
     return { unavailable: { reason: 'service-error', detail } };
@@ -2951,6 +2958,7 @@ async function resolveUnpaywall(
   try {
     content = await service.fetchContent(resolution.location, ctx.signal);
   } catch (error: unknown) {
+    if (ctx.signal.aborted) throw error;
     const detail = error instanceof Error ? error.message : String(error);
     ctx.log.warning('Unpaywall content fetch failed', { doi, error: detail });
     return { unavailable: { reason: 'fetch-failed', detail } };
@@ -3013,6 +3021,7 @@ async function resolveUnpaywall(
       text,
     );
   } catch (error: unknown) {
+    if (ctx.signal.aborted) throw error;
     const detail = error instanceof Error ? error.message : String(error);
     ctx.log.warning('Unpaywall content extraction failed', { pmid, doi, detail });
     return { unavailable: { reason: 'parse-failed', detail } };

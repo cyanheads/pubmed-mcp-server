@@ -4,7 +4,7 @@ description: >
   Finalize documentation and project metadata for a ship-ready MCP server. Use after implementation is complete, tests pass, and devcheck is clean. Safe to run at any stage — each step checks current state and only acts on what still needs work.
 metadata:
   author: cyanheads
-  version: "2.17"
+  version: "2.21"
   audience: external
   type: workflow
 ---
@@ -173,7 +173,7 @@ Never hand-edit `CHANGELOG.md` when using this pattern — it's a build artifact
 
 ### 10. Plugin Metadata (Codex / Claude Code)
 
-`lint:packaging` (run by `devcheck`) now enforces the high-value subset automatically when these manifests are present: non-empty descriptions, identity/install correctness — display fields (`name`, server key, `interface.displayName`) must be the **unscoped** machine name, while the `npx -y` install arg must be the full `package.json` `name` (scoped if scoped) — and the env contract below (no `""` values; every `${user_config.*}` reference declared). Opt out per project with `"packaging": { "pluginManifests": false }` in `devcheck.config.json`. The checks below cover the fields the gate doesn't (version / repository / license sync, category, the wording of each option).
+`lint:packaging` (run by `devcheck`) now enforces the high-value subset automatically when these manifests are present: non-empty descriptions, `version` equal to `package.json`'s, identity/install correctness — display fields (`name`, server key, `interface.displayName`) must be the **unscoped** machine name, while the `npx -y` install arg must be the full `package.json` `name` (scoped if scoped) — and the env contract below (no `""` values; every `${user_config.*}` reference declared). Opt out per project with `"packaging": { "pluginManifests": false }` in `devcheck.config.json`. The checks below cover the fields the gate doesn't (repository / license sync, category, the wording of each option).
 
 **How user-supplied values reach the server.** Neither client passes the user's shell environment through untouched, so an env entry of `"KEY": ""` is not a hint — it is the value the server receives, and the framework reads an empty string as unset. Claude Code prompts for values declared under `userConfig` at enable time and substitutes `${user_config.<option>}` into `env` (sensitive values go to the Keychain). Codex starts stdio servers with a whitelisted environment and forwards only the host variables named in `env_vars`. Mirror `manifest.json`'s `user_config` block: same options, same titles and descriptions.
 
@@ -204,14 +204,14 @@ If the project ships as an `.mcpb` bundle for Claude Desktop (check for `manifes
 **`package.json` scripts:**
 
 - `bundle` — builds the `.mcpb` (`mcpb pack`, then `scripts/clean-mcpb.ts` prunes dev deps and strips dependency-shipped agent docs)
-- `lint:packaging` — validates `manifest.json` ↔ `server.json` env var consistency, plus the version-parity checks below (run by `devcheck`, which gates the step on `manifest.json`, a plugin manifest, `.mcpbignore`, or `README.md`)
+- `lint:packaging` — validates `manifest.json` ↔ `server.json` env var consistency, version parity for `manifest.json`, the plugin manifests, and the README badge, and the Dockerfile's stages: a stage not pinned to `$BUILDPLATFORM` must not run JavaScript while building — no `bun run build`, `bun -e`, or script, and no `bun install` once `bunfig.toml` is in the stage (run by `devcheck`, which gates the step on `manifest.json`, a plugin manifest, `.mcpbignore`, `README.md`, or `Dockerfile`)
 
 **Cross-file consistency:**
 
-- `manifest.json` version matches `package.json` version
+- `manifest.json` version matches `package.json` version — `lint:packaging` enforces this
 - Env var names in `manifest.json` (`mcp_config.env` + `user_config`) match `server.json` `environmentVariables` — `lint:packaging` enforces this, but verify the set is complete
 - `manifest.json` `name` matches `package.json` name **without the npm scope prefix** (e.g. `bls-mcp-server`, not `@cyanheads/bls-mcp-server`); `description` matches `package.json`
-- `manifest.json` `author` is the full person object — `{ "name", "email", "url" }` — carrying the same identity as `package.json` `author` (name matches the LICENSE copyright holder, url is the author's site)
+- `manifest.json` `author` is `{ "name": "<publisher handle>" }` — the same handle as the `.claude-plugin` / `.codex-plugin` `author.name` and the GitHub owner (e.g. `{ "name": "cyanheads" }`), not the LICENSE copyright holder's person object; `package.json` `author` is where the full `Name <email> (url)` identity lives
 - `manifest.json` `user_config` entries must include `title` and `type` fields — `mcpb pack` validates these
 - Every `user_config` entry is referenced from `mcp_config.env` as `"X": "${user_config.X}"`, and `mcp_config` carries no other `${…}` besides MCPB's own path placeholders (`${__dirname}`, `${HOME}`, …). The host substitutes nothing else: a declared option that is never referenced is collected and dropped, and `"X": "${X}"` reaches the server as that literal string. `lint:packaging` enforces both
 - For each `user_config` entry referenced as `${user_config.X}` in `mcp_config.env`: if it's not `required: true`, set `"default": ""`. MCPB hosts (Claude Desktop included) pass the literal placeholder string through to the process when an optional field is left blank without a default — the `default` keeps that string out of the process. Server-side, the framework already treats a whole-value `${…}` placeholder the same as an empty string — unset — in both its own config and `parseEnvConfig`, so an optional field falls through to its default and a required one fails as missing rather than as a format error; a per-field `z.preprocess` guard for placeholders is redundant and can be dropped.

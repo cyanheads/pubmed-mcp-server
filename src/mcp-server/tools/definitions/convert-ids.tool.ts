@@ -130,7 +130,6 @@ export const convertIdsTool = tool('pubmed_convert_ids', {
       throw ctx.fail(
         'malformed_id',
         `Invalid ${input.idType} element "${shown}". ${parsed.error.issues[0]?.message}`,
-        { ...ctx.recoveryFor('malformed_id') },
       );
     }
 

@@ -170,7 +170,7 @@ describe('NcbiApiClient', () => {
     expect(fetchSpy).toHaveBeenCalledOnce();
   });
 
-  it('wrapped non-McpError carries reason ncbi_unreachable + recovery on the wire', async () => {
+  it('wrapped non-McpError carries reason ncbi_unreachable', async () => {
     fetchSpy.mockRejectedValueOnce(new Error('ECONNRESET'));
     const client = new NcbiApiClient(baseConfig);
 
@@ -178,12 +178,11 @@ describe('NcbiApiClient', () => {
       data: {
         reason: 'ncbi_unreachable',
         endpoint: 'esearch',
-        recovery: { hint: expect.stringContaining('NCBI was unreachable') },
       },
     });
   });
 
-  it('wrapped non-McpError on external request also carries reason + recovery', async () => {
+  it('wrapped non-McpError on external request also carries reason', async () => {
     fetchSpy.mockRejectedValueOnce(new Error('ETIMEDOUT'));
     const client = new NcbiApiClient(baseConfig);
 
@@ -194,7 +193,6 @@ describe('NcbiApiClient', () => {
     ).rejects.toMatchObject({
       data: {
         reason: 'ncbi_unreachable',
-        recovery: { hint: expect.stringContaining('NCBI was unreachable') },
       },
     });
   });

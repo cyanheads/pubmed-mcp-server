@@ -201,6 +201,19 @@ describe('OpenAlexService retry gate', () => {
   describe('exhaustion shape (#160)', () => {
     const suffix = new RegExp(`\\(failed after ${EXHAUSTED_ATTEMPTS} attempts\\)$`);
 
+    it('reports a single attempt in the singular when no retries are configured', async () => {
+      mockFetchWithTimeout.mockRejectedValue(await fetchHttpError(503));
+
+      const err = (await new OpenAlexService(new OpenAlexApiClient({ timeoutMs: 20_000 }), 0)
+        .similar('31295471', 10)
+        .catch((e: unknown) => e)) as McpError;
+
+      expect(err.code).toBe(JsonRpcErrorCode.ServiceUnavailable);
+      expect(err.message).toMatch(/\(failed after 1 attempt\)$/);
+      expect(err.data).toMatchObject({ reason: 'openalex_unreachable', attempts: 1 });
+      expect(mockFetchWithTimeout).toHaveBeenCalledTimes(1);
+    });
+
     it('keeps an exhausted 429 RateLimited with its retryAfter and no reason', async () => {
       mockFetchWithTimeout.mockRejectedValue(
         new McpError(JsonRpcErrorCode.RateLimited, 'Fetch failed. Status: 429', {
@@ -256,7 +269,7 @@ describe('OpenAlexService retry gate', () => {
       expect(mockFetchWithTimeout).toHaveBeenCalledTimes(EXHAUSTED_ATTEMPTS);
     });
 
-    it('stamps an exhausted ServiceUnavailable openalex_unreachable with its hint and retryAfter', async () => {
+    it('stamps an exhausted ServiceUnavailable openalex_unreachable with retryAfter', async () => {
       mockFetchWithTimeout.mockRejectedValue(
         new McpError(JsonRpcErrorCode.ServiceUnavailable, 'Fetch failed. Status: 503', {
           status: 503,
@@ -273,7 +286,6 @@ describe('OpenAlexService retry gate', () => {
       expect(err.message).toMatch(suffix);
       expect(err.data).toMatchObject({
         reason: 'openalex_unreachable',
-        recovery: { hint: expect.stringContaining('OpenAlex was unreachable') },
         attempts: EXHAUSTED_ATTEMPTS,
         retryAfter: '9',
       });

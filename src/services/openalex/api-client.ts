@@ -8,7 +8,6 @@
 import { JsonRpcErrorCode, McpError, serviceUnavailable } from '@cyanheads/mcp-ts-core/errors';
 import { fetchWithTimeout, logger, requestContextService } from '@cyanheads/mcp-ts-core/utils';
 
-import { recoveryFor } from '@/services/error-contracts.js';
 import {
   OPENALEX_API_BASE,
   OPENALEX_MAX_PAGE_SIZE,
@@ -73,7 +72,7 @@ export class OpenAlexApiClient {
       const msg = error instanceof Error ? error.message : String(error);
       throw serviceUnavailable(
         `OpenAlex request failed: ${msg}`,
-        { reason: 'openalex_unreachable', ...recoveryFor('openalex_unreachable') },
+        { reason: 'openalex_unreachable' },
         { cause: error },
       );
     }
@@ -84,7 +83,7 @@ export class OpenAlexApiClient {
     } catch (error: unknown) {
       throw serviceUnavailable(
         'OpenAlex returned a non-JSON body.',
-        { reason: 'openalex_invalid_response', ...recoveryFor('openalex_invalid_response') },
+        { reason: 'openalex_invalid_response' },
         { cause: error },
       );
     }
@@ -163,7 +162,7 @@ export class OpenAlexApiClient {
       const msg = error instanceof Error ? error.message : String(error);
       throw serviceUnavailable(
         `OpenAlex request failed: ${msg}`,
-        { reason: 'openalex_unreachable', ...recoveryFor('openalex_unreachable') },
+        { reason: 'openalex_unreachable' },
         { cause: error },
       );
     }
@@ -175,7 +174,7 @@ export class OpenAlexApiClient {
     } catch (error: unknown) {
       throw serviceUnavailable(
         'OpenAlex returned a non-JSON body.',
-        { reason: 'openalex_invalid_response', ...recoveryFor('openalex_invalid_response') },
+        { reason: 'openalex_invalid_response' },
         { cause: error },
       );
     }
@@ -218,7 +217,7 @@ export class OpenAlexApiClient {
       const msg = error instanceof Error ? error.message : String(error);
       throw serviceUnavailable(
         `OpenAlex request failed: ${msg}`,
-        { reason: 'openalex_unreachable', ...recoveryFor('openalex_unreachable') },
+        { reason: 'openalex_unreachable' },
         { cause: error },
       );
     }
@@ -230,7 +229,7 @@ export class OpenAlexApiClient {
     } catch (error: unknown) {
       throw serviceUnavailable(
         'OpenAlex returned a non-JSON body.',
-        { reason: 'openalex_invalid_response', ...recoveryFor('openalex_invalid_response') },
+        { reason: 'openalex_invalid_response' },
         { cause: error },
       );
     }

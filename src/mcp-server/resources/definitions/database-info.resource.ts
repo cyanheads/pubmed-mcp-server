@@ -5,6 +5,7 @@
  */
 
 import { resource, z } from '@cyanheads/mcp-ts-core';
+import { NCBI_SERVICE_ERRORS } from '@/services/error-contracts.js';
 import { getNcbiService } from '@/services/ncbi/ncbi-service.js';
 import { ensureArray, getOptionalText, getText } from '@/services/ncbi/parsing/xml-helpers.js';
 
@@ -31,6 +32,7 @@ export const databaseInfoResource = resource('pubmed://database/info', {
   mimeType: 'application/json',
   params: z.object({}),
   output: OutputSchema,
+  errors: [...NCBI_SERVICE_ERRORS] as const,
 
   async handler(_params, ctx) {
     ctx.log.info('Fetching PubMed database info');

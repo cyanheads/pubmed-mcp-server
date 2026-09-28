@@ -26,7 +26,6 @@ import { internalError, JsonRpcErrorCode, McpError } from '@cyanheads/mcp-ts-cor
 import { defaultIsTransient, logger, requestContextService } from '@cyanheads/mcp-ts-core/utils';
 
 import { getServerConfig } from '@/config/server-config.js';
-import { recoveryFor } from '@/services/error-contracts.js';
 import { OpenAlexApiClient } from './api-client.js';
 import {
   OPENALEX_MAX_FILTER_VALUES,
@@ -265,9 +264,9 @@ export class OpenAlexService {
   /**
    * Retry wrapper for transient errors. On exhaustion the last error keeps its
    * code and an upstream `retryAfter`, so a 429 still tells the caller how long to
-   * wait. Only a `ServiceUnavailable` gains `openalex_unreachable` and its hint — the
-   * one code that reason is declared for; a `Timeout` or `RateLimited` keeps its
-   * code with no reason, as the NCBI and Europe PMC services report them.
+   * wait. Only a `ServiceUnavailable` gains `openalex_unreachable` — the one code
+   * that reason is declared for; a `Timeout` or `RateLimited` keeps its
+   * code with no reason, as the Europe PMC service reports them.
    */
   private async withRetry<T>(
     execute: () => Promise<T>,
@@ -302,11 +301,10 @@ export class OpenAlexService {
         const attempts = this.maxRetries + 1;
         throw new McpError(
           error.code,
-          `${error.message} (failed after ${attempts} attempts)`,
+          `${error.message} (failed after ${attempts} attempt${attempts === 1 ? '' : 's'})`,
           {
             ...(error.code === JsonRpcErrorCode.ServiceUnavailable && {
               reason: 'openalex_unreachable',
-              ...recoveryFor('openalex_unreachable'),
             }),
             label,
             attempts,
