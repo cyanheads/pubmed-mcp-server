@@ -1,6 +1,6 @@
 # pubmed-mcp-server - Directory Structure
 
-Generated on: 2026-09-23 04:42:19
+Generated on: 2026-09-28 00:51:11
 
 ```text
 pubmed-mcp-server/
@@ -146,6 +146,7 @@ pubmed-mcp-server/
 │   ├── clean-mcpb.ts
 │   ├── clean.ts
 │   ├── devcheck.ts
+│   ├── install-otel.ts
 │   ├── lint-mcp.ts
 │   ├── lint-packaging.ts
 │   ├── list-skills.ts
@@ -167,6 +168,7 @@ pubmed-mcp-server/
 │   │           ├── _concepts.ts
 │   │           ├── _schemas.ts
 │   │           ├── _text.ts
+│   │           ├── _visible-text.ts
 │   │           ├── convert-ids.tool.ts
 │   │           ├── fetch-articles.tool.ts
 │   │           ├── fetch-fulltext.tool.ts
@@ -225,6 +227,7 @@ pubmed-mcp-server/
 │   │           ├── _fuzz-helpers.ts
 │   │           ├── _schemas.test.ts
 │   │           ├── _text.test.ts
+│   │           ├── _visible-text.test.ts
 │   │           ├── convert-ids-per-element.test.ts
 │   │           ├── convert-ids.tool.test.ts
 │   │           ├── europepmc-search-failures.test.ts
@@ -254,6 +257,7 @@ pubmed-mcp-server/
 │   │   │   │   └── citation-formatter.test.ts
 │   │   │   ├── parsing/
 │   │   │   │   ├── _book-fixtures.ts
+│   │   │   │   ├── _comments-corrections-fixtures.ts
 │   │   │   │   ├── article-parser.test.ts
 │   │   │   │   ├── esummary-parser.test.ts
 │   │   │   │   ├── pmc-article-parser.test.ts

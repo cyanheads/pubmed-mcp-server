@@ -2,6 +2,10 @@
 
 All notable changes to this project. Each entry links to its full per-version file in [changelog/](changelog/).
 
+## [2.10.19](changelog/2.10.x/2.10.19.md) — 2026-09-27
+
+pubmed_fetch_articles returns the retraction, erratum, and comment notices NCBI links to a record, and the search tools reject blank queries, filters, and cursors and impossible or reversed date ranges instead of returning unfiltered or falsely empty results.
+
 ## [2.10.18](changelog/2.10.x/2.10.18.md) — 2026-09-22
 
 Moves Europe PMC's request queue onto the framework pacer with retries outside it, so a backoff no longer holds a concurrency slot and an upstream Retry-After is honored; also widens the unkeyed NCBI request delay to 400ms and limits openalex_unreachable to exhausted ServiceUnavailable errors.
