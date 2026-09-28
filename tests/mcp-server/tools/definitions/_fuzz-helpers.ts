@@ -38,15 +38,18 @@ import {
   JOURNAL_ARTICLE_XML,
   parseArticleSetXml,
 } from '../../../services/ncbi/parsing/_book-fixtures.js';
+import { PUBLISHED_ERRATUM_XML } from '../../../services/ncbi/parsing/_comments-corrections-fixtures.js';
 
 /**
- * One journal article and one NCBI Bookshelf chapter, parsed through the
+ * Two journal articles and one NCBI Bookshelf chapter, parsed through the
  * production response handler. An EFetch batch can return both kinds side by
  * side, and a mock carrying only `PubmedArticle` leaves the whole book branch —
- * parse, output schema, `format()` — invisible to the fuzz runner. (#114)
+ * parse, output schema, `format()` — invisible to the fuzz runner. (#114) The
+ * second article carries a `CommentsCorrectionsList`, one entry with a PMID and
+ * one without, so the linked-notice branch is fuzzed too. (#178)
  */
 const MIXED_ARTICLE_SET = parseArticleSetXml(
-  articleSetXml(JOURNAL_ARTICLE_XML, GENEREVIEWS_CHAPTER_XML),
+  articleSetXml(JOURNAL_ARTICLE_XML, PUBLISHED_ERRATUM_XML, GENEREVIEWS_CHAPTER_XML),
 );
 
 /** Mock NCBI service exposing every method the 9 tools call. */
@@ -68,8 +71,8 @@ export interface MockNcbiService {
  *
  * `eFetch` dispatches by `params.db`: `pmc` returns the JATS ordered-parser
  * shape (an array containing a single `pmc-articleset` element with no child
- * articles), everything else returns a `PubmedArticleSet` holding one
- * `PubmedArticle` and one `PubmedBookArticle`, the mixed shape a real EFetch
+ * articles), everything else returns a `PubmedArticleSet` holding two
+ * `PubmedArticle`s and one `PubmedBookArticle`, the mixed shape a real EFetch
  * batch can return.
  */
 export function createMockNcbiService(): MockNcbiService {

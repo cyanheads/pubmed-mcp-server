@@ -1,8 +1,8 @@
 /**
  * @fileoverview PubMed fetch tool. Fetches full article metadata by PubMed IDs,
- * including abstracts, authors, journal info, and MeSH terms. A zero-padded
- * PMID is fetched and matched as the PMID it spells; `ids` is accepted as an
- * alias for `pmids`.
+ * including abstracts, authors, journal info, MeSH terms, and linked retraction
+ * and correction notices. A zero-padded PMID is fetched and matched as the PMID
+ * it spells; `ids` is accepted as an alias for `pmids`.
  * @module src/mcp-server/tools/definitions/fetch-articles.tool
  */
 
@@ -211,6 +211,35 @@ const GrantSchema = z
   })
   .describe('Grant record');
 
+const CommentsCorrectionSchema = z
+  .object({
+    refType: z
+      .string()
+      .describe(
+        'Link type, verbatim from NCBI\'s `RefType` — e.g. "RetractionIn", "RetractionOf", "ErratumIn", "ErratumFor", "ExpressionOfConcernIn", "CommentIn", "CommentOn", "UpdateIn". The set is open: treat an unfamiliar value as opaque.',
+      ),
+    refSource: z
+      .string()
+      .describe(
+        'Citation of the linked record as NCBI writes it (e.g. "Lancet. 2010 Feb 6;375(9713):445. doi: 10.1016/S0140-6736(10)60175-4.").',
+      ),
+    pmid: z
+      .string()
+      .optional()
+      .describe(
+        'PMID of the linked record — pass it to `pubmed_fetch_articles` to read that record. Absent when the linked record has no PMID, as with many errata.',
+      ),
+    note: z
+      .string()
+      .optional()
+      .describe(
+        'NCBI\'s note on the link, e.g. what an erratum corrected ("Fuβer, Fabian [corrected to Fußer, Fabian]"). Absent unless NCBI supplies one.',
+      ),
+  })
+  .describe(
+    'One record NCBI links to this article and published separately from it — for example a retraction notice, erratum, expression of concern, comment, update, or republication.',
+  );
+
 const ArticleDateSchema = z
   .object({
     dateType: z.string().optional().describe('Date type'),
@@ -254,6 +283,12 @@ const FetchedArticleSchema = z
     pubmedUrl: z.string().optional().describe('PubMed article URL'),
     pmcUrl: z.string().optional().describe('PMC full text URL'),
     publicationTypes: z.array(z.string()).optional().describe('Publication types'),
+    commentsCorrections: z
+      .array(CommentsCorrectionSchema)
+      .optional()
+      .describe(
+        "Records NCBI links to this article — for example retraction notices, errata, expressions of concern, comments, and updates — from `CommentsCorrectionsList`, in NCBI's order and uncapped. `Cites` entries are excluded: they list a bibliography, which `pubmed_find_related` covers with its `references` relationship. Read this alongside `publicationTypes`, not in place of it: that field describes the record itself, and a corrected or questioned article often carries no matching type. Absent when NCBI links nothing other than `Cites` entries, and never set on `book-chapter` or `book` records.",
+      ),
     keywords: z.array(z.string()).optional().describe('Keywords'),
     meshTerms: z.array(MeshTermSchema).optional().describe('MeSH terms'),
     grantList: z.array(GrantSchema).optional().describe('Grant information'),
@@ -289,7 +324,7 @@ const DeferredSchema = z
 
 export const fetchArticlesTool = tool('pubmed_fetch_articles', {
   description:
-    'Fetch full article metadata by PubMed IDs. Returns detailed article information including abstract, authors, journal, MeSH terms. Set `maxResponseCharacters` to bound the whole response: articles past the ceiling are deferred whole and listed in `deferred.ids` for a follow-up call.',
+    'Fetch full article metadata by PubMed IDs. Returns detailed article information including abstract, authors, journal, MeSH terms, and linked retraction, erratum, and comment notices. Set `maxResponseCharacters` to bound the whole response: articles past the ceiling are deferred whole and listed in `deferred.ids` for a follow-up call.',
   annotations: { readOnlyHint: true, openWorldHint: true },
   _meta: conceptMeta([SCHEMA_SCHOLARLY_ARTICLE, EDAM_DATA_RETRIEVAL, EDAM_PUBMED_ID]),
   sourceUrl:
@@ -375,7 +410,7 @@ export const fetchArticlesTool = tool('pubmed_fetch_articles', {
       throw ctx.fail(
         'invalid_efetch_response',
         'Invalid EFetch response from NCBI: missing PubmedArticleSet',
-        { requestedPmids: input.pmids.length, ...ctx.recoveryFor('invalid_efetch_response') },
+        { requestedPmids: input.pmids.length },
       );
     }
 
@@ -548,6 +583,22 @@ export const fetchArticlesTool = tool('pubmed_fetch_articles', {
 
       if (a.articleDates?.length) {
         lines.push(`**Article Dates:** ${a.articleDates.map(formatArticleDate).join('; ')}`);
+      }
+
+      // Ahead of the abstract, where PubMed itself shows "Retraction in" and
+      // "Erratum in": a notice qualifies how the rest of the record is read.
+      if (a.commentsCorrections?.length) {
+        lines.push(`\n#### Comments and Corrections (${a.commentsCorrections.length})`);
+        if (a.commentsCorrections.some((cc) => cc.pmid)) {
+          lines.push('Fetch a linked record by its PMID with `pubmed_fetch_articles`.');
+        }
+        for (const cc of a.commentsCorrections) {
+          const pmid = cc.pmid ? ` — PMID ${cc.pmid}` : '';
+          const note = cc.note ? ` — Note: ${escapeMarkdownInline(cc.note)}` : '';
+          lines.push(
+            `- **${escapeMarkdownInline(cc.refType)}:** ${escapeMarkdownInline(cc.refSource)}${pmid}${note}`,
+          );
+        }
       }
 
       if (a.abstractText) lines.push(`\n#### Abstract\n${a.abstractText}`);

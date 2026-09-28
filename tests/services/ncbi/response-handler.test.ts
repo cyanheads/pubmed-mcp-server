@@ -179,7 +179,7 @@ describe('NcbiResponseHandler', () => {
       ).toThrow(/invalid XML/i);
     });
 
-    it('invalid XML stamps reason ncbi_invalid_response + recovery on the wire', () => {
+    it('invalid XML stamps reason ncbi_invalid_response', () => {
       const handler = createHandler();
       try {
         handler.parseAndHandleResponse('<broken>xml', 'esearch', { retmode: 'xml' });
@@ -190,7 +190,6 @@ describe('NcbiResponseHandler', () => {
           data: {
             reason: 'ncbi_invalid_response',
             endpoint: 'esearch',
-            recovery: { hint: expect.stringContaining('Retry the request') },
           },
         });
       }
@@ -216,13 +215,12 @@ describe('NcbiResponseHandler', () => {
           data: {
             reason: 'ncbi_unreachable',
             endpoint: 'efetch',
-            recovery: { hint: expect.stringContaining('NCBI was unreachable') },
           },
         });
       }
     });
 
-    it('NCBI ERROR-tag in XML stamps reason ncbi_unreachable + recovery on the wire', () => {
+    it('NCBI ERROR-tag in XML stamps reason ncbi_unreachable', () => {
       const handler = createHandler();
       const xml =
         '<?xml version="1.0"?><eSummaryResult><ERROR>Invalid uid</ERROR></eSummaryResult>';
@@ -235,7 +233,6 @@ describe('NcbiResponseHandler', () => {
           data: {
             reason: 'ncbi_unreachable',
             endpoint: 'esummary',
-            recovery: { hint: expect.stringContaining('NCBI was unreachable') },
           },
         });
       }
@@ -275,7 +272,6 @@ describe('NcbiResponseHandler', () => {
             reason: 'ncbi_resource_not_found',
             endpoint: 'esummary',
             ncbiErrors: ['UID=99999999999: cannot get document summary'],
-            recovery: { hint: expect.stringContaining('not found in NCBI') },
           },
         });
       }
@@ -356,7 +352,6 @@ describe('NcbiResponseHandler', () => {
           data: {
             reason: 'ncbi_invalid_response',
             endpoint: 'efetch',
-            recovery: { hint: expect.stringContaining('Retry the request') },
           },
         });
       }
@@ -382,7 +377,7 @@ describe('NcbiResponseHandler', () => {
       ).toThrow(/Failed to parse/);
     });
 
-    it('invalid JSON stamps reason ncbi_invalid_response + recovery on the wire', () => {
+    it('invalid JSON stamps reason ncbi_invalid_response', () => {
       const handler = createHandler();
       try {
         handler.parseAndHandleResponse('not json', 'esearch', { retmode: 'json' });
@@ -393,7 +388,6 @@ describe('NcbiResponseHandler', () => {
           data: {
             reason: 'ncbi_invalid_response',
             endpoint: 'esearch',
-            recovery: { hint: expect.stringContaining('Retry the request') },
           },
         });
       }
@@ -407,7 +401,7 @@ describe('NcbiResponseHandler', () => {
       );
     });
 
-    it('JSON error-field stamps reason ncbi_unreachable + recovery on the wire', () => {
+    it('JSON error-field stamps reason ncbi_unreachable', () => {
       const handler = createHandler();
       const json = '{"error":"Invalid ID"}';
       try {
@@ -419,10 +413,21 @@ describe('NcbiResponseHandler', () => {
           data: {
             reason: 'ncbi_unreachable',
             endpoint: 'esearch',
-            recovery: { hint: expect.stringContaining('NCBI was unreachable') },
           },
         });
       }
+    });
+
+    it('JSON error-field carries the error text as ncbiErrors, like an XML <ERROR>', () => {
+      const handler = createHandler();
+      let thrown: unknown;
+      try {
+        handler.parseAndHandleResponse('{"error":"Invalid ID"}', 'esearch', { retmode: 'json' });
+      } catch (error: unknown) {
+        thrown = error;
+      }
+      expect(thrown).toMatchObject({ data: { ncbiErrors: ['Invalid ID'] } });
+      expect((thrown as McpError).data).not.toHaveProperty('ncbiError');
     });
 
     it('JSON error-field for missing record stamps reason ncbi_resource_not_found', () => {
@@ -437,7 +442,6 @@ describe('NcbiResponseHandler', () => {
           data: {
             reason: 'ncbi_resource_not_found',
             endpoint: 'esummary',
-            recovery: { hint: expect.stringContaining('not found in NCBI') },
           },
         });
       }

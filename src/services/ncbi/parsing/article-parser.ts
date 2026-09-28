@@ -10,6 +10,7 @@ import type {
   ParsedArticleDate,
   ParsedBookEditor,
   ParsedBookInfo,
+  ParsedCommentsCorrection,
   ParsedGrant,
   ParsedJournalInfo,
   ParsedMeshQualifier,
@@ -22,6 +23,7 @@ import type {
   XmlAuthor,
   XmlAuthorList,
   XmlBookDocument,
+  XmlCommentsCorrectionsList,
   XmlGrant,
   XmlGrantList,
   XmlIdentifier,
@@ -351,6 +353,36 @@ export function extractPublicationTypes(publicationTypeListXml?: XmlPublicationT
 }
 
 /**
+ * Extracts the linked notices from `MedlineCitation/CommentsCorrectionsList` —
+ * retractions, errata, expressions of concern, comments, updates — in upstream
+ * order. `Cites` entries are dropped: they list a bibliography rather than a
+ * linked record, which NLM now carries in `PubmedData/ReferenceList`. (#178)
+ *
+ * `RefSource` and `Note` reach this function as the text NCBI wrote: the response
+ * handler exempts both from numeric coercion, which would otherwise reduce `007` to
+ * `7`. A `PMID` is still coerced, and `getText` turns it back into a string — PMIDs
+ * carry no leading zeros, so none is lost.
+ * @param commentsCorrectionsListXml - The XML CommentsCorrectionsList element.
+ * @returns The linked notices; empty when the record carries none.
+ */
+export function extractCommentsCorrections(
+  commentsCorrectionsListXml?: XmlCommentsCorrectionsList,
+): ParsedCommentsCorrection[] {
+  return ensureArray(commentsCorrectionsListXml?.CommentsCorrections)
+    .filter((entry) => getAttribute(entry, 'RefType') !== 'Cites')
+    .map((entry) => {
+      const pmid = getOptionalText(entry.PMID);
+      const note = getOptionalText(entry.Note);
+      return {
+        refType: getAttribute(entry, 'RefType'),
+        refSource: getText(entry.RefSource),
+        ...(pmid && { pmid }),
+        ...(note && { note }),
+      };
+    });
+}
+
+/**
  * Extracts keywords from XML. Handles single or multiple KeywordList elements.
  * @param keywordListsXml - The XML KeywordList element or an array of them.
  * @returns An array of keyword strings.
@@ -453,6 +485,7 @@ export function parseFullArticle(
   const { authors, affiliations } = extractAuthors(article?.AuthorList);
 
   const publicationTypes = extractPublicationTypes(article?.PublicationTypeList);
+  const commentsCorrections = extractCommentsCorrections(medlineCitation?.CommentsCorrectionsList);
   const keywords = extractKeywords(medlineCitation?.KeywordList ?? article?.KeywordList);
   const articleDates = extractArticleDates(article);
   const meshTerms = includeMesh ? extractMeshTerms(medlineCitation?.MeshHeadingList) : undefined;
@@ -467,6 +500,7 @@ export function parseFullArticle(
     authors,
     ...(journalInfo !== undefined && { journalInfo }),
     ...(publicationTypes.length > 0 && { publicationTypes }),
+    ...(commentsCorrections.length > 0 && { commentsCorrections }),
     ...(keywords.length > 0 && { keywords }),
     ...(meshTerms !== undefined && meshTerms.length > 0 && { meshTerms }),
     ...(grantList !== undefined && grantList.length > 0 && { grantList }),

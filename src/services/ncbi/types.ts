@@ -236,11 +236,30 @@ export interface XmlGrantList {
   Grant: XmlGrant[] | XmlGrant;
 }
 
+/**
+ * One `CommentsCorrections` entry — a link from the article to a separately
+ * published record: a retraction, erratum, expression of concern, comment, or
+ * update. `RefType` is the DTD's link type, e.g. `RetractionIn`. `RefSource` and
+ * `Note` arrive as the text NCBI wrote, even when it is purely numeric: the
+ * response handler exempts both from the flat parser's numeric coercion. (#178)
+ */
+export interface XmlCommentsCorrections {
+  '@_RefType'?: string;
+  Note?: XmlTextElement | string;
+  PMID?: XmlPMID;
+  RefSource?: XmlTextElement | string;
+}
+
+export interface XmlCommentsCorrectionsList {
+  CommentsCorrections?: XmlCommentsCorrections[] | XmlCommentsCorrections;
+}
+
 export interface XmlMedlineCitation {
   '@_Owner'?: string; // e.g., 'NLM', 'NASA', 'PIP', 'KIE', 'HSR', 'HMD', 'NOTNLM'
   '@_Status'?: string; // e.g., 'MEDLINE', 'PubMed-not-MEDLINE', 'In-Data-Review', 'In-Process', 'Publisher', 'Completed'
   Article?: XmlArticle;
   CitationSubset?: XmlTextElement[] | XmlTextElement;
+  CommentsCorrectionsList?: XmlCommentsCorrectionsList;
   DateCompleted?: XmlArticleDate;
   DateCreated?: XmlArticleDate;
   DateRevised?: XmlArticleDate;
@@ -468,6 +487,18 @@ export interface ParsedBookInfo {
   title?: string;
 }
 
+/**
+ * A linked notice from `MedlineCitation/CommentsCorrectionsList`. `refType` is
+ * the verbatim DTD value, kept a plain string so a type NCBI adds later still
+ * parses. `pmid` and `note` are absent unless NCBI supplies them. (#178)
+ */
+export interface ParsedCommentsCorrection {
+  note?: string;
+  pmid?: string;
+  refSource: string;
+  refType: string;
+}
+
 export interface ParsedArticle {
   abstractText?: string;
   affiliations?: string[];
@@ -475,6 +506,11 @@ export interface ParsedArticle {
   authors?: ParsedArticleAuthor[];
   /** Set on `book-chapter` and `book` records only. */
   book?: ParsedBookInfo;
+  /**
+   * Linked notices, `Cites` entries excluded, in upstream order. Journal
+   * articles only: the DTD gives a Bookshelf record no such list.
+   */
+  commentsCorrections?: ParsedCommentsCorrection[];
   doi?: string;
   grantList?: ParsedGrant[];
   /**

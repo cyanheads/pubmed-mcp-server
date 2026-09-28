@@ -41,6 +41,13 @@ import {
   parseArticleSetXml,
   STATPEARLS_CHAPTER_XML,
 } from './_book-fixtures.js';
+import {
+  ERRATUM_NOTE_ARTICLE_XML,
+  PUBLISHED_ERRATUM_WITH_CITES_XML,
+  PUBLISHED_ERRATUM_XML,
+  RETRACTED_ARTICLE_XML,
+  RETRACTION_NOTICE_XML,
+} from './_comments-corrections-fixtures.js';
 
 describe('extractAuthors', () => {
   it('returns empty for undefined input', () => {
@@ -760,5 +767,182 @@ describe('Bookshelf records (#114)', () => {
 
   it('returns an empty list for an undefined set', () => {
     expect(parseArticleSet(undefined)).toEqual([]);
+  });
+});
+
+describe('CommentsCorrectionsList (#178)', () => {
+  const parseSet = (...records: string[]) =>
+    parseArticleSet(parseArticleSetXml(articleSetXml(...records)));
+  const record = (xml: string) => parseSet(xml)[0];
+
+  describe('a 29-entry list (PMID 9500320)', () => {
+    it('keeps every entry in upstream order, retraction and concern notices included', () => {
+      const commentIn = (pmids: string[]) => pmids.map((pmid) => `CommentIn ${pmid}`);
+      expect(
+        record(RETRACTED_ARTICLE_XML)?.commentsCorrections?.map((e) => `${e.refType} ${e.pmid}`),
+      ).toEqual([
+        ...commentIn([
+          '9500313',
+          '9525390',
+          '9525391',
+          '9525392',
+          '9525393',
+          '9525394',
+          '9525395',
+          '9525396',
+          '9643815',
+          '9643816',
+          '9643817',
+          '9643818',
+          '9643820',
+          '9643821',
+          '9643822',
+          '9643823',
+          '9683237',
+          '10963264',
+          '10963266',
+          '10963267',
+          '12086756',
+          '15016482',
+        ]),
+        'RetractionIn 15016483',
+        ...commentIn(['15022645', '15022648', '15022649', '15022650']),
+        'RetractionIn 20137807',
+        'ExpressionOfConcernIn 21971344',
+      ]);
+    });
+
+    it('carries the RefSource citation verbatim and no note NCBI did not supply', () => {
+      const entries = record(RETRACTED_ARTICLE_XML)?.commentsCorrections ?? [];
+      expect(entries[0]).toEqual({
+        refType: 'CommentIn',
+        refSource: 'Lancet. 1998 Feb 28;351(9103):611-2. doi: 10.1016/S0140-6736(05)78423-3.',
+        pmid: '9500313',
+      });
+      expect(entries.find((e) => e.pmid === '21971344')).toEqual({
+        refType: 'ExpressionOfConcernIn',
+        refSource:
+          'Eur J Gastroenterol Hepatol. 2011 Nov;23(11):1082. doi: 10.1097/MEG.0b013e328349d184.',
+        pmid: '21971344',
+      });
+    });
+
+    it('leaves publicationTypes as NCBI supplied them', () => {
+      expect(record(RETRACTED_ARTICLE_XML)?.publicationTypes).toEqual([
+        'Journal Article',
+        "Research Support, Non-U.S. Gov't",
+        'Retracted Publication',
+      ]);
+    });
+  });
+
+  it('decodes a note given as numeric character references and adds no pmid (PMID 23300797)', () => {
+    const parsed = record(ERRATUM_NOTE_ARTICLE_XML);
+    expect(parsed?.commentsCorrections).toEqual([
+      {
+        refType: 'ErratumIn',
+        refSource:
+          'PLoS One. 2013;8(6). doi:10.1371/annotation/df743c15-c50e-4d00-a24d-510e15f9a73b',
+        note: 'Fuβer, Fabian [corrected to Fußer, Fabian]',
+      },
+    ]);
+    expect(parsed?.commentsCorrections?.[0]).not.toHaveProperty('pmid');
+    // An erratum link is not a publication type; none is inferred from it.
+    expect(parsed?.publicationTypes).toEqual([
+      'Journal Article',
+      "Research Support, Non-U.S. Gov't",
+    ]);
+  });
+
+  it('omits the pmid key on an entry whose linked record has none (PMID 8643635)', () => {
+    const entries = record(PUBLISHED_ERRATUM_XML)?.commentsCorrections;
+    expect(entries).toEqual([
+      { refType: 'ErratumIn', refSource: 'Proc Natl Acad Sci U S A 1996 Aug 20;93(17):9302' },
+      {
+        refType: 'ErratumFor',
+        refSource:
+          'Proc Natl Acad Sci U S A. 1995 Jul 18;92(15):7090-4. doi: 10.1073/pnas.92.15.7090.',
+        pmid: '7624375',
+      },
+    ]);
+    expect(Object.keys(entries?.[0] ?? {})).toEqual(['refType', 'refSource']);
+  });
+
+  describe('a one-entry list (PMID 20137807)', () => {
+    it('reaches the parser as an array, not a collapsed scalar', () => {
+      const set = parseArticleSetXml(articleSetXml(RETRACTION_NOTICE_XML));
+      const list = ensureArray(set.PubmedArticle)[0]?.MedlineCitation.CommentsCorrectionsList;
+      expect(Array.isArray(list?.CommentsCorrections)).toBe(true);
+    });
+
+    it('returns a one-element array', () => {
+      expect(record(RETRACTION_NOTICE_XML)?.commentsCorrections).toEqual([
+        {
+          refType: 'RetractionOf',
+          refSource: 'Lancet. 1998 Feb 28;351(9103):637-41. doi: 10.1016/s0140-6736(97)11096-0.',
+          pmid: '9500320',
+        },
+      ]);
+    });
+  });
+
+  it('returns a purely numeric RefSource, Note and PMID as strings', () => {
+    // The flat parser coerces numeric-looking text (`parseTagValue`): a number would
+    // fail the output schema's string fields, and one read back with `String()` loses
+    // its spelling — `1.50` → `1.5`, `007` → `7`.
+    const numeric = RETRACTION_NOTICE_XML.replace(
+      /<RefSource>.*?<\/RefSource>/,
+      '<RefSource>1.50</RefSource>',
+    ).replace('</PMID></CommentsCorrections>', '</PMID><Note>007</Note></CommentsCorrections>');
+    expect(record(numeric)?.commentsCorrections).toEqual([
+      { refType: 'RetractionOf', refSource: '1.50', pmid: '9500320', note: '007' },
+    ]);
+  });
+
+  it('keeps the numeric coercion of an element named Note outside the list', () => {
+    // The verbatim exemption is scoped to CommentsCorrections by path, not by tag name.
+    const elsewhere = RETRACTION_NOTICE_XML.replace(
+      '<Article PubModel',
+      '<Note>007</Note><Article PubModel',
+    );
+    const set = parseArticleSetXml(articleSetXml(elsewhere));
+    const citation = ensureArray(set.PubmedArticle)[0]?.MedlineCitation as unknown as {
+      Note?: unknown;
+    };
+    expect(citation.Note).toBe(7);
+  });
+
+  it('drops a Cites entry and keeps the entries on either side of it in order', () => {
+    const entries = record(PUBLISHED_ERRATUM_WITH_CITES_XML)?.commentsCorrections;
+    expect(entries?.map((e) => e.refType)).toEqual(['ErratumIn', 'ErratumFor']);
+    expect(entries).toEqual(record(PUBLISHED_ERRATUM_XML)?.commentsCorrections);
+  });
+
+  it('omits the field when every entry is a Cites entry', () => {
+    const citesOnly = PUBLISHED_ERRATUM_WITH_CITES_XML.replace(
+      /<CommentsCorrections RefType="Erratum(?:In|For)">.*?<\/CommentsCorrections>/g,
+      '',
+    );
+    expect(citesOnly).toContain('RefType="Cites"');
+    expect(record(citesOnly)).not.toHaveProperty('commentsCorrections');
+  });
+
+  it('omits the field when the record carries no list', () => {
+    expect(record(JOURNAL_ARTICLE_XML)).not.toHaveProperty('commentsCorrections');
+  });
+
+  it('never sets the field on a Bookshelf record', () => {
+    for (const parsed of parseSet(GENEREVIEWS_CHAPTER_XML, ADA_WHOLE_BOOK_XML)) {
+      expect(parsed).not.toHaveProperty('commentsCorrections');
+    }
+  });
+
+  it('keeps each record’s own list in a mixed batch', () => {
+    const records = parseSet(RETRACTED_ARTICLE_XML, RETRACTION_NOTICE_XML, JOURNAL_ARTICLE_XML);
+    expect(records.map((r) => [r.pmid, r.commentsCorrections?.length])).toEqual([
+      ['9500320', 29],
+      ['20137807', 1],
+      ['42474064', undefined],
+    ]);
   });
 });

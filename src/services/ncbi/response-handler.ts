@@ -27,7 +27,6 @@ import { logger, requestContextService } from '@cyanheads/mcp-ts-core/utils';
 // biome-ignore lint/suspicious/noDeprecatedImports: staying on in-tree XMLValidator — see block comment above
 import { XMLParser as FastXmlParser, type X2jOptions, XMLValidator } from 'fast-xml-parser';
 
-import { recoveryFor } from '@/services/error-contracts.js';
 import {
   ORDERED_XML_PARSER_OPTIONS,
   XML_PROCESS_ENTITIES_OPTIONS,
@@ -64,6 +63,7 @@ const NCBI_ARRAY_JPATHS = new Set([
   'PubmedArticleSet.PubmedArticle.MedlineCitation.Article.AuthorList.Author.AffiliationInfo',
   'PubmedArticleSet.PubmedArticle.MedlineCitation.Article.GrantList.Grant',
   'PubmedArticleSet.PubmedArticle.MedlineCitation.Article.PublicationTypeList.PublicationType',
+  'PubmedArticleSet.PubmedArticle.MedlineCitation.CommentsCorrectionsList.CommentsCorrections',
   'PubmedArticleSet.PubmedArticle.MedlineCitation.KeywordList.Keyword',
   'PubmedArticleSet.PubmedArticle.MedlineCitation.MeshHeadingList.MeshHeading',
   'PubmedArticleSet.PubmedArticle.MedlineCitation.MeshHeadingList.MeshHeading.QualifierName',
@@ -217,7 +217,6 @@ export function reclassifyNcbiHttpError(error: unknown, endpoint: string): unkno
       endpoint,
       status: error.data?.status,
       ncbiErrors,
-      ...recoveryFor('ncbi_unreachable'),
     },
     { cause: error },
   );
@@ -397,17 +396,33 @@ export function flattenInlineMarkup(xml: string): string {
 }
 
 /**
- * Keeps `Book/Isbn` out of fast-xml-parser's numeric coercion.
+ * Free-text elements of a linked notice, matched by path: an element named `Note`
+ * elsewhere keeps the default coercion. (#178)
+ */
+const VERBATIM_TEXT_JPATHS = new Set([
+  'PubmedArticleSet.PubmedArticle.MedlineCitation.CommentsCorrectionsList.CommentsCorrections.RefSource',
+  'PubmedArticleSet.PubmedArticle.MedlineCitation.CommentsCorrectionsList.CommentsCorrections.Note',
+]);
+
+/**
+ * Keeps text that must survive exactly as NCBI wrote it out of fast-xml-parser's
+ * numeric coercion: `Book/Isbn`, and a linked notice's `RefSource` and `Note`.
  *
  * An ISBN-10 can start with a zero (`0309605393`); coerced, it becomes the
  * number 309605393 and the leading digit is gone before any read site sees it,
- * so the record ships a wrong ISBN with no error anywhere. The processor's
- * contract does the work: returning `undefined` leaves the raw text alone,
- * while returning the value unchanged for every other tag keeps the existing
- * coercion exactly as it was. (#114)
+ * so the record ships a wrong ISBN with no error anywhere (#114). A purely
+ * numeric `RefSource` or `Note` loses its spelling the same way — `1.50` → `1.5`,
+ * `007` → `7`, `0x1A` → `26` (#178). The processor's contract does the work:
+ * returning `undefined` leaves the raw text alone, while returning the value
+ * unchanged for every other tag keeps the existing coercion exactly as it was.
+ * The flat parsers keep the default `jPath: true`, so the path arrives as a string.
  */
-const preserveIsbnText = (tagName: string, tagValue: string): string | undefined =>
-  tagName === 'Isbn' ? undefined : tagValue;
+const preserveVerbatimText = (
+  tagName: string,
+  tagValue: string,
+  jPath: unknown,
+): string | undefined =>
+  tagName === 'Isbn' || VERBATIM_TEXT_JPATHS.has(jPath as string) ? undefined : tagValue;
 
 /**
  * Parses NCBI E-utility responses (XML, JSON, text) and checks for NCBI-specific
@@ -445,7 +460,7 @@ export class NcbiResponseHandler {
         const path = jpath as string;
         return NCBI_ARRAY_JPATHS.has(path) || ESUMMARY_ITEM_JPATH.test(path);
       },
-      tagValueProcessor: preserveIsbnText,
+      tagValueProcessor: preserveVerbatimText,
     } satisfies X2jOptions;
 
     this.xmlParser = new FastXmlParser({ ...flatOptions, parseTagValue: true });
@@ -477,7 +492,6 @@ export class NcbiResponseHandler {
         reason: 'ncbi_resource_not_found',
         endpoint,
         ncbiErrors: errorMessages,
-        ...recoveryFor('ncbi_resource_not_found'),
       });
     }
 
@@ -485,7 +499,6 @@ export class NcbiResponseHandler {
       reason: 'ncbi_unreachable',
       endpoint,
       ncbiErrors: errorMessages,
-      ...recoveryFor('ncbi_unreachable'),
     });
   }
 
@@ -549,7 +562,7 @@ export class NcbiResponseHandler {
         );
         throw serviceUnavailable(
           'NCBI API returned an HTML response instead of XML — likely rate-limited.',
-          { reason: 'ncbi_unreachable', endpoint, ...recoveryFor('ncbi_unreachable') },
+          { reason: 'ncbi_unreachable', endpoint },
         );
       }
 
@@ -573,7 +586,7 @@ export class NcbiResponseHandler {
         );
         throw serviceUnavailable(
           'NCBI returned an empty response body — the upstream backend likely failed mid-request.',
-          { reason: 'ncbi_unreachable', endpoint, ...recoveryFor('ncbi_unreachable') },
+          { reason: 'ncbi_unreachable', endpoint },
         );
       }
 
@@ -594,7 +607,6 @@ export class NcbiResponseHandler {
           reason: 'ncbi_invalid_response',
           endpoint,
           responseSnippet: responseText.substring(0, 200),
-          ...recoveryFor('ncbi_invalid_response'),
         });
       }
 
@@ -642,7 +654,6 @@ export class NcbiResponseHandler {
             endpoint,
             parserError,
             responseSnippet: responseText.substring(0, 200),
-            ...recoveryFor('ncbi_invalid_response'),
           },
           { cause: error },
         );
@@ -696,7 +707,6 @@ export class NcbiResponseHandler {
             reason: 'ncbi_invalid_response',
             endpoint,
             responseSnippet: responseText.substring(0, 200),
-            ...recoveryFor('ncbi_invalid_response'),
           },
           { cause: error },
         );
@@ -716,14 +726,12 @@ export class NcbiResponseHandler {
             reason: 'ncbi_resource_not_found',
             endpoint,
             ncbiErrors: [errorMessage],
-            ...recoveryFor('ncbi_resource_not_found'),
           });
         }
         throw serviceUnavailable(`NCBI API Error: ${errorMessage}`, {
           reason: 'ncbi_unreachable',
           endpoint,
-          ncbiError: errorMessage,
-          ...recoveryFor('ncbi_unreachable'),
+          ncbiErrors: [errorMessage],
         });
       }
 

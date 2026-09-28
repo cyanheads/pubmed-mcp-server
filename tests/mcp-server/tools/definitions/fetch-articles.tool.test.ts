@@ -3,7 +3,7 @@
  * @module tests/mcp-server/tools/definitions/fetch-articles.tool.test
  */
 
-import { createMockContext, getEnrichment } from '@cyanheads/mcp-ts-core/testing';
+import { createMockContext, getEnrichment, runToolContract } from '@cyanheads/mcp-ts-core/testing';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { textBlocks } from '../../../_helpers.js';
@@ -17,6 +17,13 @@ import {
   parseArticleSetXml,
   STATPEARLS_CHAPTER_XML,
 } from '../../../services/ncbi/parsing/_book-fixtures.js';
+import {
+  ERRATUM_NOTE_ARTICLE_XML,
+  PUBLISHED_ERRATUM_WITH_CITES_XML,
+  PUBLISHED_ERRATUM_XML,
+  RETRACTED_ARTICLE_XML,
+  RETRACTION_NOTICE_XML,
+} from '../../../services/ncbi/parsing/_comments-corrections-fixtures.js';
 
 const mockEFetch = vi.fn();
 vi.mock('@/services/ncbi/ncbi-service.js', () => ({
@@ -91,14 +98,16 @@ describe('fetchArticlesTool', () => {
 
   it('invalid_efetch_response carries the contract recovery hint on the wire', async () => {
     mockEFetch.mockResolvedValue({});
-    const ctx = createMockContext({ errors: fetchArticlesTool.errors });
-    const input = fetchArticlesTool.input.parse({ pmids: ['12345'] });
+    const result = await runToolContract(fetchArticlesTool, { pmids: ['12345'] });
 
-    await expect(fetchArticlesTool.handler(input, ctx)).rejects.toMatchObject({
-      data: {
-        reason: 'invalid_efetch_response',
-        requestedPmids: 1,
-        recovery: { hint: expect.stringMatching(/.{20,}/) },
+    expect(result.isError).toBe(true);
+    expect(result.structuredContent).toMatchObject({
+      error: {
+        data: {
+          reason: 'invalid_efetch_response',
+          requestedPmids: 1,
+          recovery: { hint: expect.stringMatching(/.{20,}/) },
+        },
       },
     });
   });
@@ -1183,5 +1192,261 @@ describe('fetchArticlesTool Bookshelf records (issue #114)', () => {
     const notice = getEnrichment(ctx).notice ?? '';
     expect(notice).toContain('pubmed_search_articles');
     expect(notice).not.toMatch(/invalid, unpublished, or withdrawn/i);
+  });
+});
+
+describe('fetchArticlesTool comments and corrections (issue #178)', () => {
+  beforeEach(() => {
+    mockEFetch.mockReset();
+  });
+
+  /** Stage an EFetch body parsed through the production response handler. */
+  function stageSet(...records: string[]) {
+    mockEFetch.mockResolvedValue({
+      PubmedArticleSet: parseArticleSetXml(articleSetXml(...records)),
+    });
+  }
+
+  interface ArticleOut {
+    commentsCorrections?: { note?: string; pmid?: string; refSource: string; refType: string }[];
+    pmid?: string;
+    publicationTypes?: string[];
+  }
+
+  /** Call through the contract boundary: output validation, format(), both surfaces. */
+  async function call(pmids: string[], extra: Record<string, unknown> = {}) {
+    const result = await runToolContract(fetchArticlesTool, { pmids, ...extra });
+    expect(result.isError).toBeFalsy();
+    const structured = result.structuredContent as {
+      articles: ArticleOut[];
+      deferred?: { ids: string[]; maxResponseCharacters: number; returnedCharacters: number };
+    };
+    const text = result.content
+      .flatMap((block) => (block.type === 'text' ? [block.text] : []))
+      .join('\n');
+    return { structured, text };
+  }
+
+  /** The rendered comments-and-corrections block of one record, heading included. */
+  const sectionOf = (text: string) => {
+    const start = text.indexOf('#### Comments and Corrections');
+    if (start === -1) return '';
+    const end = text.indexOf('\n#### ', start + 1);
+    return text.slice(start, end === -1 ? undefined : end);
+  };
+  const entryLines = (section: string) => section.split('\n').filter((l) => l.startsWith('- '));
+
+  it('lists all 29 entries of PMID 9500320 on both surfaces, notices included', async () => {
+    stageSet(RETRACTED_ARTICLE_XML);
+
+    const { structured, text } = await call(['9500320']);
+    const entries = structured.articles[0]?.commentsCorrections ?? [];
+
+    expect(entries).toHaveLength(29);
+    expect(entries).toContainEqual({
+      refType: 'RetractionIn',
+      refSource: 'Lancet. 2004 Mar 6;363(9411):750. doi: 10.1016/S0140-6736(04)15715-2.',
+      pmid: '15016483',
+    });
+    expect(entries).toContainEqual({
+      refType: 'RetractionIn',
+      refSource: 'Lancet. 2010 Feb 6;375(9713):445. doi: 10.1016/S0140-6736(10)60175-4.',
+      pmid: '20137807',
+    });
+    expect(entries).toContainEqual({
+      refType: 'ExpressionOfConcernIn',
+      refSource:
+        'Eur J Gastroenterol Hepatol. 2011 Nov;23(11):1082. doi: 10.1097/MEG.0b013e328349d184.',
+      pmid: '21971344',
+    });
+
+    const section = sectionOf(text);
+    expect(section.split('\n')[0]).toBe('#### Comments and Corrections (29)');
+    expect(section).toContain('`pubmed_fetch_articles`');
+    const lines = entryLines(section);
+    expect(lines).toHaveLength(29);
+    expect(lines[0]).toBe(
+      '- **CommentIn:** Lancet. 1998 Feb 28;351(9103):611-2. doi: 10.1016/S0140-6736(05)78423-3. — PMID 9500313',
+    );
+    expect(lines).toContain(
+      '- **RetractionIn:** Lancet. 2004 Mar 6;363(9411):750. doi: 10.1016/S0140-6736(04)15715-2. — PMID 15016483',
+    );
+    expect(lines).toContain(
+      '- **RetractionIn:** Lancet. 2010 Feb 6;375(9713):445. doi: 10.1016/S0140-6736(10)60175-4. — PMID 20137807',
+    );
+    expect(lines[28]).toBe(
+      '- **ExpressionOfConcernIn:** Eur J Gastroenterol Hepatol. 2011 Nov;23(11):1082. doi: 10.1097/MEG.0b013e328349d184. — PMID 21971344',
+    );
+    // Every structured entry has its rendered line, in the same order.
+    expect(lines.map((l) => l.match(/PMID (\d+)$/)?.[1])).toEqual(entries.map((e) => e.pmid));
+    // The notices sit ahead of the abstract they qualify.
+    expect(text.indexOf('#### Comments and Corrections')).toBeLessThan(
+      text.indexOf('#### Abstract'),
+    );
+  });
+
+  it('carries the decoded note without a pmid, and escapes it only in content[] (PMID 23300797)', async () => {
+    stageSet(ERRATUM_NOTE_ARTICLE_XML);
+
+    const { structured, text } = await call(['23300797']);
+
+    expect(structured.articles[0]?.commentsCorrections).toEqual([
+      {
+        refType: 'ErratumIn',
+        refSource:
+          'PLoS One. 2013;8(6). doi:10.1371/annotation/df743c15-c50e-4d00-a24d-510e15f9a73b',
+        note: 'Fuβer, Fabian [corrected to Fußer, Fabian]',
+      },
+    ]);
+    const section = sectionOf(text);
+    expect(entryLines(section)).toEqual([
+      '- **ErratumIn:** PLoS One. 2013;8(6). doi:10.1371/annotation/df743c15-c50e-4d00-a24d-510e15f9a73b — Note: Fuβer, Fabian \\[corrected to Fußer, Fabian\\]',
+    ]);
+    // No entry links a PubMed record, so nothing points at a PMID to fetch.
+    expect(section).not.toContain('PMID');
+    expect(section).not.toContain('pubmed_fetch_articles');
+  });
+
+  it('renders no PubMed link for an entry without a pmid and keeps the one that has it (PMID 8643635)', async () => {
+    stageSet(PUBLISHED_ERRATUM_XML);
+
+    const { structured, text } = await call(['8643635']);
+    const entries = structured.articles[0]?.commentsCorrections ?? [];
+
+    expect(entries[0]).not.toHaveProperty('pmid');
+    expect(entries[1]?.pmid).toBe('7624375');
+    expect(entryLines(sectionOf(text))).toEqual([
+      '- **ErratumIn:** Proc Natl Acad Sci U S A 1996 Aug 20;93(17):9302',
+      '- **ErratumFor:** Proc Natl Acad Sci U S A. 1995 Jul 18;92(15):7090-4. doi: 10.1073/pnas.92.15.7090. — PMID 7624375',
+    ]);
+  });
+
+  it('returns a one-element array for a one-entry list (PMID 20137807)', async () => {
+    stageSet(RETRACTION_NOTICE_XML);
+
+    const { structured, text } = await call(['20137807']);
+
+    expect(structured.articles[0]?.commentsCorrections).toEqual([
+      {
+        refType: 'RetractionOf',
+        refSource: 'Lancet. 1998 Feb 28;351(9103):637-41. doi: 10.1016/s0140-6736(97)11096-0.',
+        pmid: '9500320',
+      },
+    ]);
+    expect(sectionOf(text).split('\n')[0]).toBe('#### Comments and Corrections (1)');
+    expect(entryLines(sectionOf(text))).toEqual([
+      '- **RetractionOf:** Lancet. 1998 Feb 28;351(9103):637-41. doi: 10.1016/s0140-6736(97)11096-0. — PMID 9500320',
+    ]);
+  });
+
+  it('emits no Cites entry on either surface', async () => {
+    stageSet(PUBLISHED_ERRATUM_WITH_CITES_XML);
+
+    const { structured, text } = await call(['8643635']);
+
+    expect(structured.articles[0]?.commentsCorrections?.map((e) => e.refType)).toEqual([
+      'ErratumIn',
+      'ErratumFor',
+    ]);
+    expect(JSON.stringify(structured)).not.toContain('1111111');
+    expect(text).not.toContain('Synthetic bibliography entry');
+    expect(text).not.toContain('Cites');
+  });
+
+  it('omits the field and the block for a record with no list and for a Bookshelf record', async () => {
+    stageSet(JOURNAL_ARTICLE_XML, GENEREVIEWS_CHAPTER_XML);
+
+    const { structured, text } = await call(['42474064', '20301425']);
+
+    expect(structured.articles).toHaveLength(2);
+    for (const article of structured.articles) {
+      expect(article).not.toHaveProperty('commentsCorrections');
+    }
+    expect(text).not.toContain('Comments and Corrections');
+  });
+
+  it('leaves publicationTypes exactly as NCBI supplied them on every record', async () => {
+    stageSet(
+      RETRACTED_ARTICLE_XML,
+      ERRATUM_NOTE_ARTICLE_XML,
+      PUBLISHED_ERRATUM_XML,
+      RETRACTION_NOTICE_XML,
+    );
+
+    const { structured } = await call(['9500320', '23300797', '8643635', '20137807']);
+
+    expect(structured.articles.map((a) => [a.pmid, a.publicationTypes])).toEqual([
+      ['9500320', ['Journal Article', "Research Support, Non-U.S. Gov't", 'Retracted Publication']],
+      ['23300797', ['Journal Article', "Research Support, Non-U.S. Gov't"]],
+      ['8643635', ['Published Erratum']],
+      ['20137807', ['Retraction Notice']],
+    ]);
+  });
+
+  it('escapes Markdown in upstream text for content[] and leaves structuredContent verbatim', () => {
+    const entry = {
+      refType: 'CommentIn',
+      refSource: 'J *Hostile* 2020;1:1.\n#### Injected',
+      pmid: '42',
+      note: 'see [here](https://evil.test) <b>now</b>',
+    };
+    const text =
+      textBlocks(
+        fetchArticlesTool.format!({
+          articles: [
+            {
+              recordType: 'journal-article' as const,
+              pmid: '1',
+              commentsCorrections: [entry],
+            },
+          ],
+          totalReturned: 1,
+        }),
+      )[0]?.text ?? '';
+
+    expect(text.split('\n').filter((line) => line.startsWith('#'))).toEqual([
+      '## PubMed Articles',
+      '### 1',
+      '#### Comments and Corrections (1)',
+    ]);
+    expect(entryLines(sectionOf(text))).toEqual([
+      '- **CommentIn:** J \\*Hostile\\* 2020;1:1. #### Injected — PMID 42 — Note: see \\[here\\](https://evil.test) \\<b>now\\</b>',
+    ]);
+    // format() never writes back into the structured record.
+    expect(entry.refSource).toBe('J *Hostile* 2020;1:1.\n#### Injected');
+  });
+
+  describe('under maxResponseCharacters', () => {
+    const sizeOf = (article: ArticleOut) => JSON.stringify(article).length;
+
+    it('counts the field in the record size the budget spends', async () => {
+      stageSet(RETRACTED_ARTICLE_XML, JOURNAL_ARTICLE_XML);
+      const baseline = (await call(['9500320', '42474064'])).structured.articles;
+      const heavy = baseline[0] as ArticleOut;
+      const { commentsCorrections, ...withoutField } = heavy;
+      expect(commentsCorrections).toHaveLength(29);
+      const fullSize = sizeOf(heavy);
+      const sizeWithoutField = sizeOf(withoutField);
+      expect(fullSize).toBeGreaterThan(sizeWithoutField);
+
+      // A ceiling that would fit the record only if the field were not counted defers it.
+      stageSet(RETRACTED_ARTICLE_XML, JOURNAL_ARTICLE_XML);
+      const cut = (await call(['9500320', '42474064'], { maxResponseCharacters: sizeWithoutField }))
+        .structured;
+      expect(cut.articles).toEqual([]);
+      expect(cut.deferred?.ids).toEqual(['9500320', '42474064']);
+
+      // The full record size, field included, is exactly what keeps it.
+      stageSet(RETRACTED_ARTICLE_XML, JOURNAL_ARTICLE_XML);
+      const kept = (await call(['9500320', '42474064'], { maxResponseCharacters: fullSize }))
+        .structured;
+      expect(kept.articles.map((a) => a.pmid)).toEqual(['9500320']);
+      expect(kept.articles[0]?.commentsCorrections).toHaveLength(29);
+      expect(kept.deferred?.returnedCharacters).toBe(fullSize);
+      expect(kept.deferred?.returnedCharacters).toBeLessThanOrEqual(
+        kept.deferred?.maxResponseCharacters ?? 0,
+      );
+      expect(kept.deferred?.ids).toEqual(['42474064']);
+    });
   });
 });
