@@ -1,6 +1,6 @@
 # pubmed-mcp-server - Directory Structure
 
-Generated on: 2026-09-28 00:51:11
+Generated on: 2026-10-04 11:22:36
 
 ```text
 pubmed-mcp-server/
@@ -145,11 +145,13 @@ pubmed-mcp-server/
 │   ├── check-skills-sync.ts
 │   ├── clean-mcpb.ts
 │   ├── clean.ts
+│   ├── corpus-add.ts
 │   ├── devcheck.ts
 │   ├── install-otel.ts
 │   ├── lint-mcp.ts
 │   ├── lint-packaging.ts
 │   ├── list-skills.ts
+│   ├── prune-musl-packages.ts
 │   ├── release-github.ts
 │   └── tree.ts
 ├── src/
@@ -214,6 +216,97 @@ pubmed-mcp-server/
 ├── tests/
 │   ├── config/
 │   │   └── server-config.test.ts
+│   ├── corpus/
+│   │   ├── fixtures/
+│   │   │   ├── pmc/
+│   │   │   │   ├── pmc10455816/
+│   │   │   │   │   ├── expect.json
+│   │   │   │   │   ├── expected.md
+│   │   │   │   │   ├── meta.json
+│   │   │   │   │   └── source.xml
+│   │   │   │   ├── pmc10666927/
+│   │   │   │   │   ├── expect.json
+│   │   │   │   │   ├── expected.md
+│   │   │   │   │   ├── meta.json
+│   │   │   │   │   └── source.xml
+│   │   │   │   ├── pmc10707391/
+│   │   │   │   │   ├── expect.json
+│   │   │   │   │   ├── expected.md
+│   │   │   │   │   ├── meta.json
+│   │   │   │   │   └── source.xml
+│   │   │   │   ├── pmc10754557/
+│   │   │   │   │   ├── expect.json
+│   │   │   │   │   ├── expected.md
+│   │   │   │   │   ├── meta.json
+│   │   │   │   │   └── source.xml
+│   │   │   │   ├── pmc10799778/
+│   │   │   │   │   ├── expect.json
+│   │   │   │   │   ├── expected.md
+│   │   │   │   │   ├── meta.json
+│   │   │   │   │   └── source.xml
+│   │   │   │   ├── pmc11176230/
+│   │   │   │   │   ├── expect.json
+│   │   │   │   │   ├── expected.md
+│   │   │   │   │   ├── meta.json
+│   │   │   │   │   └── source.xml
+│   │   │   │   ├── pmc11292240/
+│   │   │   │   │   ├── expect.json
+│   │   │   │   │   ├── expected.md
+│   │   │   │   │   ├── meta.json
+│   │   │   │   │   └── source.xml
+│   │   │   │   └── pmc11609225/
+│   │   │   │       ├── expect.json
+│   │   │   │       ├── expected.md
+│   │   │   │       ├── meta.json
+│   │   │   │       └── source.xml
+│   │   │   └── pubmed/
+│   │   │       ├── pmid31844417/
+│   │   │       │   ├── expect.json
+│   │   │       │   ├── expected.md
+│   │   │       │   ├── meta.json
+│   │   │       │   └── source.xml
+│   │   │       ├── pmid34026693/
+│   │   │       │   ├── expect.json
+│   │   │       │   ├── expected.md
+│   │   │       │   ├── meta.json
+│   │   │       │   └── source.xml
+│   │   │       ├── pmid34116029/
+│   │   │       │   ├── expect.json
+│   │   │       │   ├── expected.md
+│   │   │       │   ├── meta.json
+│   │   │       │   └── source.xml
+│   │   │       ├── pmid38206746/
+│   │   │       │   ├── expect.json
+│   │   │       │   ├── expected.md
+│   │   │       │   ├── meta.json
+│   │   │       │   └── source.xml
+│   │   │       ├── pmid38869518/
+│   │   │       │   ├── expect.json
+│   │   │       │   ├── expected.md
+│   │   │       │   ├── meta.json
+│   │   │       │   └── source.xml
+│   │   │       └── pmid39624286/
+│   │   │           ├── expect.json
+│   │   │           ├── expected.md
+│   │   │           ├── meta.json
+│   │   │           └── source.xml
+│   │   ├── ATTRIBUTION.md
+│   │   ├── attribution.ts
+│   │   ├── corpus.test.ts
+│   │   ├── expect.ts
+│   │   ├── features.ts
+│   │   ├── fixtures.ts
+│   │   ├── invariants.test.ts
+│   │   ├── invariants.ts
+│   │   ├── meta.test.ts
+│   │   ├── pubmed-checks.test.ts
+│   │   ├── pubmed-corpus.test.ts
+│   │   ├── pubmed-expect.ts
+│   │   ├── pubmed-fixtures.ts
+│   │   ├── pubmed-invariants.ts
+│   │   ├── pubmed-meta.test.ts
+│   │   ├── pubmed-run-tools.ts
+│   │   └── run-tool.ts
 │   ├── mcp-server/
 │   │   ├── prompts/
 │   │   │   └── definitions/
@@ -231,17 +324,23 @@ pubmed-mcp-server/
 │   │           ├── convert-ids-per-element.test.ts
 │   │           ├── convert-ids.tool.test.ts
 │   │           ├── europepmc-search-failures.test.ts
+│   │           ├── fetch-articles.record-fields.test.ts
 │   │           ├── fetch-articles.tool.test.ts
 │   │           ├── fetch-fulltext-jats-sections.test.ts
+│   │           ├── fetch-fulltext-jats-text.test.ts
 │   │           ├── fetch-fulltext-routing.test.ts
 │   │           ├── fetch-fulltext.tool.test.ts
+│   │           ├── find-related-openalex-reason.test.ts
 │   │           ├── find-related.tool.test.ts
 │   │           ├── format-citations.tool.test.ts
 │   │           ├── input-aliases.test.ts
+│   │           ├── lookup-citation-esummary.test.ts
+│   │           ├── lookup-citation-truncation.test.ts
 │   │           ├── lookup-citation.tool.test.ts
 │   │           ├── lookup-mesh.tool.test.ts
 │   │           ├── pubmed-europepmc-fetch.tool.test.ts
 │   │           ├── pubmed-europepmc-search.tool.test.ts
+│   │           ├── search-articles-count-only.test.ts
 │   │           ├── search-articles.tool.test.ts
 │   │           ├── security.test.ts
 │   │           ├── spell-check.tool.test.ts
@@ -250,6 +349,7 @@ pubmed-mcp-server/
 │   │           └── zero-padded-pmid.test.ts
 │   ├── services/
 │   │   ├── europe-pmc/
+│   │   │   ├── europe-pmc-abstract.test.ts
 │   │   │   └── europe-pmc-service.test.ts
 │   │   ├── ncbi/
 │   │   │   ├── formatting/
@@ -265,10 +365,13 @@ pubmed-mcp-server/
 │   │   │   │   ├── text-helpers.test.ts
 │   │   │   │   └── xml-helpers.test.ts
 │   │   │   ├── api-client.test.ts
+│   │   │   ├── ecitmatch-truncation.test.ts
 │   │   │   ├── efetch-timeout-retry.test.ts
+│   │   │   ├── idconvert-http-400.test.ts
 │   │   │   ├── ncbi-service.test.ts
 │   │   │   ├── rate-limit-cooldown.test.ts
 │   │   │   ├── request-queue.test.ts
+│   │   │   ├── response-handler.inline-markup.test.ts
 │   │   │   ├── response-handler.test.ts
 │   │   │   └── transient-500-retry.test.ts
 │   │   ├── openalex/

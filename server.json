@@ -6,7 +6,7 @@
     "url": "https://github.com/cyanheads/pubmed-mcp-server",
     "source": "github"
   },
-  "version": "2.10.19",
+  "version": "2.10.20",
   "remotes": [
     {
       "type": "streamable-http",
@@ -19,7 +19,7 @@
       "registryBaseUrl": "https://registry.npmjs.org",
       "identifier": "@cyanheads/pubmed-mcp-server",
       "runtimeHint": "npx",
-      "version": "2.10.19",
+      "version": "2.10.20",
       "environmentVariables": [
         {
           "name": "MCP_LOG_LEVEL",
@@ -56,7 +56,7 @@
       "registryBaseUrl": "https://registry.npmjs.org",
       "identifier": "@cyanheads/pubmed-mcp-server",
       "runtimeHint": "npx",
-      "version": "2.10.19",
+      "version": "2.10.20",
       "environmentVariables": [
         {
           "name": "MCP_TRANSPORT_TYPE",

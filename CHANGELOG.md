@@ -2,6 +2,10 @@
 
 All notable changes to this project. Each entry links to its full per-version file in [changelog/](changelog/).
 
+## [2.10.20](changelog/2.10.x/2.10.20.md) — 2026-10-04
+
+Text-fidelity fixes across full-text JATS, PubMed record, and Europe PMC parsing, with Bookshelf chapters dated by their own dates and pubmed_fetch_fulltext taking pmcids, pmids, and dois in one call.
+
 ## [2.10.19](changelog/2.10.x/2.10.19.md) — 2026-09-27
 
 pubmed_fetch_articles returns the retraction, erratum, and comment notices NCBI links to a record, and the search tools reject blank queries, filters, and cursors and impossible or reversed date ranges instead of returning unfiltered or falsely empty results.
