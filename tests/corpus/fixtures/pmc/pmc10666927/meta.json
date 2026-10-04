@@ -1,0 +1,27 @@
+{
+  "id": "pmc10666927",
+  "title": "Eleven strategies for making reproducible research and open science training the norm at research institutions",
+  "identifiers": {
+    "pmcid": "PMC10666927",
+    "pmid": "37994903",
+    "doi": "10.7554/eLife.89736"
+  },
+  "url": "https://eutils.ncbi.nlm.nih.gov/entrez/eutils/efetch.fcgi?db=pmc&id=10666927&retmode=xml",
+  "retrieved": "2026-10-04",
+  "license": {
+    "id": "CC-BY-4.0",
+    "url": "https://creativecommons.org/licenses/by/4.0/"
+  },
+  "attribution": "Kohrs FE, Auer S, Bannach-Brown A, Fiedler S, Haven TL, Heise V, et al. Eleven strategies for making reproducible research and open science training the norm at research institutions. eLife. 2023;12:e89736. doi:10.7554/eLife.89736",
+  "features": [
+    "boxed-text",
+    "nested-sections",
+    "contrib-group-affiliations",
+    "institution-id",
+    "back-sections",
+    "figures",
+    "supplementary-material",
+    "element-citation",
+    "review"
+  ]
+}

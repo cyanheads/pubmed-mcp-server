@@ -1,0 +1,47 @@
+{
+  "why": "Regression fixture for #185 and #196. Table 5's header cells split by <break/> keep each line as \\n in structuredContent and render as ` · ` in content[], each colspan=2 header repeated across both columns it covers; the Table 5 footer's two <p>s are two footnote lines. Affiliations sit inside <contrib-group> with <institution-id> ROR and GRID ids, which must not reach the text. The abstract holds direct <p>s beside a \"Supplementary Information\" <sec>; the paragraphs are read first, in source order, rather than dropped (#204).",
+  "title": "Creatine homeostasis and the kidney: comparison between kidney transplant recipients and healthy controls",
+  "abstractStartsWith": "Creatine is a natural nitrogenous organic acid",
+  "authors": 13,
+  "affiliations": 5,
+  "figures": 4,
+  "supplements": 1,
+  "references": 62,
+  "sectionTitles": [
+    "Introduction",
+    "Methods",
+    "Study population",
+    "Statistical analyses",
+    "Results",
+    "Mediation analyses",
+    "Discussion",
+    "Electronic supplementary material"
+  ],
+  "cells": [
+    {
+      "table": 4,
+      "row": 0,
+      "column": 2,
+      "text": "KTR\nn = 157\nmean measured GFR: 57 ± 20\n95 percentile range: 25–87"
+    },
+    {
+      "table": 4,
+      "row": 0,
+      "column": 3,
+      "text": "KTR\nn = 157\nmean measured GFR: 57 ± 20\n95 percentile range: 25–87"
+    },
+    { "table": 4, "row": 1, "column": 1, "text": "Endogenous creatine synthesis" },
+    {
+      "table": 4,
+      "row": 2,
+      "column": 1,
+      "text": "Direct path\n(measured GFR -> Creatine synthesis)"
+    }
+  ],
+  "contains": [
+    "| KTR · n = 157 · mean measured GFR: 57 ± 20 · 95 percentile range: 25–87 | KTR · n = 157 · mean measured GFR: 57 ± 20 · 95 percentile range: 25–87 |",
+    "Footnotes: Analyses are adjusted for age, sex, weight, height and time since transplantation (for KTR) · Abbreviations: GAA: Guanidinoacetate; GFR: Glomerular filtration rate",
+    "- 1 Department of Internal Medicine, University Medical Center Groningen, University of Groningen, Groningen, 9713 GZ The Netherlands"
+  ],
+  "notContains": ["2095", "ror.org", "grid.4830"]
+}

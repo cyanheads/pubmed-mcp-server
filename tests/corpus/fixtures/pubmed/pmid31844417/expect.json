@@ -1,0 +1,62 @@
+{
+  "why": "A retracted article: Retracted Publication type plus a RetractionIn notice linked by PMID. Also a four-label structured abstract (CONCLUSION labelled, CONCLUSIONS categorised) with <i> runs, 23 MeSH headings with 17 qualifiers, an entity-encoded en dash in a keyword, &amp; in the journal title, and no Issue element, so journalInfo carries no issue key (the journal invariant fails on an empty string, #213) while the Journal line and every citation read as before. The citations carry no retraction marker; nothing here pins that either way.",
+  "title": "MicroRNA-582-3p negatively regulates cell proliferation and cell cycle progression in acute myeloid leukemia by targeting cyclin B2.",
+  "abstractLabels": ["BACKGROUND", "METHODS", "RESULTS", "CONCLUSION"],
+  "authors": 6,
+  "affiliations": 5,
+  "journal": {
+    "title": "Cellular & molecular biology letters",
+    "isoAbbreviation": "Cell Mol Biol Lett",
+    "eIssn": "1689-1392",
+    "volume": "24",
+    "pages": "66",
+    "elocationId": "66",
+    "elocationIdType": "pii",
+    "publicationDate": { "year": "2019" }
+  },
+  "doi": "10.1186/s11658-019-0184-7",
+  "pmcId": "PMC6894134",
+  "publicationTypes": ["Journal Article", "Retracted Publication"],
+  "meshMajor": [
+    "Cyclin B2",
+    "G2 Phase Cell Cycle Checkpoints",
+    "Gene Expression Regulation, Leukemic",
+    "Leukemia, Myelogenous, Chronic, BCR-ABL Positive",
+    "Leukemia, Myeloid, Acute",
+    "MicroRNAs"
+  ],
+  "commentsCorrections": [{ "refType": "RetractionIn", "pmid": "40251503" }],
+  "articleDates": "Electronic 2019-12-04",
+  "contains": [
+    "**Type:** Journal Article, Retracted Publication",
+    "#### Comments and Corrections (1)\nFetch a linked record by its PMID with `pubmed_fetch_articles`.\n- **RetractionIn:** Cell Mol Biol Lett. 2025 Apr 18;30(1):51. doi: 10.1186/s11658-025-00729-3. — PMID 40251503",
+    "Furthermore, cyclin B2 (CCNB2) was confirmed as a target gene of miR-582-3p",
+    "**Keywords:** Acute myeloid leukemia, CCNB2, Cell cycle, miR-582–3p",
+    "- Haixia Li (H) [aff 0,1]",
+    "**Journal:** Cellular & molecular biology letters, (Cell Mol Biol Lett), 2019, **24**, 66, pii: 66, eISSN 1689-1392"
+  ],
+  "citations": {
+    "apa": [
+      "Li, H., Tian, X., Wang, P., Huang, M., Xu, R., & Nie, T. (2019).",
+      "*24*, 66.",
+      "https://doi.org/10.1186/s11658-019-0184-7"
+    ],
+    "mla": ["Li, Haixia, et al.", "vol. 24, 2019"],
+    "bibtex": [
+      "journal  = {Cellular \\& molecular biology letters}",
+      "volume   = {24}",
+      "pages    = {66}",
+      "{miR-582–3p}"
+    ],
+    "ris": [
+      "AU  - Nie, Tian",
+      "JF  - Cellular & molecular biology letters",
+      "VL  - 24",
+      "SP  - 66"
+    ],
+    "vancouver": [
+      "Li H, Tian X, Wang P, Huang M, Xu R, Nie T. MicroRNA-582-3p negatively regulates",
+      "Cell Mol Biol Lett. 2019;24:66. doi: 10.1186/s11658-019-0184-7"
+    ]
+  }
+}

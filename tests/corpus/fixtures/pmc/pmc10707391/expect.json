@@ -1,0 +1,21 @@
+{
+  "why": "Tables with colspan/rowspan and many <break/>-split cells, every one matching the span-expanded source grid, and one footnote per table; Appendix C's Table A1 is returned from <back>/<app-group>. Nothing else from the appendices is pinned: Appendices A and B (search strategy; Newcastle–Ottawa scale with lists nested inside list-item paragraphs) are back matter the tool does not return, a reported gap.",
+  "title": "The Current Knowledge of Cerebral Magnetic Resonance Imaging in Monochorionic Twins: A Systematic Review of the Last 20 Years",
+  "authors": 8,
+  "affiliations": 3,
+  "figures": 2,
+  "references": 40,
+  "sectionTitles": [
+    "1. Introduction",
+    "2. Materials and Methods",
+    "2.1. Search Strategy",
+    "3. Results",
+    "3.2. Fetal MRI Findings in MC Twins",
+    "4. Discussion",
+    "4.3. Interpretation of Findings",
+    "5. Conclusions"
+  ],
+  "structuredContains": [
+    "Abbreviations: G, good quality; F, fair quality; P, poor quality; *, one star."
+  ]
+}

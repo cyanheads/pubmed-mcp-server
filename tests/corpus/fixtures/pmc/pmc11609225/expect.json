@@ -1,0 +1,28 @@
+{
+  "why": "Elsevier (Heliyon) mathematics article: 115 MathML-only <inline-formula>s and 37 <disp-formula>s (no <tex-math>), <statement> lemmas, and labelled lists. Math output is not pinned: MathML is linearised to plain text, which flattens sub/superscripts (L^{-1} reads L−1), concatenates <mml:mtable> cells, and drops <mml:mspace> (a reported defect). The Funding and Declaration sections' <funding-source><institution-wrap>s name each funder without its <institution-id> Crossref Funder DOI (#208).",
+  "title": "Securing consensus in fractional-order multi-agent systems: Algebraic approaches against Byzantine attacks",
+  "authors": 7,
+  "affiliations": 5,
+  "tables": 0,
+  "figures": 9,
+  "references": 42,
+  "sectionTitles": [
+    "Introduction",
+    "Preliminaries",
+    "Communication typologies",
+    "Problem formation",
+    "Numerical experiments",
+    "Camparsion with existing results",
+    "Conclusion",
+    "Code availability",
+    "Funding",
+    "Declaration of Competing Interest"
+  ],
+  "contains": [
+    "Lemma 2.1 [30] Inequality hold for the matrices L, M, N",
+    "Lemma 2.2 [29] Given matrices",
+    "This research was sponsored by the National Natural Science Foundation of China grant No. 12250410247, and also by the Ministry of Science and Technology of China",
+    "article publishing charges was provided by Guangzhou University."
+  ],
+  "notContains": ["501100001809", "501100014881"]
+}

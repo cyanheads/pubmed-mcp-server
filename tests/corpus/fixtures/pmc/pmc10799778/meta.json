@@ -1,0 +1,24 @@
+{
+  "id": "pmc10799778",
+  "title": "Therapeutic applications of gut microbes in cardiometabolic diseases: current state and perspectives",
+  "identifiers": {
+    "pmcid": "PMC10799778",
+    "pmid": "38244075",
+    "doi": "10.1007/s00253-024-13007-7"
+  },
+  "url": "https://eutils.ncbi.nlm.nih.gov/entrez/eutils/efetch.fcgi?db=pmc&id=10799778&retmode=xml",
+  "retrieved": "2026-10-04",
+  "license": {
+    "id": "CC-BY-4.0",
+    "url": "https://creativecommons.org/licenses/by/4.0/"
+  },
+  "attribution": "Yuan L, Li Y, Chen M, Xue L, Wang J, Ding Y, et al. Therapeutic applications of gut microbes in cardiometabolic diseases: current state and perspectives. Applied Microbiology and Biotechnology. 2024;108:156. doi:10.1007/s00253-024-13007-7",
+  "features": [
+    "contrib-group-affiliations",
+    "figures",
+    "supplementary-material",
+    "many-references",
+    "review"
+  ],
+  "regression": "cyanheads/pubmed-mcp-server#196"
+}

@@ -1,0 +1,26 @@
+{
+  "id": "pmc10754557",
+  "title": "First report of furmonertinib as a first-line treatment in advanced lung adenocarcinoma patients harboring EGFR exon 20 insertion mutations after the kinase domain αC-helix: Two case reports and a literature review",
+  "identifiers": {
+    "pmcid": "PMC10754557",
+    "pmid": "38206746",
+    "doi": "10.1097/MD.0000000000036667"
+  },
+  "url": "https://eutils.ncbi.nlm.nih.gov/entrez/eutils/efetch.fcgi?db=pmc&id=10754557&retmode=xml",
+  "retrieved": "2026-10-04",
+  "license": {
+    "id": "CC-BY-4.0",
+    "url": "https://creativecommons.org/licenses/by/4.0/"
+  },
+  "attribution": "Han H, Zhang X, Liu X, Zhao J, Zhang J, Zhang J, et al. First report of furmonertinib as a first-line treatment in advanced lung adenocarcinoma patients harboring EGFR exon 20 insertion mutations after the kinase domain αC-helix: Two case reports and a literature review. Medicine. 2023;102(52):e36667. doi:10.1097/MD.0000000000036667",
+  "features": [
+    "definition-list",
+    "back-sections",
+    "structured-abstract",
+    "tables",
+    "table-spans",
+    "table-footnotes",
+    "table-cell-breaks",
+    "figures"
+  ]
+}

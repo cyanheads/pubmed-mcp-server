@@ -1,0 +1,30 @@
+{
+  "why": "Wolters Kluwer case report: a five-part structured abstract, one table with spans and three footnote <p>s, and <mixed-citation> references whose <person-group> holds zero-gap <name>s and an empty <etal/>, read as `Zwierenga F, van Veggel B, Hendriks LEL, et al.` with the source's period closing `et al.`, and whose bracketed <label>s (`[19]`) are not bracketed again (#209). Each abstract <sec> title already ends in ':' and is read without a second one. Not pinned, a reported gap: the back-matter abbreviations <def-list> is not returned.",
+  "abstractStartsWith": "Rationale: Many studies have shown that first- and second-generation",
+  "title": "First report of furmonertinib as a first-line treatment in advanced lung adenocarcinoma patients harboring EGFR exon 20 insertion mutations after the kinase domain αC-helix: Two case reports and a literature review",
+  "authors": 9,
+  "affiliations": 5,
+  "figures": 2,
+  "references": 36,
+  "sectionTitles": [
+    "1. Introduction",
+    "2. Case presentation",
+    "2.1. Case 1",
+    "2.2. Case 2",
+    "3. Discussion",
+    "4. Conclusion",
+    "Acknowledgements",
+    "Author contribution"
+  ],
+  "contains": [
+    "| CLN-081 | EGFR TKI | - | - |  |  |  | Phase 1/2 clinical trial | NCT04036682 |",
+    "- [19 R19] Zwierenga F, van Veggel B, Hendriks LEL, et al. High dose osimertinib in patients",
+    "- [20 R20] Piotrowska Z, Wang Y, Lecia V, et al. ECOG-ACRIN 5162"
+  ],
+  "notContains": ["[[", "et al.."],
+  "structuredContains": [
+    "Many studies have shown that first- and second-generation epidermal growth factor receptor tyrosine kinase inhibitors are less effective",
+    "* FDA approval granted.\n** Data collected on November 01, 2022.",
+    "Zwierenga F, van Veggel B, Hendriks LEL, et al. High dose osimertinib in patients"
+  ]
+}

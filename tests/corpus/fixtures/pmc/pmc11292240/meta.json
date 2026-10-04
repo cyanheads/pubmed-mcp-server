@@ -1,0 +1,29 @@
+{
+  "id": "pmc11292240",
+  "title": "Development of a core outcome set for physiotherapy trials in adults with bronchiectasis (the COS-PHyBE study): A Delphi study and consensus meeting",
+  "identifiers": {
+    "pmcid": "PMC11292240",
+    "pmid": "39092259",
+    "doi": "10.1016/j.heliyon.2024.e34101"
+  },
+  "url": "https://eutils.ncbi.nlm.nih.gov/entrez/eutils/efetch.fcgi?db=pmc&id=11292240&retmode=xml",
+  "retrieved": "2026-10-04",
+  "license": {
+    "id": "CC-BY-4.0",
+    "url": "https://creativecommons.org/licenses/by/4.0/"
+  },
+  "attribution": "Hamzeh H, Kelly C, Lee AL, Spinou A, Marques A, Herrero-Cortina B, et al. Development of a core outcome set for physiotherapy trials in adults with bronchiectasis (the COS-PHyBE study): A Delphi study and consensus meeting. Heliyon. 2024;10(14):e34101. doi:10.1016/j.heliyon.2024.e34101",
+  "features": [
+    "structured-abstract",
+    "multiple-abstracts",
+    "contrib-group-affiliations",
+    "tables",
+    "table-spans",
+    "table-footnotes",
+    "figures",
+    "supplementary-material",
+    "element-citation",
+    "research-article"
+  ],
+  "notes": "Its only list sits in the author-highlights abstract and its <collab>s in references, so neither reaches the body output."
+}

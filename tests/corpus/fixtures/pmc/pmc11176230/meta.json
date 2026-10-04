@@ -1,0 +1,30 @@
+{
+  "id": "pmc11176230",
+  "title": "Creatine homeostasis and the kidney: comparison between kidney transplant recipients and healthy controls",
+  "identifiers": {
+    "pmcid": "PMC11176230",
+    "pmid": "38869518",
+    "doi": "10.1007/s00726-024-03401-w"
+  },
+  "url": "https://eutils.ncbi.nlm.nih.gov/entrez/eutils/efetch.fcgi?db=pmc&id=11176230&retmode=xml",
+  "retrieved": "2026-10-04",
+  "license": {
+    "id": "CC-BY-4.0",
+    "url": "https://creativecommons.org/licenses/by/4.0/"
+  },
+  "attribution": "Post A, Groothof D, Kremer D, Knobbe TJ, Abma W, Koops CA, et al. Creatine homeostasis and the kidney: comparison between kidney transplant recipients and healthy controls. Amino Acids. 2024;56:42. doi:10.1007/s00726-024-03401-w",
+  "features": [
+    "tables",
+    "many-tables",
+    "table-spans",
+    "table-footnotes",
+    "table-cell-breaks",
+    "figures",
+    "supplementary-material",
+    "contrib-group-affiliations",
+    "institution-id",
+    "research-article"
+  ],
+  "regression": "cyanheads/pubmed-mcp-server#185",
+  "notes": "Also covers #196: its affiliations sit inside <contrib-group> with ROR and GRID <institution-id>s."
+}

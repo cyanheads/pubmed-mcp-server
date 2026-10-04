@@ -1,0 +1,54 @@
+{
+  "why": "14 MeSH headings, four of them carrying several qualifiers (Glycine has four); a single grant whose Country is an empty element; 13 authors, one with two affiliations; an unstructured abstract.",
+  "title": "Creatine homeostasis and the kidney: comparison between kidney transplant recipients and healthy controls.",
+  "authors": 13,
+  "affiliations": 6,
+  "journal": {
+    "title": "Amino acids",
+    "isoAbbreviation": "Amino Acids",
+    "eIssn": "1438-2199",
+    "volume": "56",
+    "issue": "1",
+    "pages": "42",
+    "elocationId": "42",
+    "elocationIdType": "pii",
+    "publicationDate": { "year": "2024", "month": "Jun", "day": "13" }
+  },
+  "doi": "10.1007/s00726-024-03401-w",
+  "pmcId": "PMC11176230",
+  "publicationTypes": ["Journal Article", "Comparative Study"],
+  "meshMajor": ["Creatine", "Kidney Transplantation", "Homeostasis", "Kidney"],
+  "grantIds": ["A-1003"],
+  "articleDates": "Electronic 2024-06-13",
+  "contains": [
+    "- Stephan J L Bakker (SJL) [aff 1,5]",
+    "Creatine is a natural nitrogenous organic acid that is integral to energy metabolism",
+    "- Glycine [D005998] (analogs & derivatives [Q000031], urine [Q000652], metabolism [Q000378], blood [Q000097])",
+    "#### Grants\n- A-1003 — Top Institute Food and Nutrition"
+  ],
+  "citations": {
+    "apa": [
+      "Heiner-Fokkema, M. R., & Bakker, S. J. L. (2024).",
+      "*56*(1), 42.",
+      "https://doi.org/10.1007/s00726-024-03401-w"
+    ],
+    "mla": ["Post, Adrian, et al.", "vol. 56, no. 1, 2024"],
+    "bibtex": [
+      "{Heiner-Fokkema}, M Rebecca",
+      "{Bakker}, Stephan J L",
+      "number   = {1}",
+      "pages    = {42}"
+    ],
+    "ris": [
+      "AU  - Heiner-Fokkema, M Rebecca",
+      "VL  - 56",
+      "IS  - 1",
+      "SP  - 42",
+      "JO  - Amino Acids"
+    ],
+    "vancouver": [
+      "Post A, Groothof D, Kremer D, Knobbe TJ, Abma W, Koops CA, et al.",
+      "Amino Acids. 2024;56(1):42. doi: 10.1007/s00726-024-03401-w"
+    ]
+  }
+}

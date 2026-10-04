@@ -1,0 +1,30 @@
+{
+  "id": "pmid31844417",
+  "title": "MicroRNA-582-3p negatively regulates cell proliferation and cell cycle progression in acute myeloid leukemia by targeting cyclin B2.",
+  "identifiers": {
+    "pmid": "31844417",
+    "pmcid": "PMC6894134",
+    "doi": "10.1186/s11658-019-0184-7"
+  },
+  "url": "https://eutils.ncbi.nlm.nih.gov/entrez/eutils/efetch.fcgi?db=pubmed&id=31844417&retmode=xml",
+  "retrieved": "2026-10-04",
+  "license": {
+    "id": "CC-BY-4.0",
+    "url": "https://creativecommons.org/licenses/by/4.0/",
+    "source": "https://eutils.ncbi.nlm.nih.gov/entrez/eutils/efetch.fcgi?db=pmc&id=6894134&retmode=xml"
+  },
+  "attribution": "Li H, Tian X, Wang P, Huang M, Xu R, Nie T. MicroRNA-582-3p negatively regulates cell proliferation and cell cycle progression in acute myeloid leukemia by targeting cyclin B2. Cellular & molecular biology letters. 2019;24:66. doi:10.1186/s11658-019-0184-7",
+  "features": [
+    "retraction",
+    "publication-types",
+    "structured-abstract",
+    "inline-markup",
+    "multiple-affiliations",
+    "mesh-terms",
+    "mesh-qualifiers",
+    "keywords",
+    "article-date",
+    "elocation-id"
+  ],
+  "notes": "Retracted in 2025 (PMID 40251503). PubMed's own affiliations carry fused numbering (\"1Department of…\"), which the output reproduces faithfully."
+}

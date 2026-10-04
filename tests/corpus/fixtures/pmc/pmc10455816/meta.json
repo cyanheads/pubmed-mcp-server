@@ -1,0 +1,27 @@
+{
+  "id": "pmc10455816",
+  "title": "Diagnostic Performance of the Radiological Society of North America Consensus Statement for Reporting COVID-19 Chest CT Findings: A Revisit",
+  "identifiers": {
+    "pmcid": "PMC10455816",
+    "pmid": "37629222",
+    "doi": "10.3390/jcm12165180"
+  },
+  "url": "https://eutils.ncbi.nlm.nih.gov/entrez/eutils/efetch.fcgi?db=pmc&id=10455816&retmode=xml",
+  "retrieved": "2026-10-04",
+  "license": {
+    "id": "CC-BY-4.0",
+    "url": "https://creativecommons.org/licenses/by/4.0/"
+  },
+  "attribution": "Hazem M, Ali SI, AlAlwan QM, Al Jabr IK, Alshehri SAF, AlAlwan MQ, et al. Diagnostic Performance of the Radiological Society of North America Consensus Statement for Reporting COVID-19 Chest CT Findings: A Revisit. Journal of Clinical Medicine. 2023;12(16):5180. doi:10.3390/jcm12165180",
+  "features": [
+    "lists",
+    "labelled-lists",
+    "ordered-lists",
+    "nested-lists",
+    "list-in-paragraph",
+    "tables",
+    "figures",
+    "research-article"
+  ],
+  "regression": "cyanheads/pubmed-mcp-server#200"
+}

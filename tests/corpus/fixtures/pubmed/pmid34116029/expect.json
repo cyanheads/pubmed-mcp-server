@@ -1,0 +1,76 @@
+{
+  "why": "A mixed author list with the collective author TGU Investigators fifth; a structured abstract whose first label holds an entity (BACKGROUND &amp; AIMS) and whose text holds cm<sup>2</sup>; 20 MeSH headings; nine grants, one with no GrantID and two with all-digit GrantIDs; a CommentIn notice; Video-Audio Media type; an .e8 page range. The collective author carries its own AffiliationInfo, which it must point at like a person does — all 9 distinct affiliations are returned, and the authors after it are numbered from 5 (#212). The ID-less grant renders its acronym after its agency, never in the ID slot (#214).",
+  "title": "A Pilot Study on Automatic Three-Dimensional Quantification of Barrett's Esophagus for Risk Stratification and Therapy Monitoring.",
+  "abstractLabels": ["BACKGROUND & AIMS", "METHODS", "RESULTS", "CONCLUSIONS"],
+  "authors": 10,
+  "collectiveNames": ["TGU Investigators"],
+  "affiliations": 9,
+  "journal": {
+    "title": "Gastroenterology",
+    "isoAbbreviation": "Gastroenterology",
+    "eIssn": "1528-0012",
+    "volume": "161",
+    "issue": "3",
+    "pages": "865-878.e8",
+    "elocationId": "S0016-5085(21)03087-0",
+    "elocationIdType": "pii",
+    "publicationDate": { "year": "2021", "month": "Sep" }
+  },
+  "doi": "10.1053/j.gastro.2021.05.059",
+  "pmcId": "PMC7617121",
+  "publicationTypes": ["Journal Article", "Research Support, Non-U.S. Gov't", "Video-Audio Media"],
+  "meshMajor": [
+    "Barrett Esophagus",
+    "Deep Learning",
+    "Esophageal Mucosa",
+    "Esophagogastric Junction",
+    "Esophagoscopy",
+    "Image Interpretation, Computer-Assisted",
+    "Imaging, Three-Dimensional"
+  ],
+  "grantIds": [
+    null,
+    "MC_PC_MR/S025952/1",
+    "206314/Z/17/Z",
+    "29021",
+    "MC_UU_00008/7",
+    "MC_UU_12010/7",
+    "109965/Z/15/Z",
+    "206314",
+    "MR/S036377/1"
+  ],
+  "commentsCorrections": [{ "refType": "CommentIn", "pmid": "34197829" }],
+  "articleDates": "Electronic 2021-06-08",
+  "contains": [
+    "**Authors (10):**",
+    "- Maryam Haghighat (M) [aff 3]\n- TGU Investigators (collective) [aff 4]\n- Simon J Leedham (SJ) [aff 5]",
+    "- [4] Translational Gastroenterology Unit, Experimental Medicine Division, Nuffield Department of Medicine, John Radcliffe Hospital, University of Oxford, Oxford, United Kingdom.\n",
+    "BACKGROUND & AIMS: Barrett's epithelium measurement using widely accepted Prague C&M classification",
+    "with only ±0.4 cm² average deviation",
+    "- **CommentIn:** Gastroenterology. 2021 Sep;161(3):802-804. doi: 10.1053/j.gastro.2021.06.071. — PMID 34197829",
+    "- Barrett Esophagus [D001471] (major) (classification [Q000145], pathology [Q000473] (major), therapy [Q000628])",
+    "#### Grants\n- Department of Health (DH_) — United Kingdom\n",
+    "- 206314/Z/17/Z (WT_) — Wellcome Trust — United Kingdom",
+    "- 29021 (CRUK_) — Cancer Research UK — United Kingdom"
+  ],
+  "citations": {
+    "apa": [
+      "Ali, S., Bailey, A., Ash, S., Haghighat, M., TGU Investigators, Leedham, S. J., Lu, X., East, J. E., Rittscher, J., & Braden, B. (2021).",
+      "*161*(3)",
+      "https://doi.org/10.1053/j.gastro.2021.05.059"
+    ],
+    "mla": ["Ali, Sharib, et al.", "vol. 161, no. 3, 2021"],
+    "bibtex": [
+      "{Haghighat}, Maryam and {TGU Investigators} and {Leedham}, Simon J",
+      "number   = {3}",
+      "pages    = {865-878.e8}",
+      "issn     = {1528-0012}"
+    ],
+    "ris": ["AU  - TGU Investigators", "VL  - 161", "IS  - 3", "SP  - 865", "EP  - 878.e8"],
+    "vancouver": [
+      "Ali S, Bailey A, Ash S, Haghighat M, TGU Investigators, Leedham SJ, et al.",
+      "Gastroenterology. 2021;161(3):865-878.e8. doi: 10.1053/j.gastro.2021.05.059"
+    ]
+  },
+  "knownProblems": []
+}

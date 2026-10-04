@@ -1,0 +1,33 @@
+{
+  "why": "Elsevier (Heliyon) deposit: a structured abstract (Background/Methods/Results/Conclusion) beside a typed author-highlights abstract, the untyped one read as designed (#134); three tables with colspan/rowspan, Table 1's footer of eleven <p>s returned as eleven footnote lines; <element-citation> references with <etal/>, <collab> authors inside references, and adjacent <volume><issue> and <fpage><lpage> read as `64(Suppl 1)` and `i1–i51` (#209).",
+  "title": "Development of a core outcome set for physiotherapy trials in adults with bronchiectasis (the COS-PHyBE study): A Delphi study and consensus meeting",
+  "authors": 9,
+  "affiliations": 12,
+  "figures": 1,
+  "supplements": 1,
+  "references": 36,
+  "abstractStartsWith": "Background: Physiotherapy is recommended for bronchiectasis management",
+  "sectionTitles": [
+    "Ethics and consent",
+    "Introduction",
+    "Methods",
+    "Registration and protocol",
+    "Deviations from protocol",
+    "Results",
+    "Consensus meeting results",
+    "Discussion",
+    "Strengths and Limitations",
+    "Conclusion",
+    "CRediT authorship contribution statement",
+    "Declaration of competing interest"
+  ],
+  "contains": [
+    "spontaneously breathing patient Thorax 64(Suppl 1) 2009 i1–i51 PMID 19406863",
+    "Nurse Res. 16(1) 2008 56–71 PMID 19025106"
+  ],
+  "structuredContains": [
+    "*Economy of participants' country, according to the World Bank Classification [26].\nICU: Intensive Care Unit.",
+    "Bott J., Blumenthal S., Buxton M., Ellum S., Falconer C., Garrod R., et al. Guidelines for the physiotherapy management",
+    "Halcomb E., Davidson P., Hardaker L. Using the consensus development conference method in healthcare research Nurse Res. 16(1) 2008 56–71"
+  ]
+}

@@ -1,0 +1,24 @@
+{
+  "why": "Regression fixture for #196: every <aff> sits inside <contrib-group>, and all four reach affiliations. The abstract is all <sec>s (Abstract, Key points, Graphical Abstract, Supplementary Information), so each is read with its title. 220 references and an unlabelled graphical-abstract <fig> beside five labelled figures.",
+  "title": "Therapeutic applications of gut microbes in cardiometabolic diseases: current state and perspectives",
+  "authors": 11,
+  "affiliations": 4,
+  "tables": 0,
+  "figures": 6,
+  "supplements": 1,
+  "references": 220,
+  "abstractStartsWith": "Abstract: Cardiometabolic disease (CMD) encompasses a range of diseases such as hypertension",
+  "sectionTitles": [
+    "Introduction",
+    "Gut microbiome in CMD: altered composition of gut microbiota",
+    "Hypertension",
+    "Changes in microbial metabolites",
+    "TMAO",
+    "Potential therapeutic means",
+    "Conclusions and future perspectives",
+    "Supplementary Information"
+  ],
+  "contains": [
+    "- 1 School of Food and Biological Engineering, Shaanxi University of Science and Technology, Xi’an, 710021 China"
+  ]
+}

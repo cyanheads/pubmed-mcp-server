@@ -1,0 +1,55 @@
+{
+  "why": "Inline markup in the abstract: <i> runs that must be stripped with their text kept, and two superscripts that nest an italic (<i>miR223</i> <sup>-/<i>y</i></sup>, the hemizygous-knockout genotype). The genotype renders through the ^ fallback with the source's spacing kept, \"(miR223 ^-/y ) developed\" and \"miR223 ^-/y mice\", on both surfaces and in the RIS AB field; before #211 the superscript was dropped and its neighbours fused into \"(miR223) developed\" and \"miR223mice\". Also an article-number journal with no Issue element, for which journalInfo carries no issue key (#213).",
+  "title": "MicroRNA-223 Regulates the Development of Cardiovascular Lesions in LCWE-Induced Murine Kawasaki Disease Vasculitis by Repressing the NLRP3 Inflammasome.",
+  "authors": 11,
+  "affiliations": 3,
+  "journal": {
+    "title": "Frontiers in pediatrics",
+    "isoAbbreviation": "Front Pediatr",
+    "issn": "2296-2360",
+    "volume": "9",
+    "pages": "662953",
+    "elocationId": "662953",
+    "elocationIdType": "pii",
+    "publicationDate": { "year": "2021" }
+  },
+  "doi": "10.3389/fped.2021.662953",
+  "pmcId": "PMC8138581",
+  "publicationTypes": ["Journal Article"],
+  "articleDates": "Electronic 2021-05-07",
+  "contains": [
+    "- Shuang Chen (S) [aff 0,1]",
+    "- Michael C Fishbein (MC) [aff 2]",
+    "Here, using the Lactobacillus casei cell wall extract (LCWE) murine model of KD vasculitis",
+    "IL-1β production",
+    "LCWE-injected miR-223-deficient mice (miR223 ^-/y ) developed more severe",
+    "LCWE-injected miR223 ^-/y mice correlated with increased NLRP3",
+    "**Keywords:** IL-1 beta, Kawasaki disease, LCWE, NLRP3, miR-223, vasculitis"
+  ],
+  "notContains": ["miR223mice", "(miR223) developed"],
+  "citations": {
+    "apa": [
+      "Maruyama, D., Kocatürk, B., Lee, Y., Abe, M., Lane, M., Moreira, D., Chen, S., Fishbein, M. C., Porritt, R. A., Noval Rivas, M., & Arditi, M. (2021).",
+      "https://doi.org/10.3389/fped.2021.662953"
+    ],
+    "mla": ["Maruyama, Daisuke, et al.", "vol. 9, 2021"],
+    "bibtex": [
+      "{Noval Rivas}, Magali",
+      "volume   = {9}",
+      "issn     = {2296-2360}",
+      "keywords = {{IL-1 beta}, {Kawasaki disease}, {LCWE}, {NLRP3}, {miR-223}, {vasculitis}}"
+    ],
+    "ris": [
+      "AU  - Noval Rivas, Magali",
+      "JF  - Frontiers in pediatrics",
+      "JO  - Front Pediatr",
+      "VL  - 9",
+      "SP  - 662953",
+      "LCWE-injected miR223 ^-/y mice correlated"
+    ],
+    "vancouver": [
+      "Maruyama D, Kocatürk B, Lee Y, Abe M, Lane M, Moreira D, et al.",
+      "Front Pediatr. 2021;9:662953. doi: 10.3389/fped.2021.662953"
+    ]
+  }
+}

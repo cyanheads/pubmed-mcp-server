@@ -15,3 +15,4 @@
 bun.lock linguist-generated
 CHANGELOG.md linguist-generated
 docs/tree.md linguist-generated
+tests/corpus/fixtures/** -text

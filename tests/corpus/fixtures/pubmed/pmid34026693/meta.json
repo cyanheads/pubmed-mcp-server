@@ -1,0 +1,26 @@
+{
+  "id": "pmid34026693",
+  "title": "MicroRNA-223 Regulates the Development of Cardiovascular Lesions in LCWE-Induced Murine Kawasaki Disease Vasculitis by Repressing the NLRP3 Inflammasome.",
+  "identifiers": {
+    "pmid": "34026693",
+    "pmcid": "PMC8138581",
+    "doi": "10.3389/fped.2021.662953"
+  },
+  "url": "https://eutils.ncbi.nlm.nih.gov/entrez/eutils/efetch.fcgi?db=pubmed&id=34026693&retmode=xml",
+  "retrieved": "2026-10-04",
+  "license": {
+    "id": "CC-BY-4.0",
+    "url": "https://creativecommons.org/licenses/by/4.0/",
+    "source": "https://eutils.ncbi.nlm.nih.gov/entrez/eutils/efetch.fcgi?db=pmc&id=8138581&retmode=xml"
+  },
+  "attribution": "Maruyama D, Kocatürk B, Lee Y, Abe M, Lane M, Moreira D, et al. MicroRNA-223 Regulates the Development of Cardiovascular Lesions in LCWE-Induced Murine Kawasaki Disease Vasculitis by Repressing the NLRP3 Inflammasome. Frontiers in pediatrics. 2021;9:662953. doi:10.3389/fped.2021.662953",
+  "features": [
+    "inline-markup",
+    "nested-inline-markup",
+    "multiple-affiliations",
+    "keywords",
+    "article-date",
+    "elocation-id"
+  ],
+  "notes": "Its abstract nests italic inside a superscript twice (<i>miR223</i> <sup>-/<i>y</i></sup>). No MeSH or grants on the record."
+}

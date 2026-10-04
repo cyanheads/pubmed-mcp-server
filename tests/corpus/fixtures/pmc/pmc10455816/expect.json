@@ -1,0 +1,23 @@
+{
+  "why": "Regression fixture for #200: a list-type=\"simple\" list nested inside the first item's <p> of a list-type=\"order\" list puts each nested item on its own indented line, labels kept, and the next ordered item starts its own line. Also an unlabelled ordered list numbered 1., 2., 3. and a labelled (a)–(d) list in a third-level section folded into its subsection's text.",
+  "title": "Diagnostic Performance of the Radiological Society of North America Consensus Statement for Reporting COVID-19 Chest CT Findings: A Revisit",
+  "authors": 10,
+  "affiliations": 7,
+  "figures": 6,
+  "references": 41,
+  "sectionTitles": [
+    "1. Introduction",
+    "2. Methodology",
+    "2.1. Study Design",
+    "2.6. Statistical Analysis",
+    "3. Results",
+    "4. Exploring FPs, FNs, and TNs",
+    "5. Discussion",
+    "6. Conclusions"
+  ],
+  "contains": [
+    "1. Clinically suspected COVID-19 infection, including\n  - Fever with one or more of the following symptoms: dyspnea, cough, and sore throat.\n  - Contact with a positive case of COVID-19 infection and exhibition of mild symptoms.\n2. Chest CT scan performed after admission.\n3. Duration of the interval between the CT examination and RT-PCR of less than 7 days.",
+    "(a) No RT-PCR test results for COVID-19.\n(b) The interval between RT-PCR and the CT examination was more than 7 days."
+  ],
+  "notContains": ["including - Fever", "including\n- Fever"]
+}

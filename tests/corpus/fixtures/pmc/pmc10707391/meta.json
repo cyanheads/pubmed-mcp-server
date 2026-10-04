@@ -1,0 +1,31 @@
+{
+  "id": "pmc10707391",
+  "title": "The Current Knowledge of Cerebral Magnetic Resonance Imaging in Monochorionic Twins: A Systematic Review of the Last 20 Years",
+  "identifiers": {
+    "pmcid": "PMC10707391",
+    "pmid": "38068261",
+    "doi": "10.3390/jcm12237211"
+  },
+  "url": "https://eutils.ncbi.nlm.nih.gov/entrez/eutils/efetch.fcgi?db=pmc&id=10707391&retmode=xml",
+  "retrieved": "2026-10-04",
+  "license": {
+    "id": "CC-BY-4.0",
+    "url": "https://creativecommons.org/licenses/by/4.0/"
+  },
+  "attribution": "Rondagh M, Lopriore E, de Vries LS, Slaghekke F, Tollenaar LSA, van Klink JMM, et al. The Current Knowledge of Cerebral Magnetic Resonance Imaging in Monochorionic Twins: A Systematic Review of the Last 20 Years. Journal of Clinical Medicine. 2023;12(23):7211. doi:10.3390/jcm12237211",
+  "features": [
+    "lists",
+    "labelled-lists",
+    "nested-lists",
+    "list-in-paragraph",
+    "tables",
+    "table-spans",
+    "table-footnotes",
+    "table-cell-breaks",
+    "figures",
+    "appendix",
+    "back-sections",
+    "research-article"
+  ],
+  "notes": "Every list, including the ones nested inside a list item's <p>, sits in <back>/<app-group>, which the tool does not return today."
+}

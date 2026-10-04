@@ -1,0 +1,33 @@
+{
+  "id": "pmid34116029",
+  "title": "A Pilot Study on Automatic Three-Dimensional Quantification of Barrett's Esophagus for Risk Stratification and Therapy Monitoring.",
+  "identifiers": {
+    "pmid": "34116029",
+    "pmcid": "PMC7617121",
+    "doi": "10.1053/j.gastro.2021.05.059"
+  },
+  "url": "https://eutils.ncbi.nlm.nih.gov/entrez/eutils/efetch.fcgi?db=pubmed&id=34116029&retmode=xml",
+  "retrieved": "2026-10-04",
+  "license": {
+    "id": "CC-BY-4.0",
+    "url": "https://creativecommons.org/licenses/by/4.0/",
+    "source": "https://eutils.ncbi.nlm.nih.gov/entrez/eutils/efetch.fcgi?db=pmc&id=7617121&retmode=xml"
+  },
+  "attribution": "Ali S, Bailey A, Ash S, Haghighat M, TGU Investigators, Leedham SJ, et al. A Pilot Study on Automatic Three-Dimensional Quantification of Barrett's Esophagus for Risk Stratification and Therapy Monitoring. Gastroenterology. 2021;161(3):865-878.e8. doi:10.1053/j.gastro.2021.05.059",
+  "features": [
+    "structured-abstract",
+    "inline-markup",
+    "collective-author",
+    "mixed-author-list",
+    "mesh-terms",
+    "mesh-qualifiers",
+    "keywords",
+    "publication-types",
+    "grants",
+    "comment",
+    "article-date",
+    "elocation-id",
+    "pagination"
+  ],
+  "notes": "The collective author \"TGU Investigators\" carries its own affiliation, and the record's InvestigatorList names its 22 members. The PMC copy is a funder author manuscript."
+}

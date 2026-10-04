@@ -1,0 +1,73 @@
+{
+  "why": "A five-label structured abstract whose labels differ from their NlmCategory, an entity (&#x3b1;) in the title, Review + Case Reports types, 16 MeSH headings with 8 qualifiers, two ORCIDs, and a print-model record with no ArticleDate. The first ORCID is truncated in PubMed itself (0009-0005-0103-758); the output reproduces it faithfully.",
+  "title": "First report of furmonertinib as a first-line treatment in advanced lung adenocarcinoma patients harboring EGFR exon 20 insertion mutations after the kinase domain αC-helix: Two case reports and a literature review.",
+  "abstractLabels": ["RATIONALE", "PATIENT CONCERNS", "INTERVENTIONS", "OUTCOMES", "CONCLUSION"],
+  "authors": 9,
+  "orcids": ["0009-0005-0103-758", "0000-0001-5864-4819"],
+  "affiliations": 5,
+  "journal": {
+    "title": "Medicine",
+    "isoAbbreviation": "Medicine (Baltimore)",
+    "eIssn": "1536-5964",
+    "volume": "102",
+    "issue": "52",
+    "pages": "e36667",
+    "elocationId": "e36667",
+    "elocationIdType": "pii",
+    "publicationDate": { "year": "2023", "month": "Dec", "day": "29" }
+  },
+  "doi": "10.1097/MD.0000000000036667",
+  "pmcId": "PMC10754557",
+  "publicationTypes": ["Review", "Case Reports", "Journal Article"],
+  "meshMajor": [
+    "Carcinoma, Non-Small-Cell Lung",
+    "Lung Neoplasms",
+    "Adenocarcinoma of Lung",
+    "Indoles",
+    "Pyridines",
+    "Pyrimidines"
+  ],
+  "contains": [
+    "### First report of furmonertinib as a first-line treatment in advanced lung adenocarcinoma patients harboring EGFR exon 20 insertion mutations after the kinase domain αC-helix",
+    "- Huan Han (H) [aff 0] · ORCID 0009-0005-0103-758",
+    "- Hong Tang (H) [aff 0] · ORCID 0000-0001-5864-4819",
+    "**Journal:** Medicine, (Medicine (Baltimore)), 2023 Dec 29, **102**(52), e36667, pii: e36667, eISSN 1536-5964",
+    "**Type:** Review, Case Reports, Journal Article",
+    "PATIENT CONCERNS: We report for the first time 2 Chinese patients diagnosed with advanced lung adenocarcinoma",
+    "- Lung Neoplasms [D008175] (major) (drug therapy [Q000188], genetics [Q000235], pathology [Q000473])"
+  ],
+  "notContains": ["**Article Dates:**"],
+  "citations": {
+    "apa": [
+      "Han, H., Zhang, X., Liu, X., Zhao, J., Zhang, J., Zhang, J., Zhu, H., Jiao, S., & Tang, H. (2023).",
+      "*102*(52), e36667.",
+      "https://doi.org/10.1097/MD.0000000000036667"
+    ],
+    "mla": [
+      "Han, Huan, et al.",
+      "vol. 102, no. 52, 2023",
+      "https://doi.org/10.1097/MD.0000000000036667"
+    ],
+    "bibtex": [
+      "author   = {{Han}, Huan and {Zhang}, Xiao and {Liu}, Xiao and {Zhao}, Jiuzhou and {Zhang}, Jianbo and {Zhang}, Jianwei and {Zhu}, Hui and {Jiao}, Shuyue and {Tang}, Hong}",
+      "volume   = {102}",
+      "number   = {52}",
+      "pages    = {e36667}",
+      "doi      = {10.1097/MD.0000000000036667}",
+      "pmcid    = {PMC10754557}"
+    ],
+    "ris": [
+      "AU  - Han, Huan",
+      "AU  - Tang, Hong",
+      "JO  - Medicine (Baltimore)",
+      "VL  - 102",
+      "IS  - 52",
+      "SP  - e36667",
+      "DO  - 10.1097/MD.0000000000036667"
+    ],
+    "vancouver": [
+      "Han H, Zhang X, Liu X, Zhao J, Zhang J, Zhang J, et al.",
+      "Medicine (Baltimore). 2023;102(52):e36667. doi: 10.1097/MD.0000000000036667"
+    ]
+  }
+}

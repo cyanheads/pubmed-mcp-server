@@ -1,0 +1,53 @@
+{
+  "why": "An ErratumIn notice linked by PMID, author keywords, an electronic ArticleDate, and a print-typed ISSN on an article-number journal. No MeSH or grants on the record.",
+  "title": "Securing consensus in fractional-order multi-agent systems: Algebraic approaches against Byzantine attacks.",
+  "authors": 7,
+  "affiliations": 5,
+  "journal": {
+    "title": "Heliyon",
+    "isoAbbreviation": "Heliyon",
+    "issn": "2405-8440",
+    "volume": "10",
+    "issue": "22",
+    "pages": "e40335",
+    "elocationId": "e40335",
+    "elocationIdType": "pii",
+    "publicationDate": { "year": "2024", "month": "Nov", "day": "30" }
+  },
+  "doi": "10.1016/j.heliyon.2024.e40335",
+  "pmcId": "PMC11609225",
+  "publicationTypes": ["Journal Article"],
+  "commentsCorrections": [{ "refType": "ErratumIn", "pmid": "41216527" }],
+  "articleDates": "Electronic 2024-11-13",
+  "contains": [
+    "#### Comments and Corrections (1)",
+    "- **ErratumIn:** Heliyon. 2025 Jun 30;11(12):e43572. doi: 10.1016/j.heliyon.2025.e43572. — PMID 41216527",
+    "- Azmat Ullah Khan Niazi (AUK) [aff 4]",
+    "**Keywords:** Byzantine attacks, Fractional-order Lyapunov approach, Fractional-order systems, Leader-following consensus, Nonlinear dynamics"
+  ],
+  "citations": {
+    "apa": [
+      "Zhong, Y., Khan, A., Javeed, M. A., Raza, H., Hassan, W. U., Niazi, A. U. K., & Mehmood, M. U. (2024).",
+      "*10*(22), e40335.",
+      "https://doi.org/10.1016/j.heliyon.2024.e40335"
+    ],
+    "mla": ["Zhong, Yubin, et al.", "vol. 10, no. 22, 2024"],
+    "bibtex": [
+      "{Niazi}, Azmat Ullah Khan",
+      "number   = {22}",
+      "pages    = {e40335}",
+      "issn     = {2405-8440}"
+    ],
+    "ris": [
+      "AU  - Mehmood, Muhammad Usman",
+      "VL  - 10",
+      "IS  - 22",
+      "SP  - e40335",
+      "KW  - Nonlinear dynamics"
+    ],
+    "vancouver": [
+      "Zhong Y, Khan A, Javeed MA, Raza H, Hassan WU, Niazi AUK, et al.",
+      "Heliyon. 2024;10(22):e40335. doi: 10.1016/j.heliyon.2024.e40335"
+    ]
+  }
+}

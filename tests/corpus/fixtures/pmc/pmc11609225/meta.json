@@ -1,0 +1,25 @@
+{
+  "id": "pmc11609225",
+  "title": "Securing consensus in fractional-order multi-agent systems: Algebraic approaches against Byzantine attacks",
+  "identifiers": {
+    "pmcid": "PMC11609225",
+    "pmid": "39624286",
+    "doi": "10.1016/j.heliyon.2024.e40335"
+  },
+  "url": "https://eutils.ncbi.nlm.nih.gov/entrez/eutils/efetch.fcgi?db=pmc&id=11609225&retmode=xml",
+  "retrieved": "2026-10-04",
+  "license": {
+    "id": "CC-BY-4.0",
+    "url": "https://creativecommons.org/licenses/by/4.0/"
+  },
+  "attribution": "Zhong Y, Khan A, Javeed MA, Raza H, Hassan WU, Niazi AUK, et al. Securing consensus in fractional-order multi-agent systems: Algebraic approaches against Byzantine attacks. Heliyon. 2024;10(22):e40335. doi:10.1016/j.heliyon.2024.e40335",
+  "features": [
+    "inline-math",
+    "display-math",
+    "lists",
+    "labelled-lists",
+    "disp-quote",
+    "figures",
+    "research-article"
+  ]
+}
