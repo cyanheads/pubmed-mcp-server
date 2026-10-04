@@ -13,8 +13,10 @@
  * serving an unexplained empty window.
  *
  * Transient failures retry with capped exponential backoff. Once retries run
- * out, only a `ServiceUnavailable` is reported as `openalex_unreachable`; a
- * `Timeout` or `RateLimited` keeps its own code and any upstream `retryAfter`.
+ * out, the last attempt's `data.reason` is kept (`openalex_invalid_response` for
+ * a body that is not JSON), and only a `ServiceUnavailable` with no reason is
+ * reported as `openalex_unreachable`; a `Timeout` or `RateLimited` keeps its own
+ * code and any upstream `retryAfter`.
  *
  * Uses the NCBI_ADMIN_EMAIL config (adminEmail) as the OpenAlex polite-pool
  * `mailto=` parameter when set; omits it when unset.
@@ -263,10 +265,12 @@ export class OpenAlexService {
 
   /**
    * Retry wrapper for transient errors. On exhaustion the last error keeps its
-   * code and an upstream `retryAfter`, so a 429 still tells the caller how long to
-   * wait. Only a `ServiceUnavailable` gains `openalex_unreachable` — the one code
-   * that reason is declared for; a `Timeout` or `RateLimited` keeps its
-   * code with no reason, as the Europe PMC service reports them.
+   * code, its `data.reason`, and an upstream `retryAfter`, so a 429 still tells the
+   * caller how long to wait and an unparseable body stays
+   * `openalex_invalid_response`. Only a `ServiceUnavailable` carrying no reason
+   * gains `openalex_unreachable` — the one code that reason is declared for; a
+   * `Timeout` or `RateLimited` keeps its code with no reason, as the Europe PMC
+   * service reports them.
    */
   private async withRetry<T>(
     execute: () => Promise<T>,
@@ -299,13 +303,14 @@ export class OpenAlexService {
         }
 
         const attempts = this.maxRetries + 1;
+        const reason =
+          error.data?.reason ??
+          (error.code === JsonRpcErrorCode.ServiceUnavailable ? 'openalex_unreachable' : undefined);
         throw new McpError(
           error.code,
           `${error.message} (failed after ${attempts} attempt${attempts === 1 ? '' : 's'})`,
           {
-            ...(error.code === JsonRpcErrorCode.ServiceUnavailable && {
-              reason: 'openalex_unreachable',
-            }),
+            ...(reason !== undefined && { reason }),
             label,
             attempts,
             ...(error.data?.retryAfter !== undefined && { retryAfter: error.data.retryAfter }),

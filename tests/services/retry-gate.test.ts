@@ -65,6 +65,8 @@ let setTimeoutSpy: ReturnType<typeof vi.spyOn>;
 
 beforeEach(() => {
   mockFetchWithTimeout.mockReset();
+  mockFetchWithTimeout.mockRejectedValue(new Error('unmocked fetchWithTimeout'));
+  fetchSpy = vi.spyOn(globalThis, 'fetch').mockRejectedValue(new Error('unmocked fetch'));
   // Fire backoff sleeps immediately so an exhausted retry chain doesn't actually wait.
   setTimeoutSpy = vi.spyOn(globalThis, 'setTimeout').mockImplementation(((
     fn: () => void,
@@ -290,6 +292,133 @@ describe('OpenAlexService retry gate', () => {
         retryAfter: '9',
       });
       expect(mockFetchWithTimeout).toHaveBeenCalledTimes(EXHAUSTED_ATTEMPTS);
+    });
+  });
+
+  /**
+   * The client stamps a body it cannot parse `openalex_invalid_response`; once retries
+   * run out, the last attempt's reason is the one reported. `openalex_unreachable` is
+   * only the fallback for a `ServiceUnavailable` that carries no reason. (#182)
+   */
+  describe('exhaustion keeps the last attempt’s reason (#182)', () => {
+    const PMID = '31452104';
+    const WORK = {
+      id: 'https://openalex.org/W2964120015',
+      related_works: ['https://openalex.org/W1'],
+      referenced_works: ['https://openalex.org/W2'],
+    };
+    const suffix = new RegExp(`\\(failed after ${EXHAUSTED_ATTEMPTS} attempts\\)$`);
+    const nonJson = () => new Response('<html>oops</html>', { status: 200 });
+
+    /** Which client method a `fetchWithTimeout` URL belongs to. */
+    function routeOf(url: string): 'work' | 'citedBy' | 'resolve' {
+      const decoded = decodeURIComponent(url);
+      if (decoded.includes('/works/pmid:')) return 'work';
+      if (decoded.includes('filter=cites:')) return 'citedBy';
+      if (decoded.includes('filter=openalex:')) return 'resolve';
+      throw new Error(`unrouted OpenAlex URL: ${url}`);
+    }
+
+    /** Serve the source work as JSON and answer `failing` with a non-JSON body. */
+    function failOn(failing: 'work' | 'citedBy' | 'resolve') {
+      mockFetchWithTimeout.mockImplementation(async (url: string) => {
+        const route = routeOf(url);
+        if (route === failing) return nonJson();
+        if (route === 'work') return new Response(JSON.stringify(WORK), { status: 200 });
+        throw new Error(`unexpected ${route} request`);
+      });
+    }
+
+    it.each([
+      [
+        'getWorkByPmid',
+        'work',
+        (s: InstanceType<typeof OpenAlexService>) => s.similar(PMID, 10),
+        `getWorkByPmid(${PMID})`,
+        EXHAUSTED_ATTEMPTS,
+      ],
+      [
+        'getCitedBy',
+        'citedBy',
+        (s: InstanceType<typeof OpenAlexService>) => s.citedBy(PMID, 10),
+        `getCitedBy(${WORK.id}, page 1)`,
+        1 + EXHAUSTED_ATTEMPTS,
+      ],
+      [
+        'resolveOaIdsToPmids',
+        'resolve',
+        (s: InstanceType<typeof OpenAlexService>) => s.references(PMID, 10),
+        `resolveReferencedWorks(${PMID})`,
+        1 + EXHAUSTED_ATTEMPTS,
+      ],
+    ] as const)(
+      'reports an exhausted non-JSON body from %s as openalex_invalid_response',
+      async (_method, route, call, label, requests) => {
+        failOn(route);
+
+        const err = (await call(buildOpenAlexService()).catch((e: unknown) => e)) as McpError;
+
+        expect(err).toBeInstanceOf(McpError);
+        expect(err.code).toBe(JsonRpcErrorCode.ServiceUnavailable);
+        expect(err.message).toBe(
+          `OpenAlex returned a non-JSON body. (failed after ${EXHAUSTED_ATTEMPTS} attempts)`,
+        );
+        expect(err.data).toEqual({
+          reason: 'openalex_invalid_response',
+          label,
+          attempts: EXHAUSTED_ATTEMPTS,
+        });
+        expect((err.cause as McpError).data?.reason).toBe('openalex_invalid_response');
+        expect(mockFetchWithTimeout).toHaveBeenCalledTimes(requests);
+      },
+    );
+
+    it('lets the last attempt decide: non-JSON bodies, then a reasonless 503', async () => {
+      const unavailable = await fetchHttpError(503);
+      mockFetchWithTimeout
+        .mockImplementationOnce(async () => nonJson())
+        .mockImplementationOnce(async () => nonJson())
+        .mockRejectedValueOnce(unavailable);
+
+      const err = (await buildOpenAlexService()
+        .similar(PMID, 10)
+        .catch((e: unknown) => e)) as McpError;
+
+      expect(err.code).toBe(JsonRpcErrorCode.ServiceUnavailable);
+      expect(err.message).toMatch(suffix);
+      expect(err.data).toMatchObject({ reason: 'openalex_unreachable', attempts: 3 });
+      expect(mockFetchWithTimeout).toHaveBeenCalledTimes(EXHAUSTED_ATTEMPTS);
+    });
+
+    it('lets the last attempt decide: reasonless 503s, then a non-JSON body', async () => {
+      const unavailable = await fetchHttpError(503);
+      mockFetchWithTimeout
+        .mockRejectedValueOnce(unavailable)
+        .mockRejectedValueOnce(unavailable)
+        .mockImplementationOnce(async () => nonJson());
+
+      const err = (await buildOpenAlexService()
+        .similar(PMID, 10)
+        .catch((e: unknown) => e)) as McpError;
+
+      expect(err.code).toBe(JsonRpcErrorCode.ServiceUnavailable);
+      expect(err.message).toBe(
+        `OpenAlex returned a non-JSON body. (failed after ${EXHAUSTED_ATTEMPTS} attempts)`,
+      );
+      expect(err.data).toMatchObject({ reason: 'openalex_invalid_response', attempts: 3 });
+      expect(mockFetchWithTimeout).toHaveBeenCalledTimes(EXHAUSTED_ATTEMPTS);
+    });
+
+    it('recovers when a later attempt parses', async () => {
+      mockFetchWithTimeout
+        .mockImplementationOnce(async () => nonJson())
+        .mockImplementationOnce(async () => new Response('null', { status: 200 }));
+
+      await expect(buildOpenAlexService().similar(PMID, 10)).resolves.toMatchObject({
+        pmids: [],
+        totalCount: 0,
+      });
+      expect(mockFetchWithTimeout).toHaveBeenCalledTimes(2);
     });
   });
 });

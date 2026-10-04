@@ -146,7 +146,7 @@ export const OPENALEX_SERVICE_ERRORS = [
   {
     reason: 'openalex_invalid_response',
     code: JsonRpcErrorCode.ServiceUnavailable,
-    when: 'OpenAlex returned a body that could not be parsed (invalid JSON).',
+    when: 'The last of the retry attempts against OpenAlex returned a body that could not be parsed as JSON.',
     recovery: 'Retry the request; OpenAlex returned a malformed response that could not be parsed.',
     retryable: true,
     thrownBy: 'service',
