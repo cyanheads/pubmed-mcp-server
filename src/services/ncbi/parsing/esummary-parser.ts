@@ -84,6 +84,30 @@ export function parseNcbiDate(dateStr: string): string | undefined {
   return `${year}-01-01`;
 }
 
+/** Opens the revision date inside a Bookshelf chapter's `DocDate`. */
+const DOC_DATE_UPDATED = '[updated ';
+
+/**
+ * A Bookshelf chapter's own date from its ESummary `DocDate` — `1998 Oct 23
+ * [updated 2018 Dec 20]`, `2025 Jul 3`, `2021 Sep`, or `2026`: the revision when
+ * there is one, otherwise the contribution date, as `pubmed_format_citations`
+ * dates the chapter (#189). An unreadable revision falls back to the
+ * contribution date; undefined when neither is one of ESummary's date forms, so
+ * the caller keeps the book's date rather than guessing. (#199)
+ */
+export function chapterDateFromDocDate(docDate: string): string | undefined {
+  const readable = (part: string) => {
+    const trimmed = part.trim();
+    return parseNcbiDate(trimmed) ? trimmed : undefined;
+  };
+  const updated = docDate.indexOf(DOC_DATE_UPDATED);
+  const close = updated === -1 ? -1 : docDate.indexOf(']', updated);
+  const revised =
+    close === -1 ? undefined : readable(docDate.slice(updated + DOC_DATE_UPDATED.length, close));
+  const bracket = docDate.indexOf('[');
+  return revised ?? readable(docDate.slice(0, bracket === -1 ? undefined : bracket));
+}
+
 /**
  * Standardizes date strings from ESummary to 'YYYY-MM-DD' format.
  * Uses a dedicated NCBI date parser for known formats, falling back to
@@ -318,13 +342,17 @@ function parseSingleDocumentSummary(docSummary: ESummaryDocumentSummary): Omit<
   const title = getText(docSummary.Title);
   const source =
     getText(docSummary.Source) || getText(docSummary.FullJournalName) || getText(docSummary.SO);
-  const rawPubDate = getText(docSummary.PubDate);
-  const rawEPubDate = getText(docSummary.EPubDate);
   // A Bookshelf record leaves Source and FullJournalName empty and carries its
   // venue here instead, so without these a book summary renders with none. (#114)
   const bookTitle = getText(docSummary.BookTitle);
   const publisherName = getText(docSummary.PublisherName);
   const docType = getText(docSummary.DocType);
+  // A chapter's PubDate is its book's (GeneReviews: 1993); its own dates are in
+  // DocDate, which ESummary sets on chapters only. (#199)
+  const chapterDate =
+    docType === 'chapter' ? chapterDateFromDocDate(getText(docSummary.DocDate)) : undefined;
+  const rawPubDate = chapterDate ?? getText(docSummary.PubDate);
+  const rawEPubDate = getText(docSummary.EPubDate);
 
   return {
     pmid: String(pmid),

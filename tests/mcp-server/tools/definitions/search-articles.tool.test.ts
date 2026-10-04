@@ -7,12 +7,14 @@ import type { ContentBlock } from '@cyanheads/mcp-ts-core';
 import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
 import { createMockContext, getEnrichment, runToolContract } from '@cyanheads/mcp-ts-core/testing';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { toJSONSchema } from 'zod/v4/core';
 
 import type { ParsedBriefSummary } from '@/services/ncbi/types.js';
 
 import { textBlocks } from '../../../_helpers.js';
 import {
   BOOK_ESUMMARY_XML,
+  CHAPTER_DATES_ESUMMARY_XML,
   parseESummaryXml,
 } from '../../../services/ncbi/parsing/_book-fixtures.js';
 
@@ -192,7 +194,37 @@ describe('searchArticlesTool', () => {
 
         const notice = getEnrichment(ctx).notice as string;
         expect(notice).toContain('`maxDate` ("2024")');
-        expect(notice).toContain('`minDate: "1800"`');
+        // 1000, not 1800: PubMed dates records before 1800, and a later floor drops them.
+        expect(notice).toContain('`minDate: "1000"`');
+      });
+
+      it('names sentinels that pass validation and reach ESearch as a range', async () => {
+        const ctx = createMockContext({ errors: searchArticlesTool.errors });
+        const input = searchArticlesTool.input.parse({
+          query: 'crispr',
+          dateRange: { minDate: '1000', maxDate: '3000' },
+        });
+        await searchArticlesTool.handler(input, ctx);
+
+        expect(mockESearch.mock.calls.at(-1)?.[0]?.term).toBe(
+          'crispr AND (1000[pdat] : 3000[pdat])',
+        );
+        expect(getEnrichment(ctx).appliedFilters).toEqual({
+          dateRange: { minDate: '1000', maxDate: '3000', dateType: 'pdat' },
+        });
+      });
+
+      it('describes an empty bound as dropping the whole range, with each sentinel', () => {
+        const { minDate, maxDate } = searchArticlesTool.input.shape.dateRange.unwrap().shape;
+
+        for (const bound of [minDate, maxDate]) {
+          expect(bound.description).toContain(
+            'Leaving it empty drops the whole date range, not just this bound',
+          );
+          expect(bound.description).not.toContain('disables this bound');
+        }
+        expect(minDate.description).toContain('such as `1000`');
+        expect(maxDate.description).toContain('such as `3000`');
       });
 
       it('stays silent when both bounds are empty', async () => {
@@ -1622,6 +1654,60 @@ describe('searchArticlesTool Bookshelf summaries (issue #114)', () => {
   });
 });
 
+describe('searchArticlesTool Bookshelf chapter dates (issue #199)', () => {
+  /** PMID → expected summary date: chapters by their own date, the rest unchanged. */
+  const EXPECTED: [string, string][] = [
+    ['20301340', '2018-12-20'], // chapter, revised — book PubDate 1993
+    ['25905212', '2025-07-03'], // chapter, contributed — book PubDate 2000
+    ['36356174', '2021-09-01'], // chapter, "2021 Sep" — book PubDate 2014
+    ['42330151', '2026-01-01'], // chapter, "2026" — book PubDate 2025 Dec 4
+    ['40825089', '2025-07-02'], // whole book, PubDate "2025 Jul 2"
+    ['42474064', '2026-07-01'], // journal article, PubDate "2026 Jul"
+  ];
+
+  beforeEach(() => {
+    mockESearch.mockReset();
+    mockESummary.mockReset();
+    mockExtractBriefSummaries.mockReset();
+    mockExtractBriefSummaries.mockImplementation(realExtractBriefSummaries);
+    mockESearch.mockResolvedValue({
+      count: EXPECTED.length,
+      idList: EXPECTED.map(([pmid]) => pmid),
+      retmax: 20,
+      retstart: 0,
+      queryTranslation: 'x',
+    });
+    mockESummary.mockResolvedValue(parseESummaryXml(CHAPTER_DATES_ESUMMARY_XML));
+  });
+
+  it('dates each summary on both surfaces, chapters by their own date', async () => {
+    const result = await runToolContract(searchArticlesTool, {
+      query: 'x',
+      summaryCount: EXPECTED.length,
+    });
+
+    const summaries = (result.structuredContent as { summaries: ParsedBriefSummary[] }).summaries;
+    expect(summaries.map((s) => [s.pmid, s.pubDate])).toEqual(EXPECTED);
+
+    // content[]: each summary block carries the same date as its structured row
+    const blocks = contractText(result).split('\n#### ').slice(1);
+    expect(blocks).toHaveLength(EXPECTED.length);
+    for (const [pmid, date] of EXPECTED) {
+      const block = blocks.find((b) => b.includes(`**PMID:** ${pmid}\n`));
+      expect(block, pmid).toContain(`**Published:** ${date}\n`);
+    }
+  });
+
+  it('describes pubDate as the chapter date on a Bookshelf chapter', () => {
+    const schema = toJSONSchema(searchArticlesTool.output as never) as unknown as {
+      properties: { summaries: { items: { properties: { pubDate: { description?: string } } } } };
+    };
+    const description = schema.properties.summaries.items.properties.pubDate.description ?? '';
+    expect(description).toContain('YYYY-MM-DD');
+    expect(description).toContain('chapter');
+  });
+});
+
 describe('searchArticlesTool total match count in the header (issue #147)', () => {
   beforeEach(() => {
     mockESearch.mockReset();
@@ -1742,6 +1828,165 @@ describe('searchArticlesTool Doc Type rendering (issue #146)', () => {
  * gets NCBI's own message as `ncbi_unreachable`; only a deadline that actually fires is
  * `ncbi_deadline_exceeded`. (#174)
  */
+describe('searchArticlesTool count-only search, maxResults: 0 (issue #191)', () => {
+  beforeEach(() => {
+    mockESearch.mockReset();
+    mockESummary.mockReset();
+    mockESummary.mockRejectedValue(new Error('unmocked eSummary'));
+    mockExtractBriefSummaries.mockReset();
+    mockExtractBriefSummaries.mockResolvedValue([]);
+  });
+
+  /** ESearch's answer to `retmax=0`: the full Count and an empty IdList. */
+  const countOnly = (count: number, retstart = 0) =>
+    mockESearch.mockResolvedValue({ count, idList: [], retmax: 0, retstart });
+
+  it('the handler already sends retmax 0, skips ESummary, and renders 0 of the total', async () => {
+    countOnly(31104);
+    const ctx = createMockContext({ errors: searchArticlesTool.errors });
+    const input = {
+      ...searchArticlesTool.input.parse({ query: 'ferroptosis', summaryCount: 5 }),
+      maxResults: 0,
+    };
+
+    const output = await searchArticlesTool.handler(input, ctx);
+
+    expect(mockESearch).toHaveBeenCalledTimes(1);
+    expect(mockESearch.mock.calls[0]?.[0]).toMatchObject({ term: 'ferroptosis', retmax: 0 });
+    expect(mockESummary).not.toHaveBeenCalled();
+    expect(output).toMatchObject({ pmids: [], summaries: [], totalCount: 31104 });
+    expect(getEnrichment(ctx).notice).toBeUndefined();
+    const text = (searchArticlesTool.format!(output)[0] as { text: string }).text;
+    expect(text).toContain('**Returned:** 0 of 31104 | **Offset:** 0');
+    expect(text).not.toContain('**PMIDs:**');
+  });
+
+  it.each([
+    ['without summaryCount', {}],
+    ['with summaryCount: 5', { summaryCount: 5 }],
+  ])('returns only totalCount from one ESearch, %s', async (_label, extra) => {
+    countOnly(31104);
+    const result = await runToolContract(searchArticlesTool, {
+      query: 'ferroptosis',
+      maxResults: 0,
+      ...extra,
+    });
+
+    expect(result.isError).toBeFalsy();
+    expect(mockESearch).toHaveBeenCalledTimes(1);
+    expect(mockESearch.mock.calls[0]?.[0]).toMatchObject({
+      term: 'ferroptosis',
+      retmax: 0,
+      retstart: 0,
+    });
+    expect(mockESummary).not.toHaveBeenCalled();
+    const structured = result.structuredContent as Record<string, unknown>;
+    expect(structured).toMatchObject({ pmids: [], summaries: [], totalCount: 31104, offset: 0 });
+    expect(structured.notice).toBeUndefined();
+    const text = contractText(result);
+    expect(text).toContain('**Returned:** 0 of 31104 | **Offset:** 0');
+    expect(text).not.toContain('**PMIDs:**');
+    expect(text).not.toContain('Summaries shown');
+    expect(text).not.toContain('No results matched');
+  });
+
+  it('reports the same totalCount a maxResults: 1 call does', async () => {
+    mockESearch.mockResolvedValueOnce({ count: 31104, idList: [], retmax: 0, retstart: 0 });
+    mockESearch.mockResolvedValueOnce({ count: 31104, idList: ['42600474'], retmax: 1 });
+    const countOnlyResult = await runToolContract(searchArticlesTool, {
+      query: 'ferroptosis',
+      maxResults: 0,
+    });
+    const oneResult = await runToolContract(searchArticlesTool, {
+      query: 'ferroptosis',
+      maxResults: 1,
+    });
+
+    expect(countOnlyResult.structuredContent).toMatchObject({ totalCount: 31104, pmids: [] });
+    expect(oneResult.structuredContent).toMatchObject({ totalCount: 31104, pmids: ['42600474'] });
+  });
+
+  it('gives a zero-hit query the notice it gets with maxResults: 1', async () => {
+    countOnly(0);
+    const zero = await runToolContract(searchArticlesTool, { query: 'qqzzxx', maxResults: 0 });
+    const one = await runToolContract(searchArticlesTool, { query: 'qqzzxx', maxResults: 1 });
+
+    const zeroNotice = (zero.structuredContent as { notice?: string }).notice;
+    expect(zeroNotice).toContain('No results matched your query');
+    expect(zeroNotice).toBe((one.structuredContent as { notice?: string }).notice);
+    expect(contractText(zero)).toContain('**Returned:** 0 of 0 | **Offset:** 0');
+  });
+
+  it('keeps the overshoot notice for an offset at or past totalCount', async () => {
+    countOnly(100, 100);
+    const result = await runToolContract(searchArticlesTool, {
+      query: 'ferroptosis',
+      maxResults: 0,
+      offset: 100,
+    });
+
+    expect(mockESearch.mock.calls[0]?.[0]).toMatchObject({ retmax: 0, retstart: 100 });
+    expect((result.structuredContent as { notice?: string }).notice).toBe(
+      'Offset 100 exceeds totalCount (100). Reset offset to 0 or reduce it below 100 to page through results.',
+    );
+    expect(contractText(result)).toContain('Offset 100 exceeds totalCount (100)');
+  });
+
+  it('adds no notice for a count-only call at an offset inside the result set', async () => {
+    countOnly(100, 5);
+    const result = await runToolContract(searchArticlesTool, {
+      query: 'ferroptosis',
+      maxResults: 0,
+      offset: 5,
+    });
+
+    expect(result.structuredContent).toMatchObject({ pmids: [], offset: 5, totalCount: 100 });
+    expect((result.structuredContent as { notice?: string }).notice).toBeUndefined();
+    expect(contractText(result)).toContain('**Returned:** 0 of 100 | **Offset:** 5');
+  });
+
+  it('gives `retmax: 0` (#190) the same result as `maxResults: 0`', async () => {
+    countOnly(31104);
+    const viaTarget = await runToolContract(searchArticlesTool, {
+      query: 'ferroptosis',
+      maxResults: 0,
+    });
+    const viaAlias = await runToolContract(searchArticlesTool, {
+      query: 'ferroptosis',
+      retmax: 0,
+    } as never);
+
+    expect(viaAlias.isError).toBeFalsy();
+    expect(mockESearch.mock.calls[1]?.[0]).toEqual(mockESearch.mock.calls[0]?.[0]);
+    expect(viaAlias.structuredContent).toEqual(viaTarget.structuredContent);
+    expect(viaAlias.content).toEqual(viaTarget.content);
+    expect(mockESummary).not.toHaveBeenCalled();
+  });
+
+  it.each([[-1], [1001]])('still rejects maxResults: %d', async (maxResults) => {
+    const result = await runToolContract(searchArticlesTool, { query: 'ferroptosis', maxResults });
+
+    expect(result.isError).toBe(true);
+    expect(contractText(result)).toContain('maxResults: Too');
+    expect(mockESearch).not.toHaveBeenCalled();
+  });
+
+  it('advertises maxResults with minimum 0 and says what 0 returns', () => {
+    const emitted = toJSONSchema(searchArticlesTool.input as never, {
+      target: 'draft-7',
+      io: 'input',
+    }) as { properties: Record<string, Record<string, unknown>> };
+
+    expect(emitted.properties.maxResults).toMatchObject({
+      type: 'integer',
+      minimum: 0,
+      maximum: 1000,
+      default: 20,
+    });
+    expect(emitted.properties.maxResults?.description).toContain('0 returns only `totalCount`');
+  });
+});
+
 describe('searchArticlesTool against a failing NCBI backend (issue #174)', () => {
   const BACKEND_FAILURE =
     'Search Backend failed: An error occurred while processing request. Status: 500. Source: /api/search/?r= Details: Search is temporarily unavailable. Please try again later. Details: Cannot connect to SOLR';

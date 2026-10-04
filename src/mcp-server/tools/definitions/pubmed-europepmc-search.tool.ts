@@ -3,9 +3,10 @@
  * can't reach: preprints (source `PPR`), Agricola (`AGR`), patents (`PAT`),
  * and EPMC-only OA articles. Uses EPMC's cursor-based pagination
  * (`cursorMark`) — unlike `pubmed_search_articles`'s offset-based paging,
- * because EPMC's search API doesn't support offset. `max_results` and `limit`
- * are accepted as aliases for `pageSize`. A `query` with no search term (`()`,
- * `<b></b>`) or a blank `cursorMark` is rejected before Europe PMC is called.
+ * because EPMC's search API doesn't support offset. `max_results`, `limit`, and
+ * `maxResults` are accepted as aliases for `pageSize`. A `query` with no search
+ * term (`()`, `<b></b>`) or a blank `cursorMark` is rejected before Europe PMC
+ * is called.
  * The total hit count rides in `output` so `format()` can state it in the
  * header, and `searchUrl` opens the source-filtered query Europe PMC actually
  * ran.
@@ -78,8 +79,9 @@ export const pubmedEuropepmcSearchTool = tool('pubmed_europepmc_search', {
   ] as const,
 
   // Never advertised; rewritten to the canonical key before the schema parses.
-  // `pageSize` is this tool's only count parameter, so both map to it. (#156)
-  inputAliases: { max_results: 'pageSize', limit: 'pageSize' },
+  // `pageSize` is this tool's only count parameter, so every sibling tool's count
+  // name maps to it. (#156, #190)
+  inputAliases: { max_results: 'pageSize', limit: 'pageSize', maxResults: 'pageSize' },
 
   input: z.object({
     query: z

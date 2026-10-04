@@ -1,7 +1,8 @@
 /**
  * @fileoverview PubMed spell-check tool. Uses NCBI's ESpell service to correct
  * every misspelled token of a PubMed search query in one call — the recovery
- * step after a zero-hit or thin `pubmed_search_articles` result.
+ * step after a zero-hit or thin `pubmed_search_articles` result. `term` is
+ * accepted as an alias for `query`.
  * @module src/mcp-server/tools/definitions/spell-check.tool
  */
 
@@ -20,6 +21,10 @@ export const spellCheckTool = tool('pubmed_spell_check', {
     'https://github.com/cyanheads/pubmed-mcp-server/blob/main/src/mcp-server/tools/definitions/spell-check.tool.ts',
 
   errors: [...NCBI_SERVICE_ERRORS, ...QUERY_INPUT_ERRORS] as const,
+
+  // Never advertised; rewritten to the canonical key before the schema parses.
+  // ESpell's own name for the query. (#190)
+  inputAliases: { term: 'query' },
 
   input: z.object({
     query: z

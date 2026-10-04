@@ -6,6 +6,7 @@
 
 import { describe, expect, it } from 'vitest';
 import {
+  chapterDateFromDocDate,
   extractBriefSummaries,
   formatESummaryAuthors,
   parseESummaryAuthorsFromDocumentSummary,
@@ -14,7 +15,12 @@ import {
 } from '@/services/ncbi/parsing/esummary-parser.js';
 import { ensureArray } from '@/services/ncbi/parsing/xml-helpers.js';
 import type { ESummaryAuthor, ESummaryResult } from '@/services/ncbi/types.js';
-import { BOOK_ESUMMARY_XML, parseESummaryXml } from './_book-fixtures.js';
+import {
+  BOOK_ESUMMARY_V1_XML,
+  BOOK_ESUMMARY_XML,
+  CHAPTER_DATES_ESUMMARY_XML,
+  parseESummaryXml,
+} from './_book-fixtures.js';
 
 describe('formatESummaryAuthors', () => {
   it('returns empty string for no authors', () => {
@@ -693,7 +699,8 @@ describe('Bookshelf records (#114)', () => {
     expect(summary?.title).toBe(
       'BRCA1- and BRCA2-Associated Hereditary Breast and Ovarian Cancer.',
     );
-    expect(summary?.pubDate).toBe('1993-01-01');
+    // The chapter's own revision (DocDate "… [updated 2026 Mar 25]"), not the book's 1993 (#199)
+    expect(summary?.pubDate).toBe('2026-03-25');
   });
 
   it('adds no book fields to a journal summary', async () => {
@@ -764,5 +771,125 @@ describe('parseESummaryAuthorsFromDocumentSummary (#137)', () => {
       'Amemiya A',
     ]);
     expect(summaries[0]?.authorNames).toEqual(['Petrucelli N', 'Daly MB', 'Pal T']);
+  });
+});
+
+// ─── Bookshelf chapter dates (#199) ──────────────────────────────────────────
+//
+// A chapter's `PubDate` is its book's (GeneReviews: 1993). Its own dates are in
+// `DocDate`, and the summary is dated the way `pubmed_format_citations` dates
+// the chapter: the last revision, else the contribution date (#189).
+
+describe('Bookshelf chapter dates (#199)', () => {
+  const byPmid = async (xml: string) =>
+    new Map((await extractBriefSummaries(parseESummaryXml(xml))).map((s) => [s.pmid, s]));
+
+  it('dates a revised chapter by its revision, not its book', async () => {
+    const summaries = await byPmid(CHAPTER_DATES_ESUMMARY_XML);
+    // DocDate "1998 Oct 23 [updated 2018 Dec 20]", PubDate "1993"
+    expect(summaries.get('20301340')?.pubDate).toBe('2018-12-20');
+  });
+
+  it('dates an unrevised chapter by its contribution date', async () => {
+    const summaries = await byPmid(CHAPTER_DATES_ESUMMARY_XML);
+    // DocDate "2025 Jul 3", PubDate "2000"
+    expect(summaries.get('25905212')?.pubDate).toBe('2025-07-03');
+  });
+
+  it('reads a partial chapter date the way every summary date is read', async () => {
+    const summaries = await byPmid(CHAPTER_DATES_ESUMMARY_XML);
+    // DocDate "2021 Sep" (book PubDate "2014") and "2026" (book PubDate
+    // "2025 Dec 4"): the chapter's own month or year, padded to its first day
+    // as a journal's "2026 Jul" is.
+    expect(summaries.get('36356174')?.pubDate).toBe('2021-09-01');
+    expect(summaries.get('42330151')?.pubDate).toBe('2026-01-01');
+  });
+
+  it('leaves a whole book and a journal article on their PubDate', async () => {
+    const summaries = await byPmid(CHAPTER_DATES_ESUMMARY_XML);
+    expect(summaries.get('40825089')).toMatchObject({ docType: 'book', pubDate: '2025-07-02' });
+    expect(summaries.get('42474064')).toMatchObject({
+      docType: 'citation',
+      pubDate: '2026-07-01',
+    });
+  });
+
+  it('dates the #114 fixtures by their own DocDate', async () => {
+    const summaries = await byPmid(BOOK_ESUMMARY_XML);
+    // "1998 Sep 4 [updated 2026 Mar 25]" and "2023 Jul 23"; PubDate "1993", "2026 Jan"
+    expect(summaries.get('20301425')?.pubDate).toBe('2026-03-25');
+    expect(summaries.get('29262038')?.pubDate).toBe('2023-07-23');
+  });
+
+  it('keeps the book date when a chapter DocDate is absent or unreadable', async () => {
+    const withDocDate = (docDate: string) =>
+      CHAPTER_DATES_ESUMMARY_XML.replace(
+        '<DocDate>2025 Jul 3</DocDate>',
+        docDate ? `<DocDate>${docDate}</DocDate>` : '<DocDate/>',
+      );
+    for (const docDate of ['', 'Spring 2025', '[updated ]']) {
+      const summaries = await byPmid(withDocDate(docDate));
+      expect(summaries.get('25905212')?.pubDate, docDate).toBe('2000-01-01');
+    }
+  });
+
+  it('cannot read DocDate from a version 1 DocSum, which does not carry it', async () => {
+    // The older format has no DocDate item, so its chapter keeps the book date.
+    const summaries = await byPmid(BOOK_ESUMMARY_V1_XML);
+    expect(summaries.get('20301425')?.pubDate).toBe('1993-01-01');
+  });
+
+  describe('chapterDateFromDocDate', () => {
+    it.each([
+      ['1998 Oct 23 [updated 2018 Dec 20]', '2018 Dec 20'],
+      ['2025 Jul 3', '2025 Jul 3'],
+      ['2021 Sep', '2021 Sep'],
+      ['2026', '2026'],
+      ['  2009 Sep 1  [updated 2011 Feb 10]  ', '2011 Feb 10'],
+      ['2009 Sep 1 [updated', '2009 Sep 1'],
+      ['1998 Oct 23 [updated Smarch]', '1998 Oct 23'],
+    ])('reads %j as %j', (docDate, expected) => {
+      expect(chapterDateFromDocDate(docDate)).toBe(expected);
+    });
+
+    it.each(['', 'Spring 2025', '[updated ]', '[updated 2018 Smarch 2]'])(
+      'returns undefined for %j',
+      (docDate) => {
+        expect(chapterDateFromDocDate(docDate)).toBeUndefined();
+      },
+    );
+
+    /** CPU time of `run`, in ms — this thread's user + system time, not wall clock. */
+    const cpuMs = (run: () => void): number => {
+      const start = process.threadCpuUsage();
+      run();
+      const { user, system } = process.threadCpuUsage(start);
+      return (user + system) / 1000;
+    };
+    /** Fastest of five measurements of twenty reads each. */
+    const fastestMs = (read: () => void): number => {
+      read();
+      return Math.min(
+        ...Array.from({ length: 5 }, () =>
+          cpuMs(() => {
+            for (let i = 0; i < 20; i++) read();
+          }),
+        ),
+      );
+    };
+
+    it.each([
+      ['an opener with no closer, repeated', (n: number) => '[updated '.repeat(n / 9)],
+      ['brackets with no marker', (n: number) => '['.repeat(n)],
+      ['a year then a whitespace run', (n: number) => `2020 ${' '.repeat(n)}x`],
+      ['an opener, then whitespace with no closer', (n: number) => `[updated ${' '.repeat(n)}`],
+    ])('reads %s in linear CPU time', (_label, build) => {
+      const small = build(5_000);
+      const large = build(80_000);
+      const t5k = fastestMs(() => chapterDateFromDocDate(small));
+      const t80k = fastestMs(() => chapterDateFromDocDate(large));
+      expect(t80k / t5k).toBeLessThan(64);
+      expect(t80k).toBeLessThan(250);
+    });
   });
 });

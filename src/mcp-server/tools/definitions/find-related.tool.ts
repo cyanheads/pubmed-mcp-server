@@ -3,11 +3,11 @@
  * source article via a provider chain: NCBI ELink (primary) → Europe PMC →
  * OpenAlex. First success wins; results are never merged across sources.
  * Supports offset pagination on the returned window, sized by `maxResults`
- * (`limit` accepted as an alias). A served empty answer is a success; only a
- * chain where every eligible provider failed is an error. Every return path
- * carries the total match count in `output`, which `format()` states in the
- * header. A zero-padded source PMID runs as the PMID it spells, so the source
- * never appears among its own related articles.
+ * (`limit` and `pageSize` accepted as aliases). A served empty answer is a
+ * success; only a chain where every eligible provider failed is an error.
+ * Every return path carries the total match count in `output`, which `format()`
+ * states in the header. A zero-padded source PMID runs as the PMID it spells,
+ * so the source never appears among its own related articles.
  * @module src/mcp-server/tools/definitions/find-related.tool
  */
 
@@ -384,8 +384,9 @@ export const findRelatedTool = tool('pubmed_find_related', {
     },
   ] as const,
 
-  // Never advertised; rewritten to the canonical key before the schema parses. (#156)
-  inputAliases: { limit: 'maxResults' },
+  // Never advertised; rewritten to the canonical key before the schema parses.
+  // Sibling tools' count names. (#156, #190)
+  inputAliases: { limit: 'maxResults', pageSize: 'maxResults' },
 
   input: z.object({
     pmid: pmidStringSchema.describe('Source PubMed ID'),
@@ -452,7 +453,12 @@ export const findRelatedTool = tool('pubmed_find_related', {
               .describe(
                 "Editors of the containing book, kept out of `authors` so they cannot displace the record's own authors. Absent on a journal article and on a book that credits no editors.",
               ),
-            pubDate: z.string().optional().describe('Publication date'),
+            pubDate: z
+              .string()
+              .optional()
+              .describe(
+                'Publication date as YYYY-MM-DD; a month- or year-only date reads as the first day of that month or year. On an NCBI Bookshelf chapter (`docType` "chapter") it is the chapter\'s own date — its last revision, otherwise its contribution — not the year its book began.',
+              ),
           })
           .describe('Related article with enriched summary'),
       )

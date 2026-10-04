@@ -150,9 +150,11 @@ describe('search-articles injection', () => {
     expect(mockESearch).not.toHaveBeenCalled();
   });
 
-  it('rejects maxResults below 1', () => {
-    const result = searchArticlesTool.input.safeParse({ query: 'cancer', maxResults: 0 });
-    expect(result.success).toBe(false);
+  it('accepts maxResults 0 as a count-only search and rejects -1 (#191)', () => {
+    const zero = searchArticlesTool.input.safeParse({ query: 'cancer', maxResults: 0 });
+    const negative = searchArticlesTool.input.safeParse({ query: 'cancer', maxResults: -1 });
+    expect(zero.success).toBe(true);
+    expect(negative.success).toBe(false);
   });
 
   it('rejects maxResults above 1000 (schema max is 1000)', () => {
@@ -304,14 +306,16 @@ describe('fetch-fulltext input validation', () => {
 // ─── lookup-mesh: input validation ───────────────────────────────────────────
 
 describe('lookup-mesh input validation', () => {
-  it('rejects empty term string', () => {
-    const result = lookupMeshTool.input.safeParse({ term: '' });
+  it('rejects an empty query string', () => {
+    const result = lookupMeshTool.input.safeParse({ query: '' });
     expect(result.success).toBe(false);
   });
 
-  it('rejects maxResults above 50', () => {
-    const result = lookupMeshTool.input.safeParse({ term: 'cancer', maxResults: 51 });
-    expect(result.success).toBe(false);
+  it('rejects maxResults above 50 and accepts 50', () => {
+    const over = lookupMeshTool.input.safeParse({ query: 'cancer', maxResults: 51 });
+    const atMax = lookupMeshTool.input.safeParse({ query: 'cancer', maxResults: 50 });
+    expect(over.success).toBe(false);
+    expect(atMax.success).toBe(true);
   });
 });
 

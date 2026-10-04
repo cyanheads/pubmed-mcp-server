@@ -7,7 +7,7 @@
  * @module tests/mcp-server/tools/definitions/find-related.tool.test
  */
 
-import type { ContentBlock } from '@cyanheads/mcp-ts-core';
+import { type ContentBlock, z } from '@cyanheads/mcp-ts-core';
 import { JsonRpcErrorCode, McpError } from '@cyanheads/mcp-ts-core/errors';
 import { createMockContext, getEnrichment, runToolContract } from '@cyanheads/mcp-ts-core/testing';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
@@ -18,6 +18,7 @@ import { textBlocks } from '../../../_helpers.js';
 import {
   BOOK_ESUMMARY_V1_XML,
   BOOK_ESUMMARY_XML,
+  CHAPTER_DATES_ESUMMARY_XML,
   parseESummaryXml,
 } from '../../../services/ncbi/parsing/_book-fixtures.js';
 
@@ -419,7 +420,7 @@ describe('findRelatedTool', () => {
       }),
     );
     mockOaSimilar.mockRejectedValue(
-      new McpError(JsonRpcErrorCode.SerializationError, 'OA garbage', {
+      new McpError(JsonRpcErrorCode.ServiceUnavailable, 'OA garbage', {
         reason: 'openalex_invalid_response',
       }),
     );
@@ -1102,7 +1103,7 @@ describe('findRelatedTool', () => {
         droppedNoPmid: 0,
       });
       mockOaReferences.mockRejectedValue(
-        new McpError(JsonRpcErrorCode.SerializationError, 'OA garbage', {
+        new McpError(JsonRpcErrorCode.ServiceUnavailable, 'OA garbage', {
           reason: 'openalex_invalid_response',
         }),
       );
@@ -1890,8 +1891,10 @@ describe('findRelatedTool Bookshelf summaries (issue #114)', () => {
 
     const text = textBlocks(findRelatedTool.format!(result))[0]?.text ?? '';
     expect(text).toContain('edited by Adam MP, Bick S, Mirzaa GM, Wallace SE, Amemiya A');
+    // Dated by the chapter's own revision (DocDate "… [updated 2026 Mar 25]"),
+    // not its book's 1993 start. (#199)
     expect(text).toContain(
-      'GeneReviews(®) — University of Washington, Seattle, chapter, 1993-01-01',
+      'GeneReviews(®) — University of Washington, Seattle, chapter, 2026-03-25',
     );
   });
 
@@ -1907,6 +1910,64 @@ describe('findRelatedTool Bookshelf summaries (issue #114)', () => {
       expect.objectContaining({ db: 'pubmed', version: '2.0' }),
       expect.anything(),
     );
+  });
+});
+
+describe('findRelatedTool Bookshelf chapter dates (issue #199)', () => {
+  /** PMID → expected row date: chapters by their own date, the rest unchanged. */
+  const EXPECTED: [string, string][] = [
+    ['20301340', '2018-12-20'], // chapter, revised — book PubDate 1993
+    ['25905212', '2025-07-03'], // chapter, contributed — book PubDate 2000
+    ['36356174', '2021-09-01'], // chapter, "2021 Sep" — book PubDate 2014
+    ['42330151', '2026-01-01'], // chapter, "2026" — book PubDate 2025 Dec 4
+    ['40825089', '2025-07-02'], // whole book, PubDate "2025 Jul 2"
+    ['42474064', '2026-07-01'], // journal article, PubDate "2026 Jul"
+  ];
+
+  beforeEach(() => {
+    mockELink.mockReset();
+    mockESummary.mockReset();
+    mockExtractBriefSummaries.mockReset();
+    mockGetEpmcService.mockReturnValue(epmcService);
+    mockGetOaService.mockReturnValue(oaService);
+    mockELink.mockResolvedValue(eLinkResponse(EXPECTED.map(([pmid]) => pmid)));
+    mockESummary.mockResolvedValue(parseESummaryXml(CHAPTER_DATES_ESUMMARY_XML));
+    mockExtractBriefSummaries.mockImplementation(realExtractBriefSummaries);
+  });
+
+  it('dates each related row on both surfaces, chapters by their own date', async () => {
+    const result = await runToolContract(findRelatedTool, {
+      pmid: '12345',
+      relationship: 'similar',
+    });
+
+    const articles = (result.structuredContent as { articles: ParsedBriefSummary[] }).articles;
+    expect(articles.map((a) => [a.pmid, a.pubDate])).toEqual(EXPECTED);
+
+    // content[]: each row's indented metadata line ends on the same date
+    const rows = textBlocks(result.content as ContentBlock[])
+      .map((b) => b.text)
+      .join('\n')
+      .split('\n- **[PMID ')
+      .slice(1);
+    expect(rows).toHaveLength(EXPECTED.length);
+    for (const [pmid, date] of EXPECTED) {
+      const row = rows.find((r) => r.startsWith(`${pmid}]`)) ?? '';
+      const meta = row
+        .split('\n')
+        .filter((line) => line.startsWith('  '))
+        .at(-1);
+      expect(meta, pmid).toMatch(new RegExp(`, ${date}$`));
+    }
+  });
+
+  it('describes pubDate as the chapter date on a Bookshelf chapter', () => {
+    const schema = z.toJSONSchema(findRelatedTool.output) as unknown as {
+      properties: { articles: { items: { properties: { pubDate: { description?: string } } } } };
+    };
+    const description = schema.properties.articles.items.properties.pubDate.description ?? '';
+    expect(description).toContain('YYYY-MM-DD');
+    expect(description).toContain('chapter');
   });
 });
 

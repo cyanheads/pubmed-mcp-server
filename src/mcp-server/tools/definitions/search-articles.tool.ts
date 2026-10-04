@@ -5,10 +5,12 @@
  * bare field tag, or empty parentheses — is rejected before NCBI is called, as
  * is a filter value with no term once sanitized (`"   "`, `"()"`), a
  * `dateRange` bound that is no real calendar date, and a range whose `minDate`
- * falls after its `maxDate`. `limit` is accepted as an alias for `maxResults`.
- * The total match count rides in `output` so `format()` can state it in the
- * header beside the returned count, and a summary's `docType` is rendered only
- * when it marks something other than an ordinary journal article (`citation`).
+ * falls after its `maxDate`. `limit`, `retmax`, `num_results`, and `pageSize`
+ * are accepted as aliases for `maxResults`, `term` and `queryTerm` for `query`,
+ * `retstart` for `offset`, and `sortBy` for `sort`. The total match count rides
+ * in `output` so `format()` can state it in the header beside the returned
+ * count, and a summary's `docType` is rendered only when it marks something
+ * other than an ordinary journal article (`citation`).
  * @module src/mcp-server/tools/definitions/search-articles.tool
  */
 
@@ -257,7 +259,7 @@ function buildNotice(args: {
 
   if (partialDateBound) {
     const missing = partialDateBound.name === 'minDate' ? 'maxDate' : 'minDate';
-    const sentinel = missing === 'maxDate' ? '3000' : '1800';
+    const sentinel = missing === 'maxDate' ? '3000' : '1000';
     notices.push(
       `No date filter was applied: dateRange needs both bounds and only \`${partialDateBound.name}\` ("${partialDateBound.value}") was supplied. Set \`${missing}\` as well — for an open-ended range pass a wide sentinel (e.g. \`${missing}: "${sentinel}"\`).`,
     );
@@ -364,8 +366,19 @@ export const searchArticlesTool = tool('pubmed_search_articles', {
   ] as const,
 
   // Never advertised; rewritten to the canonical key before the schema parses.
-  // `max_results` needs no entry — the framework's case-style repair maps it. (#156)
-  inputAliases: { limit: 'maxResults' },
+  // ESearch's own names (`retmax`, `term`, `retstart`), sibling tools' names, and
+  // common caller spellings. `max_results` needs no entry — the framework's
+  // case-style repair maps it. (#156, #190)
+  inputAliases: {
+    limit: 'maxResults',
+    retmax: 'maxResults',
+    num_results: 'maxResults',
+    pageSize: 'maxResults',
+    term: 'query',
+    queryTerm: 'query',
+    retstart: 'offset',
+    sortBy: 'sort',
+  },
 
   input: z.object({
     query: z
@@ -374,7 +387,13 @@ export const searchArticlesTool = tool('pubmed_search_articles', {
       .describe(
         'PubMed search query (supports full NCBI syntax). Must carry a search term: a value that is blank once markup, bracketed field tags (`[pdat]`), parentheses, and invisible characters such as a zero-width space are disregarded is rejected rather than sent to PubMed.',
       ),
-    maxResults: z.number().int().min(1).max(1000).default(20).describe('Maximum results to return'),
+    maxResults: z
+      .number()
+      .int()
+      .min(0)
+      .max(1000)
+      .default(20)
+      .describe('Maximum results to return. 0 returns only `totalCount`.'),
     offset: z
       .number()
       .int()
@@ -394,13 +413,13 @@ export const searchArticlesTool = tool('pubmed_search_articles', {
           .string()
           .regex(DATE_RE, 'Date must be YYYY, YYYY/MM, or YYYY/MM/DD (/, -, or . separators)')
           .describe(
-            'Start date (YYYY/MM/DD, YYYY/MM, or YYYY); empty string disables this bound. Must be a real calendar date — `2023/02/29` is rejected.',
+            'Start date (YYYY/MM/DD, YYYY/MM, or YYYY). Must be a real calendar date — `2023/02/29` is rejected. Leaving it empty drops the whole date range, not just this bound; for no lower bound pass a wide sentinel such as `1000`.',
           ),
         maxDate: z
           .string()
           .regex(DATE_RE, 'Date must be YYYY, YYYY/MM, or YYYY/MM/DD (/, -, or . separators)')
           .describe(
-            'End date (YYYY/MM/DD, YYYY/MM, or YYYY); empty string disables this bound. Must be a real calendar date — `2023/02/29` is rejected.',
+            'End date (YYYY/MM/DD, YYYY/MM, or YYYY). Must be a real calendar date — `2023/02/29` is rejected. Leaving it empty drops the whole date range, not just this bound; for no upper bound pass a wide sentinel such as `3000`.',
           ),
         dateType: z
           .enum(['pdat', 'mdat', 'edat'])
@@ -501,7 +520,12 @@ export const searchArticlesTool = tool('pubmed_search_articles', {
               .describe(
                 "Editors of the containing book, kept out of `authors` so they cannot displace the record's own authors. Absent on a journal article and on a book that credits no editors.",
               ),
-            pubDate: z.string().optional().describe('Publication date'),
+            pubDate: z
+              .string()
+              .optional()
+              .describe(
+                'Publication date as YYYY-MM-DD; a month- or year-only date reads as the first day of that month or year. On an NCBI Bookshelf chapter (`docType` "chapter") it is the chapter\'s own date — its last revision, otherwise its contribution — not the year its book began.',
+              ),
             doi: z
               .string()
               .optional()
