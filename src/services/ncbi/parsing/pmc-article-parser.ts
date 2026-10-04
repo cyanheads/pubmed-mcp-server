@@ -25,11 +25,14 @@ import {
   findAll,
   findAllDescendants,
   findOne,
+  IDENTIFIER_TAGS,
   isTextNode,
   type JatsNode,
   type JatsNodeList,
+  lineTextContent,
   rawTextContent,
   selectAlternative,
+  TextAssembler,
   tagNameOf,
   textContent,
   textContentExcluding,
@@ -154,14 +157,23 @@ function extractArticleId(
 
 // ─── Authors & Affiliations ─────────────────────────────────────────────────
 
+/**
+ * True for a `<contrib>` that is an author: `contrib-type="author"` or no type
+ * at all. Editors, reviewers and every other typed contributor are not, and
+ * neither they nor their affiliations reach the output.
+ */
+function isAuthorContrib(contrib: JatsNode): boolean {
+  const contribType = attrOf(contrib, 'contrib-type');
+  return !contribType || contribType === 'author';
+}
+
 /** Extract authors from a single `<contrib-group>` node. Non-author contributors are skipped. */
 export function extractJatsAuthors(contribGroup: JatsNode | undefined): ParsedPmcAuthor[] {
   if (!contribGroup) return [];
 
   const authors: ParsedPmcAuthor[] = [];
   for (const contrib of findAll(contribGroup, 'contrib')) {
-    const contribType = attrOf(contrib, 'contrib-type');
-    if (contribType && contribType !== 'author') continue;
+    if (!isAuthorContrib(contrib)) continue;
 
     const collab = findOne(contrib, 'collab');
     if (collab) {
@@ -184,14 +196,38 @@ export function extractJatsAuthors(contribGroup: JatsNode | undefined): ParsedPm
   return authors;
 }
 
+/**
+ * Every `<aff>` in the front matter, in document order: directly under
+ * `<article-meta>`, inside a `<contrib-group>`, or inside one `<contrib>` of it.
+ * Most deposits put them under `<contrib-group>` — 131 articles of a
+ * 187-article draw carried theirs only there — and reading `<article-meta>`
+ * alone returned none for those. Some deposits repeat one affiliation as a separate
+ * `<aff>` in every `<contrib>` it applies to; the text is reported once. (#196)
+ *
+ * An affiliation belongs to the authors only: an `<aff>` inside a non-author
+ * `<contrib>` (PMC10666927's reviewing editors), and one directly under a
+ * `<contrib-group>` that holds no author, are left out, as those contributors are
+ * left out of `authors`. A group mixing authors and others keeps its direct
+ * `<aff>`s.
+ */
 function extractAffiliations(articleMeta: JatsNode | undefined): string[] {
   if (!articleMeta) return [];
-  const result: string[] = [];
-  for (const aff of findAll(articleMeta, 'aff')) {
-    const text = textContent(aff);
-    if (text) result.push(text);
+  const affs: JatsNode[] = [];
+  for (const child of childrenOf(articleMeta)) {
+    const tag = tagNameOf(child);
+    if (tag === 'aff') affs.push(child);
+    if (tag !== 'contrib-group') continue;
+    const contribs = findAll(child, 'contrib');
+    const holdsAuthor = contribs.length === 0 || contribs.some(isAuthorContrib);
+    for (const member of childrenOf(child)) {
+      const memberTag = tagNameOf(member);
+      if (memberTag === 'aff' && holdsAuthor) affs.push(member);
+      else if (memberTag === 'contrib' && isAuthorContrib(member)) {
+        affs.push(...findAll(member, 'aff'));
+      }
+    }
   }
-  return result;
+  return [...new Set(affs.map(textContent).filter(Boolean))];
 }
 
 // ─── Journal & Publication Date ─────────────────────────────────────────────
@@ -264,6 +300,9 @@ function extractPubDate(
 
 // ─── Abstract & Keywords ────────────────────────────────────────────────────
 
+/** Closing punctuation a deposited section title can already end in. */
+const TERMINAL_PUNCTUATION_RE = /[:.?!]$/;
+
 /**
  * Read the article's own abstract.
  *
@@ -280,6 +319,20 @@ function extractPubDate(
  * abstract leaves its marker and its caption reaches `assets[]` alone —
  * {@link extractPmcAssets} already walks `<front>` — instead of concatenating
  * into the prose, and a `<list>` renders as list lines rather than a token run.
+ * A section that opens with a list starts it on the line below its
+ * `Title:` heading. (#202)
+ *
+ * A structured abstract is read child by child in source order: each `<sec>`
+ * as `Title: text`, and each run of content outside any `<sec>` as an untitled
+ * section reads — its statements space-joined, a blank line between it and the
+ * sections around it. A lead paragraph before the first section therefore
+ * opens the abstract as a paragraph of its own above the first `Title:` line.
+ * Springer deposits the whole abstract that way, ahead of a "Supplementary
+ * Information" section (PMC11281965), and reading the `<sec>`s alone returned
+ * that notice as the abstract. (#204)
+ *
+ * A section title deposited with its own closing punctuation (`Background:`,
+ * `Study Design.`, `What is known?`) keeps it in place of the added colon. (#205)
  */
 function extractAbstract(articleMeta: JatsNode | undefined): string | undefined {
   if (!articleMeta) return;
@@ -288,33 +341,61 @@ function extractAbstract(articleMeta: JatsNode | undefined): string | undefined 
   const abstractNode = abstracts.find((node) => !attrOf(node, 'abstract-type')) ?? abstracts[0];
   if (!abstractNode) return;
 
-  const sections = findAll(abstractNode, 'sec');
-  if (sections.length > 0) {
-    const parts: string[] = [];
-    for (const sec of sections) {
-      const title = textContent(findOne(sec, 'title'));
-      const text = abstractProse(sec);
-      if (title && text) parts.push(`${title}: ${text}`);
-      else if (text) parts.push(text);
-    }
-    return parts.join('\n\n').trim() || undefined;
-  }
+  const children = childrenOf(abstractNode);
+  if (!findOne(abstractNode, 'sec')) return abstractProse(children).text || undefined;
 
-  return abstractProse(abstractNode) || undefined;
+  const parts: string[] = [];
+  let outside: JatsNodeList = [];
+  const addOutside = () => {
+    const { text } = abstractProse(outside);
+    if (text) parts.push(text);
+    outside = [];
+  };
+  for (const child of children) {
+    if (tagNameOf(child) !== 'sec') {
+      outside.push(child);
+      continue;
+    }
+    addOutside();
+    const title = textContent(findOne(child, 'title'));
+    const { ownLineFirst, text } = abstractProse(childrenOf(child));
+    const heading = TERMINAL_PUNCTUATION_RE.test(title) ? title : `${title}:`;
+    if (title && text) parts.push(`${heading}${ownLineFirst ? '\n' : ' '}${text}`);
+    else if (text) parts.push(text);
+  }
+  addOutside();
+  return parts.join('\n\n').trim() || undefined;
 }
 
 /**
- * The prose of an `<abstract>` or one of its `<sec>`s: every child but the
- * heading the caller reports separately, space-joined. The single space is the
- * spacing the paragraph-only read this replaces already produced, so a record
- * depositing one untyped abstract of plain `<p>`s comes back byte-identical.
+ * The prose of a run of abstract content — an `<abstract>`'s or a `<sec>`'s
+ * children, or what an abstract holds outside its sections — leaving out the
+ * `<title>` and `<label>` the caller reports separately or not at all.
+ * Statements are space-joined — the spacing the paragraph-only read this
+ * replaces already produced, so a record depositing one untyped abstract of
+ * plain `<p>`s comes back byte-identical.
+ *
+ * A list reads on lines of its own, as it does in a body section: a blank line
+ * rather than a space separates it from the statement before and after it, so
+ * neither its first item runs onto the text before it nor its last item onto
+ * the heading or sentence after it (PMC8533648). A delimited box does the same,
+ * so its `[Box]` and `[End of box]` lines stand alone. `ownLineFirst` reports
+ * either on the first line, which the caller starts below the section's
+ * heading (PMC10869376). (#202, #210)
  */
-function abstractProse(node: JatsNode): string {
-  const prose = childrenOf(node).filter((child) => {
-    const tag = tagNameOf(child);
+function abstractProse(nodes: JatsNodeList): { ownLineFirst: boolean; text: string } {
+  const prose = nodes.filter((node) => {
+    const tag = tagNameOf(node);
     return tag !== 'title' && tag !== 'label';
   });
-  return flowBlocks(prose, STATEMENT_BLOCK_TAGS).join(' ');
+  const blocks = flowParts(prose, STATEMENT_BLOCK_TAGS);
+  let text = '';
+  for (const [i, block] of blocks.entries()) {
+    const previous = blocks[i - 1];
+    if (previous) text += previous.ownLineLast || block.ownLineFirst ? '\n\n' : ' ';
+    text += block.text;
+  }
+  return { ownLineFirst: blocks[0]?.ownLineFirst ?? false, text };
 }
 
 function extractKeywords(articleMeta: JatsNode | undefined): string[] {
@@ -334,17 +415,38 @@ function extractKeywords(articleMeta: JatsNode | undefined): string[] {
 /** Indent one nesting level of a `<list>`/`<def-list>` nested in a `<list-item>`. */
 const NESTED_LIST_INDENT = '  ';
 
+/**
+ * A finished block of flow text. `ownLineFirst` / `ownLineLast` mark a block
+ * whose first / last line must stand on a line of its own — a list line (a
+ * `<list>` or `<def-list>`, or a container such as a `<p>` that opens or closes
+ * with one) or a delimited box's `[Box]` / `[End of box]` line — which an
+ * abstract's statement join reads instead of running it onto the statement
+ * beside it (see {@link abstractProse}). (#202, #210)
+ */
+interface FlowBlock {
+  ownLineFirst: boolean;
+  ownLineLast: boolean;
+  text: string;
+}
+
+/** A {@link FlowBlock} whose edges both stand on their own lines (`ownLines`), or neither does. */
+const flowBlock = (text: string, ownLines = false): FlowBlock => ({
+  text,
+  ownLineFirst: ownLines,
+  ownLineLast: ownLines,
+});
+
 /** A prose run under construction plus the finished blocks emitted before it. */
 interface Flow {
-  out: string[];
-  run: string;
+  out: FlowBlock[];
+  run: TextAssembler;
 }
 
 /** Close the prose run in progress, discarding it when it holds only whitespace. */
 function flushRun(flow: Flow): void {
-  const text = flow.run.replace(/\s+/g, ' ').trim();
-  if (text) flow.out.push(text);
-  flow.run = '';
+  const text = flow.run.toString().replace(/\s+/g, ' ').trim();
+  if (text) flow.out.push(flowBlock(text));
+  flow.run = new TextAssembler();
 }
 
 /**
@@ -361,45 +463,59 @@ function flushRun(flow: Flow): void {
  * prose, {@link STATEMENT_BLOCK_TAGS} for a container whose `<title>` and `<p>`
  * children are separate statements rather than one continuous sentence.
  *
- * `<tex-math>` and `<alternatives>` are the two elements whose text is not the
- * concatenation of their subtree, so this walk defers to the shared rule rather
- * than reading their children one at a time: a `<tex-math>` contributes its
- * LaTeX document body via `rawTextContent`, and an `<alternatives>` re-enters
- * this walk with its single chosen child, which keeps a `<disp-formula>` found
- * there at block position. (#135)
+ * `<tex-math>`, `<alternatives>` and the {@link IDENTIFIER_TAGS} are the elements
+ * whose text is not the concatenation of their subtree, so this walk defers to
+ * the shared rule rather than reading their children one at a time: a
+ * `<tex-math>` contributes its LaTeX document body via `rawTextContent`, an
+ * `<alternatives>` re-enters this walk with its single chosen child, which keeps
+ * a `<disp-formula>` found there at block position, and an `<institution-id>`
+ * in a funding statement contributes nothing. (#135, #208)
+ *
+ * The run is a {@link TextAssembler}, so prose follows the separator rules every
+ * other text field does: a `<break/>`, an inline `<fn>` or a `<label>` beside its
+ * text reads as one space rather than fusing the words on either side, and a run
+ * of `<xref>` markers with nothing between them reads `[1,2,3,4]`. (#185, #197)
  */
 function walkFlow(nodes: JatsNodeList, flow: Flow, blockTags: ReadonlySet<string>): void {
   for (const node of nodes) {
     if (isTextNode(node)) {
-      flow.run += textOf(node);
+      flow.run.text(textOf(node));
       continue;
     }
     const tag = tagNameOf(node) ?? '';
+    if (IDENTIFIER_TAGS.has(tag)) continue;
     if (tag === 'alternatives') {
       const chosen = selectAlternative(node);
       if (chosen) walkFlow([chosen], flow, blockTags);
       continue;
     }
     if (tag === 'tex-math') {
-      flow.run += rawTextContent(node);
+      flow.run.text(rawTextContent(node));
       continue;
     }
     if (blockTags.has(tag)) {
       flushRun(flow);
-      const rendered = renderBlock(node);
-      if (rendered) flow.out.push(rendered);
+      const block = renderBlock(node);
+      if (block.text) flow.out.push(block);
       continue;
     }
+    flow.run.open(tag);
     walkFlow(childrenOf(node), flow, blockTags);
+    flow.run.close(tag);
   }
+}
+
+/** Ordered blocks contributed by one `<p>` — or any other flow container — with their list edges. */
+function flowParts(nodes: JatsNodeList, blockTags: ReadonlySet<string> = BLOCK_TAGS): FlowBlock[] {
+  const flow: Flow = { out: [], run: new TextAssembler() };
+  walkFlow(nodes, flow, blockTags);
+  flushRun(flow);
+  return flow.out;
 }
 
 /** Ordered text blocks contributed by one `<p>` — or any other flow container. */
 function flowBlocks(nodes: JatsNodeList, blockTags: ReadonlySet<string> = BLOCK_TAGS): string[] {
-  const flow: Flow = { out: [], run: '' };
-  walkFlow(nodes, flow, blockTags);
-  flushRun(flow);
-  return flow.out;
+  return flowParts(nodes, blockTags).map((block) => block.text);
 }
 
 /**
@@ -432,30 +548,40 @@ function renderCaption(caption: JatsNode | undefined): string | undefined {
  * sat; `<ref-list>` is carried by `references[]` and likewise contributes
  * nothing, which is what keeps a `<sec>` that only wraps one from surviving as
  * an empty "References" heading. (#116, #130)
+ *
+ * A `<list>` or `<def-list>`, and a delimited `<boxed-text>`, stand on lines of
+ * their own at both edges; a container read through the default arm takes the
+ * edges of its first and last blocks. (#202, #210)
  */
-function renderBlock(node: JatsNode): string {
+function renderBlock(node: JatsNode): FlowBlock {
   switch (tagNameOf(node)) {
     case 'table-wrap':
     case 'ref-list':
-      return '';
+      return flowBlock('');
     case 'fig':
-      return assetMarker(node, 'Figure');
+      return flowBlock(assetMarker(node, 'Figure'));
     case 'supplementary-material':
-      return assetMarker(node, 'Supplementary');
+      return flowBlock(assetMarker(node, 'Supplementary'));
     case 'list':
-      return renderList(node, 0);
+      return flowBlock(renderList(node, 0), true);
     case 'def-list':
-      return renderDefList(node, 0);
+      return flowBlock(renderDefList(node, 0), true);
     case 'disp-quote':
-      return renderDispQuote(node);
+      return flowBlock(renderDispQuote(node));
     case 'boxed-text':
-      return renderBoxedText(node);
+      return flowBlock(renderFloatingBox(node), true);
     case 'preformat':
-      return renderPreformat(node);
+      return flowBlock(renderPreformat(node));
     case 'disp-formula':
-      return renderDispFormula(node);
-    default:
-      return flowBlocks(childrenOf(node)).join('\n\n');
+      return flowBlock(renderDispFormula(node));
+    default: {
+      const blocks = flowParts(childrenOf(node));
+      return {
+        text: blocks.map((block) => block.text).join('\n\n'),
+        ownLineFirst: blocks[0]?.ownLineFirst ?? false,
+        ownLineLast: blocks.at(-1)?.ownLineLast ?? false,
+      };
+    }
   }
 }
 
@@ -534,6 +660,25 @@ function assetMarker(node: JatsNode, kind: 'Figure' | 'Supplementary'): string {
  * `<def-list>` nested inside a `<list-item>` — both in the JATS content model —
  * indents one level per depth. (#130)
  *
+ * Publishers nest a sub-list either as a child of the `<list-item>` or inside
+ * the item's `<p>` (PMC12892673), and both render the same way: below the
+ * item's line, one level deeper. Read as paragraph flow instead, the inner
+ * list's first item ran onto its parent's line. The item's `<p>` is split at
+ * the lists it holds, so the item reads in document order: prose before the
+ * first nested list stays on the item's line, and prose after one — the rest
+ * of that `<p>` or a later `<p>` — keeps its place below the list on a line of
+ * its own, one level deeper, rather than running onto the last nested item
+ * (PMC8533647) or moving above the list onto the item's line. An item whose
+ * text all follows its nested list still prints its marker, alone on the
+ * item's line, so that text stays under its own item rather than reading as
+ * the item before it; an item holding nothing but a nested list prints no line
+ * of its own. (#200, #203)
+ *
+ * A `simple` list prints no marker of its own, so an item's `<label>` is its
+ * only numbering and leads the item's line (`1. Cereals …`); dropping it lost
+ * the source numbering of every labeled simple list. Other list types print
+ * their own marker and leave the label out. (#185)
+ *
  * `withTitle: false` leaves the title out, for a list whose title has become
  * the heading of the section it forms (see {@link extractBodySections}).
  */
@@ -551,19 +696,57 @@ function renderList(list: JatsNode, depth: number, withTitle = true): string {
     const marker = listType === 'simple' ? '' : listType === 'order' ? `${ordinal}. ` : '- ';
     const parts: string[] = [];
     const nested: string[] = [];
+    /** Prose read after a nested list, kept below that list. */
+    let after: string[] | undefined;
+    let proseAfter = false;
+    const flushAfter = () => {
+      const text = after?.filter(Boolean).join(' ');
+      if (!text) return;
+      nested.push(`${pad}${NESTED_LIST_INDENT}${text}`);
+      proseAfter = true;
+    };
+    const addNested = (block: string) => {
+      flushAfter();
+      nested.push(block);
+      after = [];
+    };
     for (const child of childrenOf(item)) {
       const tag = tagNameOf(child);
-      if (tag === 'label') continue;
-      if (tag === 'list') nested.push(renderList(child, depth + 1));
-      else if (tag === 'def-list') nested.push(renderDefList(child, depth + 1));
-      else parts.push(...flowBlocks([child]));
+      if (tag === 'label') {
+        if (listType === 'simple' && parts.length === 0) parts.push(textContent(child));
+        continue;
+      }
+      // A `<p>` is read child by child, so a list inside it splits its prose;
+      // any other child is one unit, itself a nested list or not.
+      let prose: JatsNodeList = [];
+      for (const node of tag === 'p' ? childrenOf(child) : [child]) {
+        const inner = renderNestedList(node, depth + 1);
+        if (inner === undefined) {
+          prose.push(node);
+          continue;
+        }
+        (after ?? parts).push(...flowBlocks(prose));
+        prose = [];
+        addNested(inner);
+      }
+      (after ?? parts).push(...flowBlocks(prose));
     }
-    const text = parts.join(' ');
+    flushAfter();
+    const text = parts.filter(Boolean).join(' ');
     if (text) lines.push(`${pad}${marker}${text}`);
+    else if (proseAfter && marker) lines.push(`${pad}${marker.trimEnd()}`);
     for (const block of nested) if (block) lines.push(block);
   }
 
   return lines.join('\n');
+}
+
+/** A `<list>` or `<def-list>` rendered at `depth`; undefined for any other node. (#200) */
+function renderNestedList(node: JatsNode, depth: number): string | undefined {
+  const tag = tagNameOf(node);
+  if (tag === 'list') return renderList(node, depth);
+  if (tag === 'def-list') return renderDefList(node, depth);
+  return;
 }
 
 /**
@@ -613,9 +796,13 @@ function renderDispQuote(quote: JatsNode): string {
  *
  * `withTitle: false` leaves out the `<caption>`'s `<title>` — the box's title in
  * the JATS content model — for a box whose title has become the heading of the
- * section it forms (see {@link extractBodySections}).
+ * section it forms (see {@link extractBodySections}). `withLabel: false` leaves
+ * out its `<label>`, for a box whose label {@link renderFloatingBox} names it by.
  */
-function renderBoxedText(boxedText: JatsNode, withTitle = true): string {
+function renderBoxedText(
+  boxedText: JatsNode,
+  { withLabel = true, withTitle = true }: { withLabel?: boolean; withTitle?: boolean } = {},
+): string {
   const blocks: string[] = [];
   for (const child of childrenOf(boxedText)) {
     const tag = tagNameOf(child);
@@ -623,9 +810,37 @@ function renderBoxedText(boxedText: JatsNode, withTitle = true): string {
     else if (tag === 'caption') {
       const parts = childrenOf(child).filter((c) => withTitle || tagNameOf(c) !== 'title');
       blocks.push(...flowBlocks(parts, STATEMENT_BLOCK_TAGS));
-    } else blocks.push(...flowBlocks([child]));
+    } else if (withLabel || tag !== 'label') blocks.push(...flowBlocks([child]));
   }
   return blocks.join('\n\n');
+}
+
+/** The line that closes a {@link renderFloatingBox} box. */
+const BOX_END = '[End of box]';
+
+/**
+ * Render a `<boxed-text>` that sits in the body flow — a "Box 1", a highlights
+ * panel, a sidebar — set apart from the prose around it. Read as plain
+ * paragraphs, nothing marked where the box ended, so the body text after it
+ * read as part of the box (PMC10666927). The box opens with a line naming it by
+ * its label and `<caption>` title (`[Box: Box 1. Virtual unconference format]`,
+ * or `[Box]` when it carries neither), its content follows as
+ * {@link renderBoxedText} reads it, and {@link BOX_END} closes it. A box with no
+ * readable content — a lone `<graphic>` — keeps only its opening line when it
+ * is named, and renders nothing when it is not. (#210)
+ *
+ * A box that forms a section of its own (see {@link extractBodySections})
+ * needs none of this: its title is the section heading, and the next heading
+ * ends it.
+ */
+function renderFloatingBox(boxedText: JatsNode): string {
+  const label = textContent(findOne(boxedText, 'label'));
+  const title = textContent(findOne(findOne(boxedText, 'caption'), 'title'));
+  const heading = [label, title].filter(Boolean).join(' ');
+  const opening = heading ? `[Box: ${heading}]` : '[Box]';
+  const content = renderBoxedText(boxedText, { withLabel: false, withTitle: false });
+  if (!content) return heading ? opening : '';
+  return [opening, content, BOX_END].join('\n\n');
 }
 
 /**
@@ -803,9 +1018,9 @@ function renderBlockWithoutTitle(node: JatsNode): string {
     case 'list':
       return renderList(node, 0, false);
     case 'boxed-text':
-      return renderBoxedText(node, false);
+      return renderBoxedText(node, { withTitle: false });
     default:
-      return renderBlock(node);
+      return renderBlock(node).text;
   }
 }
 
@@ -943,7 +1158,9 @@ function parseTableWrap(tableWrap: JatsNode, sectionTitle: string | undefined): 
   const id = attrOf(tableWrap, 'id');
   const label = textContent(findOne(tableWrap, 'label')) || undefined;
   const caption = renderCaption(findOne(tableWrap, 'caption'));
-  const footnotes = textContent(findOne(tableWrap, 'table-wrap-foot')) || undefined;
+  // One line per footnote or paragraph: a footer is a list of statements, and a
+  // marker run into the previous note (`…dose.*No patient…`) misattributes it. (#185)
+  const footnotes = lineTextContent(findOne(tableWrap, 'table-wrap-foot')) || undefined;
 
   // Some deposits offer both renderings inside <alternatives>; prefer the markup.
   const table = findOne(tableWrap, 'table') ?? findOne(findOne(tableWrap, 'alternatives'), 'table');
@@ -1047,7 +1264,8 @@ function extractTableRows(table: JatsNode): { headerRowCount: number; rows: stri
       sourceCells += 1;
 
       col = drainCarried(row, col);
-      const value = textContent(cell);
+      // `\n` wherever the cell breaks a line: `1.08<break/>2.44` is two values. (#185)
+      const value = lineTextContent(cell);
       const rowspan = spanOf(cell, 'rowspan');
       const width = Math.min(spanOf(cell, 'colspan'), MAX_TABLE_COLUMNS - col);
       for (let i = 0; i < width; i++) {
@@ -1175,26 +1393,35 @@ function renderCitationName(node: JatsNode): string {
  * direct children in document order, joining author names with `, ` and
  * labeling typed `<pub-id>`s, so the output reads as a citation rather than a
  * token run. (#69)
+ *
+ * Two field pairs are joined the way a citation prints them rather than by a
+ * space, which read as two unrelated numbers: an `<fpage>` followed by its
+ * `<lpage>` is a page range (`56–71`, `i1–i51`), and a `<volume>` followed by
+ * its `<issue>` reads `16(1)`. Each token is kept verbatim. (#209)
  */
 function renderElementCitation(node: JatsNode): string {
   const parts: string[] = [];
+  /** The field element that contributed the last part; undefined after anything else. */
+  let previous: string | undefined;
   for (const child of childrenOf(node)) {
     const tag = tagNameOf(child);
+    let part: string;
     if (tag === 'person-group') {
-      const names = childrenOf(child).map(renderCitationName).filter(Boolean);
-      if (names.length > 0) parts.push(names.join(', '));
+      part = childrenOf(child).map(renderCitationName).filter(Boolean).join(', ');
     } else if (tag === 'pub-id') {
       const value = textContent(child);
-      if (value) {
-        const label = PUB_ID_LABELS[attrOf(child, 'pub-id-type') ?? ''];
-        parts.push(label ? `${label} ${value}` : value);
-      }
+      const label = PUB_ID_LABELS[attrOf(child, 'pub-id-type') ?? ''];
+      part = value && label ? `${label} ${value}` : value;
     } else {
       // Element field (source, volume, year, fpage, …) or a bare text node;
       // textContent renders both, and empty results drop out of the join.
-      const text = textContent(child);
-      if (text) parts.push(text);
+      part = textContent(child);
     }
+    if (!part) continue;
+    if (tag === 'lpage' && previous === 'fpage') parts.push(`${parts.pop()}–${part}`);
+    else if (tag === 'issue' && previous === 'volume') parts.push(`${parts.pop()}(${part})`);
+    else parts.push(part);
+    previous = tag;
   }
   return parts.join(' ');
 }
@@ -1210,40 +1437,117 @@ function renderElementCitation(node: JatsNode): string {
 const NAME_WRAPPER_TAGS: ReadonlySet<string> = new Set(['name', 'string-name', 'person-group']);
 
 /**
- * Serialize a `<name>` / `<string-name>` / `<person-group>` subtree, applying
- * the same rule `renderMixedCitation` applies to its own children: a single
- * space between two adjacent elements that carry nothing between them, and
- * source text emitted verbatim. `<person-group>` separates its names with real
- * `, ` text nodes and `<string-name>` usually separates surname from given
- * names with a newline, so a fixed separator would double punctuation the
- * source already has — spacing only the zero-gap transitions leaves those
- * records byte-identical. Returns raw text; the caller collapses whitespace
- * once over the finished citation.
+ * The members of an author list: each names one contributor, or (`<etal>`)
+ * stands for the rest. Two of them with nothing but whitespace between them are
+ * two list entries, which the source left for the reader to separate. (#209)
  */
-function renderNameWrapper(node: JatsNode): string {
-  let rendered = '';
-  let prevWasElement = false;
+const PERSON_TAGS: ReadonlySet<string> = new Set(['name', 'string-name', 'collab', 'etal']);
+
+/** What an empty `<etal/>` stands for. (#209) */
+const SUPPLIED_ETAL = 'et al.';
+
+/** Any character other than whitespace. */
+const VISIBLE_TEXT = /\S/;
+
+/** Raw citation text, and whether it ends in a {@link SUPPLIED_ETAL}, whitespace aside. */
+interface CitationRun {
+  suppliedEtal: boolean;
+  text: string;
+}
+
+/** One child element of a citation run, rendered. */
+interface CitationPart extends CitationRun {
+  /** The renderer inserted a `pub-id-type` label in front of the value. */
+  labeled: boolean;
+}
+
+/**
+ * Render one child element of a `<mixed-citation>` or name wrapper. `before` is
+ * the citation text written so far, which a `<pub-id>` reads for a literal
+ * prefix already naming its type. An `<etal>` reads as its own text, or as
+ * `et al.` when it is empty — as nearly every deposit leaves it.
+ */
+function renderCitationPart(child: JatsNode, tag: string, before: string): CitationPart {
+  if (tag === 'pub-id') {
+    const value = textContent(child);
+    const type = attrOf(child, 'pub-id-type') ?? '';
+    const label = PUB_ID_LABELS[type];
+    if (value && label && !hasLiteralIdPrefix(before, type)) {
+      return { text: `${label} ${value}`, labeled: true, suppliedEtal: false };
+    }
+    return { text: value, labeled: false, suppliedEtal: false };
+  }
+  if (NAME_WRAPPER_TAGS.has(tag)) return { ...renderCitationRun(child, true), labeled: false };
+  const text = rawTextContent(child);
+  if (tag === 'etal' && !text) return { text: SUPPLIED_ETAL, labeled: false, suppliedEtal: true };
+  return { text, labeled: false, suppliedEtal: false };
+}
+
+/**
+ * Serialize a `<mixed-citation>` (`wrapper: false`) or a `<name>` /
+ * `<string-name>` / `<person-group>` inside one (`wrapper: true`), emitting
+ * source text verbatim and writing a separator only where the source left
+ * none:
+ *
+ * - Two adjacent author-list members ({@link PERSON_TAGS}) with nothing but
+ *   whitespace between them are joined by `, `: `Zwierenga F, van Veggel B,
+ *   Hendriks LEL, et al.` rather than `Zwierenga F van Veggel B Hendriks LEL`.
+ *   (#209)
+ * - Any other two elements with nothing between them get one space: a
+ *   `<surname>` and its `<given-names>`, a title and the volume after it.
+ *   (#115, #123, #124)
+ * - A label this renderer inserts is separated from whatever precedes it. (#115)
+ * - A source `.` straight after a supplied `et al.` closes it rather than
+ *   doubling its period (`<etal/></person-group>. <article-title>`). (#209)
+ *
+ * Gaps the source already fills — `, ` text between names, a newline between a
+ * `<string-name>`'s parts — are kept as written, so a fixed separator never
+ * doubles punctuation the source has. Inside a wrapper an element that renders
+ * nothing is skipped; at the citation's own level it still counts as the
+ * element the next one follows. Returns raw text; the caller collapses
+ * whitespace once over the finished citation.
+ *
+ * Whitespace is held in `gap` until what follows it decides whether it is
+ * written, so no step re-reads the text already written and the cost stays
+ * linear in the size of the citation.
+ */
+function renderCitationRun(node: JatsNode, wrapper: boolean): CitationRun {
+  let text = '';
+  /** Whitespace not yet written: the end of the last element's text, then source whitespace after it. */
+  let gap = '';
+  /** The element written last, while no visible source text has followed it. */
+  let previous: string | undefined;
+  let suppliedEtal = false;
 
   for (const child of childrenOf(node)) {
     if (isTextNode(child)) {
-      const raw = textOf(child);
-      if (raw) {
-        rendered += raw;
-        prevWasElement = false;
+      let raw = textOf(child);
+      if (!VISIBLE_TEXT.test(raw)) {
+        gap += raw;
+        continue;
       }
+      if (suppliedEtal) raw = raw.replace(/^(\s*)\./, '$1');
+      text += gap + raw;
+      gap = '';
+      previous = undefined;
+      suppliedEtal = false;
       continue;
     }
 
     const tag = tagNameOf(child) ?? '';
-    const part = NAME_WRAPPER_TAGS.has(tag) ? renderNameWrapper(child) : rawTextContent(child);
-    if (!part) continue;
+    const part = renderCitationPart(child, tag, text);
+    if (!part.text && (wrapper || tag === 'pub-id')) continue;
 
-    if (prevWasElement) rendered += ' ';
-    rendered += part;
-    prevWasElement = true;
+    if (previous && PERSON_TAGS.has(previous) && PERSON_TAGS.has(tag)) text += ', ';
+    else text += (previous && !gap) || part.labeled ? `${gap} ` : gap;
+    const body = part.text.trimEnd();
+    text += body;
+    gap = part.text.slice(body.length);
+    previous = tag;
+    suppliedEtal = part.suppliedEtal;
   }
 
-  return rendered;
+  return { text: text + gap, suppliedEtal };
 }
 
 /**
@@ -1276,48 +1580,23 @@ function hasLiteralIdPrefix(rendered: string, pubIdType: string): boolean {
  * styles routinely close the prose on punctuation (`… (2020).`, `…021]`) and a
  * label butted against that reads as one token. Source transitions that already
  * carry punctuation or whitespace are emitted unchanged; the trailing whitespace
- * collapse keeps a whitespace-only gap at one space.
+ * collapse keeps a whitespace-only gap at one space. An author list whose names
+ * the source left unseparated reads with `, ` between them and `et al.` for an
+ * empty `<etal/>` (see {@link renderCitationRun}). (#209)
  */
 function renderMixedCitation(node: JatsNode): string {
-  let rendered = '';
-  let prevWasElement = false;
+  return renderCitationRun(node, false).text.replace(/\s+/g, ' ').trim();
+}
 
-  for (const child of childrenOf(node)) {
-    if (isTextNode(child)) {
-      const raw = textOf(child);
-      if (raw) {
-        rendered += raw;
-        prevWasElement = false;
-      }
-      continue;
-    }
-
-    const tag = tagNameOf(child) ?? '';
-    let part: string;
-    let labeled = false;
-    if (tag === 'pub-id') {
-      const value = textContent(child);
-      if (!value) continue;
-      const type = attrOf(child, 'pub-id-type') ?? '';
-      const label = PUB_ID_LABELS[type];
-      if (label && !hasLiteralIdPrefix(rendered, type)) {
-        labeled = true;
-        part = `${label} ${value}`;
-      } else {
-        part = value;
-      }
-    } else if (NAME_WRAPPER_TAGS.has(tag)) {
-      part = renderNameWrapper(child);
-    } else {
-      part = rawTextContent(child);
-    }
-
-    if (prevWasElement || labeled) rendered += ' ';
-    rendered += part;
-    prevWasElement = true;
-  }
-
-  return rendered.replace(/\s+/g, ' ').trim();
+/**
+ * A `<ref>`'s `<label>`, without the one pair of square brackets some deposits
+ * print it in: `[19]` is reference 19, and the tool already writes each
+ * reference's label and id inside brackets of its own (`[19 R19]`, not
+ * `[[19] R19]`). Any other label — `1.`, `(3)`, `A12` — is kept as printed.
+ * (#209)
+ */
+function referenceLabel(label: JatsNode | undefined): string | undefined {
+  return textContent(label).replace(/^\[([^[\]]+)\]$/, '$1') || undefined;
 }
 
 /**
@@ -1365,7 +1644,7 @@ export function extractReferences(root: JatsNode | undefined): ParsedPmcReferenc
       if (!citation) continue;
 
       if (id) seenIds.add(id);
-      const label = textContent(findOne(ref, 'label')) || undefined;
+      const label = referenceLabel(findOne(ref, 'label'));
       results.push({
         ...(id && { id }),
         ...(label && { label }),

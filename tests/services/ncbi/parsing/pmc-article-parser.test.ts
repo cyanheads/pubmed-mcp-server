@@ -5,7 +5,9 @@
  * @module tests/services/ncbi/parsing/pmc-article-parser.test
  */
 
+import { XMLParser } from 'fast-xml-parser';
 import { describe, expect, it } from 'vitest';
+import { ORDERED_XML_PARSER_OPTIONS } from '@/services/ncbi/parsing/ordered-xml-parser-options.js';
 import {
   extractBodySections,
   extractJatsAuthors,
@@ -401,8 +403,9 @@ describe('extractBodySections', () => {
       ]),
     ]);
 
+    // Delimited from the prose around it, with no label or title to name it by (#210).
     expect(extractBodySections(body)[0]?.text).toBe(
-      'Opening prose.\n\nCore Ideas\nBoxed prose.\n\nImplications\n- Testing can guide dosing.',
+      'Opening prose.\n\n[Box]\n\nCore Ideas\nBoxed prose.\n\nImplications\n- Testing can guide dosing.\n\n[End of box]',
     );
   });
 
@@ -495,8 +498,11 @@ describe('extractBodySections', () => {
       el('sec', [el('title', [t('Methods')]), el('p', [t('Methods text.')])]),
     ]);
 
+    // The untitled box stays in the run, delimited from the blocks before it (#210).
     expect(extractBodySections(body)).toEqual([
-      { text: 'Opening paragraph.\n\n- Untitled point.\n\nCore Ideas\nBoxed.' },
+      {
+        text: 'Opening paragraph.\n\n- Untitled point.\n\n[Box]\n\nCore Ideas\nBoxed.\n\n[End of box]',
+      },
       { title: 'Methods', text: 'Methods text.' },
     ]);
   });
@@ -1749,8 +1755,9 @@ describe('extractReferences', () => {
     const refs = extractReferences(back);
     expect(refs).toHaveLength(1);
     expect(refs[0]?.id).toBe('bib2');
+    // Volume(issue) and the page range read as they print (#209), page tokens verbatim.
     expect(refs[0]?.citation).toBe(
-      'Doman J.L., Pandey S. Phage-assisted evolution yields compact prime editors Cell 186 18 2023 3983 4002.e26 PMID 37657419 DOI 10.1016/j.cell.2023.07.039 PMCID PMC10482982',
+      'Doman J.L., Pandey S. Phage-assisted evolution yields compact prime editors Cell 186(18) 2023 3983–4002.e26 PMID 37657419 DOI 10.1016/j.cell.2023.07.039 PMCID PMC10482982',
     );
     // Acceptance invariants from the issue:
     expect(refs[0]?.citation).not.toMatch(/e\+\d+/); // no scientific-notation page
@@ -2266,9 +2273,11 @@ describe('parsePmcArticle', () => {
       ]),
     ]);
 
+    // The list reads on lines of its own, set apart by a blank line as in a
+    // body section, rather than running onto the figure marker. (#202)
     const parsed = parsePmcArticle(article);
     expect(parsed.abstract).toBe(
-      'Attachment is promoted by stress fibers.\n\n[Figure: Fig. 7] - Sialic acid clusters stay disordered.',
+      'Attachment is promoted by stress fibers.\n\n[Figure: Fig. 7]\n\n- Sialic acid clusters stay disordered.',
     );
     expect(parsed.abstract).not.toContain('STK11 facilitates');
     expect(parsed.assets?.[0]?.caption).toBe('STK11 facilitates influenza A virus attachment.');
@@ -2660,5 +2669,945 @@ describe('tex-math preamble and alternatives duplication (#135)', () => {
     expect(parsed.tables?.[0]?.caption).toBe('Symbols used in $$Q$$');
     // One rendering per formula: the expression appears exactly once per site.
     expect(parsed.sections[0]?.text.match(/\$\$/g)).toHaveLength(4);
+  });
+});
+
+// ─── Structural boundaries (#185), affiliations (#196), citation runs (#197) ───
+
+/** Parse a JATS fragment with the server's ordered parser options. */
+const jatsArticle = (xml: string): JatsNode => {
+  const parsed = new XMLParser(ORDERED_XML_PARSER_OPTIONS).parse(xml) as JatsNode[];
+  const article = parsed.find((node) => 'article' in node);
+  if (!article) throw new Error('fixture has no <article>');
+  return article;
+};
+
+/** An `<article>` around the given `<article-meta>` children and `<body>` content. */
+const articleXml = (meta: string, body = '') =>
+  `<article><front><article-meta><article-id pub-id-type="pmcid">PMC1</article-id>${meta}</article-meta></front><body>${body}</body></article>`;
+
+describe('structural boundaries in tables and prose (#185)', () => {
+  /** PMC10164684's three tables, reduced to the cells and footnotes under test. */
+  const PMC10164684 = jatsArticle(
+    articleXml(
+      '',
+      '<sec><title>Results</title>' +
+        '<table-wrap id="T1"><label>Table 1</label><table><thead><tr><th>Characteristic</th></tr></thead><tbody><tr><td>Age</td></tr></tbody></table>' +
+        '<table-wrap-foot><fn id="TFN1"><p id="P50">Abbreviations: IQR, interquartile range; OCS, oral corticosteroids.</p></fn>' +
+        '<fn id="TFN2"><label>+</label><p id="P51">66 (97%) of the 68% patients on dupilumab were using the 300 mg every 2-week dose.</p></fn>' +
+        '<fn id="TFN3"><label>*</label><p id="P52">No patient within this cohort was uninsured</p></fn>' +
+        '<fn id="TFN4"><label>#</label><p id="P53">The five patients on omalizumab all had IgE within the accepted level.</p></fn></table-wrap-foot></table-wrap>' +
+        '<table-wrap id="T2"><label>Table 2</label><table><thead><tr><th align="left" valign="bottom" rowspan="1" colspan="1">EXACERBATION RATE RATIOS<break/>IRR (95% CI)</th><th>MEPOLIZUMAB</th></tr></thead></table></table-wrap>' +
+        '<table-wrap id="T3"><label>Table 3</label><table><thead><tr><th align="left" valign="bottom" rowspan="1" colspan="1">MEAN DIFFERENCE IN LITERS<break/>(95% CI)</th><th>MEPOLIZUMAB</th></tr></thead></table></table-wrap>' +
+        '</sec>',
+    ),
+  );
+
+  it('keeps a <break/> in a header cell as a line boundary (PMC10164684 Tables 2 and 3)', () => {
+    const tables = parsePmcArticle(PMC10164684).tables ?? [];
+    expect(tables[1]?.rows[0]).toEqual(['EXACERBATION RATE RATIOS\nIRR (95% CI)', 'MEPOLIZUMAB']);
+    expect(tables[2]?.rows[0]).toEqual(['MEAN DIFFERENCE IN LITERS\n(95% CI)', 'MEPOLIZUMAB']);
+  });
+
+  it('returns one footnotes line per <fn>, each marker leading its line (PMC10164684 Table 1)', () => {
+    const footnotes = parsePmcArticle(PMC10164684).tables?.[0]?.footnotes;
+    expect(footnotes?.split('\n')).toEqual([
+      'Abbreviations: IQR, interquartile range; OCS, oral corticosteroids.',
+      '+ 66 (97%) of the 68% patients on dupilumab were using the 300 mg every 2-week dose.',
+      '* No patient within this cohort was uninsured',
+      '# The five patients on omalizumab all had IgE within the accepted level.',
+    ]);
+  });
+
+  it('splits multi-value cells at <break/> instead of fusing their numbers (PMC11176230, PMC13531951)', () => {
+    const article = jatsArticle(
+      articleXml(
+        '',
+        '<table-wrap id="Tab4"><table><thead><tr><th/><th align="left" colspan="2" rowspan="1">KTR<break/><italic toggle="yes">n</italic>\u2009=\u2009157<break/>mean measured GFR: 57\u2009±\u200920<break/>95 percentile range: 25–87</th></tr></thead>' +
+          '<tbody><tr><td>Creatine</td><td align="center" valign="top" rowspan="1" colspan="1">1.08<break/>2.44</td><td>0.020</td></tr></tbody></table></table-wrap>',
+      ),
+    );
+    const rows = parsePmcArticle(article).tables?.[0]?.rows ?? [];
+    expect(rows[0]?.[1]).toBe(
+      'KTR\nn = 157\nmean measured GFR: 57 ± 20\n95 percentile range: 25–87',
+    );
+    expect(rows[1]).toEqual(['Creatine', '1.08\n2.44', '0.020']);
+    expect(JSON.stringify(rows)).not.toMatch(/2095|1\.082\.44/);
+  });
+
+  it('gives a <list> in a cell one line per item, label included (PMC12892626)', () => {
+    const article = jatsArticle(
+      articleXml(
+        '',
+        '<table-wrap id="tbl1"><table><tbody><tr><td align="left"><list list-type="simple" id="celist10">' +
+          '<list-item id="celistitem10"><label>1.</label><p id="para10">Hispanic, or of Hispanic origin, background or descendent</p></list-item>' +
+          '<list-item id="celistitem20"><label>2.</label><p id="para20">Aged 55 or over</p></list-item>' +
+          '</list></td></tr></tbody></table></table-wrap>',
+      ),
+    );
+    expect(parsePmcArticle(article).tables?.[0]?.rows[0]?.[0]).toBe(
+      '1. Hispanic, or of Hispanic origin, background or descendent\n2. Aged 55 or over',
+    );
+  });
+
+  it('leaves a single-footnote footer and inline cell markers as they read before', () => {
+    const article = jatsArticle(
+      articleXml(
+        '',
+        '<table-wrap><table><tbody><tr><td>0.108<sup>a</sup></td></tr></tbody></table>' +
+          '<table-wrap-foot><p><sup>a</sup>Fisher’s exact test</p></table-wrap-foot></table-wrap>',
+      ),
+    );
+    const table = parsePmcArticle(article).tables?.[0];
+    expect(table?.rows).toEqual([['0.108a']]);
+    expect(table?.footnotes).toBe('aFisher’s exact test');
+  });
+
+  it('keeps each item label of a simple list in section text (PMC12878422 celist10)', () => {
+    const article = jatsArticle(
+      articleXml(
+        '',
+        '<sec><title>Methods</title><p id="para140">\n<list list-type="simple" id="celist10">' +
+          '<list-item id="celistitem10"><label>1.</label><p id="para150">Cereals (including potatoes, bread, pasta, rice, cookies)</p></list-item>' +
+          '<list-item id="celistitem20"><label>2.</label><p id="para160">Pulses</p></list-item>' +
+          '</list></p></sec>',
+      ),
+    );
+    expect(parsePmcArticle(article).sections[0]?.text).toBe(
+      '1. Cereals (including potatoes, bread, pasta, rice, cookies)\n2. Pulses',
+    );
+  });
+
+  it('leaves the label out of a list that prints its own marker, and a simple list without labels bare', () => {
+    const sections = extractBodySections(
+      el('body', [
+        el('list', [el('list-item', [el('label', [t('(a)')]), el('p', [t('First.')])])], {
+          '@_list-type': 'order',
+        }),
+        el('list', [el('list-item', [el('label', [t('•')]), el('p', [t('Dot.')])])], {
+          '@_list-type': 'bullet',
+        }),
+        el('list', [el('list-item', [el('p', [t('Bare.')])])], { '@_list-type': 'simple' }),
+      ]),
+    );
+    expect(sections[0]?.text).toBe('1. First.\n\n- Dot.\n\nBare.');
+  });
+
+  it('reads a <fig-group> label beside its caption with one space (PMC12266799)', () => {
+    const article = jatsArticle(
+      articleXml(
+        '',
+        '<sec><title>Results</title><p>Shown below.</p><fig-group position="float" id="F3" orientation="portrait"><label>FIGURE 3</label>' +
+          '<caption><p>Kaplan-Meier cumulative incidence curves.</p></caption></fig-group></sec>',
+      ),
+    );
+    expect(parsePmcArticle(article).sections[0]?.text).toBe(
+      'Shown below.\n\nFIGURE 3 Kaplan-Meier cumulative incidence curves.',
+    );
+  });
+
+  it('reads <break/>, <hr/> and an inline <fn> in a paragraph as one space each', () => {
+    const article = jatsArticle(
+      articleXml(
+        '',
+        '<sec><title>Intro</title><p>Line one<break/>line two<hr/>line three<fn id="fn1"><label>a</label><p>A note.</p></fn>after.</p></sec>',
+      ),
+    );
+    expect(parsePmcArticle(article).sections[0]?.text).toBe(
+      'Line one line two line three a A note. after.',
+    );
+  });
+
+  it('keeps inline markup in section prose unspaced', () => {
+    const article = jatsArticle(
+      articleXml(
+        '',
+        '<sec><title>Intro</title><p>H<sub>2</sub>O<sub>2</sub> at 1 × 10<sup>−5</sup> M, kg/m<sup>2</sup>, the i<italic>th</italic> run (Smith et al., <xref ref-type="bibr" rid="b1">2008</xref>).</p></sec>',
+      ),
+    );
+    expect(parsePmcArticle(article).sections[0]?.text).toBe(
+      'H2O2 at 1 × 10−5 M, kg/m2, the ith run (Smith et al., 2008).',
+    );
+  });
+});
+
+describe('adjacent citation markers in prose (#197)', () => {
+  it('separates a run of markers with nothing between them by commas (PMC13581315)', () => {
+    const article = jatsArticle(
+      articleXml(
+        '',
+        '<sec><title>Introduction</title><p>recognised among Asians.[<xref rid="R1" ref-type="bibr">1</xref><xref rid="R2" ref-type="bibr">2</xref>' +
+          '<xref rid="R3" ref-type="bibr">3</xref><xref rid="R4" ref-type="bibr">4</xref>] Delayed diagnosis.[<xref rid="R5" ref-type="bibr">5</xref>,' +
+          '<xref rid="R7" ref-type="bibr">7</xref>–<xref rid="R9" ref-type="bibr">9</xref>]</p></sec>',
+      ),
+    );
+    expect(parsePmcArticle(article).sections[0]?.text).toBe(
+      'recognised among Asians.[1,2,3,4] Delayed diagnosis.[5,7–9]',
+    );
+  });
+
+  it('starts a fresh run after a block interrupts the paragraph', () => {
+    const article = jatsArticle(
+      articleXml(
+        '',
+        '<sec><title>Intro</title><p>Before <xref>1</xref><list><list-item><p>item</p></list-item></list><xref>2</xref> after.</p></sec>',
+      ),
+    );
+    expect(parsePmcArticle(article).sections[0]?.text).toBe('Before 1\n\n- item\n\n2 after.');
+  });
+});
+
+describe('affiliations at every front-matter level (#196)', () => {
+  it('reads <aff> inside <contrib-group> (PMC11176230 shape)', () => {
+    const article = jatsArticle(
+      articleXml(
+        '<contrib-group><contrib contrib-type="author"><name><surname>Post</surname><given-names>Adrian</given-names></name><xref ref-type="aff" rid="aff1">1</xref></contrib>' +
+          '<contrib contrib-type="author"><name><surname>Bakker</surname><given-names>Stephan</given-names></name><xref ref-type="aff" rid="aff1">1</xref><xref ref-type="aff" rid="aff2">2</xref></contrib>' +
+          '<aff id="aff1"><label>1</label>Department of Internal Medicine, University Medical Center Groningen, Groningen, The Netherlands</aff>' +
+          '<aff id="aff2"><label>2</label>Laboratory Medicine, Groningen, The Netherlands</aff></contrib-group>',
+      ),
+    );
+    expect(parsePmcArticle(article).affiliations).toEqual([
+      '1 Department of Internal Medicine, University Medical Center Groningen, Groningen, The Netherlands',
+      '2 Laboratory Medicine, Groningen, The Netherlands',
+    ]);
+  });
+
+  it('reads <aff> inside each <contrib>, one copy per distinct affiliation (PMC13588555 shape)', () => {
+    const article = jatsArticle(
+      articleXml(
+        '<contrib-group><contrib contrib-type="author"><name><surname>Rajasingham</surname></name><aff id="A1">Emergency Response and Recovery Branch, CDC, Atlanta, USA</aff></contrib>' +
+          '<contrib contrib-type="author"><name><surname>Harvey</surname></name><aff id="A2">Ethiopia WASH Cluster, Addis Ababa, Ethiopia</aff></contrib>' +
+          '<contrib contrib-type="author"><name><surname>Martinsen</surname></name><aff id="A5">Emergency Response and Recovery Branch, CDC, Atlanta, USA</aff></contrib></contrib-group>',
+      ),
+    );
+    expect(parsePmcArticle(article).affiliations).toEqual([
+      'Emergency Response and Recovery Branch, CDC, Atlanta, USA',
+      'Ethiopia WASH Cluster, Addis Ababa, Ethiopia',
+    ]);
+  });
+
+  it('reads both levels in document order, an <aff> directly under <article-meta> included', () => {
+    const article = jatsArticle(
+      articleXml(
+        '<contrib-group><contrib><name><surname>A</surname></name><aff id="a1">Group-level contrib aff</aff></contrib><aff id="a2">Group aff</aff></contrib-group>' +
+          '<aff id="a3">Meta-level aff</aff>',
+      ),
+    );
+    expect(parsePmcArticle(article).affiliations).toEqual([
+      'Group-level contrib aff',
+      'Group aff',
+      'Meta-level aff',
+    ]);
+  });
+
+  it('reads an <institution-wrap> as the institution and address only, without ROR/GRID/ISNI ids', () => {
+    const article = jatsArticle(
+      articleXml(
+        '<contrib-group><aff id="Aff1"><label>1</label><institution-wrap><institution-id institution-id-type="ROR">https://ror.org/034t3zs45</institution-id>' +
+          '<institution-id institution-id-type="GRID">grid.454711.2</institution-id><institution-id institution-id-type="ISNI">0000 0001 1942 5509</institution-id>' +
+          '<institution>School of Food and Biological Engineering, </institution><institution>Shaanxi University of Science and Technology, </institution></institution-wrap>Xi’an, 710021 China </aff></contrib-group>',
+      ),
+    );
+    const [affiliation] = parsePmcArticle(article).affiliations ?? [];
+    expect(affiliation).toBe(
+      '1 School of Food and Biological Engineering, Shaanxi University of Science and Technology, Xi’an, 710021 China',
+    );
+    expect(affiliation).not.toMatch(/ror\.org|grid\.|0000 0001/);
+  });
+
+  it('returns an <aff> directly under <article-meta> as before', () => {
+    const article = jatsArticle(
+      articleXml(
+        '<aff id="aff1">Department of Testing, Example University</aff><aff id="aff2">Second Institute</aff>',
+      ),
+    );
+    expect(parsePmcArticle(article).affiliations).toEqual([
+      'Department of Testing, Example University',
+      'Second Institute',
+    ]);
+  });
+
+  it('omits the field when the front matter carries no <aff>', () => {
+    const article = jatsArticle(
+      articleXml(
+        '<contrib-group><contrib><name><surname>A</surname></name></contrib></contrib-group>',
+      ),
+    );
+    expect(parsePmcArticle(article).affiliations).toBeUndefined();
+  });
+});
+
+describe('a nested list inside a list item paragraph (#200)', () => {
+  /** The text of the first body section holding `secContent`. */
+  const sectionText = (secContent: string): string | undefined =>
+    parsePmcArticle(jatsArticle(articleXml('', `<sec><title>S</title>${secContent}</sec>`)))
+      .sections[0]?.text;
+
+  /** A `bullet` list of plain paragraph items. */
+  const bullets = (...items: string[]) =>
+    `<list list-type="bullet">${items.map((i) => `<list-item><p>${i}</p></list-item>`).join('')}</list>`;
+
+  it('starts every nested item on a line of its own beneath its parent (PMC12892673)', () => {
+    const text = sectionText(
+      '<p id="para40">We agreed on the following priorities:<list list-type="simple" id="celist10">' +
+        '<list-item id="celistitem10"><label>-</label><p id="para50">PREVENTION:<list list-type="simple" id="celist20">' +
+        '<list-item id="celistitem20"><label>•</label><p id="para60">Implementation and education of known risk factors;</p></list-item>' +
+        '<list-item id="celistitem30"><label>•</label><p id="para70">Large interventional studies.</p></list-item></list></p></list-item>' +
+        '<list-item id="celistitem40"><label>-</label><p id="para80">EARLY DIAGNOSIS:<list list-type="simple" id="celist30">' +
+        '<list-item id="celistitem50"><label>•</label><p id="para90">Development and validation of new biological markers;</p></list-item></list></p></list-item>' +
+        '</list></p>',
+    );
+    expect(text).toBe(
+      [
+        'We agreed on the following priorities:',
+        '',
+        '- PREVENTION:',
+        '  • Implementation and education of known risk factors;',
+        '  • Large interventional studies.',
+        '- EARLY DIAGNOSIS:',
+        '  • Development and validation of new biological markers;',
+      ].join('\n'),
+    );
+  });
+
+  it('renders a list inside the item paragraph exactly as one that is a direct child of the item', () => {
+    const inParagraph = sectionText(
+      `<list list-type="order"><list-item><p>Parent:${bullets('Child one', 'Child two')}` +
+        '<def-list><def-item><term>BMI</term><def><p>body mass index</p></def></def-item></def-list></p></list-item></list>',
+    );
+    const directChild = sectionText(
+      `<list list-type="order"><list-item><p>Parent:</p>${bullets('Child one', 'Child two')}` +
+        '<def-list><def-item><term>BMI</term><def><p>body mass index</p></def></def-item></def-list></list-item></list>',
+    );
+    expect(inParagraph).toBe('1. Parent:\n  - Child one\n  - Child two\n  - BMI — body mass index');
+    expect(inParagraph).toBe(directChild);
+  });
+
+  it('indents a list nested two paragraphs deep two levels', () => {
+    const text = sectionText(
+      `<list list-type="bullet"><list-item><p>Top<list list-type="bullet"><list-item><p>Middle${bullets('Bottom')}</p></list-item></list></p></list-item></list>`,
+    );
+    expect(text).toBe('- Top\n  - Middle\n    - Bottom');
+  });
+
+  it('keeps prose that follows the nested list below it, in document order (PMC8533647)', () => {
+    // The rest of the same <p>, then a later sibling <p>, both after the list.
+    const text = sectionText(
+      `<list list-type="order"><list-item><label>3.</label><p>RoB from confounding${bullets('Assumes a list', 'Low RoB requires balance.')}` +
+        ' </p><p>Assess against the worksheet.</p></list-item><list-item><p>Next.</p></list-item></list>',
+    );
+    expect(text).toBe(
+      '1. RoB from confounding\n  - Assumes a list\n  - Low RoB requires balance.\n  Assess against the worksheet.\n2. Next.',
+    );
+    expect(
+      sectionText(
+        `<list list-type="bullet"><list-item><p>Before${bullets('Child')}after.</p></list-item></list>`,
+      ),
+    ).toBe('- Before\n  - Child\n  after.');
+  });
+
+  it('keeps prose after a direct-child list below it as well (#203)', () => {
+    expect(
+      sectionText(
+        `<list list-type="bullet"><list-item><p>Before</p>${bullets('Child')}<p>after.</p></list-item></list>`,
+      ),
+    ).toBe('- Before\n  - Child\n  after.');
+  });
+
+  it('leaves flat lists and direct-child nested lists as they read before', () => {
+    expect(
+      sectionText(
+        '<list list-type="bullet"><list-item><p>First para.</p><p>Second para.</p></list-item>' +
+          '<list-item><p>Next.</p></list-item></list>',
+      ),
+    ).toBe('- First para. Second para.\n- Next.');
+    expect(
+      sectionText(
+        `<list list-type="bullet"><list-item><p>Parent</p>${bullets('Child one', 'Child two')}</list-item></list>`,
+      ),
+    ).toBe('- Parent\n  - Child one\n  - Child two');
+    expect(sectionText(`<p>Lead-in:${bullets('A', 'B')}</p>`)).toBe('Lead-in:\n\n- A\n- B');
+  });
+});
+
+describe('a list inside an abstract reads on lines of its own (#202)', () => {
+  /** The `abstract` parsed from an `<abstract>` holding `content`. */
+  const abstractOf = (content: string): string | undefined =>
+    parsePmcArticle(jatsArticle(articleXml(`<abstract>${content}</abstract>`))).abstract;
+
+  /** A `bullet` list of plain paragraph items. */
+  const bullets = (...items: string[]) =>
+    `<list list-type="bullet">${items.map((i) => `<list-item><p>${i}</p></list-item>`).join('')}</list>`;
+
+  it('starts a section that opens with a list on the line below its heading (PMC10869376)', () => {
+    const abstract = abstractOf(
+      '<sec><title>Abstract</title><p>Type 2 diabetes mellitus (T2DM) was reported to be associated with impaired immune response.</p></sec>' +
+        '<sec><title>Key points</title><p id="Par2">\n<list list-type="bullet">' +
+        '<list-item><p id="Par3">\n<italic toggle="yes">Hyperglycemia may suppress tryptophanase activity.</italic>\n</p></list-item>' +
+        '<list-item><p id="Par4">\n<italic toggle="yes">The low abundance of Bacteroides may lead to the decrease of skatole.</italic>\n</p></list-item>' +
+        '<list-item><p id="Par5">\n<italic toggle="yes">A low abundance of</italic> anti-inflammatory bacteria <italic toggle="yes">may induce an inflammatory response.</italic></p></list-item>' +
+        '</list>\n</p></sec>' +
+        '<sec><title>Supplementary Information</title><p>The online version contains supplementary material.</p></sec>',
+    );
+    expect(abstract).toBe(
+      [
+        'Abstract: Type 2 diabetes mellitus (T2DM) was reported to be associated with impaired immune response.',
+        '',
+        'Key points:',
+        '- Hyperglycemia may suppress tryptophanase activity.',
+        '- The low abundance of Bacteroides may lead to the decrease of skatole.',
+        '- A low abundance of anti-inflammatory bacteria may induce an inflammatory response.',
+        '',
+        'Supplementary Information: The online version contains supplementary material.',
+      ].join('\n'),
+    );
+  });
+
+  it('breaks the heading line for a one-item list and for a definition list', () => {
+    expect(
+      abstractOf(
+        '<sec><title>Key point</title><list list-type="order"><list-item><p>Only one.</p></list-item></list></sec>',
+      ),
+    ).toBe('Key point:\n1. Only one.');
+    expect(
+      abstractOf(
+        '<sec><title>Abbreviations</title><def-list><def-item><term>BMI</term><def><p>body mass index</p></def></def-item></def-list></sec>',
+      ),
+    ).toBe('Abbreviations:\n- BMI — body mass index');
+  });
+
+  it('sets a list apart from the statements around it with a blank line, as a body section does', () => {
+    const list = bullets('First.', 'Second.');
+    expect(abstractOf(`<p>Intro.</p>${list}<p>After.</p>`)).toBe(
+      'Intro.\n\n- First.\n- Second.\n\nAfter.',
+    );
+    // A list in the middle of a paragraph leaves that paragraph's own edges
+    // prose, so the statement after it still joins with a space.
+    expect(abstractOf(`<p>Intro:${list}then more.</p><p>Next.</p>`)).toBe(
+      'Intro:\n\n- First.\n- Second.\n\nthen more. Next.',
+    );
+    expect(
+      abstractOf(`<sec><title>Results</title><p>We found:</p>${list}<p>After.</p></sec>`),
+    ).toBe('Results: We found:\n\n- First.\n- Second.\n\nAfter.');
+    const body = parsePmcArticle(
+      jatsArticle(
+        articleXml('', `<sec><title>S</title><p>We found:</p>${list}<p>After.</p></sec>`),
+      ),
+    ).sections[0]?.text;
+    expect(body).toBe('We found:\n\n- First.\n- Second.\n\nAfter.');
+  });
+
+  it('ends a list that closes a paragraph before the next statement starts (PMC8533648)', () => {
+    const abstract = abstractOf(
+      '<sec><title>Executive Summary/Abstract</title>' +
+        '<sec><title>OBJECTIVES</title><p>The main goal is to examine the evidence.</p>' +
+        '<p>The research questions underlying this project are as follows:\n' +
+        bullets(
+          'Do programmes reduce exclusion?',
+          'Are some approaches more effective than others?',
+        ) +
+        '\n</p></sec>' +
+        '<sec><title>SEARCH METHODS</title><p>The authors conducted a comprehensive search.</p></sec></sec>',
+    );
+    expect(abstract).toBe(
+      'Executive Summary/Abstract: OBJECTIVES The main goal is to examine the evidence. ' +
+        'The research questions underlying this project are as follows:\n\n' +
+        '- Do programmes reduce exclusion?\n- Are some approaches more effective than others?\n\n' +
+        'SEARCH METHODS The authors conducted a comprehensive search.',
+    );
+  });
+
+  it('lays out an abstract that holds no list as before, apart from the #210 box delimiters', () => {
+    expect(
+      abstractOf(
+        '<sec><title>Plain language summary</title><sec><title>The review in brief</title><p>Interventions have a temporary effect.</p>' +
+          '<boxed-text><sec><title>What is the aim of this review?</title><p>This review examines exclusion.</p></sec></boxed-text></sec></sec>' +
+          '<sec><title>Background</title><p>One.</p><p>Two <disp-formula><tex-math>x=1</tex-math></disp-formula> three.</p></sec>',
+      ),
+    ).toBe(
+      // The box stands on lines of its own between its delimiters, as a list does (#210).
+      'Plain language summary: The review in brief Interventions have a temporary effect.\n\n[Box]\n\nWhat is the aim of this review?\n' +
+        'This review examines exclusion.\n\n[End of box]\n\nBackground: One. Two\n\nx=1\n\nthree.',
+    );
+    expect(abstractOf('<p>First paragraph.</p><p>Second <italic>paragraph</italic>.</p>')).toBe(
+      'First paragraph. Second paragraph.',
+    );
+  });
+});
+
+describe('prose after a nested list that is a direct child of its item (#203)', () => {
+  /** The text of the first body section holding `secContent`. */
+  const sectionText = (secContent: string): string | undefined =>
+    parsePmcArticle(jatsArticle(articleXml('', `<sec><title>S</title>${secContent}</sec>`)))
+      .sections[0]?.text;
+
+  /** A `bullet` list of plain paragraph items. */
+  const bullets = (...items: string[]) =>
+    `<list list-type="bullet">${items.map((i) => `<list-item><p>${i}</p></list-item>`).join('')}</list>`;
+
+  it('keeps the prose after the nested list below it, in source order', () => {
+    expect(
+      sectionText(
+        '<list><list-item><p>A</p><list><list-item><p>x</p></list-item></list><p>B</p></list-item></list>',
+      ),
+    ).toBe('- A\n  - x\n  B');
+  });
+
+  it('renders the item as #200 renders the same list nested inside the item paragraph', () => {
+    const direct = sectionText(
+      `<list list-type="order"><list-item><p>A</p>${bullets('x')}<p>B</p></list-item><list-item><p>Next.</p></list-item></list>`,
+    );
+    const inParagraph = sectionText(
+      `<list list-type="order"><list-item><p>A${bullets('x')}B</p></list-item><list-item><p>Next.</p></list-item></list>`,
+    );
+    expect(direct).toBe('1. A\n  - x\n  B\n2. Next.');
+    expect(direct).toBe(inParagraph);
+  });
+
+  it('keeps prose between and after two nested lists in order, two levels deep too', () => {
+    expect(
+      sectionText(
+        `<list list-type="bullet"><list-item><p>A</p>${bullets('x')}<p>B</p>${bullets('y')}<p>C</p></list-item></list>`,
+      ),
+    ).toBe('- A\n  - x\n  B\n  - y\n  C');
+    expect(
+      sectionText(
+        `<list list-type="bullet"><list-item><p>Top</p><list list-type="bullet"><list-item><p>Middle</p>${bullets('Bottom')}<p>Tail.</p></list-item></list></list-item></list>`,
+      ),
+    ).toBe('- Top\n  - Middle\n    - Bottom\n    Tail.');
+  });
+
+  it('keeps the marker of an item whose text all follows its nested list', () => {
+    expect(
+      sectionText(
+        `<list list-type="order"><list-item><p>First.</p></list-item><list-item>${bullets('x')}<p>B</p></list-item><list-item><p>Third.</p></list-item></list>`,
+      ),
+    ).toBe('1. First.\n2.\n  - x\n  B\n3. Third.');
+    expect(
+      sectionText(`<list list-type="bullet"><list-item><p>${bullets('x')}B</p></list-item></list>`),
+    ).toBe('-\n  - x\n  B');
+  });
+
+  it('leaves an item whose paragraphs all precede its nested list as it read before', () => {
+    expect(
+      sectionText(
+        `<list list-type="bullet"><list-item><p>Parent</p><p>More.</p>${bullets('Child one', 'Child two')}</list-item></list>`,
+      ),
+    ).toBe('- Parent More.\n  - Child one\n  - Child two');
+    expect(
+      sectionText(
+        `<list list-type="order"><list-item><p>First.</p></list-item><list-item>${bullets('x')}</list-item></list>`,
+      ),
+    ).toBe('1. First.\n  - x');
+  });
+});
+
+describe('abstract content outside any section (#204)', () => {
+  /** The `abstract` parsed from an `<abstract>` holding `content`. */
+  const abstractOf = (content: string): string | undefined =>
+    parsePmcArticle(jatsArticle(articleXml(`<abstract id="Abs1">${content}</abstract>`))).abstract;
+
+  /** The "Supplementary Information" section Springer deposits after the abstract. */
+  const supplementary = (doi: string) =>
+    `<sec><title>Supplementary Information</title><p>The online version contains supplementary material available at ${doi}.</p></sec>`;
+
+  it('keeps a direct paragraph that precedes a section, as a paragraph of its own (PMC11281965)', () => {
+    const abstract = abstractOf(
+      '<p id="Par1">Sepsis is characterized by a metabolic disorder of amino acid occurs in the early stage. ' +
+        'Serum samples were collected on the 1<sup>st</sup>, 3<sup>rd</sup> and 7<sup>th</sup> day following admission. ' +
+        'PLS-DA (VIP &gt; 1.0) and <italic toggle="yes">Kruskal-Wallis</italic> test (<italic toggle="yes">p</italic> &lt; 0.05) were employed.</p>' +
+        supplementary('10.1007/s00726-024-03408-3'),
+    );
+    expect(abstract).toBe(
+      'Sepsis is characterized by a metabolic disorder of amino acid occurs in the early stage. ' +
+        'Serum samples were collected on the 1st, 3rd and 7th day following admission. ' +
+        'PLS-DA (VIP > 1.0) and Kruskal-Wallis test (p < 0.05) were employed.\n\n' +
+        'Supplementary Information: The online version contains supplementary material available at 10.1007/s00726-024-03408-3.',
+    );
+  });
+
+  it('reads a run of direct paragraphs as an untitled section does, space-joined (PMC11176230)', () => {
+    const abstract = abstractOf(
+      '<p id="Par1">Creatine is a natural nitrogenous organic acid.</p>' +
+        '<p id="Par2">Trial registration ID: <ext-link ext-link-type="pmc:clinical-trial" xlink:href="NCT02811835">NCT02811835</ext-link>.</p>' +
+        '<p id="Par5"><bold>Trial registration URL</bold>: <ext-link ext-link-type="uri" xlink:href="https://clinicaltrials.gov/ct2/show/NCT02811835">https://clinicaltrials.gov/ct2/show/NCT02811835</ext-link>.</p>' +
+        supplementary('10.1007/s00726-024-03401-w'),
+    );
+    expect(abstract).toBe(
+      'Creatine is a natural nitrogenous organic acid. Trial registration ID: NCT02811835. ' +
+        'Trial registration URL: https://clinicaltrials.gov/ct2/show/NCT02811835.\n\n' +
+        'Supplementary Information: The online version contains supplementary material available at 10.1007/s00726-024-03401-w.',
+    );
+    // An untitled <sec> holding the same paragraphs reads the same way.
+    expect(
+      abstractOf(
+        '<sec><p>Creatine is a natural nitrogenous organic acid.</p><p>Trial registration ID: NCT02811835.</p></sec>' +
+          supplementary('10.1007/s00726-024-03401-w'),
+      ),
+    ).toBe(
+      abstractOf(
+        '<p>Creatine is a natural nitrogenous organic acid.</p><p>Trial registration ID: NCT02811835.</p>' +
+          supplementary('10.1007/s00726-024-03401-w'),
+      ),
+    );
+  });
+
+  it('keeps direct content between and after sections in source order', () => {
+    expect(
+      abstractOf(
+        '<sec><title>Background</title><p>Why.</p></sec><p>Loose one.</p><p>Loose two.</p>' +
+          '<sec><title>Methods</title><p>How.</p></sec><p>Tail.</p>',
+      ),
+    ).toBe('Background: Why.\n\nLoose one. Loose two.\n\nMethods: How.\n\nTail.');
+  });
+
+  it("leaves out the abstract's own title and label, and lays out a direct list as #202 does", () => {
+    expect(
+      abstractOf(
+        '<label>A</label><title>Abstract</title><p>Lead.</p>' +
+          '<list list-type="bullet"><list-item><p>One.</p></list-item><list-item><p>Two.</p></list-item></list>' +
+          '<sec><title>Results</title><p>Found.</p></sec>',
+      ),
+    ).toBe('Lead.\n\n- One.\n- Two.\n\nResults: Found.');
+  });
+
+  it('leaves abstracts made only of sections, or only of paragraphs, byte-identical', () => {
+    expect(
+      abstractOf(
+        '\n<title>Abstract</title>\n<sec>\n<title>Background</title>\n<p>One.</p>\n<p>Two.</p>\n</sec>\n' +
+          '<sec>\n<p>Untitled.</p>\n</sec>\n<sec>\n<title>Conclusions</title>\n<p>Three.</p>\n</sec>\n',
+      ),
+    ).toBe('Background: One. Two.\n\nUntitled.\n\nConclusions: Three.');
+    expect(
+      abstractOf('\n<p>First paragraph.</p>\n<p>Second <italic>paragraph</italic>.</p>\n'),
+    ).toBe('First paragraph. Second paragraph.');
+  });
+});
+
+describe('abstract section titles that already end in punctuation (#205)', () => {
+  const abstractOf = (content: string): string | undefined =>
+    parsePmcArticle(jatsArticle(articleXml(`<abstract>${content}</abstract>`))).abstract;
+
+  it('adds no second colon to a title deposited with one (PMC10164684)', () => {
+    expect(
+      abstractOf(
+        '<sec><title>Background:</title><p>Multiple monoclonal antibodies are approved.</p></sec>' +
+          '<sec><title>Methods:</title><p>We pooled trials.</p></sec>',
+      ),
+    ).toBe(
+      'Background: Multiple monoclonal antibodies are approved.\n\nMethods: We pooled trials.',
+    );
+  });
+
+  it('keeps a title ending in a period, question mark, or exclamation mark as written', () => {
+    expect(
+      abstractOf(
+        '<sec><title>Study Design.</title><p>Cohort.</p></sec>' +
+          '<sec><title>What is known?</title><p>Little.</p></sec>' +
+          '<sec><title>Take home!</title><p>Act.</p></sec>',
+      ),
+    ).toBe('Study Design. Cohort.\n\nWhat is known? Little.\n\nTake home! Act.');
+  });
+
+  it('still adds the colon to a title with no terminal punctuation', () => {
+    expect(abstractOf('<sec><title>Results</title><p>It worked.</p></sec>')).toBe(
+      'Results: It worked.',
+    );
+  });
+});
+
+describe('affiliations of contributors who are not authors (#196)', () => {
+  const affiliationsOf = (meta: string): string[] | undefined =>
+    parsePmcArticle(jatsArticle(articleXml(meta))).affiliations;
+
+  it("leaves out an <aff> inside an editor's <contrib> (PMC10666927 shape)", () => {
+    expect(
+      affiliationsOf(
+        '<contrib-group><contrib contrib-type="author"><name><surname>Kohrs</surname></name><xref ref-type="aff" rid="aff1">1</xref></contrib>' +
+          '<aff id="aff1"><label>1</label>QUEST Center for Responsible Research, Berlin, Germany</aff></contrib-group>' +
+          '<contrib-group><contrib contrib-type="editor"><name><surname>Rodgers</surname></name>' +
+          '<aff><institution-wrap><institution-id institution-id-type="ror">https://ror.org/04a9tmd77</institution-id><institution>Icahn School of Medicine at Mount Sinai</institution></institution-wrap><country>United States</country></aff></contrib>' +
+          '<contrib contrib-type="senior_editor"><name><surname>Zaidi</surname></name><aff><institution>Icahn School of Medicine at Mount Sinai</institution></aff></contrib></contrib-group>',
+      ),
+    ).toEqual(['1 QUEST Center for Responsible Research, Berlin, Germany']);
+  });
+
+  it('leaves out a direct <aff> of a <contrib-group> that holds no author', () => {
+    expect(
+      affiliationsOf(
+        '<contrib-group><contrib><name><surname>Author</surname></name></contrib><aff id="a1">Author Institute</aff></contrib-group>' +
+          '<contrib-group><contrib contrib-type="reviewer"><name><surname>Reviewer</surname></name></contrib><aff id="r1">Reviewer Institute</aff></contrib-group>',
+      ),
+    ).toEqual(['Author Institute']);
+  });
+
+  it("keeps an untyped <contrib>'s <aff> and a direct <aff> of a group mixing authors with others", () => {
+    expect(
+      affiliationsOf(
+        '<contrib-group><contrib><name><surname>A</surname></name><aff id="a1">Untyped contributor aff</aff></contrib>' +
+          '<contrib contrib-type="editor"><name><surname>E</surname></name></contrib><aff id="a2">Shared group aff</aff></contrib-group>' +
+          '<contrib-group><aff id="a3">Group with no contrib</aff></contrib-group>',
+      ),
+    ).toEqual(['Untyped contributor aff', 'Shared group aff', 'Group with no contrib']);
+  });
+});
+
+describe('institution identifiers in body text (#208)', () => {
+  const fundingSource = (id: string, name: string) =>
+    `<funding-source><institution-wrap><institution-id institution-id-type="doi">${id}</institution-id><institution>${name}</institution></institution-wrap></funding-source>`;
+
+  it('names the funder without its id in section prose (PMC11609225 Funding)', () => {
+    const article = jatsArticle(
+      articleXml(
+        '',
+        `<sec><title>Funding</title><p>This research was sponsored by the ${fundingSource('10.13039/501100001809', 'National Natural Science Foundation of China')} grant No. <award-id award-type="grant">12250410247</award-id>, and also by the <funding-source>Ministry of Science and Technology of China</funding-source>.</p></sec>` +
+          `<sec><title>Declaration of Competing Interest</title><p>Article publishing charges were provided by ${fundingSource('10.13039/501100014881', 'Guangzhou University')}.</p></sec>`,
+      ),
+    );
+    const [funding, declaration] = parsePmcArticle(article).sections;
+    expect(funding?.text).toBe(
+      'This research was sponsored by the National Natural Science Foundation of China grant No. 12250410247, and also by the Ministry of Science and Technology of China.',
+    );
+    expect(declaration?.text).toBe(
+      'Article publishing charges were provided by Guangzhou University.',
+    );
+  });
+
+  it('leaves an id out of a table cell and a figure caption too', () => {
+    const article = jatsArticle(
+      articleXml(
+        '',
+        `<sec><title>S</title><table-wrap id="T1"><caption><p>Funded by ${fundingSource('10.13039/100000002', 'NIH')}.</p></caption><table><tbody><tr><td>${fundingSource('10.13039/100000001', 'NSF')}</td></tr></tbody></table></table-wrap></sec>`,
+      ),
+    );
+    const table = parsePmcArticle(article).tables?.[0];
+    expect(table?.caption).toBe('Funded by NIH.');
+    expect(table?.rows).toEqual([['NSF']]);
+  });
+
+  it('reads funding prose with no <institution-id> as before', () => {
+    const article = jatsArticle(
+      articleXml(
+        '',
+        '<sec><title>Funding</title><p>Supported by the <funding-source><institution-wrap><institution>Wellcome Trust</institution></institution-wrap></funding-source> (grant <award-id>12345</award-id>).</p></sec>',
+      ),
+    );
+    expect(parsePmcArticle(article).sections[0]?.text).toBe(
+      'Supported by the Wellcome Trust (grant 12345).',
+    );
+  });
+});
+
+describe('reference fields that run together (#209)', () => {
+  /** The `references[]` of an article whose `<back>` holds `refs`. */
+  const referencesOf = (refs: string) =>
+    extractReferences(
+      jatsArticle(
+        `<article><front><article-meta><article-id pub-id-type="pmcid">PMC1</article-id></article-meta></front><back><ref-list>${refs}</ref-list></back></article>`,
+      ),
+    );
+  const name = (surname: string, given: string) =>
+    `<name name-style="western"><surname>${surname}</surname><given-names>${given}</given-names></name>`;
+
+  it('separates zero-gap <name>s with ", " and reads an empty <etal/> as "et al." (PMC10754557 R19)', () => {
+    const [ref] = referencesOf(
+      `<ref id="R19"><label>[19]</label><mixed-citation publication-type="journal"><person-group person-group-type="author">${name('Zwierenga', 'F')}${name('van Veggel', 'B')}${name('Hendriks', 'LEL')}<etal/></person-group>. ` +
+        '<article-title>High dose osimertinib in patients with advanced stage EGFR exon 20 mutation-positive NSCLC.</article-title>\n<source>Lung Cancer</source>. <year>2022</year>;<volume>170</volume>:<fpage>133</fpage>–<lpage>40</lpage>.</mixed-citation></ref>',
+    );
+    expect(ref?.citation).toBe(
+      'Zwierenga F, van Veggel B, Hendriks LEL, et al. High dose osimertinib in patients with advanced stage EGFR exon 20 mutation-positive NSCLC. Lung Cancer. 2022;170:133–40.',
+    );
+  });
+
+  it('separates names a newline alone divides, and closes "et al." with the source period (PMC12266799)', () => {
+    const [ref] = referencesOf(
+      `<ref id="r1"><mixed-citation>\n<person-group person-group-type="author">\n${name('Berzigotti', 'A')}\n${name('García-Pagán', 'JC')}\n<etal/>\n</person-group>. <article-title>Elastography and spleen size</article-title>. <source>Gastroenterology</source>.</mixed-citation></ref>`,
+    );
+    expect(ref?.citation).toBe(
+      'Berzigotti A, García-Pagán JC, et al. Elastography and spleen size. Gastroenterology.',
+    );
+  });
+
+  it('reads an <etal/> outside the <person-group> after source punctuation (PMC10164684, PMC11572527, PMC13610153)', () => {
+    const refs = referencesOf(
+      `<ref id="a"><mixed-citation>${name('Liao', 'KP')}, ${name('Cai', 'T')}, <etal/>\n<article-title>Development of phenotype algorithms</article-title>.</mixed-citation></ref>` +
+        `<ref id="b"><mixed-citation><person-group person-group-type="author">${name('Wray', 'NR')}, ${name('Ripke', 'S')}</person-group>, <etal/>. <article-title>Genome-wide association analyses</article-title>.</mixed-citation></ref>` +
+        `<ref id="c"><mixed-citation><person-group person-group-type="author">${name('Hirsch', 'JS')}${name('Ng', 'JH')}<etal/></person-group>; <collab>Northwell COVID-19 Research Consortium</collab>. <article-title>Acute kidney injury</article-title>.</mixed-citation></ref>`,
+    );
+    expect(refs.map((ref) => ref.citation)).toEqual([
+      'Liao KP, Cai T, et al. Development of phenotype algorithms.',
+      'Wray NR, Ripke S, et al. Genome-wide association analyses.',
+      'Hirsch JS, Ng JH, et al.; Northwell COVID-19 Research Consortium. Acute kidney injury.',
+    ]);
+  });
+
+  it('keeps an <etal> that carries its own text, and a source "et al.." the renderer did not supply, as written', () => {
+    const refs = referencesOf(
+      `<ref id="a"><mixed-citation><person-group>${name('Smith', 'J')}, <etal>et al</etal></person-group>. <source>Cell</source>.</mixed-citation></ref>` +
+        '<ref id="b"><mixed-citation><string-name><surname>Doe</surname> <given-names>K</given-names></string-name> et al.. <source>Cell</source>.</mixed-citation></ref>',
+    );
+    expect(refs.map((ref) => ref.citation)).toEqual([
+      'Smith J, et al. Cell.',
+      'Doe K et al.. Cell.',
+    ]);
+  });
+
+  it('joins an <element-citation> page range and volume(issue) (PMC11292240 bib2)', () => {
+    const [ref] = referencesOf(
+      `<ref id="bib2"><label>2</label><element-citation publication-type="journal"><person-group person-group-type="author">${name('Pasteur', 'M.C.')}${name('Bilton', 'D.')}</person-group>` +
+        '<article-title>British thoracic society guideline for non-CF bronchiectasis</article-title><source>Thorax</source><volume>65</volume><issue>SUPPL. 1</issue><year>2010</year><fpage>i1</fpage><lpage>i58</lpage>' +
+        '<pub-id pub-id-type="pmid">20627931</pub-id></element-citation></ref>',
+    );
+    expect(ref?.citation).toBe(
+      'Pasteur M.C., Bilton D. British thoracic society guideline for non-CF bronchiectasis Thorax 65(SUPPL. 1) 2010 i1–i58 PMID 20627931',
+    );
+    expect(ref?.label).toBe('2');
+  });
+
+  it('leaves <element-citation> fields that are not an adjacent pair spaced as before', () => {
+    const [ref] = referencesOf(
+      '<ref id="r"><element-citation><source>Nurse Res.</source><volume>16</volume><year>2008</year><issue>1</issue><fpage>56</fpage>\n<elocation-id>e5</elocation-id><lpage>71</lpage></element-citation></ref>',
+    );
+    expect(ref?.citation).toBe('Nurse Res. 16 2008 1 56 e5 71');
+  });
+
+  it('drops the square brackets a <label> is printed in, and keeps every other label as printed', () => {
+    const refs = referencesOf(
+      '<ref id="R19"><label>[19]</label><mixed-citation>A.</mixed-citation></ref>' +
+        '<ref id="B1"><label>1.</label><mixed-citation>B.</mixed-citation></ref>' +
+        '<ref id="C3"><label>(3)</label><mixed-citation>C.</mixed-citation></ref>' +
+        '<ref id="D4"><label>[4]–[5]</label><mixed-citation>D.</mixed-citation></ref>',
+    );
+    expect(refs.map((ref) => ref.label)).toEqual(['19', '1.', '(3)', '[4]–[5]']);
+  });
+});
+
+describe('boxed text set apart from the body (#210)', () => {
+  /** The sections of an article whose `<body>` holds `body`. */
+  const sectionsOf = (body: string) => parsePmcArticle(jatsArticle(articleXml('', body))).sections;
+
+  it('opens a floating box with its label and title and closes it before the body resumes (PMC10666927)', () => {
+    const [section] = sectionsOf(
+      '<sec><title>Introduction</title><p>Members organized a virtual brainstorming event (see <xref rid="box1" ref-type="boxed-text">Box 1</xref>).</p>' +
+        '<boxed-text id="box1" position="float"><label>Box 1.</label><caption><title>Virtual unconference format</title></caption><p>In March 2022, 96 participants took part.</p></boxed-text>' +
+        '<p>The first section of this paper provides a brief overview.</p></sec>',
+    );
+    expect(section?.text).toBe(
+      'Members organized a virtual brainstorming event (see Box 1).\n\n' +
+        '[Box: Box 1. Virtual unconference format]\n\nIn March 2022, 96 participants took part.\n\n[End of box]\n\n' +
+        'The first section of this paper provides a brief overview.',
+    );
+  });
+
+  it('names a box by its title alone, keeps its caption paragraphs, and delimits one nested in a <p>', () => {
+    const [section] = sectionsOf(
+      '<sec><title>Summary</title><p>Before the box.<boxed-text><caption><title>Highlights</title><p>Caption note.</p></caption>' +
+        '<p>Fusions are rare.</p><list list-type="bullet"><list-item><p>Actionable.</p></list-item></list></boxed-text>After the box.</p></sec>',
+    );
+    expect(section?.text).toBe(
+      'Before the box.\n\n[Box: Highlights]\n\nCaption note.\n\nFusions are rare.\n\n- Actionable.\n\n[End of box]\n\nAfter the box.',
+    );
+  });
+
+  it('delimits a box inside a box, each closing in order', () => {
+    const [section] = sectionsOf(
+      '<sec><title>S</title><boxed-text><label>Box 2</label><p>Outer.</p><boxed-text><caption><title>Inner</title></caption><p>Inside.</p></boxed-text><p>Outer again.</p></boxed-text></sec>',
+    );
+    expect(section?.text).toBe(
+      '[Box: Box 2]\n\nOuter.\n\n[Box: Inner]\n\nInside.\n\n[End of box]\n\nOuter again.\n\n[End of box]',
+    );
+  });
+
+  it('keeps a named box with no readable content as its opening line, and an unnamed one out', () => {
+    const [section] = sectionsOf(
+      '<sec><title>S</title><p>Prose.</p><boxed-text><caption><title>Figure panel</title></caption><graphic href="a.jpg"/></boxed-text>' +
+        '<boxed-text><graphic href="b.jpg"/></boxed-text></sec>',
+    );
+    expect(section?.text).toBe('Prose.\n\n[Box: Figure panel]');
+  });
+
+  it('leaves a titled box that forms a section of its own as it read before', () => {
+    expect(
+      sectionsOf(
+        '<boxed-text><caption><title>Key messages:</title></caption><p>In this cohort:</p><list list-type="bullet"><list-item><p>Dupilumab helped.</p></list-item></list></boxed-text>' +
+          '<sec><title>Methods</title><p>Text.</p></sec>',
+      ),
+    ).toEqual([
+      { title: 'Key messages:', text: 'In this cohort:\n\n- Dupilumab helped.' },
+      { title: 'Methods', text: 'Text.' },
+    ]);
+  });
+});
+
+describe('reference rendering runs in linear time (#209)', () => {
+  /** CPU time of `run`, in ms — this thread's user + system time, not wall clock. */
+  const cpuMs = (run: () => void): number => {
+    const start = process.threadCpuUsage();
+    run();
+    const { user, system } = process.threadCpuUsage(start);
+    return (user + system) / 1000;
+  };
+
+  /** Fastest of five measurements of five renders each. */
+  const fastestMs = (render: () => void): number => {
+    render();
+    return Math.min(
+      ...Array.from({ length: 5 }, () =>
+        cpuMs(() => {
+          for (let i = 0; i < 5; i++) render();
+        }),
+      ),
+    );
+  };
+
+  /** `unit` repeated until its serialized form spans about `chars` characters. */
+  const repeat = (unit: JatsNode[], unitChars: number, chars: number): JatsNode[] =>
+    Array.from({ length: Math.ceil(chars / unitChars) }, () => unit).flat();
+
+  const nameNode = el('name', [el('surname', [t('A')]), el('given-names', [t('B')])]);
+  const inPersonGroup = (children: JatsNode[]) =>
+    el('mixed-citation', [el('person-group', children)]);
+
+  it.each([
+    // `<name>…</name><name>…</name>`: a ", " owed between every pair.
+    ['zero-gap names', (units: JatsNode[]) => inPersonGroup(units), [nameNode], 63],
+    // `<name>…</name>\n`: whitespace held, then dropped for a ", ".
+    [
+      'names a newline divides',
+      (units: JatsNode[]) => inPersonGroup(units),
+      [nameNode, t('\n')],
+      64,
+    ],
+    // `<etal/>.`: a supplied "et al." whose period the source closes every time.
+    [
+      'supplied et al. closed by the source',
+      (units: JatsNode[]) => el('mixed-citation', units),
+      [el('etal', []), t('.')],
+      8,
+    ],
+    // `<pub-id/>`: a label read against the text written so far, every time.
+    [
+      'zero-gap typed pub-ids',
+      (units: JatsNode[]) => el('mixed-citation', units),
+      [el('pub-id', [t('1')], { '@_pub-id-type': 'pmid' })],
+      37,
+    ],
+    // `<fpage/><lpage/>`: a range joined from the part just written.
+    [
+      'element-citation page pairs',
+      (units: JatsNode[]) => el('element-citation', units),
+      [el('fpage', [t('1')]), el('lpage', [t('2')])],
+      32,
+    ],
+  ])('renders %s in linear CPU time', (_label, wrap, unit, unitChars) => {
+    const at = (chars: number) =>
+      el('ref-list', [el('ref', [wrap(repeat(unit as JatsNode[], unitChars as number, chars))])]);
+    const small = at(5_000);
+    const large = at(80_000);
+    const t5k = fastestMs(() => extractReferences(small));
+    const t80k = fastestMs(() => extractReferences(large));
+    expect(t80k / t5k).toBeLessThan(64);
+    expect(t80k).toBeLessThan(250);
   });
 });

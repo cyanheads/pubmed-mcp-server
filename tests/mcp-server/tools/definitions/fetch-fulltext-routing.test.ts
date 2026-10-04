@@ -19,9 +19,10 @@
  * Covers DOI matching and dispatch (#166), per-PMCID dispatch on the `pmcids`
  * branch with zero-padded PMC IDs run in canonical form (#170), the title / journal / year an Unpaywall-served article carries and
  * the order its title sources are consulted in (#144), tier failures
- * staying on the chain rather than reaching the caller as an error (#168), and
+ * staying on the chain rather than reaching the caller as an error (#168),
  * the Europe PMC tier's parallel fan-out staying within four requests in flight
- * (#163).
+ * (#163), and `pmcids`, `pmids`, and `dois` in one call, each tier working a
+ * record once for every id that reaches it (#192).
  * @module tests/mcp-server/tools/definitions/fetch-fulltext-routing.test
  */
 
@@ -639,6 +640,398 @@ describe('pmcids routing', () => {
     ]);
     expect(pmcEfetchIds()).toEqual(['0']);
     expect(text).toContain('- [pmcid] PMC0 — not-found');
+  });
+});
+
+// ─── #192: pmcids, pmids, and dois in one call ───────────────────────────────
+
+/** A third PMC article, for calls that name one article per field. */
+const THIRD = { pmid: 30000002, pmcid: 'PMC7000002', doi: '10.1000/third' };
+
+/** The Watson & Crick letter: in PubMed and Europe PMC, not in PMC. */
+const DNA = { pmid: '13054692', doi: '10.1038/171737a0' };
+const DNA_PDF_URL = 'https://repository.example.org/watson-crick-1953.pdf';
+
+/** Europe PMC's MED record for the letter, found by its PMID and by its DOI alike. */
+function serveDnaInEpmc(pmcid?: string) {
+  const hit: EpmcHit = {
+    id: DNA.pmid,
+    source: 'MED',
+    pmid: DNA.pmid,
+    doi: DNA.doi,
+    title: 'Molecular structure of nucleic acids',
+    ...(pmcid && { pmcid }),
+  };
+  epmcHits.set(`EXT_ID:${DNA.pmid} AND SRC:MED`, hit);
+  epmcHits.set(`DOI:"${DNA.doi}"`, hit);
+}
+
+/** An Unpaywall OA copy of the letter, served as a PDF. */
+function serveDnaInUnpaywall() {
+  const location = {
+    url: DNA_PDF_URL,
+    url_for_pdf: DNA_PDF_URL,
+    host_type: 'repository',
+    license: 'cc-by',
+    version: 'publishedVersion',
+  };
+  unpaywallRecords.set(DNA.doi, {
+    doi: DNA.doi,
+    is_oa: true,
+    title: 'Molecular Structure of Nucleic Acids',
+    journal_name: 'Nature',
+    year: 1953,
+    best_oa_location: location,
+    oa_locations: [location],
+  });
+  oaContent.set(DNA_PDF_URL, {
+    kind: 'pdf',
+    body: buildPdf(['Molecular Structure of Nucleic Acids', 'We wish to suggest a structure.']),
+  });
+}
+
+const fullTextXmlRequests = () =>
+  requests().filter((u) => u.hostname === 'www.ebi.ac.uk' && u.pathname.endsWith('/fullTextXML'));
+
+describe('pmcids, pmids, and dois together (#192)', () => {
+  it('returns one article named once per field, from one PMC EFetch request', async () => {
+    converter.set(String(GENBANK.pmid), GENBANK);
+    serveGenbank();
+    const { result, text } = await fetchFulltext({
+      pmcids: [GENBANK.pmcid],
+      pmids: [String(GENBANK.pmid)],
+      dois: [GENBANK.doi],
+    });
+
+    expect(result.articles.map((a) => [a.viaSource, a.pmcId])).toEqual([['pmc', 'PMC3531190']]);
+    expect(result.totalReturned).toBe(1);
+    expect(result.unavailable).toBeUndefined();
+    expect(converterIds()).toEqual([String(GENBANK.pmid), GENBANK.doi]);
+    expect(pmcEfetchIds()).toEqual(['3531190']);
+    expect(epmcQueries()).toEqual([]);
+    expect(text).toContain('**Articles Returned:** 1');
+    expect(text).not.toContain('Unavailable');
+  });
+
+  it('returns three articles named one per field, from one PMC EFetch request in field order', async () => {
+    converter.set(String(GENBANK.pmid), GENBANK);
+    converter.set(THIRD.doi, THIRD);
+    pmcJats.set('3531190', jats(GENBANK.pmcid, 'GenBank', GENBANK.doi));
+    pmcJats.set('7000001', jats(SECOND.pmcid, 'Second', SECOND.doi));
+    pmcJats.set('7000002', jats(THIRD.pmcid, 'Third', THIRD.doi));
+    const { result, text } = await fetchFulltext({
+      pmcids: [SECOND.pmcid],
+      pmids: [String(GENBANK.pmid)],
+      dois: [THIRD.doi],
+    });
+
+    expect(result.articles.map((a) => a.pmcId)).toEqual(['PMC7000001', 'PMC3531190', 'PMC7000002']);
+    expect(result.unavailable).toBeUndefined();
+    expect(pmcEfetchIds()).toEqual(['7000001,3531190,7000002']);
+    expect(text).toContain('**Articles Returned:** 3');
+  });
+
+  it('reports each unavailable id under its own field, running a shared record once', async () => {
+    serveDnaInEpmc();
+    const { result, text } = await fetchFulltext({
+      pmcids: ['PMC99999999'],
+      pmids: [DNA.pmid],
+      dois: [DNA.doi],
+    });
+
+    expect(result.articles).toEqual([]);
+    // The PMID and the DOI name one Europe PMC record: one chain from there on,
+    // one Unpaywall lookup, and each id reported under the field it was sent
+    // in, with its own PMC step from before the record joined them.
+    const sharedTail = [
+      {
+        tier: 'europepmc',
+        outcome: 'no-fulltext',
+        detail: 'EPMC source MED has no PMC counterpart',
+      },
+      { tier: 'unpaywall', outcome: 'no-oa', detail: 'DOI unknown to Unpaywall' },
+    ];
+    expect(result.unavailable).toEqual([
+      {
+        id: 'PMC99999999',
+        idType: 'pmcid',
+        reason: 'not-found',
+        triedTiers: [
+          { tier: 'pmc', outcome: 'miss' },
+          { tier: 'europepmc', outcome: 'miss' },
+          { tier: 'unpaywall', outcome: 'no-doi' },
+        ],
+      },
+      {
+        id: DNA.pmid,
+        idType: 'pmid',
+        reason: 'no-oa',
+        triedTiers: [
+          { tier: 'pmc', outcome: 'not-attempted', detail: 'PMID has no PMC counterpart' },
+          ...sharedTail,
+        ],
+      },
+      {
+        id: DNA.doi,
+        idType: 'doi',
+        reason: 'no-oa',
+        triedTiers: [
+          { tier: 'pmc', outcome: 'not-attempted', detail: 'DOI has no PMC counterpart' },
+          ...sharedTail,
+        ],
+      },
+    ]);
+    expect(epmcQueries()).toEqual([
+      'PMCID:PMC99999999',
+      `EXT_ID:${DNA.pmid} AND SRC:MED`,
+      `DOI:"${DNA.doi}"`,
+    ]);
+    expect(unpaywallLookups()).toHaveLength(1);
+    expect(text).toContain('- [pmcid] PMC99999999 — not-found');
+    expect(text).toContain(`- [pmid] ${DNA.pmid} — no-oa`);
+    expect(text).toContain(`- [doi] ${DNA.doi} — no-oa`);
+  });
+
+  it('fetches a Europe PMC record a PMID and a DOI both reach once, returning one article', async () => {
+    serveDnaInEpmc('PMC9100001');
+    epmcFullText.set('PMC9100001', jats('PMC9100001', 'Molecular structure', DNA.doi));
+    const { result, text } = await fetchFulltext({ pmids: [DNA.pmid], dois: [DNA.doi] });
+
+    expect(result.articles.map((a) => [a.viaSource, a.pmcId, a.pmid])).toEqual([
+      ['europepmc', 'PMC9100001', DNA.pmid],
+    ]);
+    expect(result.unavailable).toBeUndefined();
+    expect(epmcQueries()).toHaveLength(2);
+    expect(fullTextXmlRequests()).toHaveLength(1);
+    expect(unpaywallLookups()).toEqual([]);
+    expect(text).toContain('**Articles Returned:** 1');
+    expect(text).not.toContain('Unavailable');
+  });
+
+  it('returns a PMC-served article once when a DOI the converter cannot place reaches it through Europe PMC', async () => {
+    // The converter has no PMC record for this DOI, but Europe PMC's record for
+    // it links the PMC ID that PMC EFetch already served in this call.
+    const alias = '10.9999/genbank-alias';
+    pmcJats.set('3531190', jats(GENBANK.pmcid, 'GenBank', GENBANK.doi));
+    epmcFullText.set(GENBANK.pmcid, jats(GENBANK.pmcid, 'GenBank', GENBANK.doi));
+    epmcHits.set(`DOI:"${alias}"`, {
+      id: String(GENBANK.pmid),
+      source: 'MED',
+      pmid: String(GENBANK.pmid),
+      pmcid: GENBANK.pmcid,
+      doi: GENBANK.doi,
+    });
+    const { result, text } = await fetchFulltext({ pmcids: [GENBANK.pmcid], dois: [alias] });
+
+    expect(result.articles.map((a) => [a.viaSource, a.pmcId])).toEqual([['pmc', GENBANK.pmcid]]);
+    expect(result.unavailable).toBeUndefined();
+    expect(fullTextXmlRequests()).toEqual([]);
+    expect(text).toContain('**Articles Returned:** 1');
+  });
+
+  it('resolves a DOI that a PMID and a DOI share through Unpaywall once, under the PMID', async () => {
+    // The converter carries the PMID's DOI; Europe PMC knows neither id, so the
+    // only place the two meet is Unpaywall's DOI — cased differently here.
+    converter.set(DNA.pmid, { pmid: Number(DNA.pmid), doi: DNA.doi });
+    serveDnaInUnpaywall();
+    const { result, text } = await fetchFulltext({
+      pmids: [DNA.pmid],
+      dois: ['10.1038/171737A0'],
+    });
+
+    expect(unpaywallLookups()).toHaveLength(1);
+    expect(result.articles).toHaveLength(1);
+    expect(unpaywallArticle(result)).toMatchObject({
+      source: 'unpaywall',
+      pmid: DNA.pmid,
+      doi: DNA.doi,
+      sourceUrl: DNA_PDF_URL,
+    });
+    expect(unpaywallArticle(result)).not.toHaveProperty('pmcId');
+    expect(result.unavailable).toBeUndefined();
+    expect(text).toContain('**Articles Returned:** 1');
+    expect(text).not.toContain('Unavailable');
+  });
+
+  it('carries a DOI that joined a PMC ID’s record on to Unpaywall', async () => {
+    const doi = '10.9999/first';
+    converter.set(doi, { pmcid: 'PMC8000001', doi });
+    const { result } = await fetchFulltext({ pmcids: ['PMC8000001'], dois: [doi] });
+
+    expect(pmcEfetchIds()).toEqual(['8000001']);
+    // The PMC ID owns the record, so Europe PMC is searched by it alone, and
+    // the DOI the caller sent spares the PMCID → DOI converter lookup.
+    expect(epmcQueries()).toEqual(['PMCID:PMC8000001']);
+    expect(converterIds()).toEqual([doi]);
+    const chain = [
+      { tier: 'pmc', outcome: 'miss' },
+      { tier: 'europepmc', outcome: 'miss' },
+      { tier: 'unpaywall', outcome: 'no-oa', detail: 'DOI unknown to Unpaywall' },
+    ];
+    expect(result.unavailable).toEqual([
+      { id: 'PMC8000001', idType: 'pmcid', reason: 'no-oa', triedTiers: chain },
+      { id: doi, idType: 'doi', reason: 'no-oa', triedTiers: chain },
+    ]);
+    expect(unpaywallLookups()).toHaveLength(1);
+  });
+
+  it('sends a record a PMID owns on to Europe PMC by that PMID when PMC misses', async () => {
+    const doi = '10.9999/pmid-owned';
+    converter.set('30000009', { pmid: 30000009, pmcid: 'PMC8000002' });
+    converter.set(doi, { pmcid: 'PMC8000002', doi });
+    const { result } = await fetchFulltext({ pmids: ['30000009'], dois: [doi] });
+
+    expect(pmcEfetchIds()).toEqual(['8000002']);
+    expect(epmcQueries()).toEqual(['EXT_ID:30000009 AND SRC:MED']);
+    expect(result.unavailable?.map((u) => [u.idType, u.id])).toEqual([
+      ['pmid', '30000009'],
+      ['doi', doi],
+    ]);
+  });
+
+  it('carries an id that joined at Europe PMC along when its owner joins another at Unpaywall', async () => {
+    // The DOI joins the PMID at Europe PMC (one MED record); the PMC ID misses
+    // both PMC and Europe PMC, and its converter DOI is the same DOI — so at
+    // Unpaywall the PMID's chain, the DOI riding on it, joins the PMC ID's.
+    const pmcid = 'PMC8000003';
+    serveDnaInEpmc();
+    converter.set(pmcid.toLowerCase(), { pmcid, doi: DNA.doi });
+    serveDnaInUnpaywall();
+    const { result, text } = await fetchFulltext({
+      pmcids: [pmcid],
+      pmids: [DNA.pmid],
+      dois: [DNA.doi],
+    });
+
+    expect(epmcQueries()).toEqual([
+      `PMCID:${pmcid}`,
+      `EXT_ID:${DNA.pmid} AND SRC:MED`,
+      `DOI:"${DNA.doi}"`,
+    ]);
+    expect(unpaywallLookups()).toHaveLength(1);
+    expect(result.articles).toHaveLength(1);
+    expect(unpaywallArticle(result)).toMatchObject({ pmcId: pmcid, doi: DNA.doi });
+    expect(unpaywallArticle(result)).not.toHaveProperty('pmid');
+    expect(result.unavailable).toBeUndefined();
+    expect(text).toContain('**Articles Returned:** 1');
+    expect(text).not.toContain('Unavailable');
+  });
+
+  it('reports each of three ids with its own tiers up to the join and the shared Unpaywall lookup after', async () => {
+    const pmcid = 'PMC8000003';
+    serveDnaInEpmc();
+    converter.set(pmcid.toLowerCase(), { pmcid, doi: DNA.doi });
+    const { result } = await fetchFulltext({
+      pmcids: [pmcid],
+      pmids: [DNA.pmid],
+      dois: [DNA.doi],
+    });
+
+    const unpaywall = { tier: 'unpaywall', outcome: 'no-oa', detail: 'DOI unknown to Unpaywall' };
+    const epmcNoFulltext = {
+      tier: 'europepmc',
+      outcome: 'no-fulltext',
+      detail: 'EPMC source MED has no PMC counterpart',
+    };
+    expect(result.unavailable).toEqual([
+      {
+        id: pmcid,
+        idType: 'pmcid',
+        reason: 'no-oa',
+        triedTiers: [
+          { tier: 'pmc', outcome: 'miss' },
+          { tier: 'europepmc', outcome: 'miss' },
+          unpaywall,
+        ],
+      },
+      {
+        id: DNA.pmid,
+        idType: 'pmid',
+        reason: 'no-oa',
+        triedTiers: [
+          { tier: 'pmc', outcome: 'not-attempted', detail: 'PMID has no PMC counterpart' },
+          epmcNoFulltext,
+          unpaywall,
+        ],
+      },
+      {
+        id: DNA.doi,
+        idType: 'doi',
+        reason: 'no-oa',
+        triedTiers: [
+          { tier: 'pmc', outcome: 'not-attempted', detail: 'DOI has no PMC counterpart' },
+          epmcNoFulltext,
+          unpaywall,
+        ],
+      },
+    ]);
+    expect(unpaywallLookups()).toHaveLength(1);
+  });
+
+  /** One PMC ID and one DOI naming two PMC articles, served in that order. */
+  function serveMixedPair() {
+    serveGenbank();
+    pmcJats.set('7000001', jats(SECOND.pmcid, 'Second', SECOND.doi));
+  }
+  const mixedPair = { pmcids: [SECOND.pmcid], dois: [GENBANK.doi] };
+
+  it('lists a mixed deferral under each id’s own field, without `idType`', async () => {
+    serveMixedPair();
+    const sizes = (await fetchFulltext(mixedPair)).result.articles.map(
+      (a) => JSON.stringify(a).length,
+    );
+
+    const { result, text, enrichment } = await fetchFulltext({
+      ...mixedPair,
+      maxResponseCharacters: 1,
+    });
+
+    expect(result.articles).toEqual([]);
+    expect(result.deferred).toEqual({
+      maxResponseCharacters: 1,
+      returnedCharacters: 0,
+      deferredCount: 2,
+      ids: ['PMC7000001', GENBANK.doi],
+      pmcids: ['PMC7000001'],
+      dois: [GENBANK.doi],
+      nextDeferredCharacters: sizes[0],
+    });
+    const lists = `\`pmcids\`: PMC7000001; \`dois\`: ${GENBANK.doi}`;
+    expect(text).toContain(`each under its own field — ${lists}`);
+    expect(text).not.toContain('undefined');
+    expect(enrichment.notice).toContain(`deferred whole: PMC7000001, ${GENBANK.doi}.`);
+    expect(enrichment.notice).toContain(lists);
+    expect(enrichment.notice).not.toContain('undefined');
+
+    // Resending the per-field lists retrieves exactly the deferred articles.
+    const deferred = result.deferred;
+    const resumed = await fetchFulltext({ pmcids: deferred?.pmcids, dois: deferred?.dois });
+    expect(resumed.result.articles.map((a) => a.pmcId)).toEqual(['PMC7000001', 'PMC3531190']);
+    expect(resumed.result.deferred).toBeUndefined();
+  });
+
+  it('keeps `idType` when every deferred id of a mixed call came from one field', async () => {
+    serveMixedPair();
+    const sizes = (await fetchFulltext(mixedPair)).result.articles.map(
+      (a) => JSON.stringify(a).length,
+    );
+
+    const { result, text } = await fetchFulltext({
+      ...mixedPair,
+      maxResponseCharacters: sizes[0] ?? 0,
+    });
+
+    expect(result.articles.map((a) => a.pmcId)).toEqual(['PMC7000001']);
+    expect(result.deferred).toEqual({
+      maxResponseCharacters: sizes[0],
+      returnedCharacters: sizes[0],
+      deferredCount: 1,
+      idType: 'doi',
+      ids: [GENBANK.doi],
+      nextDeferredCharacters: sizes[1],
+    });
+    expect(text).toContain(`as \`dois\`: ${GENBANK.doi}`);
+    expect(text).not.toContain('each under its own field');
   });
 });
 

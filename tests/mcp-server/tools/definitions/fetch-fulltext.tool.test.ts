@@ -3,7 +3,8 @@
  * @module tests/mcp-server/tools/definitions/fetch-fulltext.tool.test
  */
 
-import { z } from '@cyanheads/mcp-ts-core';
+import { type ContentBlock, z } from '@cyanheads/mcp-ts-core';
+import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
 import { createMockContext, getEnrichment, runToolContract } from '@cyanheads/mcp-ts-core/testing';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
@@ -121,36 +122,96 @@ describe('fetchFulltextTool', () => {
       expect(message).toContain('13054692');
     });
 
-    it('rejects input with no input branch (issue #46)', () => {
+    it('rejects input naming no identifier as invalid params, before any upstream request (issues #46, #192)', async () => {
       const parsed = fetchFulltextTool.input.safeParse({});
       expect(parsed.success).toBe(false);
-      expect(parsed.error?.issues[0]?.message).toMatch(/exactly one of/);
-    });
+      expect(parsed.error?.issues.map((i) => i.message)).toEqual([
+        'Provide at least one of `pmcids`, `pmids`, or `dois`.',
+      ]);
 
-    it('rejects input with two branches set (issue #46)', () => {
-      const parsed = fetchFulltextTool.input.safeParse({
-        pmcids: ['PMC1'],
-        pmids: ['12345'],
+      const result = await runToolContract(fetchFulltextTool, {});
+      expect(result.isError).toBe(true);
+      expect(result.structuredContent).toMatchObject({
+        error: { code: JsonRpcErrorCode.InvalidParams, data: { reason: 'invalid_arguments' } },
       });
-      expect(parsed.success).toBe(false);
-      expect(parsed.error?.issues[0]?.message).toMatch(/exactly one of/);
+      expect(textBlocks(result.content as ContentBlock[])[0]?.text).toContain(
+        'Provide at least one of `pmcids`, `pmids`, or `dois`.',
+      );
+      expect(mockIdConvert).not.toHaveBeenCalled();
+      expect(mockEFetch).not.toHaveBeenCalled();
     });
 
-    it('rejects input with all three branches set', () => {
-      const parsed = fetchFulltextTool.input.safeParse({
+    it('accepts pmcids, pmids, and dois together (issue #192)', () => {
+      const input = fetchFulltextTool.input.parse({
         pmcids: ['PMC1'],
         pmids: ['12345'],
         dois: ['10.1/x'],
       });
-      expect(parsed.success).toBe(false);
+      expect([input.pmcids, input.pmids, input.dois]).toEqual([['PMC1'], ['12345'], ['10.1/x']]);
     });
 
-    it('rejects input with pmids and dois set together', () => {
+    it('rejects 11 distinct identifiers across the fields, naming the count, before any upstream request (issue #192)', async () => {
+      const input = {
+        pmcids: ['PMC1', 'PMC2', 'PMC3', 'PMC4', 'PMC5', 'PMC6'],
+        pmids: ['11', '12', '13', '14', '15'],
+      };
+      const parsed = fetchFulltextTool.input.safeParse(input);
+      expect(parsed.success).toBe(false);
+      expect(parsed.error?.issues.map((i) => i.message)).toEqual([
+        '`pmcids`, `pmids`, and `dois` together name 11 distinct identifiers; a call accepts at most 10 — split them across calls.',
+      ]);
+
+      const result = await runToolContract(fetchFulltextTool, input);
+      expect(result.isError).toBe(true);
+      expect(result.structuredContent).toMatchObject({
+        error: { code: JsonRpcErrorCode.InvalidParams, data: { reason: 'invalid_arguments' } },
+      });
+      expect(textBlocks(result.content as ContentBlock[])[0]?.text).toContain(
+        '11 distinct identifiers',
+      );
+      expect(mockIdConvert).not.toHaveBeenCalled();
+      expect(mockEFetch).not.toHaveBeenCalled();
+    });
+
+    it('accepts exactly 10 distinct identifiers across the fields (issue #192)', () => {
       const parsed = fetchFulltextTool.input.safeParse({
-        pmids: ['12345'],
-        dois: ['10.1/x'],
+        pmcids: ['PMC1', 'PMC2', 'PMC3', 'PMC4'],
+        pmids: ['11', '12', '13'],
+        dois: ['10.1/a', '10.1/b', '10.1/c'],
+      });
+      expect(parsed.success).toBe(true);
+    });
+
+    it('counts every spelling one field accepts for an identifier once (issue #192)', () => {
+      // 22 elements, 10 identifiers: PMC IDs in any prefix case or zero-padded,
+      // zero-padded PMIDs, and DOIs differing only in case each name one.
+      const spelled = {
+        pmcids: ['PMC1', 'pmc1', '1', 'PMC01', 'PMC2', '2', 'PMC3', 'PMC003', 'PMC4', 'pmc04'],
+        pmids: ['11', '011', '12', '0012', '13', '13'],
+        dois: ['10.1/A', '10.1/a', '10.1/b', '10.1/B', '10.1/c', '10.1/C'],
+      };
+      expect(fetchFulltextTool.input.safeParse(spelled).success).toBe(true);
+
+      const oneMore = fetchFulltextTool.input.safeParse({
+        ...spelled,
+        pmids: [...spelled.pmids, '14'],
+      });
+      expect(oneMore.success).toBe(false);
+      expect(oneMore.error?.issues[0]?.message).toContain('11 distinct identifiers');
+    });
+
+    it('counts the same digits in two fields as two identifiers (issue #192)', () => {
+      const parsed = fetchFulltextTool.input.safeParse({
+        pmcids: ['PMC1', 'PMC2', 'PMC3', 'PMC4', 'PMC5', 'PMC6'],
+        pmids: ['1', '2', '3', '4', '5'],
       });
       expect(parsed.success).toBe(false);
+      expect(parsed.error?.issues[0]?.message).toContain('11 distinct identifiers');
+    });
+
+    it('keeps the per-field cap of 10 elements (issue #192)', () => {
+      const eleven = Array.from({ length: 11 }, () => 'PMC1');
+      expect(fetchFulltextTool.input.safeParse({ pmcids: eleven }).success).toBe(false);
     });
 
     it('advertises the DOI constraint as a JSON-Schema pattern (issue #120)', () => {
@@ -163,6 +224,17 @@ describe('fetchFulltextTool', () => {
       const advertised = new RegExp(pattern as string);
       expect(advertised.test('10.1093/nar/gks1195')).toBe(true);
       expect(advertised.test('10.1002/a,b')).toBe(false);
+    });
+
+    it('describes each id field as combinable under the cross-field cap (issue #192)', () => {
+      const schema = z.toJSONSchema(fetchFulltextTool.input, { io: 'input' }) as unknown as {
+        properties: Record<'pmcids' | 'pmids' | 'dois', { description?: string }>;
+      };
+      for (const field of ['pmcids', 'pmids', 'dois'] as const) {
+        const description = schema.properties[field].description ?? '';
+        expect(description).not.toContain('exactly one of');
+        expect(description).toContain('at most 10 distinct identifiers across the three');
+      }
     });
   });
 
@@ -207,13 +279,22 @@ describe('fetchFulltextTool', () => {
         expect(d).toContain('ID Converter');
       }
     });
+
+    it('invites mixing the three fields under the 10-identifier cap (issue #192)', () => {
+      const d = buildFulltextDescription({ europePmc: true, unpaywall: true });
+      expect(d).not.toContain('exactly one of');
+      expect(d).toContain('any mix of the three');
+      expect(d).toContain('up to 10 distinct identifiers per call');
+      expect(d).toContain('fetched and returned once');
+    });
   });
 
   describe('declared error surface (issue #168)', () => {
-    it('declares only the NCBI reasons the unwrapped ID routing can surface', () => {
+    it('declares the NCBI reasons the unwrapped ID routing can surface, plus the blank-section rejection', () => {
       // Every Europe PMC and Unpaywall call sits behind a catch that folds the
       // failure into `unavailable[].triedTiers`, so none of their reasons can
-      // reach the caller.
+      // reach the caller. `blank_filter` is raised by the handler itself, before
+      // any upstream request. (#186)
       expect(fetchFulltextTool.errors?.map((entry) => entry.reason)).toEqual([
         'queue_full',
         'ncbi_unreachable',
@@ -221,6 +302,7 @@ describe('fetchFulltextTool', () => {
         'ncbi_deadline_exceeded',
         'ncbi_invalid_response',
         'ncbi_resource_not_found',
+        'blank_filter',
       ]);
     });
   });
@@ -1410,6 +1492,122 @@ describe('fetchFulltextTool', () => {
     });
   });
 
+  describe('a PMID and a DOI sharing one DOI with Europe PMC disabled (issue #192)', () => {
+    const DOI = '10.1000/example';
+    const SENT_DOI = '10.1000/EXAMPLE';
+    const run = async () => {
+      const ctx = createMockContext({ errors: fetchFulltextTool.errors });
+      const input = fetchFulltextTool.input.parse({ pmids: ['42'], dois: [SENT_DOI] });
+      const result = await fetchFulltextTool.handler(input, ctx);
+      return { result, text: textBlocks(fetchFulltextTool.format!(result))[0]?.text ?? '' };
+    };
+
+    beforeEach(() => {
+      mockIdConvert.mockImplementation(async (_ids: string[], idtype: string) =>
+        idtype === 'pmid'
+          ? [{ 'requested-id': '42', pmid: '42', errmsg: 'Identifier not found in PMC' }]
+          : [{ 'requested-id': SENT_DOI, errmsg: 'Identifier not found in PMC' }],
+      );
+      mockEFetchBy({ pubmedDois: { '42': DOI } });
+      mockGetUnpaywallService.mockReturnValue({
+        resolve: mockUnpaywallResolve,
+        fetchContent: mockUnpaywallFetchContent,
+      });
+    });
+
+    it('resolves the shared DOI once and returns one article under the PMID', async () => {
+      mockUnpaywallResolve.mockResolvedValue({
+        kind: 'found',
+        location: { url: 'https://repo.example.org/paper', license: 'cc-by' },
+      });
+      mockUnpaywallFetchContent.mockResolvedValue({
+        kind: 'html',
+        fetchedUrl: 'https://repo.example.org/paper',
+        body: '<html><body>hi</body></html>',
+      });
+      mockHtmlExtract.mockResolvedValue({ title: 'A Paper', content: 'Body text.' });
+
+      const { result } = await run();
+
+      expect(mockUnpaywallResolve).toHaveBeenCalledTimes(1);
+      expect(mockUnpaywallResolve).toHaveBeenCalledWith(DOI, expect.any(AbortSignal));
+      expect(result.articles).toHaveLength(1);
+      expect(result.articles[0]).toMatchObject({ source: 'unpaywall', pmid: '42', doi: DOI });
+      expect(result.unavailable).toBeUndefined();
+    });
+
+    it('reports both ids with their own PMC step and the shared lookup, unqueried tier included, when the DOI has no OA copy', async () => {
+      mockUnpaywallResolve.mockResolvedValue({ kind: 'no-oa', reason: 'No OA location' });
+
+      const { result, text } = await run();
+
+      expect(mockUnpaywallResolve).toHaveBeenCalledTimes(1);
+      const chainAfterPmc = [
+        { tier: 'europepmc', outcome: 'not-attempted', detail: 'EUROPEPMC_ENABLED=false' },
+        { tier: 'unpaywall', outcome: 'no-oa', detail: 'No OA location' },
+      ];
+      expect(result.unavailable).toEqual([
+        {
+          id: '42',
+          idType: 'pmid',
+          reason: 'no-oa',
+          triedTiers: [
+            { tier: 'pmc', outcome: 'not-attempted', detail: 'PMID has no PMC counterpart' },
+            ...chainAfterPmc,
+          ],
+          unqueriedTiers: ['europepmc'],
+        },
+        {
+          id: SENT_DOI,
+          idType: 'doi',
+          reason: 'no-oa',
+          triedTiers: [
+            { tier: 'pmc', outcome: 'not-attempted', detail: 'DOI has no PMC counterpart' },
+            ...chainAfterPmc,
+          ],
+          unqueriedTiers: ['europepmc'],
+        },
+      ]);
+      expect(text).toContain('- [pmid] 42 — no-oa');
+      expect(text).toContain(`- [doi] ${SENT_DOI} — no-oa`);
+      expect(text).toContain('Not queried: Europe PMC');
+    });
+
+    it('keeps each id on its own chain when Unpaywall is not configured, since no lookup runs', async () => {
+      mockGetUnpaywallService.mockReturnValue(undefined);
+
+      const { result } = await run();
+
+      const skipped = [
+        { tier: 'europepmc', outcome: 'not-attempted', detail: 'EUROPEPMC_ENABLED=false' },
+        { tier: 'unpaywall', outcome: 'not-attempted', detail: 'UNPAYWALL_EMAIL is not set' },
+      ];
+      expect(result.unavailable).toEqual([
+        {
+          id: '42',
+          idType: 'pmid',
+          reason: 'no-pmc-fallback-disabled',
+          triedTiers: [
+            { tier: 'pmc', outcome: 'not-attempted', detail: 'PMID has no PMC counterpart' },
+            ...skipped,
+          ],
+          unqueriedTiers: ['europepmc', 'unpaywall'],
+        },
+        {
+          id: SENT_DOI,
+          idType: 'doi',
+          reason: 'no-pmc-fallback-disabled',
+          triedTiers: [
+            { tier: 'pmc', outcome: 'not-attempted', detail: 'DOI has no PMC counterpart' },
+            ...skipped,
+          ],
+          unqueriedTiers: ['europepmc', 'unpaywall'],
+        },
+      ]);
+      expect(mockUnpaywallResolve).not.toHaveBeenCalled();
+    });
+  });
+
   describe('DOI evidence and failed DOI lookups (issue #119)', () => {
     function withEpmc() {
       mockGetEpmcService.mockReturnValue({
@@ -2045,6 +2243,34 @@ describe('fetchFulltextTool', () => {
       expect(getEnrichment(ctx).notice).toBeUndefined();
     });
 
+    it('names only the nonblank terms when an empty element rides along with a term that misses (#186)', async () => {
+      // An empty element used to match every titled section, so the miss was
+      // never reported at all. It is skipped now, and the notice names the term
+      // that actually filtered.
+      mockParsePmcArticle.mockReturnValue({
+        pmcId: 'PMC3531190',
+        pmcUrl: 'https://www.ncbi.nlm.nih.gov/pmc/articles/PMC3531190/',
+        title: 'Article with real sections',
+        sections: [
+          { title: 'Introduction', text: 'Intro body.' },
+          { title: 'Methods', text: 'Methods body.' },
+        ],
+      });
+      mockEFetch.mockResolvedValue([{ 'pmc-articleset': [{ article: [] }] }]);
+
+      const ctx = createMockContext({ errors: fetchFulltextTool.errors });
+      const input = fetchFulltextTool.input.parse({
+        pmcids: ['PMC3531190'],
+        sections: ['NoSuchSection', ''],
+      });
+      const result = await fetchFulltextTool.handler(input, ctx);
+
+      const article = result.articles[0];
+      expect(article?.source).toBe('pmc');
+      if (article?.source === 'pmc') expect(article.sections).toEqual([]);
+      expect(getEnrichment(ctx).notice).toContain('requested section filter (NoSuchSection) for');
+    });
+
     it('does not emit a notice when no sections filter is provided', async () => {
       mockParsePmcArticle.mockReturnValue({
         pmcId: 'PMC3531190',
@@ -2130,6 +2356,47 @@ describe('fetchFulltextTool', () => {
       expect(notice).toBeDefined();
       expect(notice).toContain('NoSuchSection');
       expect(notice).toContain('PMC42');
+    });
+
+    it('detects an EPMC-stage miss when an empty element rides along with the term (#186)', async () => {
+      mockGetEpmcService.mockReturnValue({
+        search: mockEpmcSearch,
+        fullTextXml: mockEpmcFullTextXml,
+        parseFullTextXml: mockEpmcParseFullTextXml,
+      });
+      mockIdConvert.mockResolvedValue([{ 'requested-id': '42', pmid: '42' }]);
+      mockEpmcSearch.mockResolvedValue({
+        hits: [{ id: '42', source: 'MED', pmid: '42', pmcid: 'PMC42', doi: '10.1/x' }],
+        hitCount: 1,
+        cursorMark: '*',
+      });
+      mockEpmcFullTextXml.mockResolvedValue({
+        kind: 'found',
+        xml: '<article/>',
+        epmcId: 'PMC42',
+        source: 'MED',
+      });
+      mockEpmcParseFullTextXml.mockReturnValue({ article: [{ body: [] }] });
+      mockParsePmcArticle.mockReturnValue({
+        pmcId: 'PMC42',
+        pmcUrl: 'https://www.ncbi.nlm.nih.gov/pmc/articles/PMC42/',
+        title: 'EPMC-served article',
+        sections: [{ title: 'Background', text: 'Body' }],
+      });
+
+      const ctx = createMockContext({ errors: fetchFulltextTool.errors });
+      const input = fetchFulltextTool.input.parse({
+        pmids: ['42'],
+        sections: ['', 'NoSuchSection'],
+      });
+      const result = await fetchFulltextTool.handler(input, ctx);
+
+      const article = result.articles[0];
+      expect(article?.source === 'pmc' && article.viaSource).toBe('europepmc');
+      if (article?.source === 'pmc') expect(article.sections).toEqual([]);
+      expect(getEnrichment(ctx).notice).toContain(
+        'requested section filter (NoSuchSection) for article PMC42',
+      );
     });
   });
 
@@ -3241,6 +3508,31 @@ describe('fetchFulltextTool', () => {
       expect(text).toContain('[1] Reference one');
     });
 
+    it('lists affiliations as bullets so a deposited label is not numbered twice (#196)', () => {
+      const text =
+        textBlocks(
+          fetchFulltextTool.format!({
+            articles: [
+              {
+                source: 'pmc',
+                viaSource: 'pmc',
+                pmcId: 'PMC1',
+                pmcUrl: 'https://www.ncbi.nlm.nih.gov/pmc/articles/PMC1/',
+                title: 'Article',
+                affiliations: ['1 Division of Gastroenterology', 'Example University'],
+                sections: [],
+              },
+            ],
+            totalReturned: 1,
+          }),
+        )[0]?.text ?? '';
+
+      expect(text).toContain(
+        '**Affiliations:**\n- 1 Division of Gastroenterology\n- Example University',
+      );
+      expect(text).not.toContain('1. 1 Division');
+    });
+
     it('labels EPMC-sourced PMC articles with the EPMC source name', () => {
       const blocks = textBlocks(
         fetchFulltextTool.format!({
@@ -3680,6 +3972,31 @@ describe('fetchFulltextTool whole-response budget (issue #100)', () => {
     expect(getEnrichment(ctx).truncated).toBeUndefined();
   });
 
+  it('names the first article as the one that does not fit when a smaller later one would', async () => {
+    const staged: StagedArticle[] = [
+      { pmcId: 'PMC1', sections: [{ title: 'Intro', text: 'A'.repeat(400) }] },
+      { pmcId: 'PMC2', sections: [{ title: 'Intro', text: 'B'.repeat(40) }] },
+    ];
+    stagePmc(staged);
+    const sizes = sizesOf((await run({ pmcids: ['PMC1', 'PMC2'] })).result);
+    expect(sizes[1]).toBeLessThan(sizes[0] ?? 0);
+
+    stagePmc(staged);
+    const { result, ctx } = await run({
+      pmcids: ['PMC1', 'PMC2'],
+      maxResponseCharacters: sizes[1],
+    });
+
+    expect(result.totalReturned).toBe(0);
+    expect(result.deferred?.nextDeferredCharacters).toBe(sizes[0]);
+    const notice = getEnrichment(ctx).notice ?? '';
+    // PMC2 alone fits this ceiling, so "no article fits" would be false.
+    expect(notice).toContain(
+      `The first article alone exceeds the requested maxResponseCharacters of ${sizes[1]}, so none were returned.`,
+    );
+    expect(notice).not.toMatch(/no article fits/i);
+  });
+
   it('returns every article when the batch exactly meets the ceiling, and defers one character over', async () => {
     const staged: StagedArticle[] = [
       { pmcId: 'PMC1', sections: [{ title: 'Intro', text: 'A'.repeat(200) }] },
@@ -3880,6 +4197,87 @@ describe('fetchFulltextTool whole-response budget (issue #100)', () => {
     expect(result.totalReturned).toBe(1);
     expect(result.deferred?.idType).toBe('doi');
     expect(result.deferred?.ids).toEqual(['10.1000/two']);
+  });
+
+  describe('mixed identifier fields (issue #192)', () => {
+    const staged: StagedArticle[] = [
+      { pmcId: 'PMC1', sections: [{ title: 'Intro', text: 'A'.repeat(200) }] },
+      { pmcId: 'PMC20', sections: [{ title: 'Intro', text: 'B'.repeat(200) }] },
+    ];
+    const mixed = { pmcids: ['PMC1'], pmids: ['2'] };
+    const stageMixed = () => {
+      mockIdConvert.mockResolvedValue([{ 'requested-id': '2', pmid: '2', pmcid: 'PMC20' }]);
+      mockParsePmcArticle.mockReset();
+      stagePmc(staged);
+    };
+
+    it('groups deferred ids by their own field and omits `idType` when they span fields', async () => {
+      stageMixed();
+      const sizes = sizesOf((await run(mixed)).result);
+
+      stageMixed();
+      const { result, ctx } = await run({ ...mixed, maxResponseCharacters: 1 });
+
+      expect(result.deferred).toEqual({
+        maxResponseCharacters: 1,
+        returnedCharacters: 0,
+        deferredCount: 2,
+        ids: ['PMC1', '2'],
+        pmcids: ['PMC1'],
+        pmids: ['2'],
+        nextDeferredCharacters: sizes[0],
+      });
+      const notice = getEnrichment(ctx).notice ?? '';
+      expect(notice).toContain('deferred whole: PMC1, 2.');
+      expect(notice).toContain(
+        'Re-call pubmed_fetch_fulltext with each id under its own field (`pmcids`: PMC1; `pmids`: 2) to retrieve them',
+      );
+      const text = textBlocks(fetchFulltextTool.format!(result))[0]?.text ?? '';
+      expect(text).toContain(
+        'Re-call `pubmed_fetch_fulltext` with these ids, each under its own field — `pmcids`: PMC1; `pmids`: 2',
+      );
+      expect(text).not.toContain('undefined');
+    });
+
+    it('keeps `idType` and no per-field lists when every deferred id came from one field', async () => {
+      stageMixed();
+      const sizes = sizesOf((await run(mixed)).result);
+
+      stageMixed();
+      const { result, ctx } = await run({ ...mixed, maxResponseCharacters: sizes[0] });
+
+      expect(result.deferred).toEqual({
+        maxResponseCharacters: sizes[0],
+        returnedCharacters: sizes[0],
+        deferredCount: 1,
+        idType: 'pmid',
+        ids: ['2'],
+        nextDeferredCharacters: sizes[1],
+      });
+      expect(getEnrichment(ctx).notice).toContain('with those ids under `pmids`');
+    });
+
+    it('renders per-field lists in field order, whatever the response order', () => {
+      const result = {
+        articles: [],
+        totalReturned: 0,
+        deferred: {
+          maxResponseCharacters: 5,
+          returnedCharacters: 0,
+          deferredCount: 3,
+          ids: ['10.1/x', 'PMC1', '2'],
+          pmcids: ['PMC1'],
+          pmids: ['2'],
+          dois: ['10.1/x'],
+          nextDeferredCharacters: 100,
+        },
+      };
+      const text = textBlocks(fetchFulltextTool.format!(result))[0]?.text ?? '';
+      expect(text).toContain(
+        'each under its own field — `pmcids`: PMC1; `pmids`: 2; `dois`: 10.1/x',
+      );
+      expect(text).not.toContain('No full-text articles returned');
+    });
   });
 
   it('resumes exactly where the previous call stopped when re-called with the deferred ids', async () => {
@@ -4358,6 +4756,52 @@ describe('fetchFulltextTool JATS tables (issue #111)', () => {
     expect(readTables(call)?.[0]?.rows[1]).toEqual(['A|B', '2.5']);
   });
 
+  describe('line boundaries in cells and footnotes (issue #185)', () => {
+    /** Two header rows whose cells break lines, and footnotes marked `*` and `**`. */
+    const MULTILINE_TABLE = {
+      label: 'TABLE 2',
+      headerRowCount: 2,
+      rows: [
+        ['Outcome', 'EXACERBATION RATE RATIOS\nIRR (95% CI)'],
+        ['', 'Adjusted\nmodel'],
+        ['Mepolizumab', '0.66\n(0.43–1.02)'],
+      ],
+      footnotes: '*p < 0.05\n**p < 0.01',
+    };
+
+    it('renders each \\n as " · " in the grid, header folding included, and keeps \\n in structuredContent', async () => {
+      stageArticle({ tables: [MULTILINE_TABLE] });
+
+      const call = await runToolContract(fetchFulltextTool, { pmcids: ['PMC11391094'] });
+      const text = rendered(call);
+
+      expect(readTables(call)?.[0]).toEqual(MULTILINE_TABLE);
+      expect(text).toContain(
+        '| Outcome | EXACERBATION RATE RATIOS · IRR (95% CI) · Adjusted · model |',
+      );
+      expect(text).toContain('| Mepolizumab | 0.66 · (0.43–1.02) |');
+      expect(text).not.toMatch(/RATIOS ?IRR|0\.66 \(0\.43/);
+    });
+
+    it('joins footnote lines with " · " and escapes the joined line, not each line alone', async () => {
+      stageArticle({ tables: [MULTILINE_TABLE] });
+
+      const call = await runToolContract(fetchFulltextTool, { pmcids: ['PMC11391094'] });
+
+      // Three `*` across the joined line: each footnote alone carries fewer
+      // than two, so escaping line by line would leave a pair to form emphasis.
+      expect(rendered(call)).toContain('Footnotes: \\*p < 0.05 · \\*\\*p < 0.01');
+    });
+
+    it('describes rows and footnotes as keeping line boundaries as \\n', () => {
+      const output = fetchFulltextTool.output as unknown as z.ZodObject<z.ZodRawShape>;
+      const json = JSON.stringify(z.toJSONSchema(output));
+      expect(json).toMatch(/line break in a cell/i);
+      expect(json).toMatch(/one line per footnote/i);
+      expect(json).not.toMatch(/flattened to one string/);
+    });
+  });
+
   it('returns an unextractable table with its label and caption and says the body could not be read', async () => {
     stageArticle({ tables: [TABLE_UNEXTRACTABLE] });
 
@@ -4422,6 +4866,29 @@ describe('fetchFulltextTool JATS tables (issue #111)', () => {
     });
 
     expect(readTables(call)).toBeUndefined();
+  });
+
+  it('returns every table, sectionless ones included, when the only sections element is empty (#186)', async () => {
+    stageArticle({ tables: [TABLE_IN_SECTION, TABLE_NO_SECTION, TABLE_UNEXTRACTABLE] });
+
+    const call = await runToolContract(fetchFulltextTool, {
+      pmcids: ['PMC11391094'],
+      sections: [''],
+    });
+
+    expect(readTables(call)).toEqual([TABLE_IN_SECTION, TABLE_NO_SECTION, TABLE_UNEXTRACTABLE]);
+    expect(rendered(call)).toContain('TABLE 2');
+  });
+
+  it('narrows tables by the nonblank terms alone when an empty element rides along (#186)', async () => {
+    stageArticle({ tables: [TABLE_IN_SECTION, TABLE_NO_SECTION, TABLE_UNEXTRACTABLE] });
+
+    const call = await runToolContract(fetchFulltextTool, {
+      pmcids: ['PMC11391094'],
+      sections: ['METHODS', ''],
+    });
+
+    expect(readTables(call)).toEqual([TABLE_IN_SECTION]);
   });
 
   it('counts table text against maxCharacters and drops a table that does not fit, whole', async () => {
@@ -4914,6 +5381,24 @@ describe('fetchFulltextTool nested sections filter (issue #126)', () => {
     expect(sections?.[1]?.subsections?.map((s) => s.title)).toEqual(['Demographics']);
   });
 
+  it('matches a nested term exactly as before when an empty element rides along (#186)', async () => {
+    stageNestedArticle();
+
+    const call = await runToolContract(fetchFulltextTool, {
+      pmcids: ['PMC9575052'],
+      sections: ['', 'demograph', ''],
+    });
+
+    expect(readSections(call)).toEqual([
+      {
+        title: 'RESULTS',
+        label: '3',
+        text: '',
+        subsections: [{ title: 'Demographics', text: 'Demographics body.' }],
+      },
+    ]);
+  });
+
   it('keeps maxSections capping genuine top-level sections', async () => {
     stageNestedArticle();
 
@@ -5250,6 +5735,40 @@ describe('fetchFulltextTool JATS assets (issue #130)', () => {
     expect(readAssets(call)).toHaveLength(3);
   });
 
+  it('returns what an omitted filter returns when every sections element is empty (#186)', async () => {
+    stageArticle({ assets: [FIGURE_IN_SECTION, FIGURE_NO_SECTION, SUPPLEMENT_BARE] });
+    const omitted = await runToolContract(fetchFulltextTool, { pmcids: ['PMC11726426'] });
+
+    stageArticle({ assets: [FIGURE_IN_SECTION, FIGURE_NO_SECTION, SUPPLEMENT_BARE] });
+    const empty = await runToolContract(fetchFulltextTool, {
+      pmcids: ['PMC11726426'],
+      sections: ['', ''],
+    });
+
+    expect(readAssets(empty)).toEqual([FIGURE_IN_SECTION, FIGURE_NO_SECTION, SUPPLEMENT_BARE]);
+    expect(empty.structuredContent).toEqual(omitted.structuredContent);
+    expect(empty.content).toEqual(omitted.content);
+  });
+
+  it('returns the same response for an empty element alongside a term as for the term alone (#186)', async () => {
+    stageArticle({ assets: [FIGURE_IN_SECTION, FIGURE_NO_SECTION, SUPPLEMENT_BARE] });
+    const alone = await runToolContract(fetchFulltextTool, {
+      pmcids: ['PMC11726426'],
+      sections: ['METHODS'],
+    });
+
+    stageArticle({ assets: [FIGURE_IN_SECTION, FIGURE_NO_SECTION, SUPPLEMENT_BARE] });
+    const withEmpty = await runToolContract(fetchFulltextTool, {
+      pmcids: ['PMC11726426'],
+      sections: ['METHODS', ''],
+    });
+
+    expect(readAssets(withEmpty)).toEqual([FIGURE_IN_SECTION]);
+    expect(readSections(withEmpty)?.map((s) => s.title)).toEqual(['METHODS']);
+    expect(withEmpty.structuredContent).toEqual(alone.structuredContent);
+    expect(withEmpty.content).toEqual(alone.content);
+  });
+
   it('counts asset text against maxCharacters and stops admitting at the first that does not fit', async () => {
     // A small asset sits *after* the oversized one: scanning past the first
     // non-fit would return it alone, with nothing saying the earlier ones exist.
@@ -5524,6 +6043,45 @@ describe('fetchFulltextTool JATS assets (issue #130)', () => {
     });
     expect(readAssets(suppressed)).toBeUndefined();
     expect(rendered(suppressed)).not.toContain('[Figure');
+  });
+
+  it('skips an empty sections element on the Europe PMC stage too (#186)', async () => {
+    mockGetEpmcService.mockReturnValue({
+      search: mockEpmcSearch,
+      fullTextXml: mockEpmcFullTextXml,
+      parseFullTextXml: mockEpmcParseFullTextXml,
+    });
+    mockIdConvert.mockResolvedValue([{ 'requested-id': '42', pmid: '42' }]);
+    mockEpmcSearch.mockResolvedValue({
+      hits: [{ id: '42', source: 'MED', pmid: '42', pmcid: 'PMC42', doi: '10.1/x' }],
+      hitCount: 1,
+      cursorMark: '*',
+    });
+    mockEpmcFullTextXml.mockResolvedValue({
+      kind: 'found',
+      xml: '<article/>',
+      epmcId: 'PMC42',
+      source: 'MED',
+    });
+    mockEpmcParseFullTextXml.mockReturnValue({ article: [{ body: [] }] });
+    mockParsePmcArticle.mockReturnValue({
+      pmcId: 'PMC42',
+      pmcUrl: 'https://www.ncbi.nlm.nih.gov/pmc/articles/PMC42/',
+      title: 'EPMC article with a figure',
+      sections: MARKED_SECTIONS,
+      assets: [FIGURE_IN_SECTION, FIGURE_NO_SECTION],
+    });
+
+    const empty = await runToolContract(fetchFulltextTool, { pmids: ['42'], sections: [''] });
+    expect(readAssets(empty)).toEqual([FIGURE_IN_SECTION, FIGURE_NO_SECTION]);
+    expect(readSections(empty)?.map((s) => s.title)).toEqual(['METHODS', 'RESULTS']);
+
+    const withTerm = await runToolContract(fetchFulltextTool, {
+      pmids: ['42'],
+      sections: ['', 'METHODS'],
+    });
+    expect(readAssets(withTerm)).toEqual([FIGURE_IN_SECTION]);
+    expect(readSections(withTerm)?.map((s) => s.title)).toEqual(['METHODS']);
   });
 
   it('keeps an asset whose section is folded away by the depth clamp', async () => {
@@ -6212,5 +6770,306 @@ describe('fetchFulltextTool section headings match the truncation ledger (issue 
       ['2', 'Methods'],
       ['S1', undefined],
     ]);
+  });
+});
+
+describe('fetchFulltextTool blank section selectors (issue #186)', () => {
+  beforeEach(() => {
+    mockEFetch.mockReset();
+    mockIdConvert.mockReset();
+    mockParsePmcArticle.mockReset();
+    mockGetUnpaywallService.mockReset();
+    mockGetEpmcService.mockReset();
+    mockEpmcSearch.mockReset();
+    // An upstream call a case did not stage fails loudly rather than resolving.
+    mockEFetch.mockRejectedValue(new Error('unmocked eFetch'));
+    mockIdConvert.mockRejectedValue(new Error('unmocked idConvert'));
+    mockEpmcSearch.mockRejectedValue(new Error('unmocked Europe PMC search'));
+    mockGetUnpaywallService.mockReturnValue(undefined);
+    mockGetEpmcService.mockReturnValue(undefined);
+  });
+
+  /**
+   * PMC10164684's shape: titled top-level sections with multi-word subsections,
+   * a table and a figure that name no section, and a figure inside Methods.
+   */
+  function stageArticle() {
+    mockParsePmcArticle.mockReturnValue({
+      pmcId: 'PMC10164684',
+      pmcUrl: 'https://www.ncbi.nlm.nih.gov/pmc/articles/PMC10164684/',
+      title: 'Blank Selector Article',
+      sections: [
+        { title: 'INTRODUCTION', text: 'Intro body.' },
+        {
+          title: 'METHODS',
+          text: 'Methods body.',
+          subsections: [{ title: 'Study design', text: 'Design body.' }],
+        },
+        {
+          title: 'RESULTS',
+          text: 'Results body.',
+          subsections: [{ title: 'Patient outcomes', text: 'Outcomes body.' }],
+        },
+        { title: 'Supplementary Material', text: 'Supplement body.' },
+      ],
+      tables: [
+        { label: 'TABLE 1', caption: 'Floating table', headerRowCount: 0, rows: [['a', '1']] },
+      ],
+      assets: [
+        {
+          assetType: 'figure',
+          id: 'F1',
+          label: 'Figure 1',
+          caption: 'Study flow',
+          sectionTitle: 'METHODS',
+          href: 'f1.jpg',
+        },
+        { assetType: 'figure', id: 'F2', label: 'Figure 2', caption: 'Floating', href: 'f2.jpg' },
+      ],
+    });
+    mockEFetch.mockResolvedValue([{ 'pmc-articleset': [{ article: [] }] }]);
+  }
+
+  async function call(sections?: string[]) {
+    stageArticle();
+    return await runToolContract(fetchFulltextTool, {
+      pmcids: ['PMC10164684'],
+      ...(sections && { sections }),
+    });
+  }
+
+  function summary(result: Awaited<ReturnType<typeof runToolContract>>) {
+    const article = (
+      result.structuredContent as {
+        articles: { assets?: unknown[]; sections: DeepSection[]; tables?: unknown[] }[];
+      }
+    ).articles[0];
+    return {
+      sections: article?.sections.map((s) => s.title),
+      tables: article?.tables?.length ?? 0,
+      assets: article?.assets?.length ?? 0,
+    };
+  }
+
+  function text(result: Awaited<ReturnType<typeof runToolContract>>): string {
+    return (result.content as { type: string; text?: string }[])
+      .map((b) => b.text ?? '')
+      .join('\n');
+  }
+
+  const BLANK_FILTER = fetchFulltextTool.errors?.find((e) => e.reason === 'blank_filter');
+
+  it('applies no filter for an empty array, as for an omitted field', async () => {
+    const omitted = await call();
+    const empty = await call([]);
+
+    expect(summary(omitted)).toEqual({
+      sections: ['INTRODUCTION', 'METHODS', 'RESULTS', 'Supplementary Material'],
+      tables: 1,
+      assets: 2,
+    });
+    expect(empty.structuredContent).toEqual(omitted.structuredContent);
+    expect(empty.content).toEqual(omitted.content);
+  });
+
+  it('skips an exactly-empty element, so [""] returns what an omitted field returns', async () => {
+    const omitted = await call();
+    const empty = await call(['']);
+
+    expect(summary(empty)).toEqual({
+      sections: ['INTRODUCTION', 'METHODS', 'RESULTS', 'Supplementary Material'],
+      tables: 1,
+      assets: 2,
+    });
+    expect(empty.structuredContent).toEqual(omitted.structuredContent);
+    expect(empty.content).toEqual(omitted.content);
+  });
+
+  it('skips an empty element beside a term, so ["Methods", ""] returns what ["Methods"] returns', async () => {
+    const alone = await call(['Methods']);
+    const withEmpty = await call(['Methods', '']);
+
+    expect(summary(withEmpty)).toEqual({ sections: ['METHODS'], tables: 0, assets: 1 });
+    expect(withEmpty.structuredContent).toEqual(alone.structuredContent);
+    expect(withEmpty.content).toEqual(alone.content);
+  });
+
+  it.each([
+    ['a leading space', ' Methods'],
+    ['a trailing space', 'Methods '],
+    ['a tab and a newline', '\tMethods\n'],
+    ['no-break spaces (U+00A0)', ' Methods '],
+  ])('trims %s around a term, so it matches what the bare term matches', async (_label, term) => {
+    const bare = await call(['Methods']);
+    const padded = await call([term]);
+
+    expect(summary(padded)).toEqual({ sections: ['METHODS'], tables: 0, assets: 1 });
+    expect(padded.structuredContent).toEqual(bare.structuredContent);
+    expect(padded.content).toEqual(bare.content);
+  });
+
+  it('keeps whitespace inside a term and echoes the trimmed term in a miss notice', async () => {
+    const inner = await call([' Study design ']);
+    expect(inner.structuredContent).toEqual((await call(['Study design'])).structuredContent);
+    expect(summary(await call(['Study  design']))).toEqual({ sections: [], tables: 0, assets: 0 });
+
+    const miss = await call(['  Nowhere ']);
+    const notice = (miss.structuredContent as { notice?: string }).notice;
+    expect(notice).toContain('requested section filter (Nowhere) for article PMC10164684');
+  });
+
+  it.each([
+    ['four spaces', ['    '], ['sections.0']],
+    ['a single space', [' '], ['sections.0']],
+    ['a tab and a newline', ['\t\n'], ['sections.0']],
+    ['a no-break space (U+00A0)', [' '], ['sections.0']],
+    ['a zero-width space (U+200B)', ['​'], ['sections.0']],
+    ['a word joiner between spaces (U+2060)', [' ⁠ '], ['sections.0']],
+    ['a byte-order mark (U+FEFF)', ['﻿'], ['sections.0']],
+    ['a Hangul filler (U+3164)', ['ㅤ'], ['sections.0']],
+    ['a zero-width space after a term', ['Methods', '​'], ['sections.1']],
+    [
+      'two blank elements around a term and an empty one',
+      [' ', 'Methods', '', '​ '],
+      ['sections.0', 'sections.3'],
+    ],
+  ])(
+    'rejects a sections element of %s as blank_filter before any upstream request',
+    async (_label, sections, fields) => {
+      const result = await call(sections);
+
+      expect(result.isError).toBe(true);
+      expect(result.structuredContent).toMatchObject({
+        error: {
+          code: JsonRpcErrorCode.ValidationError,
+          data: {
+            reason: 'blank_filter',
+            retryable: false,
+            fields,
+            recovery: { hint: BLANK_FILTER?.recovery },
+          },
+        },
+      });
+      const rendered = text(result);
+      for (const field of fields) expect(rendered).toContain(`\`${field}\``);
+      expect(rendered).toContain(`Recovery: ${BLANK_FILTER?.recovery}`);
+      expect(mockEFetch).not.toHaveBeenCalled();
+      expect(mockIdConvert).not.toHaveBeenCalled();
+      expect(mockParsePmcArticle).not.toHaveBeenCalled();
+    },
+  );
+
+  it('names one blank element in the singular and several in the plural', async () => {
+    const one = await call(['Methods', '​']);
+    expect((one.structuredContent as { error: { message: string } }).error.message).toBe(
+      '`sections.1` holds only whitespace or invisible characters, so it names no section heading.',
+    );
+
+    const two = await call(['  ', 'Methods', '​']);
+    expect((two.structuredContent as { error: { message: string } }).error.message).toBe(
+      '`sections.0`, `sections.2` hold only whitespace or invisible characters, so they name no section heading.',
+    );
+  });
+
+  it('rejects before PMID and DOI routing too', async () => {
+    mockGetEpmcService.mockReturnValue({ search: mockEpmcSearch });
+
+    const result = await runToolContract(fetchFulltextTool, {
+      pmids: ['36998765'],
+      dois: ['10.1000/example'],
+      sections: ['Results', '​'],
+    });
+
+    expect(result.structuredContent).toMatchObject({
+      error: { data: { reason: 'blank_filter', fields: ['sections.1'] } },
+    });
+    expect(mockIdConvert).not.toHaveBeenCalled();
+    expect(mockEFetch).not.toHaveBeenCalled();
+    expect(mockEpmcSearch).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    ['markup', '<b></b>'],
+    ['query syntax', '()'],
+    ['an entity spelling an invisible character', '&#8203;'],
+  ])('matches %s literally rather than stripping it first', async (_label, term) => {
+    const result = await call([term]);
+
+    expect(result.isError).toBeFalsy();
+    expect(summary(result)).toEqual({ sections: [], tables: 0, assets: 0 });
+    const notice = (result.structuredContent as { notice?: string }).notice;
+    expect(notice).toContain(`requested section filter (${term}) for article PMC10164684`);
+    expect(text(result)).toContain(`requested section filter (${term})`);
+  });
+
+  describe('linear time on caller-sized blank input', () => {
+    /** CPU time of `run`, in ms — this thread's user + system time, not wall clock. */
+    const cpuMs = (run: () => void): number => {
+      const start = process.threadCpuUsage();
+      run();
+      const { user, system } = process.threadCpuUsage(start);
+      return (user + system) / 1000;
+    };
+
+    /**
+     * Fastest of five measurements of ten rejected calls each. The rejection is
+     * raised before the handler's first `await`, so the whole check runs inside
+     * the synchronous call being measured.
+     */
+    const fastestMs = (sections: string[]): number => {
+      const input = fetchFulltextTool.input.parse({ pmcids: ['PMC10164684'], sections });
+      const reject = () =>
+        Promise.resolve(
+          fetchFulltextTool.handler(input, createMockContext({ errors: fetchFulltextTool.errors })),
+        ).catch(() => undefined);
+      reject();
+      return Math.min(
+        ...Array.from({ length: 5 }, () =>
+          cpuMs(() => {
+            for (let i = 0; i < 10; i++) reject();
+          }),
+        ),
+      );
+    };
+
+    it.each([
+      ['one element of N blank characters', (n: number) => [' ​'.repeat(n / 2)]],
+      ['N single-space elements', (n: number) => Array.from({ length: n }, () => ' ')],
+      ['N empty elements and one blank one', (n: number) => [...Array(n).fill(''), '​']],
+    ])('rejects %s in linear CPU time', (_label, build) => {
+      const t5k = fastestMs(build(5_000));
+      const t80k = fastestMs(build(80_000));
+
+      // Measured at a ratio of 12–20 and ~80 ms for the slowest shape.
+      expect(t80k / t5k).toBeLessThan(64);
+      expect(t80k).toBeLessThan(1_000);
+    });
+  });
+
+  it('keeps case-insensitive substring matching for the kept terms', async () => {
+    const result = await call(['', 'resul']);
+    expect(summary(result)).toEqual({ sections: ['RESULTS'], tables: 0, assets: 0 });
+  });
+
+  it('declares blank_filter as a non-retryable ValidationError covering whitespace and invisible characters', () => {
+    expect(BLANK_FILTER).toMatchObject({
+      code: JsonRpcErrorCode.ValidationError,
+      retryable: false,
+    });
+    expect(BLANK_FILTER?.when).toMatch(/`sections` element/);
+    expect(BLANK_FILTER?.when).toMatch(/whitespace/i);
+    expect(BLANK_FILTER?.when).toMatch(/zero-width space/i);
+    expect(BLANK_FILTER?.when).toMatch(/exactly-empty element .* skipped/i);
+  });
+
+  it('states the empty-element and blank-element rules on the sections description', () => {
+    const shape = fetchFulltextTool.input as unknown as {
+      shape: Record<string, { description?: string }>;
+    };
+    const description = shape.shape.sections?.description ?? '';
+    expect(description).toMatch(/Empty strings are skipped/);
+    expect(description).toMatch(
+      /an element of only whitespace or invisible characters, such as a zero-width space, is rejected/,
+    );
   });
 });

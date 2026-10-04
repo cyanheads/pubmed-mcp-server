@@ -264,8 +264,12 @@ describe('pubmed_fetch_fulltext section and box titles (#169)', () => {
   it('renders a box caption title and paragraph as separate lines', async () => {
     const { article, text } = await titled();
 
-    expect(article.sections[1]?.text).toBe('Assessment text.\n\nBox 1\n\nSummary.\n\nBox body.');
-    expect(text).toContain('Assessment text.\n\nBox 1\n\nSummary.\n\nBox body.');
+    expect(article.sections[1]?.text).toBe(
+      'Assessment text.\n\n[Box: Box 1]\n\nSummary.\n\nBox body.\n\n[End of box]',
+    );
+    expect(text).toContain(
+      'Assessment text.\n\n[Box: Box 1]\n\nSummary.\n\nBox body.\n\n[End of box]',
+    );
     // A lifted box loses only its title, never its caption paragraph.
     expect(article.sections[0]).toEqual({
       title: 'Key points',

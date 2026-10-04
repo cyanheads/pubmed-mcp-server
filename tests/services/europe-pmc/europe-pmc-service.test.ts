@@ -1489,6 +1489,29 @@ describe('EuropePmcService.parseFullTextXml', () => {
       expect(article.references?.[0]?.label).toBe('1.');
     });
   });
+
+  /**
+   * Europe PMC's `fullTextXML` feeds the same `parsePmcArticle`, so a cell or
+   * footer that breaks lines in the JATS reads the same as on the PMC tier.
+   * The fixture is PMC11519154's Table 1, as Europe PMC serves it. (#185)
+   */
+  it('keeps the line structure of table cells and footnotes (PMC11519154)', () => {
+    const node = makeService().parseFullTextXml(
+      `<?xml version="1.0" encoding="UTF-8"?>
+<article><front><article-meta><article-id pub-id-type="pmcid">PMC11519154</article-id></article-meta></front><body><sec><title>Results</title>
+<table-wrap id="Tab1" position="float" orientation="portrait"><label>Table\u00a01</label><caption><p>Participant characteristics</p></caption><table frame="hsides" rules="groups"><thead><tr><th align="left" colspan="1" rowspan="1"/><th align="left" colspan="1" rowspan="1">DR-group<break/>(<italic toggle="yes">n</italic>\u2009=\u200946)</th><th align="left" colspan="1" rowspan="1">DM-group<break/>(<italic toggle="yes">n</italic>\u2009=\u200953)</th></tr></thead>
+<tbody><tr><td align="left" colspan="1" rowspan="1">\u00a0\u00a0Sex (male:female)</td><td align="left" colspan="1" rowspan="1">19:27</td><td align="left" colspan="1" rowspan="1">0.108<sup>a</sup></td></tr></tbody></table>
+<table-wrap-foot><p><sup>a</sup>Fisher’s exact test</p><p><sup>b</sup>Mann–Whitney test</p></table-wrap-foot></table-wrap></sec></body></article>`,
+    );
+    if (!node) throw new Error('expected an <article> node');
+    const table = parsePmcArticle(node).tables?.[0];
+    expect(table?.rows).toEqual([
+      ['', 'DR-group\n(n = 46)', 'DM-group\n(n = 53)'],
+      ['Sex (male:female)', '19:27', '0.108a'],
+    ]);
+    // Two <p>s, two lines; each marker is an inline <sup>, so it stays attached.
+    expect(table?.footnotes).toBe('aFisher’s exact test\nbMann–Whitney test');
+  });
 });
 
 describe('EuropePmcService.citations', () => {

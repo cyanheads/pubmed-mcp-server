@@ -3,7 +3,9 @@
  * @module tests/services/ncbi/parsing/pmc-xml-helpers.test
  */
 
+import { XMLParser } from 'fast-xml-parser';
 import { describe, expect, it } from 'vitest';
+import { ORDERED_XML_PARSER_OPTIONS } from '@/services/ncbi/parsing/ordered-xml-parser-options.js';
 import type { JatsNode } from '@/services/ncbi/parsing/pmc-xml-helpers.js';
 import {
   attrOf,
@@ -12,6 +14,7 @@ import {
   findAllDescendants,
   findOne,
   isTextNode,
+  lineTextContent,
   rawTextContent,
   selectAlternative,
   tagNameOf,
@@ -560,5 +563,309 @@ describe('selectAlternative', () => {
   it('falls back to a pointer when it is the only child carrying text', () => {
     const pointer = el('graphic', [el('alt-text', [t('Structure of benzene')])]);
     expect(selectAlternative(el('alternatives', [pointer]))).toBe(pointer);
+  });
+});
+
+// ─── Structural boundaries (#185) and citation runs (#197) ────────────────────
+
+/** Parse one JATS element with the server's ordered parser options. */
+const jats = (xml: string): JatsNode => {
+  const parsed = new XMLParser(ORDERED_XML_PARSER_OPTIONS).parse(xml) as JatsNode[];
+  const node = parsed.find((n) => !isTextNode(n));
+  if (!node) throw new Error(`no element in ${xml}`);
+  return node;
+};
+
+/** PMC10164684 Table 1's `<table-wrap-foot>`: four `<fn>`s, three of them labeled. */
+const PMC10164684_FOOT = jats(
+  '<table-wrap-foot><fn id="TFN1"><p id="P50">Abbreviations: IQR, interquartile range.</p></fn>' +
+    '<fn id="TFN2"><label>+</label><p id="P51">66 (97%) of the 68% patients on dupilumab were using the 300 mg every 2-week dose.</p></fn>' +
+    '<fn id="TFN3"><label>*</label><p id="P52">No patient within this cohort was uninsured</p></fn>' +
+    '<fn id="TFN4"><label>#</label><p id="P53">The five patients on omalizumab as shown in <xref rid="T1" ref-type="table">Table 1</xref> all had IgE within the accepted level.</p></fn>' +
+    '</table-wrap-foot>',
+);
+
+/** PMC11176230 Table 4's header cell: four lines split by `<break/>`, thin spaces inside. */
+const PMC11176230_CELL = jats(
+  '<th align="left" colspan="2" rowspan="1">KTR<break/><italic toggle="yes">n</italic>\u2009=\u2009157<break/>' +
+    'mean measured GFR: 57\u2009±\u200920<break/>95 percentile range: 25–87</th>',
+);
+
+/** PMC12892626 Table 1's inclusion-criteria cell: a labeled `simple` list. */
+const PMC12892626_CELL = jats(
+  '<td align="left" colspan="1" rowspan="1"><list list-type="simple" id="celist10">' +
+    '<list-item id="celistitem10"><label>1.</label><p id="para10">Hispanic, or of Hispanic origin, background or descendent</p></list-item>' +
+    '<list-item id="celistitem20"><label>2.</label><p id="para20">Aged 55 or over</p></list-item>' +
+    '</list></td>',
+);
+
+describe('structural boundaries (#185)', () => {
+  describe('lineTextContent', () => {
+    it('keeps a <break/> as a line boundary between two values', () => {
+      // PMC13531951: two estimates in one cell, split by <break/> and nothing else.
+      expect(lineTextContent(jats('<td>1.08<break/>2.44</td>'))).toBe('1.08\n2.44');
+    });
+
+    it('keeps every <break/> of a multi-line header cell, collapsing source whitespace inside each line', () => {
+      expect(lineTextContent(PMC11176230_CELL)).toBe(
+        'KTR\nn = 157\nmean measured GFR: 57 ± 20\n95 percentile range: 25–87',
+      );
+    });
+
+    it('puts each <fn> on a line of its own, its <label> leading the line by one space', () => {
+      expect(lineTextContent(PMC10164684_FOOT)).toBe(
+        [
+          'Abbreviations: IQR, interquartile range.',
+          '+ 66 (97%) of the 68% patients on dupilumab were using the 300 mg every 2-week dose.',
+          '* No patient within this cohort was uninsured',
+          '# The five patients on omalizumab as shown in Table 1 all had IgE within the accepted level.',
+        ].join('\n'),
+      );
+    });
+
+    it('gives a <list> one line per item, label included', () => {
+      expect(lineTextContent(PMC12892626_CELL)).toBe(
+        '1. Hispanic, or of Hispanic origin, background or descendent\n2. Aged 55 or over',
+      );
+    });
+
+    it('separates sibling <p>s and keeps a <list-item> with no label bare', () => {
+      const cell = jats(
+        '<td><p>10.8</p><p>CON: 33.9</p><list list-type="bullet"><list-item><p>a</p></list-item><list-item><p>b</p></list-item></list></td>',
+      );
+      expect(lineTextContent(cell)).toBe('10.8\nCON: 33.9\na\nb');
+    });
+
+    it('treats <hr/>, <def-item>, <title> and <attrib> as line boundaries too', () => {
+      const foot = jats(
+        '<table-wrap-foot><title>Notes</title><def-list><def-item><term>BMI</term><def><p>body mass index</p></def></def-item>' +
+          '<def-item><term>SD</term><def><p>standard deviation</p></def></def-item></def-list>' +
+          'x<hr/>y<disp-quote><p>quoted</p><attrib>Source</attrib></disp-quote></table-wrap-foot>',
+      );
+      // `<term>` is inline; the `<p>` inside `<def>` starts a line of its own.
+      expect(lineTextContent(foot)).toBe(
+        'Notes\nBMI\nbody mass index\nSD\nstandard deviation\nx\ny\nquoted\nSource',
+      );
+    });
+
+    it('turns a source-spaced boundary into the line break, leaving no space beside it', () => {
+      // Pretty-printed deposits put newlines and indentation between elements.
+      const foot = jats(
+        '<table-wrap-foot>\n  <fn>\n    <label>a</label>\n    <p>First note.</p>\n  </fn>\n  <fn>\n    <p>Second  note.</p>\n  </fn>\n</table-wrap-foot>',
+      );
+      expect(lineTextContent(foot)).toBe('a First note.\nSecond note.');
+      expect(lineTextContent(jats('<td>A <break/> B</td>'))).toBe('A\nB');
+    });
+
+    it('keeps the line boundary before a footnote whose <label> is empty', () => {
+      const foot = jats(
+        '<table-wrap-foot><fn><p>A</p></fn><fn><label/><p>B</p></fn></table-wrap-foot>',
+      );
+      expect(lineTextContent(foot)).toBe('A\nB');
+    });
+
+    it('keeps inline markup unspaced inside a line', () => {
+      // PMC11519154: a significance marker deposited as an inline <sup>.
+      expect(lineTextContent(jats('<td>0.108<sup>a</sup></td>'))).toBe('0.108a');
+      expect(
+        lineTextContent(
+          jats('<td>DR-group<break/>(<italic toggle="yes">n</italic>\u2009=\u200946)</td>'),
+        ),
+      ).toBe('DR-group\n(n = 46)');
+    });
+
+    it('reads a cell with no boundary exactly as textContent does', () => {
+      const cell = jats('<td>\u00a0\u00a0Sex  (male:female) <sup>b</sup></td>');
+      expect(lineTextContent(cell)).toBe(textContent(cell));
+      expect(lineTextContent(cell)).toBe('Sex (male:female) b');
+    });
+
+    it('returns empty for undefined and for a node with only whitespace', () => {
+      expect(lineTextContent(undefined)).toBe('');
+      expect(lineTextContent(jats('<td> <p> </p> <break/> </td>'))).toBe('');
+    });
+  });
+
+  describe('textContent', () => {
+    it('reads a line boundary as one space where the source has none', () => {
+      expect(textContent(jats('<th>EXACERBATION RATE RATIOS<break/>IRR (95% CI)</th>'))).toBe(
+        'EXACERBATION RATE RATIOS IRR (95% CI)',
+      );
+      expect(textContent(PMC10164684_FOOT)).toBe(
+        'Abbreviations: IQR, interquartile range. + 66 (97%) of the 68% patients on dupilumab were using the 300 mg every 2-week dose. * No patient within this cohort was uninsured # The five patients on omalizumab as shown in Table 1 all had IgE within the accepted level.',
+      );
+    });
+
+    it('puts one space after an affiliation <label>', () => {
+      // PMC12266799: the label sits flush against the institution text.
+      const aff = jats(
+        '<aff id="aff1">\n<label>1</label>Division of Gastroenterology, Department of Medicine, University of Washington, Seattle, Washington, USA</aff>',
+      );
+      expect(textContent(aff)).toBe(
+        '1 Division of Gastroenterology, Department of Medicine, University of Washington, Seattle, Washington, USA',
+      );
+    });
+
+    it('leaves text with no listed boundary byte-identical', () => {
+      // Pinned against the pre-#185 reader: inline markup never gains a space.
+      const cases: [string, string][] = [
+        ['<p>H<sub>2</sub>O<sub>2</sub> was added</p>', 'H2O2 was added'],
+        ['<p>p = 1 × 10<sup>−5</sup></p>', 'p = 1 × 10−5'],
+        ['<p>BMI 30 kg/m<sup>2</sup></p>', 'BMI 30 kg/m2'],
+        ['<p>the i<italic>th</italic> sample</p>', 'the ith sample'],
+        [
+          '<p>(Smith et al., <xref ref-type="bibr" rid="b1">2008</xref>)</p>',
+          '(Smith et al., 2008)',
+        ],
+        ['<p>×10<sup>9</sup>/L and [M‐H]<sup>−</sup></p>', '×109/L and [M‐H]−'],
+        ['<p>Cys<sub>2</sub>–His<sub>2</sub></p>', 'Cys2–His2'],
+      ];
+      for (const [xml, expected] of cases) expect(textContent(jats(xml))).toBe(expected);
+    });
+  });
+
+  describe('rawTextContent', () => {
+    it('adds nothing at the edges of the node it reads', () => {
+      expect(rawTextContent(jats('<fn><label>*</label><p>Note</p></fn>'))).toBe('* Note');
+      expect(rawTextContent(jats('<p>Edge</p>'))).toBe('Edge');
+      expect(rawTextContent(jats('<list><list-item><p>only</p></list-item></list>'))).toBe('only');
+    });
+
+    it('adds a newline only where the source has no whitespace at the boundary', () => {
+      expect(rawTextContent(jats('<td>a<break/>b</td>'))).toBe('a\nb');
+      // Source spacing is kept intact rather than gaining a separator beside it.
+      expect(rawTextContent(jats('<td>a <break/>b</td>'))).toBe('a b');
+      expect(rawTextContent(jats('<td>a<break/>\n  b</td>'))).toBe('a\n  b');
+    });
+  });
+
+  it('applies the boundary rule through textContentExcluding', () => {
+    const p = jats('<p>Before<break/>after<table-wrap><label>Table 1</label></table-wrap></p>');
+    expect(textContentExcluding(p, new Set(['table-wrap']))).toBe('Before after');
+  });
+});
+
+describe('adjacent citation markers (#197)', () => {
+  it('separates <xref>s with no source text between them by a comma', () => {
+    // PMC13581315: four bibr markers inside one bracket pair, nothing between them.
+    const p = jats(
+      '<p>recognised among Asians.[<xref rid="R1" ref-type="bibr">1</xref><xref rid="R2" ref-type="bibr">2</xref>' +
+        '<xref rid="R3" ref-type="bibr">3</xref><xref rid="R4" ref-type="bibr">4</xref>]</p>',
+    );
+    expect(textContent(p)).toBe('recognised among Asians.[1,2,3,4]');
+    expect(rawTextContent(p)).toBe('recognised among Asians.[1,2,3,4]');
+    expect(lineTextContent(p)).toBe('recognised among Asians.[1,2,3,4]');
+  });
+
+  it('separates markers each wrapped in its own superscript', () => {
+    const p = jats(
+      '<p>shown before<sup><xref ref-type="bibr">1</xref></sup><sup><xref ref-type="bibr">2</xref></sup>.</p>',
+    );
+    expect(textContent(p)).toBe('shown before1,2.');
+  });
+
+  it('looks past an <xref> that carries no text', () => {
+    const p = jats('<p>[<xref>5</xref><xref rid="f1" ref-type="fig"/><xref>7</xref>]</p>');
+    expect(textContent(p)).toBe('[5,7]');
+  });
+
+  it('leaves markers the source already separates unchanged', () => {
+    expect(textContent(jats('<p>[<xref>1</xref>, <xref>2</xref>]</p>'))).toBe('[1, 2]');
+    expect(textContent(jats('<p>[<xref>1</xref>–<xref>4</xref>]</p>'))).toBe('[1–4]');
+    expect(textContent(jats('<p>[<xref>1</xref>\n<xref>2</xref>]</p>'))).toBe('[1 2]');
+    expect(textContent(jats('<p>et al., <xref>2008</xref>)</p>'))).toBe('et al., 2008)');
+  });
+
+  it('adds no comma where a structural boundary already separates the markers', () => {
+    expect(lineTextContent(jats('<td><xref>a</xref><break/><xref>b</xref></td>'))).toBe('a\nb');
+  });
+});
+
+describe('text readers run in linear time (#185, #197)', () => {
+  /** CPU time of `run`, in ms — this thread's user + system time, not wall clock. */
+  const cpuMs = (run: () => void): number => {
+    const start = process.threadCpuUsage();
+    run();
+    const { user, system } = process.threadCpuUsage(start);
+    return (user + system) / 1000;
+  };
+
+  /** Fastest of five measurements of five reads each. */
+  const fastestMs = (read: () => void): number => {
+    read();
+    return Math.min(
+      ...Array.from({ length: 5 }, () =>
+        cpuMs(() => {
+          for (let i = 0; i < 5; i++) read();
+        }),
+      ),
+    );
+  };
+
+  /** `unit` repeated until its serialized form spans about `chars` characters. */
+  const repeat = (unit: JatsNode[], unitChars: number, chars: number): JatsNode[] =>
+    Array.from({ length: Math.ceil(chars / unitChars) }, () => unit).flat();
+
+  it.each([
+    // `a<break/>`: a separator owed before every text node.
+    ['a <break/> after every character', [t('a'), el('break', [])], 9],
+    // `<label>x</label>`: a label space owed and never followed by a line.
+    ['labels with nothing after them', [el('label', [t('x')])], 16],
+    // `<fn><label/><p>y</p></fn>`: a line boundary an empty label must not swallow.
+    ['footnotes with empty labels', [el('fn', [el('label', []), el('p', [t('y')])])], 26],
+    // `<xref>1</xref><xref/>`: a comma owed, then withdrawn by an empty marker.
+    ['citation markers alternating with empty ones', [el('xref', [t('1')]), el('xref', [])], 21],
+    // ` <x/>`: whitespace-only text the line reader collapses.
+    ['whitespace between empty elements', [t(' '), el('x', [])], 5],
+  ])('reads %s in linear CPU time', (_label, unit, unitChars) => {
+    const at = (chars: number) => el('td', repeat(unit as JatsNode[], unitChars as number, chars));
+    const small = at(5_000);
+    const large = at(80_000);
+    for (const reader of [textContent, lineTextContent, rawTextContent]) {
+      const t5k = fastestMs(() => reader(small));
+      const t80k = fastestMs(() => reader(large));
+      // Measured at a ratio of 11–16 and under 6 ms for five reads of 80k.
+      expect(t80k / t5k).toBeLessThan(64);
+      expect(t80k).toBeLessThan(250);
+    }
+  });
+});
+
+describe('identifiers are never text (#208)', () => {
+  /** PMC11609225's funding statement: an `<institution-wrap>` holding a Crossref Funder DOI and the name. */
+  const funding = el('p', [
+    t('This research was sponsored by the '),
+    el('funding-source', [
+      el('institution-wrap', [
+        el('institution-id', [t('10.13039/501100001809')], { '@_institution-id-type': 'doi' }),
+        el('institution', [t('National Natural Science Foundation of China')]),
+      ]),
+    ]),
+    t(' grant No. '),
+    el('award-id', [t('12250410247')]),
+    t('.'),
+  ]);
+  const read =
+    'This research was sponsored by the National Natural Science Foundation of China grant No. 12250410247.';
+
+  it.each([
+    ['textContent', textContent],
+    ['rawTextContent', rawTextContent],
+    ['lineTextContent', lineTextContent],
+  ])('%s leaves the <institution-id> out', (_name, reader) => {
+    expect(reader(funding)).toBe(read);
+  });
+
+  it('textContentExcluding leaves it out under any exclusion set', () => {
+    expect(textContentExcluding(funding, new Set(['table-wrap']))).toBe(read);
+  });
+
+  it('keeps the rest of an <institution-wrap> and the text around it, the label spaced per #185', () => {
+    const wrap = el('aff', [
+      el('label', [t('1')]),
+      el('institution-wrap', [el('institution', [t('Example University')])]),
+      t(', Springfield'),
+    ]);
+    expect(textContent(wrap)).toBe('1 Example University, Springfield');
   });
 });

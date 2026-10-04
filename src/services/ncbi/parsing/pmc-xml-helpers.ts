@@ -67,6 +67,17 @@ const TEX_MATH_TAG = 'tex-math';
 const ALTERNATIVES_TAG = 'alternatives';
 
 /**
+ * Elements whose text identifies the element around them and is never prose:
+ * the `<institution-id>` (a ROR URL, a GRID or ISNI id, a Crossref Funder DOI)
+ * an `<institution-wrap>` carries beside the `<institution>` name. Read as text
+ * it fuses onto that name, in an affiliation
+ * (`1https://ror.org/034t3zs45grid.454711.2School of …`) and in a funding
+ * statement (`sponsored by the 10.13039/501100001809National Natural Science
+ * Foundation of China`) alike, so no reader takes its text. (#196, #208)
+ */
+export const IDENTIFIER_TAGS: ReadonlySet<string> = new Set(['institution-id']);
+
+/**
  * JATS pointers to an external rendering: a file reference, not a rendering of
  * the object itself.
  */
@@ -124,7 +135,7 @@ export function selectAlternative(
   excluded?: ReadonlySet<string>,
 ): JatsNode | undefined {
   const children = childrenOf(node);
-  const carriesText = (child: JatsNode): boolean => concatText(child, excluded).trim() !== '';
+  const carriesText = (child: JatsNode): boolean => readText(child, excluded).trim() !== '';
   return (
     children.find((child) => tagNameOf(child) === TEX_MATH_TAG && carriesText(child)) ??
     children.find((child) => !POINTER_TAGS.has(tagNameOf(child) ?? '') && carriesText(child)) ??
@@ -133,60 +144,246 @@ export function selectAlternative(
 }
 
 /**
- * Concatenate text content in document order without normalizing whitespace.
- * Internal helper so recursion preserves the original spacing between siblings.
- * `excluded` skips a whole subtree by tag name; omitting it reads everything.
- *
- * Two JATS elements do not contribute the plain concatenation of their subtree:
- * a `<tex-math>` contributes only its LaTeX document body, and an
- * `<alternatives>` contributes exactly one child. Both rules live here so every
- * prose consumer inherits them — paragraphs, table cells, captions, abstracts.
- * (#135)
+ * Elements whose start and end are line boundaries: each holds a statement, a
+ * footnote, a list or list item, or a heading of its own. A deposit marks these
+ * boundaries with the element alone — `RATIOS<break/>IRR`, `</fn><fn>` — so
+ * reading straight through fuses the words and numbers on either side
+ * (`57 ± 2095`, `1.082.44`). Inline markup (`<sub>`, `<sup>`, `<italic>`,
+ * `<xref>`) is never one: `H<sub>2</sub>O` must read `H2O`. (#185)
  */
-function concatText(input: JatsNode | JatsNodeList, excluded?: ReadonlySet<string>): string {
-  const nodes = Array.isArray(input) ? input : [input];
-  const parts: string[] = [];
-  for (const node of nodes) {
+const LINE_BOUNDARY_TAGS: ReadonlySet<string> = new Set([
+  'attrib',
+  'def-item',
+  'def-list',
+  'disp-quote',
+  'fn',
+  'list',
+  'list-item',
+  'p',
+  'title',
+]);
+
+/** Empty elements that are a line boundary in themselves. (#185) */
+const LINE_BREAK_TAGS: ReadonlySet<string> = new Set(['break', 'hr']);
+
+/**
+ * A marker printed beside the text it labels — a footnote's `*`, an
+ * affiliation's `1`, a list item's `2.` — with nothing between them in the
+ * source. (#185)
+ */
+const LABEL_TAG = 'label';
+
+/** A cross-reference: in prose, usually a citation marker. (#197) */
+const XREF_TAG = 'xref';
+
+/** No separator owed. */
+const NO_SEPARATOR = 0;
+/** One space owed: what follows a `<label>`. */
+const SPACE_SEPARATOR = 1;
+/** A line boundary owed. */
+const LINE_SEPARATOR = 2;
+type Separator = typeof NO_SEPARATOR | typeof SPACE_SEPARATOR | typeof LINE_SEPARATOR;
+
+/** One character of whitespace — the same class `\s+` collapses. */
+const WHITESPACE_CHAR = /\s/;
+/** Any character other than whitespace. */
+const VISIBLE_CHAR = /\S/;
+
+/**
+ * Accumulates JATS text in document order and decides every separator the
+ * markup implies in the same pass, from state it carries rather than by
+ * re-reading text already emitted — so the cost stays linear in the size of the
+ * subtree. A reader drives it with {@link text} for text nodes and with
+ * {@link open} / {@link close} around each element's children.
+ *
+ * - A line-boundary element ({@link LINE_BOUNDARY_TAGS}, `<break/>`, `<hr/>`)
+ *   owes a line boundary before the next content.
+ * - A `<label>` that carried text owes one space, and a line boundary arriving
+ *   before any further content becomes that space: `<fn><label>*</label><p>…`
+ *   reads `* …`, the marker leading its line rather than standing alone on it.
+ * - An `<xref>` that carries text and follows another with no source text
+ *   between them is preceded by a comma: `[1,2,3,4]`, not `[1234]`, which reads
+ *   as one reference. Any source text between them, whitespace included, means
+ *   the source already separated them. (#197)
+ *
+ * An owed separator is only written between two pieces of content, so a reader
+ * adds nothing at the edges of what it reads. By default the source text is
+ * kept verbatim and a separator is written only where neither side carries
+ * whitespace — `a<break/>b` gains a `\n`, `a <break/>b` stays as it was — so a
+ * caller collapsing whitespace afterwards reads every boundary as one space. In
+ * `lines` mode each text node's whitespace collapses to a space and every line
+ * boundary is written as `\n`, replacing whatever spacing the source had there,
+ * so the result keeps the source's line structure and nothing else. (#185)
+ */
+export class TextAssembler {
+  readonly #lines: boolean;
+  readonly #out: string[] = [];
+  /** How many non-whitespace text pieces have been written. */
+  #written = 0;
+  /** The last character written is whitespace. */
+  #endsWithSpace = false;
+  #owed: Separator = NO_SEPARATOR;
+  /** A `<label>` closed and nothing but whitespace has arrived since. */
+  #afterLabel = false;
+  /** An `<xref>` carrying text closed and no source text has arrived since. */
+  #afterXref = false;
+  /** A comma is owed before the open `<xref>`'s first text. */
+  #commaOwed = false;
+  /** {@link #written} at each open `<label>` and `<xref>`, innermost last. */
+  readonly #marks: number[] = [];
+
+  constructor(options: { lines?: boolean } = {}) {
+    this.#lines = options.lines ?? false;
+  }
+
+  /** Append one text node's value. */
+  text(value: string): void {
+    if (value === '') return;
+    this.#afterXref = false;
+    if (!VISIBLE_CHAR.test(value)) {
+      this.#out.push(this.#lines ? ' ' : value);
+      this.#endsWithSpace = true;
+      return;
+    }
+    if (this.#written > 0 && this.#owed !== NO_SEPARATOR) {
+      const separator = this.#owed === LINE_SEPARATOR ? '\n' : ' ';
+      const sourceSpaced = this.#endsWithSpace || WHITESPACE_CHAR.test(value.charAt(0));
+      if (this.#lines || !sourceSpaced) this.#out.push(separator);
+    } else if (this.#commaOwed) {
+      this.#out.push(',');
+    }
+    this.#owed = NO_SEPARATOR;
+    this.#afterLabel = false;
+    this.#commaOwed = false;
+    this.#out.push(this.#lines ? value.replace(/\s+/g, ' ') : value);
+    this.#endsWithSpace = WHITESPACE_CHAR.test(value.charAt(value.length - 1));
+    this.#written += 1;
+  }
+
+  /** Enter an element, before its children are read. */
+  open(tag: string): void {
+    if (LINE_BREAK_TAGS.has(tag) || LINE_BOUNDARY_TAGS.has(tag)) {
+      this.#oweLine();
+    } else if (tag === LABEL_TAG) {
+      this.#marks.push(this.#written);
+    } else if (tag === XREF_TAG) {
+      this.#marks.push(this.#written);
+      this.#commaOwed = this.#afterXref;
+    }
+  }
+
+  /**
+   * Leave an element, after its children are read. A close with no matching
+   * mark — the run was restarted inside the element, as a prose walk does at a
+   * block nested in inline markup — owes nothing.
+   */
+  close(tag: string): void {
+    if (LINE_BOUNDARY_TAGS.has(tag)) {
+      this.#oweLine();
+      return;
+    }
+    if (tag !== LABEL_TAG && tag !== XREF_TAG) return;
+    const mark = this.#marks.pop();
+    if (mark === undefined) return;
+    const carriedText = mark !== this.#written;
+    if (tag === LABEL_TAG) {
+      if (!carriedText) return;
+      this.#owed = SPACE_SEPARATOR;
+      this.#afterLabel = true;
+      return;
+    }
+    this.#commaOwed = false;
+    if (carriedText) this.#afterXref = true;
+  }
+
+  /** The text assembled so far. */
+  toString(): string {
+    const text = this.#out.join('');
+    if (!this.#lines) return text;
+    return text
+      .replace(/ {2,}/g, ' ')
+      .replace(/ ?\n ?/g, '\n')
+      .trim();
+  }
+
+  #oweLine(): void {
+    if (!this.#afterLabel) this.#owed = LINE_SEPARATOR;
+  }
+}
+
+/**
+ * Drive `sink` through a node or sibling list in document order. `excluded`
+ * skips a whole subtree by tag name; omitting it reads everything else.
+ *
+ * Three JATS elements do not contribute the plain concatenation of their
+ * subtree: a `<tex-math>` contributes only its LaTeX document body, an
+ * `<alternatives>` exactly one child, and an {@link IDENTIFIER_TAGS} element
+ * nothing. The rules live here, beside the boundary rules {@link TextAssembler}
+ * applies, so every consumer inherits them — table cells, footnotes, titles,
+ * affiliations, references. (#135, #185, #208)
+ */
+function readInto(
+  input: JatsNode | JatsNodeList,
+  sink: TextAssembler,
+  excluded?: ReadonlySet<string>,
+): void {
+  for (const node of Array.isArray(input) ? input : [input]) {
     if (isTextNode(node)) {
-      parts.push(textOf(node));
+      sink.text(textOf(node));
       continue;
     }
     const tag = tagNameOf(node) ?? '';
-    if (excluded?.has(tag)) continue;
+    if (IDENTIFIER_TAGS.has(tag) || excluded?.has(tag)) continue;
     if (tag === TEX_MATH_TAG) {
-      parts.push(texMathExpression(concatText(childrenOf(node))));
+      sink.text(texMathExpression(readText(childrenOf(node))));
       continue;
     }
     if (tag === ALTERNATIVES_TAG) {
       const chosen = selectAlternative(node, excluded);
-      if (chosen) parts.push(concatText(chosen, excluded));
+      if (chosen) readInto(chosen, sink, excluded);
       continue;
     }
-    parts.push(concatText(childrenOf(node), excluded));
+    sink.open(tag);
+    readInto(childrenOf(node), sink, excluded);
+    sink.close(tag);
   }
-  return parts.join('');
+}
+
+/** Read a subtree through a fresh {@link TextAssembler}. */
+function readText(
+  input: JatsNode | JatsNodeList,
+  excluded?: ReadonlySet<string>,
+  lines = false,
+): string {
+  const sink = new TextAssembler({ lines });
+  readInto(input, sink, excluded);
+  return sink.toString();
 }
 
 /**
  * Extract all text from a node or sibling list in document order with the
- * source spacing intact — no whitespace collapsing, no trimming. Use it when
- * the caller assembles several fragments itself and needs to collapse once over
- * the joined result; {@link textContent} is the normalizing form for everything
- * else.
+ * source spacing intact — no whitespace collapsing, no trimming. A line boundary
+ * the source marks with an element alone gains a `\n`, and a `<label>` beside
+ * its text a space; a boundary the source already spaced is left as it is, and
+ * nothing is added at the edges of the node read. Use it when the caller assembles several
+ * fragments itself and needs to collapse once over the joined result;
+ * {@link textContent} is the normalizing form for everything else.
  */
 export function rawTextContent(input: JatsNode | JatsNodeList | undefined): string {
-  return input ? concatText(input) : '';
+  return input ? readText(input) : '';
 }
 
 /**
  * Extract all text from a node or sibling list in document order, collapsing
  * runs of whitespace to a single space and trimming the result. Use this for
  * mixed-content elements (`<p>`, `<title>`, `<abstract>`, …) where inline
- * children must read back in the order they appear in the source.
+ * children must read back in the order they appear in the source. A structural
+ * boundary — `<break/>`, a sibling `<p>` or `<fn>`, a `<label>` beside its text —
+ * reads as one space; inline markup never gains one. (#185)
  */
 export function textContent(input: JatsNode | JatsNodeList | undefined): string {
   if (!input) return '';
-  return concatText(input).replace(/\s+/g, ' ').trim();
+  return readText(input).replace(/\s+/g, ' ').trim();
 }
 
 /**
@@ -201,7 +398,20 @@ export function textContentExcluding(
   excludedTags: ReadonlySet<string>,
 ): string {
   if (!input) return '';
-  return concatText(input, excludedTags).replace(/\s+/g, ' ').trim();
+  return readText(input, excludedTags).replace(/\s+/g, ' ').trim();
+}
+
+/**
+ * {@link textContent}, keeping every structural line boundary as `\n`: one line
+ * per `<break/>`-separated value, paragraph, footnote, or list item, a
+ * `<label>` leading its line by one space. Source whitespace inside a line —
+ * pretty-printing newlines included — collapses to one space, and blank lines
+ * drop out. For table cells and `<table-wrap-foot>`, whose line structure is
+ * part of the value: `1.08<break/>2.44` is two estimates, not `1.082.44`.
+ * (#185)
+ */
+export function lineTextContent(input: JatsNode | JatsNodeList | undefined): string {
+  return input ? readText(input, undefined, true) : '';
 }
 
 /** First direct child with the given tag name. */
