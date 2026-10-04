@@ -2,7 +2,7 @@
 
 **Server:** @cyanheads/pubmed-mcp-server
 **Version:** 2.10.19
-**Framework:** [@cyanheads/mcp-ts-core](https://www.npmjs.com/package/@cyanheads/mcp-ts-core) `^0.13.10`
+**Framework:** [@cyanheads/mcp-ts-core](https://www.npmjs.com/package/@cyanheads/mcp-ts-core) `^0.13.11`
 **Engines:** Bun ≥1.4.0, Node ≥24.0.0
 
 > **Read the framework docs first:** `node_modules/@cyanheads/mcp-ts-core/CLAUDE.md` contains the full API reference — builders, Context, error codes, exports, patterns. This file covers server-specific conventions only.
@@ -259,7 +259,7 @@ src/
       response-handler.ts              # XML response parsing
       types.ts                          # NCBI/PubMed domain types
       parsing/                          # XML parsers (article, esummary, PMC)
-      formatting/                       # Citation formatter (APA, MLA, BibTeX, RIS)
+      formatting/                       # Citation formatter (APA, MLA, BibTeX, RIS, Vancouver)
   mcp-server/
     tools/definitions/                  # 11 tool definitions (*.tool.ts)
     resources/definitions/              # database-info.resource.ts
@@ -343,10 +343,13 @@ When you complete a skill's checklist, check the boxes and add a completion time
 | `bun run format` | Auto-fix formatting (safe fixes only) |
 | `bun run format:unsafe` | Also apply Biome's unsafe autofixes — review the diff; they can change behavior |
 | `bun run test` | Run tests (Vitest — use `bun run test`, not `bun test`) |
+| `bun run test:corpus` | Run only the real-article corpus suite in `tests/corpus/` (`bun run test` includes it) |
+| `bun run corpus:snapshot` | Rewrite each corpus fixture's `expected.md` after an intended output change — review every rewritten snapshot against its `source.xml` before keeping it |
+| `bun run scripts/corpus-add.ts <PMCID>` | Add an openly licensed PMC article (`--kind pubmed <PMID>` for a PubMed record) to the corpus; refuses any license but CC BY, CC BY-SA, CC0, or public domain, and regenerates `tests/corpus/ATTRIBUTION.md` |
 | `bun run changelog:build` | Regenerate `CHANGELOG.md` from `changelog/*.md` |
 | `bun run changelog:check` | Verify `CHANGELOG.md` is in sync (used by devcheck) |
 | `bun run lint:mcp` | Validate MCP definitions against spec |
-| `bun run lint:packaging` | Validate env var alignment between `manifest.json` and `server.json` (skipped cleanly when `manifest.json` is absent) |
+| `bun run lint:packaging` | Packaging surface checks — `server.json`/`manifest.json` env-var parity, `server.json` npm launch shape, plugin manifests (run by devcheck) |
 | `bun run list-skills` | List skills in `framework-skills/` with name + description |
 | `bun run bundle` | Build, pack, and clean a `.mcpb` for one-click Claude Desktop install |
 | `bun run release:github` | Create GitHub Release from an annotated tag — enforces `v<VERSION>: <subject>` title, attaches `.mcpb` bundle |

@@ -7,7 +7,7 @@
 
 <div align="center">
 
-[![Version](https://img.shields.io/badge/Version-2.10.19-blue.svg?style=flat-square)](./CHANGELOG.md) [![License](https://img.shields.io/badge/License-Apache%202.0-orange.svg?style=flat-square)](./LICENSE) [![Docker](https://img.shields.io/badge/Docker-ghcr.io-2496ED?style=flat-square&logo=docker&logoColor=white)](https://github.com/users/cyanheads/packages/container/package/pubmed-mcp-server) [![MCP SDK](https://img.shields.io/badge/MCP%20SDK-^2.1.0-green.svg?style=flat-square)](https://modelcontextprotocol.io/) [![npm](https://img.shields.io/npm/v/@cyanheads/pubmed-mcp-server?style=flat-square&logo=npm&logoColor=white)](https://www.npmjs.com/package/@cyanheads/pubmed-mcp-server) [![TypeScript](https://img.shields.io/badge/TypeScript-^7.0.2-3178C6.svg?style=flat-square)](https://www.typescriptlang.org/) [![Bun](https://img.shields.io/badge/Bun-v1.4.2-blueviolet.svg?style=flat-square)](https://bun.sh/)
+[![Version](https://img.shields.io/badge/Version-2.10.19-blue.svg?style=flat-square)](./CHANGELOG.md) [![License](https://img.shields.io/badge/License-Apache%202.0-orange.svg?style=flat-square)](./LICENSE) [![Docker](https://img.shields.io/badge/Docker-ghcr.io-2496ED?style=flat-square&logo=docker&logoColor=white)](https://github.com/users/cyanheads/packages/container/package/pubmed-mcp-server) [![MCP SDK](https://img.shields.io/badge/MCP%20SDK-^2.2.0-green.svg?style=flat-square)](https://modelcontextprotocol.io/) [![npm](https://img.shields.io/npm/v/@cyanheads/pubmed-mcp-server?style=flat-square&logo=npm&logoColor=white)](https://www.npmjs.com/package/@cyanheads/pubmed-mcp-server) [![TypeScript](https://img.shields.io/badge/TypeScript-^7.0.2-3178C6.svg?style=flat-square)](https://www.typescriptlang.org/) [![Bun](https://img.shields.io/badge/Bun-v1.4.2-blueviolet.svg?style=flat-square)](https://bun.sh/)
 
 </div>
 
@@ -64,7 +64,7 @@ Biomedical literature from PubMed, PubMed Central, and Europe PMC. Search it, fe
 ### `pubmed_search_articles` <sub>tool</sub>
 
 - Full PubMed query syntax plus filters (author, journal, MeSH, publication type, language, species, abstract, free full text) and publication/modification/Entrez date ranges
-- Up to 1,000 results per page and offsets up to 9,998; `summaryCount` adds briefs for up to 50 hits
+- Up to 1,000 results per page and offsets up to 9,998, or `maxResults: 0` for the match count alone; `summaryCount` adds briefs for up to 50 hits
 - Reports `totalCount`, the `effectiveQuery` PubMed ran, and the `appliedFilters`
 - Rejects blank filter values, impossible dates, and reversed date ranges before PubMed is called
 
@@ -80,7 +80,7 @@ Biomedical literature from PubMed, PubMed Central, and Europe PMC. Search it, fe
 
 ### `pubmed_fetch_fulltext` <sub>tool</sub>
 
-- One of `pmcids`, `pmids`, or `dois`, up to 10 per call, tried against PMC, then Europe PMC, then Unpaywall (needs `UNPAYWALL_EMAIL`); `viaSource` names the tier that answered
+- `pmcids`, `pmids`, and `dois` in any mix, up to 10 distinct identifiers per call, tried against PMC, then Europe PMC, then Unpaywall (needs `UNPAYWALL_EMAIL`); an article several of them name is fetched and returned once, and `viaSource` names the tier that answered
 - `source: "pmc"` returns sections, tables, and figures; `source: "unpaywall"` returns a best-effort HTML or PDF text body
 - Misses carry a typed `reason` and `triedTiers`; `sections`, `maxCharacters`, `overflowMode`, and `maxResponseCharacters` bound the response, and `truncation` reports what was cut
 
@@ -96,7 +96,7 @@ Biomedical literature from PubMed, PubMed Central, and Europe PMC. Search it, fe
 
 ### `pubmed_europepmc_fetch` <sub>tool</sub>
 
-- Up to 25 records per call, addressed by a search hit's `source` + `epmcId`, with the full abstract; unresolved ids land in `notFound`
+- Up to 25 records per call, addressed by a search hit's `source` + `epmcId`, with the full abstract; unresolved ids land in `notFound`; opt-in `maxResponseCharacters` defers overflow to `deferred.records`
 - Not registered when `EUROPEPMC_ENABLED=false`
 
 ---
@@ -104,7 +104,7 @@ Biomedical literature from PubMed, PubMed Central, and Europe PMC. Search it, fe
 ### `pubmed_format_citations` <sub>tool</sub>
 
 - Up to 50 PMIDs per call, in any mix of `apa`, `mla`, `bibtex`, `ris`, and `vancouver`
-- Bookshelf records cite as edited books; PMIDs that can't be fetched are reported as unavailable
+- Bookshelf records cite as edited books, each chapter dated by its own last revision or contribution date; PMIDs that can't be fetched are reported as unavailable
 
 ---
 
@@ -131,8 +131,8 @@ Biomedical literature from PubMed, PubMed Central, and Europe PMC. Search it, fe
 
 ### `pubmed_lookup_citation` <sub>tool</sub>
 
-- Up to 25 partial citations per call; journal or year is required, and volume, first page, and author sharpen the match
-- Each comes back `matched`, `not_found`, or `ambiguous`, with recovery detail
+- Up to 25 partial citations per call; a journal or a four-digit year is required, and volume, first page, and author sharpen the match
+- Each is matched independently and comes back `matched`, `not_found`, or `ambiguous`, with recovery detail
 
 ---
 
