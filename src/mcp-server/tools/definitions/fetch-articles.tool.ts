@@ -205,7 +205,12 @@ const MeshTermSchema = z
 const GrantSchema = z
   .object({
     grantId: z.string().optional().describe('Grant identifier'),
-    acronym: z.string().optional().describe('Grant acronym'),
+    acronym: z
+      .string()
+      .optional()
+      .describe(
+        'Acronym of the funding institute or agency from `Grant/Acronym` (e.g. "EY" for the National Eye Institute) — it names the funder, never the grant, so it is no substitute for `grantId`.',
+      ),
     agency: z.string().optional().describe('Funding agency'),
     country: z.string().optional().describe('Agency country'),
   })
@@ -292,7 +297,12 @@ const FetchedArticleSchema = z
     keywords: z.array(z.string()).optional().describe('Keywords'),
     meshTerms: z.array(MeshTermSchema).optional().describe('MeSH terms'),
     grantList: z.array(GrantSchema).optional().describe('Grant information'),
-    articleDates: z.array(ArticleDateSchema).optional().describe('Article dates'),
+    articleDates: z
+      .array(ArticleDateSchema)
+      .optional()
+      .describe(
+        "Dates of the record itself, each named by `dateType`. On a journal article, PubMed's `ArticleDate` entries (`Electronic` — the electronic publication date). On a Bookshelf record, its own `ContributionDate` (when the chapter was contributed) and `DateRevised` (when it was last updated), distinct from the containing book's dates in `book`; `pubmed_format_citations` cites a chapter by `DateRevised` when present, otherwise `ContributionDate`. Absent when NCBI supplies none.",
+      ),
   })
   .describe('Parsed PubMed article');
 
@@ -552,11 +562,12 @@ export const fetchArticlesTool = tool('pubmed_fetch_articles', {
         if (bk.publisher) bookLines.push(`**Publisher:** ${bk.publisher}`);
         if (bk.publisherLocation) bookLines.push(`**Publisher Location:** ${bk.publisherLocation}`);
         // A book published over several years carries a closed range
-        // (GeneReviews 1993–2026); otherwise the single publication year. A
-        // publication year that differs from the range's start is kept beside it.
+        // (GeneReviews 1993–2026), one still being updated an open one
+        // (Endotext 2000–); otherwise the single publication year. A publication
+        // year that differs from the range's start is kept beside it. (#189)
         const range =
-          bk.beginningDate && bk.endingDate && bk.beginningDate !== bk.endingDate
-            ? `${bk.beginningDate}–${bk.endingDate}`
+          bk.beginningDate && bk.beginningDate !== bk.endingDate
+            ? `${bk.beginningDate}–${bk.endingDate ?? ''}`
             : undefined;
         const bookDate =
           range && bk.pubDate && bk.pubDate !== bk.beginningDate
@@ -626,9 +637,14 @@ export const fetchArticlesTool = tool('pubmed_fetch_articles', {
       if (a.grantList?.length) {
         lines.push(`\n#### Grants`);
         for (const g of a.grantList) {
-          const grantId =
-            g.grantId && g.acronym ? `${g.grantId} (${g.acronym})` : (g.grantId ?? g.acronym ?? '');
-          const parts = [grantId, g.agency, g.country].filter(Boolean);
+          // The acronym names the funder, never the grant: without a GrantID it
+          // follows the agency instead of taking the ID's slot. (#214)
+          const grantId = g.grantId && g.acronym ? `${g.grantId} (${g.acronym})` : g.grantId;
+          const agency =
+            !g.grantId && g.acronym
+              ? [g.agency, `(${g.acronym})`].filter(Boolean).join(' ')
+              : g.agency;
+          const parts = [grantId, agency, g.country].filter(Boolean);
           lines.push(`- ${parts.join(' — ')}`);
         }
       }
@@ -646,7 +662,7 @@ export const fetchArticlesTool = tool('pubmed_fetch_articles', {
 function buildDeferralNotice(deferred: z.infer<typeof DeferredSchema>): string {
   const spent =
     deferred.returnedCharacters === 0
-      ? `No article fits the requested maxResponseCharacters of ${deferred.maxResponseCharacters}, so none were returned.`
+      ? `The first article alone exceeds the requested maxResponseCharacters of ${deferred.maxResponseCharacters}, so none were returned.`
       : `Response character budget reached: ${deferred.returnedCharacters} of ${deferred.maxResponseCharacters} characters returned.`;
   return `${spent} ${deferred.deferredCount} resolved article(s) were deferred whole: ${deferred.ids.join(', ')}. Re-call pubmed_fetch_articles with those PMIDs to retrieve them, or raise maxResponseCharacters to at least ${deferred.nextDeferredCharacters} — the size of the next deferred article.`;
 }
@@ -697,7 +713,14 @@ type FormattedArticleDate = {
   day?: string | undefined;
 };
 
+/**
+ * `ContributionDate 2025-07-03`. A one-digit month or day is zero-padded for
+ * display only — the parser reads `<Month>07</Month>` as 7, and Bookshelf writes
+ * `<Month>7</Month>` outright — so structuredContent keeps the value as parsed.
+ */
 function formatArticleDate(ad: FormattedArticleDate): string {
-  const datePart = [ad.year, ad.month, ad.day].filter(Boolean).join('-');
+  const pad = (part?: string) =>
+    part?.length === 1 && part >= '0' && part <= '9' ? `0${part}` : part;
+  const datePart = [ad.year, pad(ad.month), pad(ad.day)].filter(Boolean).join('-');
   return ad.dateType ? `${ad.dateType} ${datePart}` : datePart;
 }

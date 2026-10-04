@@ -370,29 +370,139 @@ function mapInlineContent(
   return out;
 }
 
+/** A superscript or subscript, with the table and fallback prefix that render it. */
+const SUPERSCRIPT = { table: SUPERSCRIPT_MAP, prefix: '^' } as const;
+const SUBSCRIPT = { table: SUBSCRIPT_MAP, prefix: '_' } as const;
+type ScriptStyle = typeof SUPERSCRIPT | typeof SUBSCRIPT;
+
 /**
- * Flattens inline mixed-content markup (`<sup>`, `<sub>`, `<inf>`, `<i>`,
- * `<b>`, `<u>`, `<sc>`) inside PubMed/MEDLINE XML before fast-xml-parser
- * runs. The non-ordered parser used for EFetch responses doesn't preserve
- * mixed content — `1.73 m<sup>2</sup>` parses to `{ '#text': '1.73 m', sup:
- * 2 }`, and `extractAbstractText` only reads `#text`, so the superscript
- * digit is silently dropped from abstracts and titles.
+ * An open `<sup>`/`<sub>`/`<inf>`, or a MathML script slot. While `plain`, it has
+ * held only text, buffered in `text` so it can still map to Unicode when it
+ * closes; a nested script makes it fall back to its prefix, written out at once.
+ */
+interface ScriptFrame {
+  plain: boolean;
+  style: ScriptStyle;
+  text: string;
+}
+
+/** An open MathML element, counting its children to find script and fraction slots. */
+interface MathFrame {
+  children: number;
+  name: string;
+  /** Whether this element occupies a script slot of its parent, opening a {@link ScriptFrame}. */
+  opensScript: boolean;
+}
+
+/**
+ * One inline token, in a single left-to-right pass: a `b|i|u|sc|sup|sub|inf` tag
+ * (PubMed's `%text;` elements, plus two legacy names), or a MathML or
+ * `DispFormula` tag with optional attributes and self-closing slash. Attribute
+ * text excludes `<`, as XML requires, so a match opened on a tag that never
+ * closes fails at the next `<` and the scan stays linear.
+ */
+const INLINE_TOKEN_RE =
+  /<(\/?)(sup|sub|inf|i|b|u|sc)>|<(\/?)(mml:[A-Za-z][\w.-]*|DispFormula)(?:\s(?:[^<>"'/]|"[^"<]*"|'[^'<]*')*)?(\/?)>/g;
+
+/**
+ * Count one more child of `parent` and name the slot it fills: the script of
+ * `msub`/`msup`, either script of `msubsup`, or the denominator of `mfrac`.
+ */
+function claimMathChildSlot(
+  parent: MathFrame | undefined,
+): ScriptStyle | 'denominator' | undefined {
+  if (!parent) return;
+  const index = parent.children++;
+  switch (parent.name) {
+    case 'mml:msub':
+      return index === 1 ? SUBSCRIPT : undefined;
+    case 'mml:msup':
+      return index === 1 ? SUPERSCRIPT : undefined;
+    case 'mml:msubsup':
+      return index === 1 ? SUBSCRIPT : index === 2 ? SUPERSCRIPT : undefined;
+    case 'mml:mfrac':
+      return index === 1 ? 'denominator' : undefined;
+    default:
+      return;
+  }
+}
+
+/**
+ * Flattens inline mixed-content markup inside PubMed/MEDLINE XML before
+ * fast-xml-parser runs. The non-ordered parser used for EFetch responses
+ * doesn't preserve mixed content — `1.73 m<sup>2</sup>` parses to `{ '#text':
+ * '1.73 m', sup: 2 }`, and every read site takes only `#text`, so a child
+ * element is dropped and the trimmed text around it is joined with no space.
  *
- * Numeric and operator characters map to Unicode (²/³/⁻²/₂…); anything else
- * falls back to a `^X` / `_X` ASCII prefix so the content survives in a
- * recognizable form. Italic / bold / underline / small-caps tags are
- * stripped (content kept) since they don't carry meaning in our text
- * rendering. Only invoked on the regular parser path; the PMC JATS path
- * already preserves inline markup via `preserveOrder: true`.
+ * PubMed's `%text;` content model (`b | i | sup | sub | u`) nests without limit,
+ * and titles, abstracts and keywords also take `mml:math` (an abstract's
+ * `DispFormula` wraps one). One pass handles all of it:
+ * - `<i>`, `<b>`, `<u>`, `<sc>` are removed, content kept, wherever they sit.
+ * - A `<sup>`/`<sub>`/`<inf>` maps numeric and operator characters to Unicode
+ *   (²/³/⁻²/₂…) and otherwise falls back to a `^X` / `_X` prefix, so the
+ *   content survives in a recognizable form. Emphasis inside it no longer
+ *   blocks the mapping (`<sup>-/<i>y</i></sup>` → `^-/y`); a script holding
+ *   another script takes the prefix, with the inner one rendered in place.
+ * - `mml:math` becomes its text, inter-element whitespace dropped: the scripts
+ *   of `msub`/`msup`/`msubsup` render like `<sub>`/`<sup>`, and `mfrac` is
+ *   written `a/b`. `DispFormula` tags are removed. (#211)
+ *
+ * Only invoked on the regular parser path; the PMC JATS path already preserves
+ * inline markup via `preserveOrder: true`.
  *
  * @internal exported for direct unit tests
  */
 export function flattenInlineMarkup(xml: string): string {
-  return xml
-    .replace(/<sup>([^<]*)<\/sup>/g, (_, c: string) => mapInlineContent(c, SUPERSCRIPT_MAP, '^'))
-    .replace(/<sub>([^<]*)<\/sub>/g, (_, c: string) => mapInlineContent(c, SUBSCRIPT_MAP, '_'))
-    .replace(/<inf>([^<]*)<\/inf>/g, (_, c: string) => mapInlineContent(c, SUBSCRIPT_MAP, '_'))
-    .replace(/<\/?(?:i|b|u|sc)>/g, '');
+  const out: string[] = [];
+  const scripts: ScriptFrame[] = [];
+  const math: MathFrame[] = [];
+
+  const write = (text: string) => {
+    if (text === '' || (math.length > 0 && text.trim() === '')) return;
+    const top = scripts.at(-1);
+    if (top?.plain) top.text += text;
+    else out.push(text);
+  };
+  const openScript = (style: ScriptStyle) => {
+    const top = scripts.at(-1);
+    if (top?.plain) {
+      top.plain = false;
+      out.push(top.style.prefix + top.text);
+    }
+    scripts.push({ plain: true, style, text: '' });
+  };
+  const closeScript = () => {
+    const frame = scripts.pop();
+    if (frame?.plain) {
+      out.push(mapInlineContent(frame.text, frame.style.table, frame.style.prefix));
+    }
+  };
+
+  let last = 0;
+  for (const match of xml.matchAll(INLINE_TOKEN_RE)) {
+    write(xml.slice(last, match.index));
+    last = match.index + match[0].length;
+    const [, inlineClose, inlineName, otherClose, otherName, selfClosing] = match;
+
+    if (inlineName === 'sup' || inlineName === 'sub' || inlineName === 'inf') {
+      if (inlineClose) closeScript();
+      else openScript(inlineName === 'sup' ? SUPERSCRIPT : SUBSCRIPT);
+    } else if (otherName?.startsWith('mml:')) {
+      if (otherClose) {
+        if (math.pop()?.opensScript) closeScript();
+        continue;
+      }
+      const slot = claimMathChildSlot(math.at(-1));
+      if (slot === 'denominator') write('/');
+      const opensScript = slot !== undefined && slot !== 'denominator';
+      if (opensScript) openScript(slot);
+      if (!selfClosing) math.push({ children: 0, name: otherName, opensScript });
+      else if (opensScript) closeScript();
+    }
+    // Emphasis and `DispFormula` tags are dropped; their content stays.
+  }
+  write(xml.slice(last));
+  return out.join('');
 }
 
 /**
@@ -627,8 +737,8 @@ export class NcbiResponseHandler {
         : options?.useVerbatimParser
           ? this.verbatimXmlParser
           : this.xmlParser;
-      // Pre-flatten <sup>/<sub>/<inf>/<i>/<b>/<u>/<sc> on the regular parser
-      // path. The ordered parser walks mixed content correctly via
+      // Pre-flatten inline markup (scripts, emphasis, MathML) on the regular
+      // parser path. The ordered parser walks mixed content correctly via
       // preserveOrder; the regular parser does not.
       const xmlForParse = useOrdered ? responseText : flattenInlineMarkup(responseText);
       let parsedXml: unknown;

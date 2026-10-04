@@ -191,6 +191,37 @@ describe('formatApa — date fallback to articleDates', () => {
     };
     expect(formatApa(article)).toContain('(n.d.).');
   });
+
+  it('keeps a journal article dated by articleDates to the year in every style (#189)', () => {
+    // The full-date rendering is a Bookshelf chapter's alone; a journal record's
+    // `ArticleDate` still contributes only its year, and RIS gains no `DA`.
+    const article: ParsedArticle = {
+      recordType: 'journal-article',
+      pmid: '99',
+      title: 'Preprint article',
+      journalInfo: { title: 'Test Journal' },
+      articleDates: [{ dateType: 'Electronic', year: '2025', month: '1', day: '15' }],
+    };
+    expect(formatMla(article)).toBe('"Preprint article." *Test Journal*, 2025.');
+    expect(formatRis(article)).toContain('PY  - 2025\n');
+    expect(formatRis(article)).not.toContain('DA  - ');
+    expect(formatVancouver(article)).toBe('Preprint article. Test Journal. 2025.');
+  });
+
+  it('keeps a whole-book record on its book date even when it carries record dates (#189)', () => {
+    // Only a chapter is cited by its own ContributionDate/DateRevised.
+    const article: ParsedArticle = {
+      recordType: 'book',
+      pmid: '99',
+      title: 'A Book',
+      book: { title: 'A Book', publisher: 'Pub', pubDate: '2020' },
+      articleDates: [{ dateType: 'DateRevised', year: '2024', month: '3', day: '1' }],
+    };
+    expect(formatApa(article)).toContain('(2020).');
+    expect(formatMla(article)).toBe('*A Book*, Pub, 2020.');
+    expect(formatRis(article)).not.toContain('DA  - ');
+    expect(formatVancouver(article)).toBe('A Book. Pub; 2020.');
+  });
 });
 
 // ─── formatCitation dispatcher ───────────────────────────────────────────────

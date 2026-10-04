@@ -83,6 +83,58 @@ describe('extractAuthors', () => {
     expect(result.authors[0]).toEqual({ collectiveName: 'WHO Study Group' });
   });
 
+  describe("a collective author's own affiliation (#212)", () => {
+    const oxford =
+      'Translational Gastroenterology Unit, University of Oxford, Oxford, United Kingdom.';
+    const authorList: XmlAuthorList = {
+      Author: [
+        {
+          CollectiveName: { '#text': 'TGU Investigators' },
+          AffiliationInfo: [{ Affiliation: { '#text': oxford } }],
+        },
+        {
+          LastName: { '#text': 'Ali' },
+          ForeName: { '#text': 'Sharib' },
+          Initials: { '#text': 'S' },
+          AffiliationInfo: [{ Affiliation: { '#text': 'Big Data Institute, Oxford.' } }],
+        },
+        {
+          LastName: { '#text': 'East' },
+          ForeName: { '#text': 'James E' },
+          Initials: { '#text': 'JE' },
+          AffiliationInfo: [{ Affiliation: { '#text': oxford } }],
+        },
+        { CollectiveName: { '#text': 'Unaffiliated Group' } },
+      ],
+    };
+
+    it('points the collective at its affiliation and lists it', () => {
+      const result = extractAuthors(authorList);
+      expect(result.affiliations).toEqual([oxford, 'Big Data Institute, Oxford.']);
+      expect(result.authors[0]).toEqual({
+        collectiveName: 'TGU Investigators',
+        affiliationIndices: [0],
+      });
+    });
+
+    it('shares an affiliation index between a collective and a person', () => {
+      const { authors } = extractAuthors(authorList);
+      expect(authors[1]?.affiliationIndices).toEqual([1]);
+      expect(authors[2]).toEqual({
+        lastName: 'East',
+        firstName: 'James E',
+        initials: 'JE',
+        affiliationIndices: [0],
+      });
+    });
+
+    it('leaves a collective with no affiliation as its name alone', () => {
+      expect(extractAuthors(authorList).authors[3]).toEqual({
+        collectiveName: 'Unaffiliated Group',
+      });
+    });
+  });
+
   it('deduplicates affiliations', () => {
     const sharedAffiliation = { Affiliation: { '#text': 'MIT, Cambridge, MA' } };
     const authorList: XmlAuthorList = {
@@ -162,6 +214,31 @@ describe('extractJournalInfo', () => {
     expect(result?.publicationDate?.year).toBe('2024');
   });
 
+  it('omits every field the record does not carry, never writing "" (#213)', () => {
+    expect(
+      extractJournalInfo(
+        { JournalIssue: { Volume: { '#text': '24' }, PubDate: { Year: { '#text': '2019' } } } },
+        {} as XmlArticle,
+      ),
+    ).toStrictEqual({ volume: '24', publicationDate: { year: '2019' } });
+    expect(extractJournalInfo({ Title: { '#text': 'J' } }, {} as XmlArticle)).toStrictEqual({
+      title: 'J',
+    });
+  });
+
+  it('omits a field present as an empty element (#213)', () => {
+    expect(
+      extractJournalInfo(
+        {
+          Title: { '#text': 'J' },
+          ISOAbbreviation: { '#text': '' },
+          JournalIssue: { Issue: { '#text': '' } },
+        },
+        { Pagination: { MedlinePgn: { '#text': '' } } } as XmlArticle,
+      ),
+    ).toStrictEqual({ title: 'J' });
+  });
+
   describe('electronic article locators (ELocationID)', () => {
     // Shape of PMID 39060015 as NCBI EFetch returns it: no Pagination element,
     // a pii locator and a doi locator side by side, both ValidYN="Y".
@@ -186,8 +263,8 @@ describe('extractJournalInfo', () => {
       const result = extractJournalInfo(eurRespirJournal, eurRespirArticle);
       expect(result?.elocationId).toBe('2400512');
       expect(result?.elocationIdType).toBe('pii');
-      // Never backfilled from the locator — the record genuinely has no pages
-      expect(result?.pages).toBe('');
+      // Never backfilled from the locator — the record genuinely has no pages (#213)
+      expect(result).not.toHaveProperty('pages');
     });
 
     it('leaves DOI extraction untouched — the two values live side by side', () => {
@@ -604,6 +681,23 @@ describe('parseFullArticle', () => {
 describe('Bookshelf records (#114)', () => {
   const parseSet = (...records: string[]) =>
     parseArticleSet(parseArticleSetXml(articleSetXml(...records)));
+
+  it('omits a chapter date part the record does not carry, never writing "" (#213)', () => {
+    const contribution = (inner: string) =>
+      STATPEARLS_CHAPTER_XML.replace(
+        '<ContributionDate><Year>2023</Year><Month>7</Month><Day>23</Day></ContributionDate>',
+        `<ContributionDate>${inner}</ContributionDate><DateRevised><Year>2024</Year><Month>1</Month><Day>2</Day></DateRevised>`,
+      );
+    expect(
+      parseSet(contribution('<Year>2023</Year><Month>7</Month>'))[0]?.articleDates,
+    ).toStrictEqual([
+      { dateType: 'ContributionDate', year: '2023', month: '7' },
+      { dateType: 'DateRevised', year: '2024', month: '1', day: '2' },
+    ]);
+    expect(
+      parseSet(contribution('<Year>2023</Year><Season>Spring</Season>'))[0]?.articleDates?.[0],
+    ).toStrictEqual({ dateType: 'ContributionDate', year: '2023' });
+  });
 
   describe('the reproduction — PMIDs 20301425 and 29262038', () => {
     const bookOnlySet = () =>

@@ -32,15 +32,116 @@ function isBookRecord(article: ParsedArticle): article is BookRecord {
 // Helpers
 // ---------------------------------------------------------------------------
 
+/** A cited date with whatever precision the record carries: month 1–12, day 1–31. */
+interface CitedDate {
+  day?: number;
+  month?: number;
+  year: string;
+}
+
+/** Vancouver (NLM) month abbreviations: three letters, no period. */
+const NLM_MONTHS = [
+  'Jan',
+  'Feb',
+  'Mar',
+  'Apr',
+  'May',
+  'Jun',
+  'Jul',
+  'Aug',
+  'Sep',
+  'Oct',
+  'Nov',
+  'Dec',
+] as const;
+
+/** MLA 9 month forms: names longer than four letters are abbreviated. */
+const MLA_MONTHS = [
+  'Jan.',
+  'Feb.',
+  'Mar.',
+  'Apr.',
+  'May',
+  'June',
+  'July',
+  'Aug.',
+  'Sept.',
+  'Oct.',
+  'Nov.',
+  'Dec.',
+] as const;
+
+/**
+ * Read one of a Bookshelf chapter's own dates. Bookshelf writes months and days
+ * as numbers; a month that is not one is dropped together with its day rather
+ * than guessed, so the date keeps only the parts that can be stated.
+ */
+function chapterDateOfType(
+  article: ParsedArticle,
+  dateType: 'ContributionDate' | 'DateRevised',
+): CitedDate | undefined {
+  const date = article.articleDates?.find((d) => d.dateType === dateType);
+  if (!date?.year) return;
+  const month = Number(date.month);
+  if (!Number.isInteger(month) || month < 1 || month > 12) return { year: date.year };
+  const day = Number(date.day);
+  return Number.isInteger(day) && day >= 1 && day <= 31
+    ? { year: date.year, month, day }
+    : { year: date.year, month };
+}
+
+/** A chapter's `ContributionDate` and `DateRevised`; both absent on any other record type. */
+function chapterDates(article: ParsedArticle): {
+  contributed?: CitedDate | undefined;
+  revised?: CitedDate | undefined;
+} {
+  if (article.recordType !== 'book-chapter') return {};
+  return {
+    contributed: chapterDateOfType(article, 'ContributionDate'),
+    revised: chapterDateOfType(article, 'DateRevised'),
+  };
+}
+
+/**
+ * The date a Bookshelf chapter is cited by: its last revision when it has one
+ * (APA and MLA both cite a last-updated date), otherwise its contribution date.
+ * Never the containing book's date, which records when the book began. (#189)
+ */
+function chapterDate(article: ParsedArticle): CitedDate | undefined {
+  const { contributed, revised } = chapterDates(article);
+  return revised ?? contributed;
+}
+
+/** `20 Dec. 2018`, `July 2025`, or `2025` — MLA 9's day-month-year order. */
+function formatDateMla(date: CitedDate): string {
+  const month = date.month ? MLA_MONTHS[date.month - 1] : undefined;
+  return [date.day, month, date.year].filter(Boolean).join(' ');
+}
+
+/** `2018 Dec 20`, `2025 Jul`, or `2025` — NLM's year-month-day order. */
+function formatDateNlm(date: CitedDate): string {
+  const month = date.month ? NLM_MONTHS[date.month - 1] : undefined;
+  return [date.year, month, date.day].filter(Boolean).join(' ');
+}
+
+/** RIS `DA` form, zero-padded: `2018/12/20`, `2025/07`, or `2025`. */
+function formatDateRis(date: CitedDate): string {
+  const pad = (n?: number) => (n ? String(n).padStart(2, '0') : undefined);
+  return [date.year, pad(date.month), pad(date.day)].filter(Boolean).join('/');
+}
+
 /**
  * Extract the publication year from a ParsedArticle.
- * Prefers `journalInfo.publicationDate.year`, then the containing book's own
- * date, then the earliest `articleDates` entry (for a book, its contribution
- * date) before giving up. Returns 'n.d.' (no date) when no year is available.
+ * Prefers `journalInfo.publicationDate.year`, then a Bookshelf chapter's own
+ * date ({@link chapterDate}), then the containing book's date, then the first
+ * dated `articleDates` entry before giving up. Returns 'n.d.' (no date) when no
+ * year is available.
  */
 function getYear(article: ParsedArticle): string {
   const journalYear = article.journalInfo?.publicationDate?.year;
   if (journalYear) return journalYear;
+  const chapterYear = chapterDate(article)?.year;
+  if (chapterYear) return chapterYear;
   const bookYear = article.book?.pubDate ?? article.book?.beginningDate ?? article.book?.endingDate;
   if (bookYear) return bookYear;
   const articleYear = article.articleDates?.find((d) => d.year)?.year;
@@ -49,11 +150,12 @@ function getYear(article: ParsedArticle): string {
 
 /**
  * The date NLM prints for a book: a closed range for a book published over
- * several years (`1993-2026`), otherwise the single publication year.
+ * several years (`1993-2026`), an open one for a book still being updated
+ * (`2000-`), otherwise the single publication year.
  */
 function bookDateSpan(book: ParsedBookInfo): string | undefined {
-  if (book.beginningDate && book.endingDate && book.beginningDate !== book.endingDate) {
-    return `${book.beginningDate}-${book.endingDate}`;
+  if (book.beginningDate && book.beginningDate !== book.endingDate) {
+    return `${book.beginningDate}-${book.endingDate ?? ''}`;
   }
   return book.pubDate ?? book.beginningDate ?? book.endingDate;
 }
@@ -334,7 +436,8 @@ function formatEditorsApa(editors: ParsedBookEditor[]): string {
  * ```
  * Authors (Year). Chapter title. In E. Editor (Ed.), *Book title*. Publisher. URL
  * ```
- * A whole-book record drops the `In …` clause and italicizes its own title.
+ * A chapter's year is its own ({@link chapterDate}), not the book's. A whole-book
+ * record drops the `In …` clause and italicizes its own title.
  *
  * A record crediting nobody at all — no authors, and for a whole book no
  * editors either — moves its title into the author position instead (APA 7
@@ -378,7 +481,8 @@ function formatApaBook(article: BookRecord): string {
     parts.push(`*${stripTrailingPeriod(book.title)}*.`);
   }
 
-  if (book.publisher) parts.push(`${book.publisher}.`);
+  // A publisher already ending in a period (`MDText.com, Inc.`) gains no second one
+  if (book.publisher) parts.push(terminate(book.publisher));
 
   const url = bookAccessUrl(article);
   if (url) parts.push(url);
@@ -461,14 +565,6 @@ export function formatApa(article: ParsedArticle): string {
 // MLA 9th Edition
 // ---------------------------------------------------------------------------
 
-/**
- * Format a PubMed article as an MLA 9th edition citation.
- *
- * Pattern:
- * ```
- * Last, First, et al. "Title." *Journal*, vol. 12, no. 3, 2024, pp. 45-67. DOI.
- * ```
- */
 /** MLA renders editors first-name-first after `edited by`. */
 function formatEditorsMla(editors: ParsedBookEditor[]): string {
   const names = editors
@@ -488,9 +584,11 @@ function formatEditorsMla(editors: ParsedBookEditor[]): string {
  * Format a Bookshelf record as an MLA 9th edition citation.
  *
  * ```
- * Author. "Chapter Title." *Book Title*, edited by E. Editor, Publisher, Year.
+ * Author. "Chapter Title." *Book Title*, edited by E. Editor, Publisher, Date.
  * ```
- * A whole-book record italicizes its own title in place of the quoted chapter.
+ * A chapter's date is its own, in full (`20 Dec. 2018`); otherwise the book's
+ * year. A whole-book record italicizes its own title in place of the quoted
+ * chapter.
  */
 function formatMlaBook(article: BookRecord): string {
   const { book } = article;
@@ -509,13 +607,23 @@ function formatMlaBook(article: BookRecord): string {
   if (editorStr) detailParts.push(`edited by ${editorStr}`);
   if (book.edition) detailParts.push(book.edition);
   if (book.publisher) detailParts.push(book.publisher);
-  const year = getYear(article);
-  if (year !== 'n.d.') detailParts.push(year);
-  if (detailParts.length) parts.push(`${detailParts.join(', ')}.`);
+  const ownDate = chapterDate(article);
+  const date = ownDate ? formatDateMla(ownDate) : getYear(article);
+  if (date !== 'n.d.') detailParts.push(date);
+  if (detailParts.length) parts.push(terminate(detailParts.join(', ')));
 
   return parts.join(' ');
 }
 
+/**
+ * Format a PubMed article as an MLA 9th edition citation.
+ *
+ * Pattern:
+ * ```
+ * Last, First, et al. "Title." *Journal*, vol. 12, no. 3, 2024, pp. 45-67. DOI.
+ * ```
+ * A Bookshelf record routes to {@link formatMlaBook}.
+ */
 export function formatMla(article: ParsedArticle): string {
   if (isBookRecord(article)) return formatMlaBook(article);
   const parts: string[] = [];
@@ -779,11 +887,13 @@ export function formatRis(article: ParsedArticle): string {
     tag('T3', book.collectionTitle);
   }
 
-  // Year
+  // Year, and a Bookshelf chapter's own date in full as `DA` (YYYY/MM/DD)
   const year = getYear(article);
   if (year !== 'n.d.') {
     tag('PY', year);
   }
+  const ownDate = chapterDate(article);
+  if (ownDate) tag('DA', formatDateRis(ownDate));
 
   // Volume & Issue
   tag('VL', journal?.volume);
@@ -890,29 +1000,17 @@ function formatAuthorsVancouver(authors: ParsedArticleAuthor[]): string {
 }
 
 /**
- * Format a PubMed article as a Vancouver (ICMJE/NLM) reference — the numbered
- * style used by NEJM, Lancet, JAMA, BMJ, and most biomedical journals.
- *
- * Pattern (the leading list number is the consumer's responsibility — entries
- * are formatted independently, so this returns the unnumbered reference body):
- * ```
- * Surname AB, Surname CD, et al. Article title. Abbrev J Name. Year;Vol(Issue):Pages. doi: 10.x/y
- * ```
- * Journal name uses the NLM/ISO abbreviation when available; pages are used as
- * PubMed supplies them (often elided, e.g. "583-9"); the DOI carries no trailing
- * period so it stays copy-pasteable. An article number replaces nothing — with
- * no pagination it trails the source as an NLM note (`. pii: 2400512.`).
- */
-/**
  * Format a Bookshelf record as a Vancouver (NLM) reference, following *Citing
  * Medicine* 2e Ch. 22 §C, Contributions to Books on the Internet:
  * ```
- * Authors. Chapter title. In: Editors, editors. Book title [Internet].
- * Place: Publisher; date. Available from: URL
+ * Authors. Chapter title. Contributed [updated Revised]. In: Editors, editors.
+ * Book title [Internet]. Place: Publisher; date. Available from: URL
  * ```
- * A whole-book record drops the contribution and the `In:`, taking the book
- * title as its own. `[cited …]` and the extent (`[about 41 p.]`) are part of the
- * NLM pattern but neither is derivable from an EFetch record, so both are
+ * The chapter carries its own dates (`1998 Oct 23 [updated 2018 Dec 20]`); the
+ * container keeps the book's, open-ended as `2000-` while the book is still
+ * updated. A whole-book record drops the contribution and the `In:`, taking the
+ * book title as its own. `[cited …]` and the extent (`[about 41 p.]`) are part of
+ * the NLM pattern but neither is derivable from an EFetch record, so both are
  * omitted rather than invented. Editors stand in for absent authors on a whole
  * book, which is the NLM form for an edited work.
  */
@@ -926,6 +1024,12 @@ function formatVancouverBook(article: BookRecord): string {
 
   if (article.recordType === 'book-chapter') {
     if (article.title) segments.push(`${stripTrailingPeriod(article.title)}.`);
+    const { contributed, revised } = chapterDates(article);
+    const dated = [
+      contributed && formatDateNlm(contributed),
+      revised && `[updated ${formatDateNlm(revised)}]`,
+    ].filter(Boolean);
+    if (dated.length) segments.push(`${dated.join(' ')}.`);
     segments.push(editorStr ? `In: ${editorStr}, editors.` : 'In:');
   } else if (!authorStr && editorStr) {
     segments.push(`${editorStr}, editors.`);
@@ -935,7 +1039,7 @@ function formatVancouverBook(article: BookRecord): string {
   if (container) segments.push(`${stripTrailingPeriod(container)}.`);
 
   const source = [bookImprint(book), bookDateSpan(book)].filter(Boolean).join('; ');
-  if (source) segments.push(`${source}.`);
+  if (source) segments.push(terminate(source));
 
   // No trailing period — it would be read as part of the URL
   const url = bookshelfUrl(book);
@@ -944,6 +1048,21 @@ function formatVancouverBook(article: BookRecord): string {
   return segments.join(' ');
 }
 
+/**
+ * Format a PubMed article as a Vancouver (ICMJE/NLM) reference — the numbered
+ * style used by NEJM, Lancet, JAMA, BMJ, and most biomedical journals.
+ *
+ * Pattern (the leading list number is the consumer's responsibility — entries
+ * are formatted independently, so this returns the unnumbered reference body):
+ * ```
+ * Surname AB, Surname CD, et al. Article title. Abbrev J Name. Year;Vol(Issue):Pages. doi: 10.x/y
+ * ```
+ * Journal name uses the NLM/ISO abbreviation when available; pages are used as
+ * PubMed supplies them (often elided, e.g. "583-9"); the DOI carries no trailing
+ * period so it stays copy-pasteable. An article number replaces nothing — with
+ * no pagination it trails the source as an NLM note (`. pii: 2400512.`). A
+ * Bookshelf record routes to {@link formatVancouverBook}.
+ */
 export function formatVancouver(article: ParsedArticle): string {
   if (isBookRecord(article)) return formatVancouverBook(article);
   const segments: string[] = [];

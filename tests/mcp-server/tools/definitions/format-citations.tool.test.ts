@@ -12,9 +12,13 @@ import { textBlocks } from '../../../_helpers.js';
 import {
   ADA_WHOLE_BOOK_XML,
   articleSetXml,
+  ENDOTEXT_CHAPTER_XML,
+  GENEREVIEWS_ALZHEIMER_CHAPTER_XML,
   GENEREVIEWS_CHAPTER_XML,
   JOURNAL_ARTICLE_XML,
   NAP_WHOLE_BOOK_XML,
+  NICE_WHOLE_BOOK_XML,
+  PROBE_REPORTS_CHAPTER_XML,
   parseArticleSetXml,
   STATPEARLS_CHAPTER_XML,
 } from '../../../services/ncbi/parsing/_book-fixtures.js';
@@ -545,18 +549,20 @@ describe('formatCitationsTool Bookshelf records (issue #114)', () => {
     expect(entry?.pmid).toBe('20301425');
     expect(Object.keys(entry?.citations ?? {})).toEqual([...CITATION_STYLES]);
 
+    // Dated by the chapter's own DateRevised (2026-03-25), not the book's 1993 start. (#189)
     expect(entry?.citations.apa).toBe(
-      'Petrucelli, N., Daly, M. B., & Pal, T. (1993). ' +
+      'Petrucelli, N., Daly, M. B., & Pal, T. (2026). ' +
         'BRCA1- and BRCA2-Associated Hereditary Breast and Ovarian Cancer. ' +
         'In M. P. Adam, S. Bick, G. M. Mirzaa, S. E. Wallace, & A. Amemiya (Eds.), *GeneReviews®*. ' +
         'University of Washington, Seattle. https://www.ncbi.nlm.nih.gov/books/NBK1247/',
     );
     expect(entry?.citations.mla).toBe(
       'Petrucelli, Nancie, et al. "BRCA1- and BRCA2-Associated Hereditary Breast and Ovarian Cancer." ' +
-        '*GeneReviews®*, edited by Margaret P Adam, et al., University of Washington, Seattle, 1993.',
+        '*GeneReviews®*, edited by Margaret P Adam, et al., University of Washington, Seattle, 25 Mar. 2026.',
     );
     expect(entry?.citations.vancouver).toBe(
       'Petrucelli N, Daly MB, Pal T. BRCA1- and BRCA2-Associated Hereditary Breast and Ovarian Cancer. ' +
+        '1998 Sep 4 [updated 2026 Mar 25]. ' +
         'In: Adam MP, Bick S, Mirzaa GM, Wallace SE, Amemiya A, editors. GeneReviews® [Internet]. ' +
         'Seattle (WA): University of Washington, Seattle; 1993-2026. ' +
         'Available from: https://www.ncbi.nlm.nih.gov/books/NBK1247/',
@@ -624,6 +630,76 @@ describe('formatCitationsTool Bookshelf records (issue #114)', () => {
       .join('\n');
     expect(rendered).toContain(expected);
     expect(rendered).not.toContain('(2026). *A Practical Guide');
+  });
+
+  it('dates each chapter by its own date on both surfaces (#189)', async () => {
+    // Real records for the issue's four PMIDs: a revised GeneReviews chapter, an
+    // Endotext chapter in an open-ended book, a Probe Report contributed before
+    // its book began, and a whole book.
+    stageSet(
+      GENEREVIEWS_ALZHEIMER_CHAPTER_XML,
+      ENDOTEXT_CHAPTER_XML,
+      PROBE_REPORTS_CHAPTER_XML,
+      NICE_WHOLE_BOOK_XML,
+    );
+    const result = await runToolContract(formatCitationsTool, {
+      pmids: ['20301340', '25905212', '21634080', '40825089'],
+      format: [...CITATION_STYLES],
+    });
+
+    const structured = result.structuredContent as {
+      citations: { pmid: string; citations: Record<string, string> }[];
+    };
+    const byPmid = Object.fromEntries(structured.citations.map((c) => [c.pmid, c.citations]));
+    const alzheimer = byPmid['20301340'] ?? {};
+    const endotext = byPmid['25905212'] ?? {};
+    const probe = byPmid['21634080'] ?? {};
+    const nice = byPmid['40825089'] ?? {};
+
+    expect(alzheimer.apa).toContain('Bird, T. D. (2018).');
+    expect(alzheimer.mla).toMatch(/University of Washington, Seattle, 20 Dec\. 2018\.$/);
+    expect(alzheimer.bibtex).toMatch(/^ {2}year\s+= \{2018\},$/m);
+    expect(alzheimer.ris).toContain('PY  - 2018\n');
+    expect(alzheimer.ris).toContain('DA  - 2018/12/20\n');
+    expect(alzheimer.vancouver).toBe(
+      'Bird TD. Alzheimer Disease Overview. 1998 Oct 23 [updated 2018 Dec 20]. In: Adam MP, Bick S, ' +
+        'Mirzaa GM, Wallace SE, Amemiya A, editors. GeneReviews® [Internet]. Seattle (WA): University ' +
+        'of Washington, Seattle; 1993-2026. Available from: https://www.ncbi.nlm.nih.gov/books/NBK1161/',
+    );
+
+    expect(endotext.apa).toContain('(2025).');
+    expect(endotext.apa).toContain('MDText.com, Inc. https://');
+    expect(endotext.apa).not.toContain('Inc..');
+    expect(endotext.mla).toMatch(/MDText\.com, Inc\., 3 July 2025\.$/);
+    expect(endotext.ris).toContain('PY  - 2025\n');
+    expect(endotext.ris).toContain('DA  - 2025/07/03\n');
+    expect(endotext.vancouver).toContain(
+      'Thyrotropin-Secreting Pituitary Adenomas. 2025 Jul 3. In:',
+    );
+    expect(endotext.vancouver).toContain('MDText.com, Inc.; 2000-.');
+
+    expect(probe.apa).toContain('(2011).');
+    expect(probe.mla).toMatch(/10 Feb\. 2011\.$/);
+    expect(probe.vancouver).toContain('2009 Sep 1 [updated 2011 Feb 10]. In:');
+    expect(probe.vancouver).toContain('; 2010-.');
+
+    expect(nice.apa).toContain('(2025).');
+    expect(nice.mla).toMatch(/, 2025\.$/);
+    expect(nice.bibtex).toMatch(/^ {2}year\s+= \{2025\},$/m);
+    expect(nice.ris).toContain('PY  - 2025\n');
+    expect(nice.ris).not.toContain('DA  - ');
+    expect(nice.vancouver).toContain('; 2025. Available from:');
+
+    // content[] carries every one of those strings verbatim
+    const rendered = textBlocks(result.content as ContentBlock[])
+      .map((b) => b.text)
+      .join('\n');
+    for (const citations of [alzheimer, endotext, probe, nice]) {
+      for (const style of CITATION_STYLES) {
+        expect(citations[style], style).toBeTruthy();
+        expect(rendered, style).toContain(citations[style]);
+      }
+    }
   });
 
   it('cites a mixed batch and reports no PMID unavailable', async () => {

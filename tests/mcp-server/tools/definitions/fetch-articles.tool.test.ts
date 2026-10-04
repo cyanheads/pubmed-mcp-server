@@ -3,6 +3,7 @@
  * @module tests/mcp-server/tools/definitions/fetch-articles.tool.test
  */
 
+import { z } from '@cyanheads/mcp-ts-core';
 import { createMockContext, getEnrichment, runToolContract } from '@cyanheads/mcp-ts-core/testing';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
@@ -10,10 +11,13 @@ import { textBlocks } from '../../../_helpers.js';
 import {
   ADA_WHOLE_BOOK_XML,
   articleSetXml,
+  ENDOTEXT_CHAPTER_XML,
+  GENEREVIEWS_ALZHEIMER_CHAPTER_XML,
   GENEREVIEWS_CHAPTER_XML,
   JOURNAL_ARTICLE_XML,
   LACTMED_CHAPTER_XML,
   NAP_WHOLE_BOOK_XML,
+  NICE_WHOLE_BOOK_XML,
   parseArticleSetXml,
   STATPEARLS_CHAPTER_XML,
 } from '../../../services/ncbi/parsing/_book-fixtures.js';
@@ -269,8 +273,8 @@ describe('fetchArticlesTool', () => {
       const ji = result.articles[0]?.journalInfo;
       expect(ji?.elocationId).toBe('2400512');
       expect(ji?.elocationIdType).toBe('pii');
-      // Never backfilled from the locator — the record genuinely has no pages
-      expect(ji?.pages).toBe('');
+      // Never backfilled from the locator — the record genuinely has no pages (#213)
+      expect(ji).not.toHaveProperty('pages');
       // DOI extraction is unaffected — the two values live side by side
       expect(result.articles[0]?.doi).toBe('10.1183/13993003.00512-2024');
     });
@@ -753,7 +757,7 @@ describe('fetchArticlesTool whole-response budget (issue #99)', () => {
     const text = textBlocks(fetchArticlesTool.format!(result))[0]?.text ?? '';
 
     expect(JSON.stringify(result)).toBe(
-      '{"articles":[{"recordType":"journal-article","pmid":"111","title":"Article 111","abstractText":"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA","authors":[],"journalInfo":{"title":"J Budget","isoAbbreviation":"","volume":"","issue":"","pages":"","publicationDate":{}},"publicationTypes":["Journal Article"],"meshTerms":[{"descriptorName":"Topic 111","descriptorUi":"D111","qualifiers":[{"qualifierName":"therapy 111","qualifierUi":"Q111","isMajorTopic":false}],"isMajorTopic":true}],"pubmedUrl":"https://pubmed.ncbi.nlm.nih.gov/111/"},{"recordType":"journal-article","pmid":"222","title":"Article 222","abstractText":"BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB","authors":[],"journalInfo":{"title":"J Budget","isoAbbreviation":"","volume":"","issue":"","pages":"","publicationDate":{}},"publicationTypes":["Journal Article"],"pubmedUrl":"https://pubmed.ncbi.nlm.nih.gov/222/"}],"totalReturned":2,"unavailablePmids":["333"]}',
+      '{"articles":[{"recordType":"journal-article","pmid":"111","title":"Article 111","abstractText":"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA","authors":[],"journalInfo":{"title":"J Budget"},"publicationTypes":["Journal Article"],"meshTerms":[{"descriptorName":"Topic 111","descriptorUi":"D111","qualifiers":[{"qualifierName":"therapy 111","qualifierUi":"Q111","isMajorTopic":false}],"isMajorTopic":true}],"pubmedUrl":"https://pubmed.ncbi.nlm.nih.gov/111/"},{"recordType":"journal-article","pmid":"222","title":"Article 222","abstractText":"BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB","authors":[],"journalInfo":{"title":"J Budget"},"publicationTypes":["Journal Article"],"pubmedUrl":"https://pubmed.ncbi.nlm.nih.gov/222/"}],"totalReturned":2,"unavailablePmids":["333"]}',
     );
     expect(text).toBe(
       [
@@ -909,12 +913,12 @@ describe('fetchArticlesTool whole-response budget (issue #99)', () => {
     expect(sizes[1]).toBeLessThan(sizes[0] ?? 0);
 
     stageArticles(specs);
-    const { result, ctx } = await run(['111', '222'], { maxResponseCharacters: 1 });
+    const { result, ctx } = await run(['111', '222'], { maxResponseCharacters: sizes[1] });
 
     expect(result.articles).toEqual([]);
     expect(result.totalReturned).toBe(0);
     expect(result.deferred).toEqual({
-      maxResponseCharacters: 1,
+      maxResponseCharacters: sizes[1],
       returnedCharacters: 0,
       deferredCount: 2,
       ids: ['111', '222'],
@@ -922,7 +926,11 @@ describe('fetchArticlesTool whole-response budget (issue #99)', () => {
     });
     const notice = getEnrichment(ctx).notice ?? '';
     expect(notice).toContain(String(sizes[0]));
-    expect(notice).toContain('maxResponseCharacters');
+    // 222 alone fits this ceiling, so "no article fits" would be false.
+    expect(notice).toContain(
+      `The first article alone exceeds the requested maxResponseCharacters of ${sizes[1]}, so none were returned.`,
+    );
+    expect(notice).not.toMatch(/no article fits/i);
     // The empty-result guidance is about invalid PMIDs — it must not fire here.
     expect(notice).not.toMatch(/may be invalid/i);
     expect(getEnrichment(ctx).truncated).toBe(true);
@@ -1144,9 +1152,83 @@ describe('fetchArticlesTool Bookshelf records (issue #114)', () => {
     expect(result.articles[0]?.book?.editors).toBeUndefined();
     expect(text).not.toContain('**Editors');
     expect(text).not.toContain('**Authors');
-    // No closed range, so the single publication year stands alone.
-    expect(text).toContain('**Published:** 2006');
-    expect(text).not.toContain('2006–');
+    // LactMed begins in 2006 and is still updated, so the range stays open. (#189)
+    expect(text).toContain('**Published:** 2006–\n');
+  });
+
+  it('zero-pads numeric Article Dates parts in content[] only', async () => {
+    // The XML parser reads `<Month>07</Month>` as the number 7, and Bookshelf
+    // writes `<Month>7</Month>` outright; structuredContent keeps that value.
+    stageSet(
+      ENDOTEXT_CHAPTER_XML,
+      JOURNAL_ARTICLE_XML.replace(
+        '<Pagination>',
+        '<ArticleDate DateType="Electronic"><Year>2026</Year><Month>07</Month><Day>03</Day></ArticleDate><Pagination>',
+      ),
+    );
+    const { result } = await run(['25905212', '42474064']);
+
+    expect(result.articles[0]?.articleDates?.[0]).toMatchObject({ month: '7', day: '3' });
+    expect(result.articles[1]?.articleDates?.[0]).toMatchObject({ month: '7', day: '3' });
+    const text = render(result);
+    expect(text).toContain('**Article Dates:** ContributionDate 2025-07-03\n');
+    expect(text).toContain('**Article Dates:** Electronic 2026-07-03\n');
+  });
+
+  describe('book date line (#189)', () => {
+    const publishedLine = (text: string) =>
+      text.split('\n').find((line) => line.startsWith('**Published:**'));
+
+    it('writes an open-ended book as its start year and a dash', async () => {
+      stageSet(ENDOTEXT_CHAPTER_XML);
+      const { result } = await run(['25905212']);
+
+      expect(result.articles[0]?.book).toMatchObject({ pubDate: '2000', beginningDate: '2000' });
+      expect(result.articles[0]?.book?.endingDate).toBeUndefined();
+      expect(publishedLine(render(result))).toBe('**Published:** 2000–');
+    });
+
+    it('keeps a closed range and a single publication year as they were', async () => {
+      stageSet(GENEREVIEWS_ALZHEIMER_CHAPTER_XML, NICE_WHOLE_BOOK_XML);
+      const { result } = await run(['20301340', '40825089']);
+      const [chapter, book] = render(result).split('**Record Type:**');
+
+      expect(publishedLine(chapter ?? '')).toBe('**Published:** 1993–2026');
+      expect(publishedLine(book ?? '')).toBe('**Published:** 2025');
+    });
+
+    it('keeps a publication year that differs from an open range beside it', async () => {
+      stageSet(
+        ENDOTEXT_CHAPTER_XML.replace(
+          '<PubDate><Year>2000</Year></PubDate>',
+          '<PubDate><Year>2026</Year></PubDate>',
+        ),
+      );
+      const { result } = await run(['25905212']);
+
+      expect(publishedLine(render(result))).toBe('**Published:** 2026 (2000–)');
+    });
+
+    it('lists the chapter dates beside the book date', async () => {
+      stageSet(GENEREVIEWS_ALZHEIMER_CHAPTER_XML);
+      const { result } = await run(['20301340']);
+
+      expect(render(result)).toContain(
+        '**Article Dates:** ContributionDate 1998-10-23; DateRevised 2018-12-20',
+      );
+    });
+
+    it("describes articleDates as a Bookshelf record's own ContributionDate and DateRevised", () => {
+      const schema = z.toJSONSchema(fetchArticlesTool.output) as unknown as {
+        properties: {
+          articles: { items: { properties: { articleDates: { description?: string } } } };
+        };
+      };
+      const description = schema.properties.articles.items.properties.articleDates.description;
+      expect(description).toContain('`ContributionDate`');
+      expect(description).toContain('`DateRevised`');
+      expect(description).toContain('Bookshelf');
+    });
   });
 
   it('parses a single-book response that arrives as a scalar rather than an array', async () => {

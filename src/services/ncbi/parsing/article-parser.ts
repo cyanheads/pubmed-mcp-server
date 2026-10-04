@@ -81,12 +81,8 @@ export function extractAuthors(authorListXml?: XmlAuthorList): ExtractedAuthors 
 
   const xmlAuthors = ensureArray(authorListXml.Author);
   const authors = xmlAuthors.map((auth: XmlAuthor): ParsedArticleAuthor => {
-    const collectiveName = getText(auth.CollectiveName);
-    if (collectiveName) {
-      return { collectiveName };
-    }
-
-    // Collect all affiliations for this author, deduplicated at article level
+    // Collect all affiliations for this author, deduplicated at article level.
+    // A collective author carries its own `AffiliationInfo` too. (#212)
     const authorAffiliationInfos = ensureArray(auth.AffiliationInfo);
     const indices: number[] = [];
     for (const info of authorAffiliationInfos) {
@@ -107,10 +103,15 @@ export function extractAuthors(authorListXml?: XmlAuthorList): ExtractedAuthors 
       }
     }
 
+    const collectiveName = getText(auth.CollectiveName);
     return {
-      lastName: getText(auth.LastName),
-      firstName: getText(auth.ForeName), // XML uses ForeName
-      initials: getText(auth.Initials),
+      ...(collectiveName
+        ? { collectiveName }
+        : {
+            lastName: getText(auth.LastName),
+            firstName: getText(auth.ForeName), // XML uses ForeName
+            initials: getText(auth.Initials),
+          }),
       ...(indices.length > 0 && { affiliationIndices: indices }),
       ...(orcid && { orcid }),
     };
@@ -170,23 +171,30 @@ export function extractJournalInfo(
   const day = getText(pubDate?.Day);
   const medlineDate = getText(pubDate?.MedlineDate);
   const locator = extractELocationId(articleXml);
+  // A field the record does not carry is omitted, never written as "". (#137, #213)
+  const title = getOptionalText(journalXml.Title);
+  const isoAbbreviation = getOptionalText(journalXml.ISOAbbreviation);
+  const volume = getOptionalText(journalXml.JournalIssue?.Volume);
+  const issue = getOptionalText(journalXml.JournalIssue?.Issue);
+  const pages = getOptionalText(articleXml?.Pagination?.MedlinePgn);
+  const publicationDate = {
+    ...(year && { year }),
+    ...(month && { month }),
+    ...(day && { day }),
+    ...(medlineDate && { medlineDate }),
+  };
 
   return {
-    title: getText(journalXml.Title),
-    isoAbbreviation: getText(journalXml.ISOAbbreviation),
+    ...(title && { title }),
+    ...(isoAbbreviation && { isoAbbreviation }),
     ...(issn && { issn }),
     ...(eIssn && { eIssn }),
-    volume: getText(journalXml.JournalIssue?.Volume),
-    issue: getText(journalXml.JournalIssue?.Issue),
-    pages: getText(articleXml?.Pagination?.MedlinePgn),
+    ...(volume && { volume }),
+    ...(issue && { issue }),
+    ...(pages && { pages }),
     ...(locator && { elocationId: locator.value }),
     ...(locator?.type && { elocationIdType: locator.type }),
-    publicationDate: {
-      ...(year && { year }),
-      ...(month && { month }),
-      ...(day && { day }),
-      ...(medlineDate && { medlineDate }),
-    },
+    ...(Object.keys(publicationDate).length > 0 && { publicationDate }),
   };
 }
 
@@ -640,18 +648,15 @@ export function parseFullBookArticle(xmlBookArticle: XmlPubmedBookArticle): Pars
       ['ContributionDate', bookDocument?.ContributionDate],
       ['DateRevised', bookDocument?.DateRevised],
     ] as const
-  ).flatMap(([dateType, dateXml]): ParsedArticleDate[] =>
-    dateXml
-      ? [
-          {
-            dateType,
-            year: getText(dateXml.Year),
-            month: getText(dateXml.Month),
-            day: getText(dateXml.Day),
-          },
-        ]
-      : [],
-  );
+  ).flatMap(([dateType, dateXml]): ParsedArticleDate[] => {
+    if (!dateXml) return [];
+    // A `ContributionDate` may carry no `Month` or `Day` (or a `Season` instead),
+    // unlike a journal `ArticleDate`; an absent part is omitted, never "". (#213)
+    const year = getOptionalText(dateXml.Year);
+    const month = getOptionalText(dateXml.Month);
+    const day = getOptionalText(dateXml.Day);
+    return [{ dateType, ...(year && { year }), ...(month && { month }), ...(day && { day }) }];
+  });
   const doi =
     findArticleId(bookDocument?.ArticleIdList, 'doi') ??
     findArticleId(xmlBookArticle.PubmedBookData?.ArticleIdList, 'doi');

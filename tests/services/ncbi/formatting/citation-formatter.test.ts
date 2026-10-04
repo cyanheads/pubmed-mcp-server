@@ -18,9 +18,14 @@ import type { ParsedArticle } from '@/services/ncbi/types.js';
 import {
   ADA_WHOLE_BOOK_XML,
   articleSetXml,
+  ENDOTEXT_CHAPTER_XML,
+  GENEREVIEWS_ALZHEIMER_CHAPTER_XML,
   GENEREVIEWS_CHAPTER_XML,
+  JOURNAL_ARTICLE_XML,
   LACTMED_CHAPTER_XML,
   NAP_WHOLE_BOOK_XML,
+  NICE_WHOLE_BOOK_XML,
+  PROBE_REPORTS_CHAPTER_XML,
   parseArticleSetXml,
 } from '../parsing/_book-fixtures.js';
 
@@ -686,6 +691,7 @@ describe('Bookshelf records (#114)', () => {
     it('follows NLM Citing Medicine Ch. 22 §C for a chapter in an edited book', () => {
       expect(formatVancouver(geneReviews())).toBe(
         'Petrucelli N, Daly MB, Pal T. BRCA1- and BRCA2-Associated Hereditary Breast and Ovarian Cancer. ' +
+          '1998 Sep 4 [updated 2026 Mar 25]. ' +
           'In: Adam MP, Bick S, Mirzaa GM, Wallace SE, Amemiya A, editors. GeneReviews® [Internet]. ' +
           'Seattle (WA): University of Washington, Seattle; 1993-2026. ' +
           'Available from: https://www.ncbi.nlm.nih.gov/books/NBK1247/',
@@ -695,8 +701,8 @@ describe('Bookshelf records (#114)', () => {
     it('keeps the In: form for a chapter with no editors', () => {
       const citation = formatVancouver(lactMed());
       expect(citation).toBe(
-        'Carboplatin. In: Drugs and Lactation Database (LactMed®) [Internet]. ' +
-          'Bethesda (MD): National Institute of Child Health and Human Development; 2006. ' +
+        'Carboplatin. 2026 Aug 15. In: Drugs and Lactation Database (LactMed®) [Internet]. ' +
+          'Bethesda (MD): National Institute of Child Health and Human Development; 2006-. ' +
           'Available from: https://www.ncbi.nlm.nih.gov/books/NBK500577/',
       );
     });
@@ -721,15 +727,15 @@ describe('Bookshelf records (#114)', () => {
   describe('formatApa', () => {
     it('uses the chapter-in-edited-book form', () => {
       expect(formatApa(geneReviews())).toBe(
-        'Petrucelli, N., Daly, M. B., & Pal, T. (1993). ' +
+        'Petrucelli, N., Daly, M. B., & Pal, T. (2026). ' +
           'BRCA1- and BRCA2-Associated Hereditary Breast and Ovarian Cancer. ' +
           'In M. P. Adam, S. Bick, G. M. Mirzaa, S. E. Wallace, & A. Amemiya (Eds.), *GeneReviews®*. ' +
           'University of Washington, Seattle. https://www.ncbi.nlm.nih.gov/books/NBK1247/',
       );
     });
 
-    it('takes the date from the book rather than falling through to n.d.', () => {
-      expect(formatApa(lactMed())).toContain('(2006).');
+    it('dates a record from the chapter or the book rather than falling through to n.d.', () => {
+      expect(formatApa(lactMed())).toContain('(2026).');
       expect(formatApa(adaBook())).toContain('(2026).');
       expect(formatApa(adaBook())).not.toContain('n.d.');
     });
@@ -752,7 +758,7 @@ describe('Bookshelf records (#114)', () => {
 
     it('puts a chapter title in the author position when nothing else credits it (#139)', () => {
       expect(formatApa(lactMed())).toBe(
-        'Carboplatin. (2006). In *Drugs and Lactation Database (LactMed®)*. ' +
+        'Carboplatin. (2026). In *Drugs and Lactation Database (LactMed®)*. ' +
           'National Institute of Child Health and Human Development. ' +
           'https://www.ncbi.nlm.nih.gov/books/NBK500577/',
       );
@@ -773,7 +779,7 @@ describe('Bookshelf records (#114)', () => {
 
       expect(chapterUnderEditedBook.authors).toEqual([]);
       expect(formatApa(chapterUnderEditedBook)).toBe(
-        'Carboplatin. (2006). In M. P. Adam (Ed.), *Drugs and Lactation Database (LactMed®)*. ' +
+        'Carboplatin. (2026). In M. P. Adam (Ed.), *Drugs and Lactation Database (LactMed®)*. ' +
           'National Institute of Child Health and Human Development. ' +
           'https://www.ncbi.nlm.nih.gov/books/NBK500577/',
       );
@@ -790,7 +796,7 @@ describe('Bookshelf records (#114)', () => {
     it('uses the chapter form with edited by', () => {
       expect(formatMla(geneReviews())).toBe(
         'Petrucelli, Nancie, et al. "BRCA1- and BRCA2-Associated Hereditary Breast and Ovarian Cancer." ' +
-          '*GeneReviews®*, edited by Margaret P Adam, et al., University of Washington, Seattle, 1993.',
+          '*GeneReviews®*, edited by Margaret P Adam, et al., University of Washington, Seattle, 25 Mar. 2026.',
       );
     });
 
@@ -799,7 +805,7 @@ describe('Bookshelf records (#114)', () => {
       expect(citation).not.toContain('edited by');
       expect(citation).toBe(
         '"Carboplatin." *Drugs and Lactation Database (LactMed®)*, ' +
-          'National Institute of Child Health and Human Development, 2006.',
+          'National Institute of Child Health and Human Development, 15 Aug. 2026.',
       );
     });
 
@@ -967,5 +973,257 @@ describe('Bookshelf records (#114)', () => {
         expect(text.length, style).toBeGreaterThan(0);
       }
     }
+  });
+});
+
+// ─── Bookshelf chapter dates (#189) ──────────────────────────────────────────
+//
+// A chapter is cited by its own date — `DateRevised` when present, otherwise
+// `ContributionDate` — never by the year its containing book began. The
+// containing book's date survives only in Vancouver's container.
+
+describe('Bookshelf chapter dates (#189)', () => {
+  const record = (xml: string): ParsedArticle => {
+    const parsed = parseArticleSet(parseArticleSetXml(articleSetXml(xml)))[0];
+    if (!parsed) throw new Error('fixture did not parse');
+    return parsed;
+  };
+  const ALL = ['apa', 'mla', 'bibtex', 'ris', 'vancouver'] as const;
+
+  /** PMID 20301340: contributed 1998-10-23, revised 2018-12-20, book 1993–2026. */
+  const alzheimer = () => record(GENEREVIEWS_ALZHEIMER_CHAPTER_XML);
+  /** PMID 25905212: contributed 2025-07-03, open-ended book from 2000. */
+  const endotext = () => record(ENDOTEXT_CHAPTER_XML);
+  /** PMID 21634080: contributed 2009-09-01, revised 2011-02-10, open-ended book from 2010. */
+  const probeReport = () => record(PROBE_REPORTS_CHAPTER_XML);
+
+  /** Endotext with its `ContributionDate` replaced by the given inner XML. */
+  const endotextContributed = (inner: string) =>
+    record(
+      ENDOTEXT_CHAPTER_XML.replace(
+        '<ContributionDate><Year>2025</Year><Month>7</Month><Day>3</Day></ContributionDate>',
+        `<ContributionDate>${inner}</ContributionDate>`,
+      ),
+    );
+
+  const bibtexYear = (bibtex: string) => /^ {2}year\s+= \{(\d{4})\},?$/m.exec(bibtex)?.[1];
+
+  describe('PMID 20301340 — a revised GeneReviews chapter', () => {
+    it('cites the revision year in APA, BibTeX, and RIS', () => {
+      const article = alzheimer();
+      expect(formatApa(article)).toBe(
+        'Bird, T. D. (2018). Alzheimer Disease Overview. ' +
+          'In M. P. Adam, S. Bick, G. M. Mirzaa, S. E. Wallace, & A. Amemiya (Eds.), *GeneReviews®*. ' +
+          'University of Washington, Seattle. https://www.ncbi.nlm.nih.gov/books/NBK1161/',
+      );
+      expect(bibtexYear(formatBibtex(article))).toBe('2018');
+      const ris = formatRis(article);
+      expect(ris).toContain('PY  - 2018\nDA  - 2018/12/20\n');
+      expect(ris).not.toContain('PY  - 1993');
+    });
+
+    it('cites the full revision date in MLA, abbreviating the month', () => {
+      expect(formatMla(alzheimer())).toBe(
+        'Bird, Thomas D. "Alzheimer Disease Overview." *GeneReviews®*, edited by Margaret P Adam, ' +
+          'et al., University of Washington, Seattle, 20 Dec. 2018.',
+      );
+    });
+
+    it('puts the contribution and update dates after the chapter title in Vancouver', () => {
+      expect(formatVancouver(alzheimer())).toBe(
+        'Bird TD. Alzheimer Disease Overview. 1998 Oct 23 [updated 2018 Dec 20]. In: Adam MP, Bick S, ' +
+          'Mirzaa GM, Wallace SE, Amemiya A, editors. GeneReviews® [Internet]. Seattle (WA): University ' +
+          'of Washington, Seattle; 1993-2026. Available from: https://www.ncbi.nlm.nih.gov/books/NBK1161/',
+      );
+    });
+  });
+
+  describe('PMID 25905212 — an Endotext chapter in an open-ended book', () => {
+    it('cites the contribution date when the chapter was never revised', () => {
+      const article = endotext();
+      expect(formatApa(article)).toBe(
+        'Persani, L., Lania, A., & Beck-Peccoz, P. (2025). Thyrotropin-Secreting Pituitary Adenomas. ' +
+          'In K. R. Feingold, R. A. Adler, S. F. Ahmed, B. Anawalt, M. R. Blackman, G. Chrousos, & ' +
+          'E. Corpas (Eds.), *Endotext*. MDText.com, Inc. https://www.ncbi.nlm.nih.gov/books/NBK278978/',
+      );
+      expect(formatMla(article)).toBe(
+        'Persani, Luca, et al. "Thyrotropin-Secreting Pituitary Adenomas." *Endotext*, edited by ' +
+          'Kenneth R Feingold, et al., MDText.com, Inc., 3 July 2025.',
+      );
+      expect(bibtexYear(formatBibtex(article))).toBe('2025');
+      expect(formatRis(article)).toContain('PY  - 2025\nDA  - 2025/07/03\n');
+    });
+
+    it('writes the open-ended book range as `2000-` in the Vancouver container', () => {
+      expect(formatVancouver(endotext())).toBe(
+        'Persani L, Lania A, Beck-Peccoz P. Thyrotropin-Secreting Pituitary Adenomas. 2025 Jul 3. ' +
+          'In: Feingold KR, Adler RA, Ahmed SF, Anawalt B, Blackman MR, Chrousos G, et al., editors. ' +
+          'Endotext [Internet]. South Dartmouth (MA): MDText.com, Inc.; 2000-. ' +
+          'Available from: https://www.ncbi.nlm.nih.gov/books/NBK278978/',
+      );
+    });
+
+    it('never doubles the period after a publisher that already ends in one', () => {
+      for (const style of ALL) {
+        expect(formatCitations(endotext(), [style])[style], style).not.toContain('Inc..');
+      }
+    });
+  });
+
+  describe('PMID 21634080 — a chapter contributed before its book began', () => {
+    it('cites the revision, not the earlier contribution or the later book start', () => {
+      const article = probeReport();
+      expect(formatApa(article)).toMatch(/^Lopez, M\., .* & Cuddy, M\. \(2011\)\. Antagonists/);
+      expect(formatMla(article)).toMatch(
+        /, National Center for Biotechnology Information \(US\), 10 Feb\. 2011\.$/,
+      );
+      expect(bibtexYear(formatBibtex(article))).toBe('2011');
+      expect(formatRis(article)).toContain('PY  - 2011\nDA  - 2011/02/10\n');
+    });
+
+    it('renders both dates and the open-ended container in Vancouver', () => {
+      expect(formatVancouver(probeReport())).toBe(
+        'Lopez M, Welsh K, Yuan H, Stonich D, Su Y, Garcia X, et al. Antagonists of IAP-family ' +
+          'anti-apoptotic proteins - Probe 2. 2009 Sep 1 [updated 2011 Feb 10]. In: Probe Reports from ' +
+          'the NIH Molecular Libraries Program [Internet]. Bethesda (MD): National Center for ' +
+          'Biotechnology Information (US); 2010-. Available from: https://www.ncbi.nlm.nih.gov/books/NBK55068/',
+      );
+    });
+
+    it('marks a revision-only chapter as updated in Vancouver', () => {
+      const revisedOnly = record(
+        PROBE_REPORTS_CHAPTER_XML.replace(
+          '<ContributionDate><Year>2009</Year><Month>9</Month><Day>1</Day></ContributionDate>',
+          '',
+        ),
+      );
+      expect(formatVancouver(revisedOnly)).toContain('Probe 2. [updated 2011 Feb 10]. In: ');
+      expect(formatApa(revisedOnly)).toContain('(2011).');
+    });
+  });
+
+  describe('partial chapter dates render only the parts they have', () => {
+    it('renders a year and month', () => {
+      const article = endotextContributed('<Year>2025</Year><Month>7</Month>');
+      expect(formatApa(article)).toContain('(2025).');
+      expect(formatMla(article)).toMatch(/, MDText\.com, Inc\., July 2025\.$/);
+      expect(formatRis(article)).toContain('PY  - 2025\nDA  - 2025/07\n');
+      expect(formatVancouver(article)).toContain('Adenomas. 2025 Jul. In: ');
+    });
+
+    it('renders a year alone', () => {
+      const article = endotextContributed('<Year>2025</Year>');
+      expect(formatMla(article)).toMatch(/, MDText\.com, Inc\., 2025\.$/);
+      expect(formatRis(article)).toContain('PY  - 2025\nDA  - 2025\n');
+      expect(formatVancouver(article)).toContain('Adenomas. 2025. In: ');
+    });
+
+    it('drops a non-numeric month and its day rather than guessing them', () => {
+      const article = endotextContributed('<Year>2025</Year><Month>Spring</Month><Day>3</Day>');
+      expect(formatMla(article)).toMatch(/, MDText\.com, Inc\., 2025\.$/);
+      expect(formatRis(article)).toContain('DA  - 2025\n');
+      expect(formatVancouver(article)).toContain('Adenomas. 2025. In: ');
+    });
+
+    it.each([
+      [1, 'Jan.', 'Jan'],
+      [2, 'Feb.', 'Feb'],
+      [3, 'Mar.', 'Mar'],
+      [4, 'Apr.', 'Apr'],
+      [5, 'May', 'May'],
+      [6, 'June', 'Jun'],
+      [7, 'July', 'Jul'],
+      [8, 'Aug.', 'Aug'],
+      [9, 'Sept.', 'Sep'],
+      [10, 'Oct.', 'Oct'],
+      [11, 'Nov.', 'Nov'],
+      [12, 'Dec.', 'Dec'],
+    ])('month %i reads %s in MLA and %s in Vancouver', (month, mla, vancouver) => {
+      const article = endotextContributed(`<Year>2025</Year><Month>${month}</Month><Day>9</Day>`);
+      expect(formatMla(article)).toMatch(new RegExp(`, 9 ${mla.replace('.', '\\.')} 2025\\.$`));
+      expect(formatVancouver(article)).toContain(`Adenomas. 2025 ${vancouver} 9. In: `);
+      expect(formatRis(article)).toContain(`DA  - 2025/${String(month).padStart(2, '0')}/09\n`);
+    });
+  });
+
+  describe('records whose dates do not change', () => {
+    it('keeps the whole-book record 40825089 on its own publication year in every style', () => {
+      const citations = formatCitations(record(NICE_WHOLE_BOOK_XML), [...ALL]);
+      expect(citations.apa).toBe(
+        'Dapagliflozin for treating chronic kidney disease. (2025). National Institute for Health ' +
+          'and Care Excellence (NICE). https://www.ncbi.nlm.nih.gov/books/NBK617223/',
+      );
+      expect(citations.mla).toBe(
+        '*Dapagliflozin for treating chronic kidney disease*, National Institute for Health and ' +
+          'Care Excellence (NICE), 2025.',
+      );
+      expect(bibtexYear(citations.bibtex ?? '')).toBe('2025');
+      expect(citations.ris).toContain('PY  - 2025\n');
+      expect(citations.ris).not.toContain('DA  - ');
+      expect(citations.vancouver).toBe(
+        'Dapagliflozin for treating chronic kidney disease. London: National Institute for Health ' +
+          'and Care Excellence (NICE); 2025. Available from: https://www.ncbi.nlm.nih.gov/books/NBK617223/',
+      );
+    });
+
+    it('falls back to the book year for a chapter carrying neither date', () => {
+      const undated = record(
+        GENEREVIEWS_ALZHEIMER_CHAPTER_XML.replace(/<ContributionDate>.*<\/DateRevised>/, ''),
+      );
+      expect(undated.articleDates).toBeUndefined();
+      const citations = formatCitations(undated, [...ALL]);
+      expect(citations.apa).toBe(
+        'Bird, T. D. (1993). Alzheimer Disease Overview. ' +
+          'In M. P. Adam, S. Bick, G. M. Mirzaa, S. E. Wallace, & A. Amemiya (Eds.), *GeneReviews®*. ' +
+          'University of Washington, Seattle. https://www.ncbi.nlm.nih.gov/books/NBK1161/',
+      );
+      expect(citations.mla).toMatch(/, University of Washington, Seattle, 1993\.$/);
+      expect(bibtexYear(citations.bibtex ?? '')).toBe('1993');
+      expect(citations.ris).toContain('PY  - 1993\n');
+      expect(citations.ris).not.toContain('DA  - ');
+      expect(citations.vancouver).toBe(
+        'Bird TD. Alzheimer Disease Overview. In: Adam MP, Bick S, Mirzaa GM, Wallace SE, Amemiya A, ' +
+          'editors. GeneReviews® [Internet]. Seattle (WA): University of Washington, Seattle; ' +
+          '1993-2026. Available from: https://www.ncbi.nlm.nih.gov/books/NBK1161/',
+      );
+    });
+
+    it('keeps a journal article on its journal date with no RIS DA line', () => {
+      const citations = formatCitations(record(JOURNAL_ARTICLE_XML), [...ALL]);
+      expect(citations.apa).toContain('Lall, R. (2026). Paramedic analgesia');
+      expect(citations.mla).toContain('vol. 30, no. 57, 2026, pp. 1-32.');
+      expect(bibtexYear(citations.bibtex ?? '')).toBe('2026');
+      expect(citations.ris).toContain('PY  - 2026\n');
+      expect(citations.ris).not.toContain('DA  - ');
+      expect(citations.vancouver).toContain('Health Technol Assess. 2026;30(57):1-32.');
+    });
+  });
+
+  describe('a publisher that already ends in a period, on every book path', () => {
+    /** Endotext with no chapter or book date, so the publisher ends the MLA detail run. */
+    const undatedEndotext = () =>
+      record(
+        ENDOTEXT_CHAPTER_XML.replace(
+          '<ContributionDate><Year>2025</Year><Month>7</Month><Day>3</Day></ContributionDate>',
+          '',
+        )
+          .replace('<PubDate><Year>2000</Year></PubDate>', '')
+          .replace('<BeginningDate><Year>2000</Year></BeginningDate>', ''),
+      );
+
+    it('ends APA, MLA, and Vancouver on a single period', () => {
+      const article = undatedEndotext();
+      expect(formatApa(article)).toContain('(n.d.). Thyrotropin-Secreting Pituitary Adenomas. In ');
+      expect(formatApa(article)).toContain('*Endotext*. MDText.com, Inc. https://');
+      expect(formatMla(article)).toMatch(
+        /, edited by Kenneth R Feingold, et al\., MDText\.com, Inc\.$/,
+      );
+      expect(formatVancouver(article)).toContain(
+        'South Dartmouth (MA): MDText.com, Inc. Available from: ',
+      );
+      for (const style of ALL) {
+        expect(formatCitations(article, [style])[style], style).not.toContain('Inc..');
+      }
+    });
   });
 });
