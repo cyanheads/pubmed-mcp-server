@@ -940,8 +940,8 @@ export interface ECitMatchCitation {
   journal?: string | undefined;
   /**
    * Arbitrary label echoed onto this citation's result. Not a correlation key:
-   * it may repeat across citations, so `eCitMatch` submits a separate
-   * per-request token and matches upstream rows on that instead.
+   * it may repeat across citations, so `eCitMatch` submits the citation's
+   * position in the call as its token and matches upstream rows on that instead.
    */
   key: string;
   /** Volume number */

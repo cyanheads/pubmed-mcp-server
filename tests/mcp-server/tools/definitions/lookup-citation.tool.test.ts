@@ -109,7 +109,7 @@ describe('lookupCitationTool', () => {
     expect(result.totalSubmitted).toBe(1);
     expect(result.totalWarnings).toBe(0);
     expect(mockESummary).toHaveBeenCalledWith(
-      { db: 'pubmed', id: '8400044' },
+      { db: 'pubmed', version: '2.0', retmode: 'xml', id: '8400044' },
       expect.objectContaining({ signal: expect.anything() }),
     );
   });
@@ -281,7 +281,10 @@ describe('lookupCitationTool', () => {
     await lookupCitationTool.handler(input, ctx);
 
     expect(mockESummary).toHaveBeenCalledTimes(1);
-    expect(mockESummary).toHaveBeenCalledWith({ db: 'pubmed', id: '111,222' }, expect.anything());
+    expect(mockESummary).toHaveBeenCalledWith(
+      { db: 'pubmed', version: '2.0', retmode: 'xml', id: '111,222' },
+      expect.anything(),
+    );
   });
 
   it('flags year mismatch without dropping the PMID', async () => {
@@ -618,7 +621,6 @@ describe('lookupCitationTool', () => {
       ['journal', { journal: 'N Engl|J Med', year: '2024' }],
       ['authorName', { journal: 'N Engl J Med', year: '2024', authorName: 'Wood|RA' }],
       ['volume', { journal: 'N Engl J Med', year: '2024', volume: '39|0' }],
-      ['year', { journal: 'N Engl J Med', year: '20|24' }],
       ['firstPage', { journal: 'N Engl J Med', year: '2024', firstPage: '88|9' }],
     ])('rejects a pipe in %s', async (field, citation) => {
       const parsed = lookupCitationTool.input.safeParse({ citations: [citation] });
@@ -626,6 +628,19 @@ describe('lookupCitationTool', () => {
       expect(parsed.success).toBe(false);
       expect(parsed.error?.issues[0]?.path).toEqual(['citations', 0, field]);
       expect(parsed.error?.issues[0]?.message).toMatch(/pipe/i);
+      expect(mockECitMatch).not.toHaveBeenCalled();
+    });
+
+    // `year` admits only four digits and space/tab padding, so its pattern
+    // already excludes every bdata-hazardous character. (#187)
+    it.each([['20|24'], ['20\r24'], ['2024\n']])('rejects %j in year as one issue', (year) => {
+      const parsed = lookupCitationTool.input.safeParse({
+        citations: [{ journal: 'N Engl J Med', year }],
+      });
+
+      expect(parsed.success).toBe(false);
+      expect(parsed.error?.issues).toHaveLength(1);
+      expect(parsed.error?.issues[0]?.path).toEqual(['citations', 0, 'year']);
       expect(mockECitMatch).not.toHaveBeenCalled();
     });
 
@@ -1063,12 +1078,12 @@ describe('a single citation object and the `citation` alias (issue #156)', () =>
 
     it('names the element index for a bad entry deep in an array', () => {
       const parsed = lookupCitationTool.input.safeParse({
-        citations: [NATURE, PNAS, { journal: 'Lancet', year: '20|21' }],
+        citations: [NATURE, PNAS, { journal: 'Lancet', year: '2021', volume: '39|7' }],
       });
 
       expect(parsed.success).toBe(false);
       expect(parsed.error?.issues).toHaveLength(1);
-      expect(parsed.error?.issues[0]?.path).toEqual(['citations', 2, 'year']);
+      expect(parsed.error?.issues[0]?.path).toEqual(['citations', 2, 'volume']);
       expect(parsed.error?.issues[0]?.message).toMatch(/pipe/i);
     });
 
@@ -1272,5 +1287,403 @@ describe('lookupCitationTool against a Bookshelf chapter (issue #114)', () => {
     // never described as the article's authors.
     expect(warning?.message).toContain('3-author roster (Petrucelli N, Daly MB, Pal T)');
     expect(warning?.message).not.toContain('Adam MP');
+  });
+});
+
+describe('blank and malformed bibliographic fields (issue #187)', () => {
+  const PNAS = {
+    journal: 'proc natl acad sci u s a',
+    year: '1991',
+    volume: '88',
+    firstPage: '3248',
+    authorName: 'mann bj',
+  };
+
+  /** Raw client arguments, run through the framework's validation and repair. */
+  const callRaw = (args: Record<string, unknown>) =>
+    runToolContract(lookupCitationTool, args as never);
+
+  const textOf = (result: Awaited<ReturnType<typeof runToolContract>>) =>
+    textBlocks(result.content as ContentBlock[])
+      .map((b) => b.text)
+      .join('\n');
+
+  const issuesOf = (citation: Record<string, unknown>) =>
+    lookupCitationTool.input
+      .safeParse({ citations: [citation] })
+      .error?.issues.map((issue) => issue.path.join('.'));
+
+  beforeEach(() => {
+    mockECitMatch.mockReset();
+    mockESummary.mockReset();
+    mockExtractBriefSummaries.mockReset();
+    mockESummary.mockResolvedValue({});
+    mockECitMatch.mockImplementation(async (citations: { key: string }[]) =>
+      citations.map((c) => ({ key: c.key, matched: true, pmid: '2014248', status: 'matched' })),
+    );
+    mockExtractBriefSummaries.mockResolvedValue([
+      {
+        pmid: '2014248',
+        authors: 'Mann BJ, Torian BE, Vedvick TS, Petri WA Jr',
+        authorNames: ['Mann BJ', 'Torian BE', 'Vedvick TS', 'Petri WA Jr'],
+        pubDate: '1991 Apr 15',
+      },
+    ]);
+  });
+
+  describe('the reproduction inputs', () => {
+    it.each([
+      [
+        'a whitespace journal beside an author',
+        [{ journal: '   ', authorName: 'Smith J' }],
+        'journal',
+      ],
+      ['a whitespace year', [{ year: '    ' }], 'year'],
+      ['a non-numeric year', [{ year: 'banana' }], 'year'],
+      ['a non-numeric year ahead of a valid citation', [{ year: 'banana' }, PNAS], 'year'],
+    ])(
+      'rejects %s with -32602 naming the field, before ECitMatch',
+      async (_label, citations, field) => {
+        const result = await callRaw({ citations });
+
+        expect(result.isError).toBe(true);
+        expect(result.structuredContent).toMatchObject({
+          error: { code: JsonRpcErrorCode.InvalidParams },
+        });
+        expect(textOf(result)).toContain(`citations.0.${field}:`);
+        expect(mockECitMatch).not.toHaveBeenCalled();
+      },
+    );
+  });
+
+  describe('year', () => {
+    it.each([
+      ['1991a'],
+      ['1991-1992'],
+      ['91'],
+      ['1991 May'],
+      ['   '],
+      ['\t'],
+      ['19 91'],
+      ['１９９１'],
+      ['1991\n'],
+    ])('rejects %j with and without a journal', (year) => {
+      expect(issuesOf({ year })).toEqual(['citations.0.year', 'citations.0']);
+      expect(issuesOf({ ...PNAS, year })).toEqual(['citations.0.year']);
+    });
+
+    it('states the four-digit rule in the rejection', () => {
+      const parsed = lookupCitationTool.input.safeParse({
+        citations: [{ ...PNAS, year: '1991a' }],
+      });
+      expect(parsed.error?.issues[0]?.message).toBe('Must be a four-digit year, e.g. "1991".');
+    });
+
+    it.each([
+      ['plain', '1991', '1991'],
+      ['space-padded', ' 1991 ', ' 1991 '],
+      ['tab-padded', '\t1991\t', '\t1991\t'],
+    ])('accepts a %s four-digit year and sends it as given', async (_label, year, sent) => {
+      const result = await callRaw({ citations: [{ ...PNAS, year }] });
+
+      expect(result.isError).toBeFalsy();
+      expect(mockECitMatch.mock.calls[0]?.[0]?.[0]).toMatchObject({ year: sent });
+      expect(result.structuredContent).toMatchObject({
+        results: [{ pmid: '2014248', status: 'matched' }],
+        totalWarnings: 0,
+      });
+    });
+
+    it('reads an exactly-empty year as unset', async () => {
+      const result = await callRaw({ citations: [{ ...PNAS, year: '' }] });
+
+      expect(result.isError).toBeFalsy();
+      expect(mockECitMatch.mock.calls[0]?.[0]?.[0]?.year).toBeUndefined();
+      expect(result.structuredContent).toMatchObject({
+        results: [{ pmid: '2014248', status: 'matched' }],
+      });
+    });
+
+    it('still accepts an integer year, which the framework sends on as its digits', async () => {
+      const result = await callRaw({ citations: [{ ...PNAS, year: 1991 }] });
+
+      expect(result.isError).toBeFalsy();
+      expect(mockECitMatch.mock.calls[0]?.[0]?.[0]).toMatchObject({ year: '1991' });
+      expect(textOf(result)).toContain('**PMID:** 2014248');
+    });
+
+    it('accepts a year on its own', () => {
+      expect(lookupCitationTool.input.safeParse({ citations: [{ year: '1991' }] }).success).toBe(
+        true,
+      );
+    });
+
+    it('does not count an empty year toward the journal-or-year rule', () => {
+      expect(issuesOf({ year: '', volume: '88' })).toEqual(['citations.0']);
+    });
+
+    it('advertises the four-digit pattern, and no blank wording in its description', () => {
+      const emitted = toJSONSchema(lookupCitationTool.input as never, {
+        target: 'draft-7',
+        io: 'input',
+      }) as unknown as {
+        properties: {
+          citations: { items: { properties: Record<string, Record<string, unknown>> } };
+        };
+      };
+      const fields = emitted.properties.citations.items.properties;
+
+      expect(fields.year).toMatchObject({ type: 'string', pattern: '^[ \\t]*\\d{4}[ \\t]*$' });
+      for (const field of ['journal', 'year', 'volume', 'firstPage', 'authorName']) {
+        expect(fields[field]?.description).toEqual(expect.any(String));
+        expect(fields[field]?.description).not.toMatch(/empty|blank|unset/i);
+      }
+    });
+  });
+
+  describe('journal, volume, firstPage, authorName', () => {
+    it.each([
+      ['journal', '​'],
+      ['journal', '   '],
+      ['journal', ' ㅤ'],
+      ['volume', '   '],
+      ['firstPage', '\t'],
+      ['authorName', '   '],
+      ['authorName', '⁠'],
+    ])('rejects %s of %j', (field, value) => {
+      const parsed = lookupCitationTool.input.safeParse({
+        citations: [{ ...PNAS, [field]: value }],
+      });
+
+      expect(parsed.success).toBe(false);
+      expect(parsed.error?.issues).toHaveLength(1);
+      expect(parsed.error?.issues[0]?.path).toEqual(['citations', 0, field]);
+      expect(parsed.error?.issues[0]?.message).toBe(
+        'Must contain a visible character. Omit the field rather than sending only spaces or invisible characters.',
+      );
+    });
+
+    it('rejects an invisible journal as no journal for the journal-or-year rule', () => {
+      expect(issuesOf({ journal: '​', authorName: 'Smith J' })).toEqual([
+        'citations.0.journal',
+        'citations.0',
+      ]);
+      expect(issuesOf({ journal: '​', year: '1991' })).toEqual(['citations.0.journal']);
+    });
+
+    it.each([
+      ['journal', 'journal'],
+      ['volume', 'volume'],
+      ['firstPage', 'firstPage'],
+      ['authorName', 'authorName'],
+    ])('reads an exactly-empty %s as unset', async (_label, field) => {
+      const result = await callRaw({ citations: [{ ...PNAS, [field]: '' }] });
+
+      expect(result.isError).toBeFalsy();
+      expect(mockECitMatch.mock.calls[0]?.[0]?.[0]?.[field]).toBeUndefined();
+      expect(result.structuredContent).toMatchObject({
+        results: [{ pmid: '2014248', status: 'matched' }],
+      });
+    });
+
+    it('keeps visible values with inner or edge whitespace as sent', async () => {
+      await callRaw({ citations: [{ ...PNAS, journal: ' proc natl acad sci u s a ' }] });
+      expect(mockECitMatch.mock.calls[0]?.[0]?.[0]?.journal).toBe(' proc natl acad sci u s a ');
+    });
+
+    it('does not count an empty journal toward the journal-or-year rule', () => {
+      expect(issuesOf({ journal: '', authorName: 'Smith J' })).toEqual(['citations.0']);
+    });
+  });
+
+  it('leaves key free-form', async () => {
+    for (const key of ['   ', '​', 'a|b', 'x\r\ny', '']) {
+      expect(lookupCitationTool.input.safeParse({ citations: [{ ...PNAS, key }] }).success).toBe(
+        true,
+      );
+    }
+    const result = await callRaw({ citations: [{ ...PNAS, key: '   ' }] });
+    expect(result.structuredContent).toMatchObject({ results: [{ key: '   ' }] });
+  });
+
+  describe('linear time on long year values', () => {
+    /** CPU time of `run`, in ms — this thread's user + system time, not wall clock. */
+    const cpuMs = (run: () => void): number => {
+      const start = process.threadCpuUsage();
+      run();
+      const { user, system } = process.threadCpuUsage(start);
+      return (user + system) / 1000;
+    };
+
+    const parseYear = (year: string) =>
+      lookupCitationTool.input.safeParse({ citations: [{ journal: 'J', year }] });
+
+    /** Fastest of five measurements of twenty parses each — the least noisy reading. */
+    const fastestMs = (year: string): number => {
+      parseYear(year);
+      return Math.min(
+        ...Array.from({ length: 5 }, () =>
+          cpuMs(() => {
+            for (let i = 0; i < 20; i++) parseYear(year);
+          }),
+        ),
+      );
+    };
+
+    it.each([
+      ['spaces, then a non-digit', (n: number) => `${' '.repeat(n - 1)}x`],
+      ['a year, spaces, then a non-digit', (n: number) => `1991${' '.repeat(n - 5)}x`],
+      ['alternating spaces and tabs', (n: number) => ' \t'.repeat(n / 2)],
+      ['digits only', (n: number) => '1'.repeat(n)],
+    ])('scales linearly from 5k to 80k characters of %s', (_label, build) => {
+      const [t5k, t20k, t80k] = [5_000, 20_000, 80_000].map((n) => fastestMs(build(n)));
+      // Linear work grows 16× across the span; quadratic grows 256×.
+      expect((t80k ?? 0) / Math.max(t5k ?? 0, 0.001)).toBeLessThan(64);
+      expect(t20k).toBeLessThan(400);
+      expect(t80k).toBeLessThan(400);
+      expect(parseYear(build(80_000)).success).toBe(false);
+    });
+  });
+});
+
+describe('an integer field in either `citations` shape (issue #198)', () => {
+  const PNAS = {
+    journal: 'proc natl acad sci u s a',
+    year: '1991',
+    volume: '88',
+    firstPage: '3248',
+    authorName: 'mann bj',
+  };
+
+  /** Raw client arguments, through the framework's validation and integer repair. */
+  const callRaw = (args: Record<string, unknown>) =>
+    runToolContract(lookupCitationTool, args as never);
+
+  const textOf = (result: Awaited<ReturnType<typeof runToolContract>>) =>
+    textBlocks(result.content as ContentBlock[])
+      .map((b) => b.text)
+      .join('\n');
+
+  /** The same citation sent as a lone object and as a one-element array. */
+  const bothShapes = async (citation: Record<string, unknown>) => ({
+    single: await callRaw({ citations: citation }),
+    array: await callRaw({ citations: [citation] }),
+  });
+
+  beforeEach(() => {
+    mockECitMatch.mockReset();
+    mockESummary.mockReset();
+    mockExtractBriefSummaries.mockReset();
+    mockESummary.mockResolvedValue({});
+    mockECitMatch.mockImplementation(async (citations: { key: string }[]) =>
+      citations.map((c) => ({ key: c.key, matched: true, pmid: '2014248', status: 'matched' })),
+    );
+    mockExtractBriefSummaries.mockResolvedValue([
+      {
+        pmid: '2014248',
+        authors: 'Mann BJ, Torian BE, Vedvick TS, et al.',
+        authorNames: ['Mann BJ', 'Torian BE', 'Vedvick TS', 'Petri WA Jr'],
+        pubDate: '1991 Apr 15',
+      },
+    ]);
+  });
+
+  it('resolves the reproduction the same as a lone object and as an array, on both surfaces', async () => {
+    const { single, array } = await bothShapes({ journal: 'Lancet', year: 1991 });
+    const asString = await callRaw({ citations: [{ journal: 'Lancet', year: '1991' }] });
+
+    expect(single.isError).toBeFalsy();
+    expect(single.structuredContent).toEqual(array.structuredContent);
+    expect(textOf(single)).toBe(textOf(array));
+    expect(single).toEqual(asString);
+    expect(mockECitMatch.mock.calls.map((call) => call[0])).toEqual([
+      [{ journal: 'Lancet', year: '1991', key: '1' }],
+      [{ journal: 'Lancet', year: '1991', key: '1' }],
+      [{ journal: 'Lancet', year: '1991', key: '1' }],
+    ]);
+  });
+
+  it.each([
+    ['year', 1991, '1991'],
+    ['volume', 88, '88'],
+    ['firstPage', 3248, '3248'],
+    ['journal', 1234, '1234'],
+    ['authorName', 5, '5'],
+    ['key', 7, '7'],
+    ['volume', -5, '-5'],
+    ['firstPage', 0, '0'],
+    ['firstPage', Number.MAX_SAFE_INTEGER, '9007199254740991'],
+  ])('reads %s %d as %j in both shapes', async (field, value, sent) => {
+    const { single, array } = await bothShapes({ ...PNAS, [field]: value });
+
+    expect(single.isError).toBeFalsy();
+    expect(single).toEqual(array);
+    for (const call of mockECitMatch.mock.calls) {
+      expect(call[0]?.[0]?.[field]).toBe(sent);
+    }
+    expect(mockECitMatch).toHaveBeenCalledTimes(2);
+  });
+
+  it.each([
+    ['year', 1991.5],
+    ['year', -0],
+    ['volume', 2 ** 53],
+    ['firstPage', 1e21],
+  ])('rejects %s %d in both shapes, as the framework repair does', async (field, value) => {
+    const { single, array } = await bothShapes({ ...PNAS, [field]: value });
+
+    for (const result of [single, array]) {
+      expect(result.isError).toBe(true);
+      expect(result.structuredContent).toMatchObject({
+        error: { code: JsonRpcErrorCode.InvalidParams },
+      });
+      expect(textOf(result)).toContain(
+        `citations.0.${field}: Invalid input: expected string, received number`,
+      );
+    }
+    expect(mockECitMatch).not.toHaveBeenCalled();
+  });
+
+  it('holds an integer year to the four-digit rule in both shapes', async () => {
+    const { single, array } = await bothShapes({ ...PNAS, year: 19911 });
+
+    for (const result of [single, array]) {
+      expect(result.isError).toBe(true);
+      expect(textOf(result)).toContain('citations.0.year: Must be a four-digit year, e.g. "1991".');
+    }
+    expect(mockECitMatch).not.toHaveBeenCalled();
+  });
+
+  describe('#187 rules on string years, unchanged', () => {
+    it('rejects "19x1" under citations.0.year in both shapes', async () => {
+      const { single, array } = await bothShapes({ year: '19x1' });
+
+      for (const result of [single, array]) {
+        expect(result.isError).toBe(true);
+        expect(result.structuredContent).toMatchObject({
+          error: { code: JsonRpcErrorCode.InvalidParams },
+        });
+        expect(textOf(result)).toContain('citations.0.year: Must be a four-digit year');
+      }
+      expect(mockECitMatch).not.toHaveBeenCalled();
+    });
+
+    it('reads an empty year as unset in both shapes', async () => {
+      const alone = await bothShapes({ year: '' });
+      for (const result of [alone.single, alone.array]) {
+        expect(result.isError).toBe(true);
+        expect(textOf(result)).toContain('citations.0: Each citation must include');
+        expect(textOf(result)).not.toContain('citations.0.year');
+      }
+      expect(mockECitMatch).not.toHaveBeenCalled();
+
+      const withJournal = await bothShapes({ ...PNAS, year: '' });
+      expect(withJournal.single.isError).toBeFalsy();
+      expect(withJournal.single).toEqual(withJournal.array);
+      expect(mockECitMatch.mock.calls.map((call) => call[0]?.[0]?.year)).toEqual([
+        undefined,
+        undefined,
+      ]);
+    });
   });
 });

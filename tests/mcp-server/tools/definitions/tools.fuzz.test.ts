@@ -19,6 +19,7 @@
 
 import { createMockContext } from '@cyanheads/mcp-ts-core/testing';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { hasVisibleText } from '@/mcp-server/tools/definitions/_visible-text.js';
 import {
   createMockNcbiService,
   FUZZ_OPTIONS,
@@ -89,14 +90,16 @@ function validConvertIds(raw: unknown): unknown {
  * raw every generated `citations` value is rejected before the handler runs
  * (cyanheads/mcp-ts-core#592). Rewrite it into an array of one to three
  * citations whose journal is the drawn value, minus the characters the schema
- * refuses, keeping any extra keys the arbitrary planted.
+ * refuses, keeping any extra keys the arbitrary planted. A draw with no visible
+ * character — whitespace, a zero-width space — is refused as a journal, so it
+ * falls back to a real one and the case still reaches ECitMatch. (#187)
  */
 function citationArrays(raw: unknown): unknown {
   if (typeof raw !== 'object' || raw === null) return raw;
   const input = raw as { citations?: unknown };
   const drawn = String(input.citations ?? '').replace(/[|\r\n]/g, ' ');
   const citations = Array.from({ length: (drawn.length % 3) + 1 }, (_, i) => ({
-    journal: drawn.trim() || 'proc natl acad sci u s a',
+    journal: hasVisibleText(drawn) ? drawn : 'proc natl acad sci u s a',
     year: String(1991 + i),
   }));
   return { ...input, citations };

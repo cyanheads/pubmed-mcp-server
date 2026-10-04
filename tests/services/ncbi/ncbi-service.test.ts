@@ -514,8 +514,9 @@ describe('NcbiService.eCitMatch', () => {
   });
 
   it('reconciles dropped upstream rows as not_found (issue #54)', async () => {
-    // Upstream returns only 1 of 3 submitted citations — the others were dropped
-    // (NCBI omits lines for citations it cannot classify).
+    // Upstream only ever answers the first citation. The response stops at the
+    // second, which is reported not_found; the third, requested again on its
+    // own, gets no row either. (#193)
     const { service, mockApiClient, mockResponseHandler } = createMockService();
     (mockApiClient.makeRequest as ReturnType<typeof vi.fn>).mockResolvedValue('<xml/>');
     (mockResponseHandler.parseAndHandleResponse as ReturnType<typeof vi.fn>).mockReturnValue(
@@ -532,10 +533,12 @@ describe('NcbiService.eCitMatch', () => {
     expect(results[0]).toEqual({ key: 'ref1', matched: true, pmid: '12345', status: 'matched' });
     expect(results[1]).toEqual({ key: 'ref2', matched: false, pmid: null, status: 'not_found' });
     expect(results[2]).toEqual({ key: 'ref3', matched: false, pmid: null, status: 'not_found' });
+    expect(mockApiClient.makeRequest).toHaveBeenCalledTimes(2);
   });
 
   it('preserves upstream row order and fills gaps (issue #54)', async () => {
-    // Upstream returns the second citation but not the first or third.
+    // Upstream returns the second citation but not the first or third. The
+    // response stops at the third, the last line, so nothing is re-requested.
     const { service, mockApiClient, mockResponseHandler } = createMockService();
     (mockApiClient.makeRequest as ReturnType<typeof vi.fn>).mockResolvedValue('<xml/>');
     (mockResponseHandler.parseAndHandleResponse as ReturnType<typeof vi.fn>).mockReturnValue(
@@ -556,6 +559,7 @@ describe('NcbiService.eCitMatch', () => {
     expect(results[1]?.status).toBe('not_found');
     expect(results[2]?.key).toBe('ref3');
     expect(results[2]?.status).toBe('not_found');
+    expect(mockApiClient.makeRequest).toHaveBeenCalledTimes(1);
   });
 
   /**
@@ -798,7 +802,7 @@ describe('NcbiService.idConvert', () => {
     expect(records).toEqual([]);
   });
 
-  it('rewrites upstream 400 InvalidParams to ValidationError with idType-specific hint', async () => {
+  it('rewrites the message of an upstream 400 with an idType-specific hint, keeping InvalidParams', async () => {
     const { service, mockApiClient } = createIdConvertService();
     (mockApiClient.makeExternalRequest as ReturnType<typeof vi.fn>).mockRejectedValue(
       new McpError(JsonRpcErrorCode.InvalidParams, 'NCBI returned HTTP 400 Bad Request.', {
@@ -809,7 +813,7 @@ describe('NcbiService.idConvert', () => {
     );
 
     await expect(service.idConvert(['not-a-real-id'], 'pmid')).rejects.toMatchObject({
-      code: JsonRpcErrorCode.ValidationError,
+      code: JsonRpcErrorCode.InvalidParams,
       message: expect.stringMatching(/idType="pmid".*numeric digits/i),
       data: { idType: 'pmid', idCount: 1 },
     });
@@ -822,7 +826,7 @@ describe('NcbiService.idConvert', () => {
     );
 
     await expect(service.idConvert(['x'])).rejects.toMatchObject({
-      code: JsonRpcErrorCode.ValidationError,
+      code: JsonRpcErrorCode.InvalidParams,
       message: expect.stringContaining('unspecified'),
     });
   });

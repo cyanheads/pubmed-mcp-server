@@ -8,6 +8,7 @@
  */
 
 import {
+  invalidParams,
   JsonRpcErrorCode,
   McpError,
   rateLimited,
@@ -86,19 +87,79 @@ function normalizeDiagnosticList(
 }
 
 /**
- * The tracking token each citation is submitted to ECitMatch under — echoed
- * back verbatim on that citation's response row, and unique within the request.
+ * The tracking token a citation is submitted to ECitMatch under — echoed back
+ * verbatim on that citation's response row, and unique within the call.
  *
- * Always the citation's 1-based position, never `ECitMatchCitation.key`. That
- * label is caller-supplied, so reconciling response rows on it collapses two
- * citations carrying the same label onto one row and hands the second
- * citation's PMID to the first (#113); and a `|` inside it shifts the
- * pipe-delimited field layout of the submitted line, so NCBI's echoed row no
- * longer reconciles and a citation it matched comes back as not_found (#125).
- * Keeping the label off the wire entirely removes both.
+ * Always the citation's 1-based position in the call, never
+ * `ECitMatchCitation.key`, and the same in every request that carries it, so a
+ * re-requested line reconciles without renumbering (#193). The label is
+ * caller-supplied, so reconciling response rows on it collapses two citations
+ * carrying the same label onto one row and hands the second citation's PMID to
+ * the first (#113); and a `|` inside it shifts the pipe-delimited field layout
+ * of the submitted line, so NCBI's echoed row no longer reconciles and a
+ * citation it matched comes back as not_found (#125). Keeping the label off the
+ * wire entirely removes both.
  */
-function wireKeysFor(citations: ECitMatchCitation[]): string[] {
-  return citations.map((_, i) => String(i + 1));
+function wireKeyFor(index: number): string {
+  return String(index + 1);
+}
+
+/** One submitted citation as an ECitMatch `bdata` line. */
+function bdataLine(c: ECitMatchCitation, index: number): string {
+  return `${c.journal ?? ''}|${c.year ?? ''}|${c.volume ?? ''}|${c.firstPage ?? ''}|${c.authorName ?? ''}|${wireKeyFor(index)}|`;
+}
+
+/** ECitMatch's response rows, each carrying the wire key its line was submitted under. */
+function parseECitMatchRows(text: string): ECitMatchResult[] {
+  return text
+    .split(/[\r\n]+/)
+    .filter((line) => line.trim().length > 0)
+    .map((line) => {
+      const parts = line.split('|');
+      const key = parts[5]?.trim() ?? '';
+      const rawOutcome = parts[6]?.trim() ?? '';
+
+      if (/^\d+$/.test(rawOutcome)) {
+        return { key, matched: true, pmid: rawOutcome, status: 'matched' as const };
+      }
+
+      if (rawOutcome.startsWith('AMBIGUOUS')) {
+        const csv = /^AMBIGUOUS\s+([\d,\s]+)/.exec(rawOutcome)?.[1];
+        const candidatePmids = csv
+          ? csv
+              .split(',')
+              .map((p) => p.trim())
+              .filter((p) => /^\d+$/.test(p))
+          : undefined;
+        return {
+          key,
+          matched: false,
+          pmid: null,
+          status: 'ambiguous' as const,
+          detail: rawOutcome,
+          ...(candidatePmids?.length && { candidatePmids }),
+        };
+      }
+
+      return {
+        key,
+        matched: false,
+        pmid: null,
+        status: 'not_found' as const,
+        ...(rawOutcome && { detail: rawOutcome }),
+      };
+    });
+}
+
+/**
+ * One deadline and one retry allowance shared by every request of a call that
+ * sends several, so splitting the call into more requests never extends either.
+ */
+interface CallBudget {
+  /** `Date.now()` at which the call's deadline expires. */
+  readonly expiresAt: number;
+  /** Retries the call may still spend; each request's retries come off as it settles. */
+  retriesLeft: number;
 }
 
 /** Ceiling on one backoff sleep, so a high retry count cannot grow it without bound. */
@@ -355,76 +416,60 @@ export class NcbiService {
    *
    * Results come back one per submitted citation, in submission order, carrying
    * the caller's `key`. Correlation runs on the wire key (see
-   * {@link wireKeysFor}), never on `key` itself — that label is caller-supplied,
+   * {@link wireKeyFor}), never on `key` itself — that label is caller-supplied,
    * so it may repeat and may carry characters that break the wire format.
    * (#113, #125)
+   *
+   * A journal-less citation ECitMatch finds no candidate for ends the response:
+   * that line and every line after it come back with no row. So the response
+   * stops at the line after the last one answered; that line is reported
+   * `not_found`, and the lines after it are requested again without it, until
+   * every line has a result. A complete response costs one request, each
+   * dropped line at most one more — 25 requests for 25 such citations. Every
+   * request draws on one deadline and one retry allowance for the whole call.
+   * A line with no row ahead of one that has a row is not a stop and is never
+   * re-requested; it stays `not_found`, as every missing row did before. (#54, #193)
    */
   async eCitMatch(
     citations: ECitMatchCitation[],
     options?: NcbiCallOptions,
   ): Promise<ECitMatchResult[]> {
-    const wireKeys = wireKeysFor(citations);
-    const bdata = citations
-      .map(
-        (c, i) =>
-          `${c.journal ?? ''}|${c.year ?? ''}|${c.volume ?? ''}|${c.firstPage ?? ''}|${c.authorName ?? ''}|${wireKeys[i]}|`,
-      )
-      .join('\r');
+    const budget: CallBudget = {
+      expiresAt: Date.now() + this.totalDeadlineMs,
+      retriesLeft: this.maxRetries,
+    };
+    const rowByIndex = new Map<number, ECitMatchResult>();
+    let pending = citations.map((citation, index) => ({ citation, index }));
 
-    const text = await this.performRequest<string>(
-      'ecitmatch.cgi',
-      { db: 'pubmed', retmode: 'xml', bdata },
-      { retmode: 'text', ...(options?.signal && { signal: options.signal }) },
-    );
+    while (pending.length > 0) {
+      const bdata = pending.map(({ citation, index }) => bdataLine(citation, index)).join('\r');
+      const text = await this.performRequest<string>(
+        'ecitmatch.cgi',
+        { db: 'pubmed', retmode: 'xml', bdata },
+        { retmode: 'text', ...(options?.signal && { signal: options.signal }) },
+        budget,
+      );
 
-    const parsed: ECitMatchResult[] = text
-      .split(/[\r\n]+/)
-      .filter((line) => line.trim().length > 0)
-      .map((line) => {
-        const parts = line.split('|');
-        const key = parts[5]?.trim() ?? '';
-        const rawOutcome = parts[6]?.trim() ?? '';
+      // Reconcile on the wire key each line was submitted under — unique within
+      // the call, so one row can never stand in for a second citation. The line
+      // after the last one answered is where the response stopped: it keeps no
+      // row, and only the lines after it go out again.
+      const rowByWireKey = new Map(parseECitMatchRows(text).map((r) => [r.key, r]));
+      let lastAnswered = -1;
+      for (const [position, { index }] of pending.entries()) {
+        const row = rowByWireKey.get(wireKeyFor(index));
+        if (!row) continue;
+        rowByIndex.set(index, row);
+        lastAnswered = position;
+      }
+      pending = pending.slice(lastAnswered + 2);
+    }
 
-        if (/^\d+$/.test(rawOutcome)) {
-          return { key, matched: true, pmid: rawOutcome, status: 'matched' as const };
-        }
-
-        if (rawOutcome.startsWith('AMBIGUOUS')) {
-          const csv = /^AMBIGUOUS\s+([\d,\s]+)/.exec(rawOutcome)?.[1];
-          const candidatePmids = csv
-            ? csv
-                .split(',')
-                .map((p) => p.trim())
-                .filter((p) => /^\d+$/.test(p))
-            : undefined;
-          return {
-            key,
-            matched: false,
-            pmid: null,
-            status: 'ambiguous' as const,
-            detail: rawOutcome,
-            ...(candidatePmids?.length && { candidatePmids }),
-          };
-        }
-
-        return {
-          key,
-          matched: false,
-          pmid: null,
-          status: 'not_found' as const,
-          ...(rawOutcome && { detail: rawOutcome }),
-        };
-      });
-
-    // ECitMatch omits lines for citations it cannot classify. Reconcile on the
-    // wire key each citation was submitted under — unique within the request, so
-    // one row can never stand in for a second citation — then restore the
-    // caller's label on the way out. Every input gets a result row, so callers
-    // can rely on results.length === citations.length and on results[i]
-    // describing citations[i]. (#54, #113, #125)
-    const parsedByWireKey = new Map(parsed.map((r) => [r.key, r]));
+    // Every input gets a result row, so callers can rely on results.length ===
+    // citations.length and on results[i] describing citations[i]; the caller's
+    // label is restored on the way out. (#54, #113, #125)
     return citations.map((c, i): ECitMatchResult => {
-      const row = parsedByWireKey.get(wireKeys[i] ?? '');
+      const row = rowByIndex.get(i);
       return row
         ? { ...row, key: c.key }
         : { key: c.key, matched: false, pmid: null, status: 'not_found' as const };
@@ -478,14 +523,15 @@ export class NcbiService {
       );
     } catch (error: unknown) {
       // PMC ID Converter returns 400 (InvalidParams) for malformed inputs and
-      // leaks the upstream HTML/text body into `data.body`. Rewrite to a typed
-      // validation error with idType-specific guidance and drop the leaky body.
+      // leaks the upstream HTML/text body into `data.body`. Rewrite the message
+      // with idType-specific guidance and drop the leaky body, keeping the
+      // InvalidParams code every other NCBI 400 carries.
       if (error instanceof McpError && error.code === JsonRpcErrorCode.InvalidParams) {
         const hint = ID_CONVERT_FORMAT_HINTS[idtype ?? ''];
         const message = hint
           ? `PMC ID Converter rejected one or more inputs as malformed (idType="${idtype}"). Expected: ${hint}.`
           : `PMC ID Converter rejected the input as malformed (idType="${idtype ?? 'unspecified'}").`;
-        throw validationError(message, { idType: idtype, idCount: ids.length }, { cause: error });
+        throw invalidParams(message, { idType: idtype, idCount: ids.length }, { cause: error });
       }
       throw error;
     }
@@ -515,6 +561,11 @@ export class NcbiService {
    * and the HTTP request, and each attempt offers the queue only the time left, so
    * a call that cannot start in time is shed at once instead of waiting it out.
    *
+   * With a `budget`, the request is one of several in a call: its deadline is the
+   * time the call has left and its retries are the ones the call has not spent,
+   * which it then spends from. A failure is still reported against the call's
+   * full deadline.
+   *
    * A caller abort rethrows the caller's own reason; every other failure is mapped
    * onto this service's reasons by {@link toServiceError}, after the loop. Once the
    * caller is ruled out, the loop's signal has aborted only if the deadline fired.
@@ -523,7 +574,9 @@ export class NcbiService {
     endpoint: string,
     callerSignal: AbortSignal | undefined,
     execute: (signal: AbortSignal) => Promise<T>,
+    budget?: CallBudget,
   ): Promise<T> {
+    const maxRetries = budget?.retriesLeft ?? this.maxRetries;
     let attempt = 0;
     let loopSignal: AbortSignal | undefined;
     let ncbiErrors: unknown;
@@ -538,9 +591,9 @@ export class NcbiService {
               if (error instanceof McpError && error.data?.ncbiErrors !== undefined) {
                 ncbiErrors = error.data.ncbiErrors;
               }
-              if (attempt <= this.maxRetries && isTransient(error)) {
+              if (attempt <= maxRetries && isTransient(error)) {
                 logger.warning(
-                  `NCBI request to ${endpoint} failed on attempt ${attempt} of ${this.maxRetries + 1}.`,
+                  `NCBI request to ${endpoint} failed on attempt ${attempt} of ${maxRetries + 1}.`,
                   requestContextService.createRequestContext({
                     operation: 'NcbiRetry',
                     additionalContext: {
@@ -555,9 +608,9 @@ export class NcbiService {
             });
         },
         {
-          maxRetries: this.maxRetries,
+          maxRetries,
           maxDelayMs: MAX_BACKOFF_MS,
-          deadlineMs: this.totalDeadlineMs,
+          deadlineMs: budget ? Math.max(0, budget.expiresAt - Date.now()) : this.totalDeadlineMs,
           isTransient,
           operation: `NCBI ${endpoint}`,
           ...(callerSignal && { signal: callerSignal }),
@@ -570,6 +623,8 @@ export class NcbiService {
         deadlineFired: loopSignal?.aborted === true,
         ncbiErrors,
       });
+    } finally {
+      if (budget) budget.retriesLeft -= attempt - 1;
     }
   }
 
@@ -582,17 +637,23 @@ export class NcbiService {
     endpoint: string,
     params: NcbiRequestParams,
     options?: NcbiRequestOptions,
+    budget?: CallBudget,
   ): Promise<T> {
-    return this.runPaced(endpoint, options?.signal, async (signal) => {
-      const text = await this.apiClient
-        .makeRequest(endpoint, params, { ...options, signal })
-        .catch((error: unknown) => {
-          const empty = emptyEFetchResultFor(error, endpoint, params.db);
-          if (empty !== undefined) return empty;
-          throw reclassifyNcbiHttpError(error, endpoint);
-        });
-      return this.responseHandler.parseAndHandleResponse<T>(text, endpoint, options);
-    });
+    return this.runPaced(
+      endpoint,
+      options?.signal,
+      async (signal) => {
+        const text = await this.apiClient
+          .makeRequest(endpoint, params, { ...options, signal })
+          .catch((error: unknown) => {
+            const empty = emptyEFetchResultFor(error, endpoint, params.db);
+            if (empty !== undefined) return empty;
+            throw reclassifyNcbiHttpError(error, endpoint);
+          });
+        return this.responseHandler.parseAndHandleResponse<T>(text, endpoint, options);
+      },
+      budget,
+    );
   }
 }
 

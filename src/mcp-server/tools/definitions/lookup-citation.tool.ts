@@ -5,7 +5,11 @@
  * returns a PMID whose author roster doesn't contain the queried author.
  * `citations` is advertised as an array of 1–25 citations. A lone citation
  * object is wrapped into a one-element array before validation, and `citation`
- * is accepted as an alias for `citations`.
+ * is accepted as an alias for `citations`. Every citation-shape rule lives in
+ * the schema, so a citation that cannot match is rejected under its
+ * `citations.N.<field>` path before ECitMatch is called: `year` is four digits,
+ * the other bibliographic fields hold a visible character, and each citation
+ * carries a journal or a year.
  * @module src/mcp-server/tools/definitions/lookup-citation.tool
  */
 
@@ -20,6 +24,7 @@ import {
   EDAM_PUBMED_ID,
   SCHEMA_SCHOLARLY_ARTICLE,
 } from './_concepts.js';
+import { hasVisibleText } from './_visible-text.js';
 
 /** Extract the surname token (first whitespace-separated part) from an author string. */
 function surname(name: string): string {
@@ -39,54 +44,99 @@ function surname(name: string): string {
  * wire (the service submits positional tokens instead), so it stays free-form.
  */
 const BDATA_FIELD_RE = /^[^|\r\n]*$/;
-const BDATA_FIELD_HINT = 'Cannot contain a pipe ("|") or a line break.';
-const BDATA_FIELD_ERROR = `${BDATA_FIELD_HINT} Those characters shift ECitMatch's field layout — remove them or replace them with a space.`;
+const BDATA_FIELD_ERROR =
+  'Cannot contain a pipe ("|") or a line break. Those characters shift ECitMatch\'s field layout — remove them or replace them with a space.';
+const TEXT_FIELD_HINT =
+  'Must contain a visible character, and cannot contain a pipe ("|") or a line break.';
+const VISIBLE_TEXT_ERROR =
+  'Must contain a visible character. Omit the field rather than sending only spaces or invisible characters.';
+
+/**
+ * The only year ECitMatch matches on: four ASCII digits, padding with spaces or
+ * tabs tolerated. Every other form — `1991a`, `91`, `1991-1992`, `1991 May` —
+ * misses, and a journal-less citation carrying one makes ECitMatch drop that
+ * line and every line after it. No CR or LF, so the bdata layout rule above
+ * holds for this field too. (#187)
+ */
+const YEAR_RE = /^[ \t]*\d{4}[ \t]*$/;
+
+/**
+ * A safe integer sent for a string field, read as its decimal string — the
+ * framework's own repair rule (a safe integer other than `-0`), applied here
+ * because that repair cannot reach a lone citation object: it re-reads the
+ * failing path `citations.0.year` against the raw arguments, where `citations`
+ * is still the object this schema wraps. Converting before validation gives the
+ * object and array forms the same citation. Anything else passes through to be
+ * rejected as before. (#198)
+ */
+const integerAsString = (value: unknown): unknown =>
+  typeof value === 'number' && Number.isSafeInteger(value) && !Object.is(value, -0)
+    ? String(value)
+    : value;
+
+/**
+ * An exactly-empty string from a form client means "unset", never a value to
+ * validate: it parses to `undefined` before the field's checks run, so the
+ * advertised schema keeps its plain `pattern`. Whitespace and invisible-only
+ * values still reach the checks and are rejected. An integer is read as its
+ * decimal string first. (#187, #198)
+ */
+const blankAsUnset = <T extends z.ZodType>(schema: T) =>
+  z.preprocess((value) => {
+    const read = integerAsString(value);
+    return read === '' ? undefined : read;
+  }, schema);
+
+/**
+ * A bibliographic text field: rejected when it would shift the bdata layout or
+ * holds no visible character — whitespace or a zero-width space sent as a
+ * journal reads as present here but constrains nothing upstream. (#125, #187)
+ */
+const textField = () =>
+  blankAsUnset(
+    z
+      .string()
+      .regex(BDATA_FIELD_RE, BDATA_FIELD_ERROR)
+      .refine(hasVisibleText, VISIBLE_TEXT_ERROR)
+      .optional(),
+  );
 
 const CitationSchema = z
   .object({
-    journal: z
-      .string()
-      .regex(BDATA_FIELD_RE, BDATA_FIELD_ERROR)
-      .optional()
-      .describe(
-        `Journal title or ISO abbreviation (e.g., "proc natl acad sci u s a"). ${BDATA_FIELD_HINT}`,
-      ),
-    year: z
-      .string()
-      .regex(BDATA_FIELD_RE, BDATA_FIELD_ERROR)
-      .optional()
-      .describe(`Publication year (e.g., "1991"). ${BDATA_FIELD_HINT}`),
-    volume: z
-      .string()
-      .regex(BDATA_FIELD_RE, BDATA_FIELD_ERROR)
-      .optional()
-      .describe(`Volume number. ${BDATA_FIELD_HINT}`),
-    firstPage: z
-      .string()
-      .regex(BDATA_FIELD_RE, BDATA_FIELD_ERROR)
-      .optional()
-      .describe(`First page number. ${BDATA_FIELD_HINT}`),
-    authorName: z
-      .string()
-      .regex(BDATA_FIELD_RE, BDATA_FIELD_ERROR)
-      .optional()
-      .describe(
-        `Author name, typically "lastname initials" (e.g., "mann bj"). ${BDATA_FIELD_HINT}`,
-      ),
+    journal: textField().describe(
+      `Journal title or ISO abbreviation (e.g., "proc natl acad sci u s a"). ${TEXT_FIELD_HINT}`,
+    ),
+    year: blankAsUnset(
+      z.string().regex(YEAR_RE, 'Must be a four-digit year, e.g. "1991".').optional(),
+    ).describe('Publication year as four digits (e.g., "1991").'),
+    volume: textField().describe(`Volume number. ${TEXT_FIELD_HINT}`),
+    firstPage: textField().describe(`First page number. ${TEXT_FIELD_HINT}`),
+    authorName: textField().describe(
+      `Author name, typically "lastname initials" (e.g., "mann bj"). ${TEXT_FIELD_HINT}`,
+    ),
     key: z
-      .string()
-      .optional()
+      .preprocess(integerAsString, z.string().optional())
       .describe(
         'Arbitrary label to track this citation in results. Auto-assigned if omitted. Echoed back unchanged and never sent to NCBI, so any character is accepted here.',
       ),
   })
   .describe(
-    'Citation to match against PubMed. Must include at least journal or year — ECitMatch primary-keys on journal+volume+page, so author-only or volume-only inputs guarantee no match.',
+    'Citation to match against PubMed. Must include at least journal or a four-digit year — ECitMatch primary-keys on journal+volume+page, so author-only or volume-only inputs guarantee no match.',
   )
-  .refine((c) => !!(c.journal || c.year), {
-    message:
-      'Each citation must include at least a journal or year field — ECitMatch primary-keys on journal+volume+page, so author-only or volume-only inputs guarantee no match.',
-  });
+  /**
+   * Zod still runs this beside a field that failed its own check, handing it the
+   * raw value, so the rule tests the journal and year itself: a whitespace
+   * journal or a malformed year never satisfies it. (#187)
+   */
+  .refine(
+    (c) =>
+      (c.journal !== undefined && hasVisibleText(c.journal)) ||
+      (c.year !== undefined && YEAR_RE.test(c.year)),
+    {
+      message:
+        'Each citation must include at least a journal or year field — ECitMatch primary-keys on journal+volume+page, so author-only or volume-only inputs guarantee no match.',
+    },
+  );
 
 /**
  * Message for a `citations` value the array check refuses (a string, a number, a
@@ -103,7 +153,7 @@ const isCitationObject = (value: unknown): value is Record<string, unknown> =>
   typeof value === 'object' && value !== null && !Array.isArray(value);
 
 export const lookupCitationTool = tool('pubmed_lookup_citation', {
-  description: `Look up PubMed IDs from partial bibliographic citations. Useful when you have a reference (journal, year, volume, page, author) and need the PMID — deterministic citation matching, more reliable than free-text search for structured references. Each citation must include at least journal or year (ECitMatch primary-keys on journal+volume+page; author-only or volume-only inputs guarantee no match); more fields = better match accuracy.`,
+  description: `Look up PubMed IDs from partial bibliographic citations. Useful when you have a reference (journal, year, volume, page, author) and need the PMID — deterministic citation matching, more reliable than free-text search for structured references. Each citation must include at least journal or a four-digit year (ECitMatch primary-keys on journal+volume+page; author-only or volume-only inputs guarantee no match); more fields = better match accuracy.`,
   annotations: { readOnlyHint: true, openWorldHint: true },
   _meta: conceptMeta([SCHEMA_SCHOLARLY_ARTICLE, EDAM_DATA_RETRIEVAL, EDAM_PUBMED_ID]),
   sourceUrl:
@@ -231,8 +281,12 @@ export const lookupCitationTool = tool('pubmed_lookup_citation', {
       { authors?: string; authorNames?: string[]; pubDate?: string }
     >();
     if (matchedPmids.length > 0) {
+      // Version 2.0, because the version 1 DocSum drops what verification
+      // needs: it lists a consortium as a `CollectiveName` item the roster
+      // never reads, and it has no `DocDate`, so a Bookshelf chapter would be
+      // dated by its book's start year. (#199, #201)
       const summaryResult = await ncbi.eSummary(
-        { db: 'pubmed', id: matchedPmids.join(',') },
+        { db: 'pubmed', version: '2.0', retmode: 'xml', id: matchedPmids.join(',') },
         { signal: ctx.signal },
       );
       const summaries = await extractBriefSummaries(summaryResult);
