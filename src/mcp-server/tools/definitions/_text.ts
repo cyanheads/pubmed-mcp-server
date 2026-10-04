@@ -69,11 +69,16 @@ export function sliceAtWordBoundary(text: string, limit: number): string {
 /** Any line break, including the Unicode line and paragraph separators. */
 const LINE_BREAK_RE = /[\r\n\u2028\u2029]+/g;
 /**
- * A `<` that opens something a Markdown renderer will read as raw HTML or an
- * autolink: a tag-name start, then a body carrying no further angle bracket,
- * then a closing `>`. Deliberately the same shape as `MARKUP_TAG_RE` in
- * `text-helpers.ts` — a `<` with no `>` after it (`n<N`) or one followed by a
- * digit (`P<0.001`) cannot open a tag and is left alone.
+ * A `<` that could open something a Markdown renderer reads as raw HTML or an
+ * autolink: a tag-name start (a letter, `/`, `!`, or `?`), then a body carrying
+ * no further angle bracket, then a closing `>`. Looser than `MARKUP_TAG_RE` in
+ * `text-helpers.ts` on purpose: that pattern deletes what it matches, so its tag
+ * name ends only at whitespace, `/`, or `>` to keep PubMed's `<or= 20 or > 20`
+ * as text, while an escape here costs only a backslash the renderer hides, so
+ * that `<` is escaped. The two agree that a `<` with no `>` after it (`n<N`) or
+ * one followed by a digit (`P<0.001`) cannot open a tag and is left alone. An
+ * entity-encoded tag (`&lt;i&gt;`), which `MARKUP_TAG_RE` also strips, is literal
+ * text to a renderer and is not escaped here.
  */
 const HTML_TAG_OPENER_RE = /<(?=[A-Za-z/!?][^<>]*>)/g;
 /** A character that makes an adjacent `_` intraword, where it cannot emphasize. */

@@ -851,3 +851,53 @@ describe('pubmedEuropepmcSearchTool query description (issue #149)', () => {
     expect(description).toContain('resolves under `SRC:MED`, not `SRC:PMC`');
   });
 });
+
+describe('pubmedEuropepmcSearchTool entity-encoded title markup (issue #181)', () => {
+  beforeEach(() => {
+    mockSearch.mockReset();
+    mockGetEpmc.mockReset();
+    mockGetEpmc.mockReturnValue({ search: mockSearch });
+  });
+
+  it('reads a MED title clean on both surfaces', async () => {
+    // Europe PMC's core record for MED/42631465: the PubMed title's `<b>`
+    // arrives entity-encoded, the abstract's `<h4>` raw.
+    mockSearch.mockResolvedValue(
+      page(
+        1,
+        [
+          {
+            id: '42631465',
+            source: 'MED',
+            pmid: '42631465',
+            title:
+              '&lt;b&gt;Molecular mechanism of ephedrine-regulated ferroptosis in asthma via PKM2-ACSL4 lactylation&lt;/b&gt;.',
+            authorString: 'Zhao L, Xia R, Zeng S, Yan X.',
+            journalTitle: 'Pakistan journal of pharmaceutical sciences',
+            abstractText: '<h4>Background</h4>Asthma is a chronic airway inflammatory disease.',
+          },
+        ],
+        'EXT_ID:42631465 AND SRC:MED',
+      ),
+    );
+
+    const result = await runToolContract(pubmedEuropepmcSearchTool, {
+      query: 'EXT_ID:42631465 AND SRC:MED',
+      pageSize: 1,
+    });
+
+    expect(result.isError).toBeFalsy();
+    const title =
+      'Molecular mechanism of ephedrine-regulated ferroptosis in asthma via PKM2-ACSL4 lactylation.';
+    const { hits } = result.structuredContent as {
+      hits: Array<{ title?: string; abstractSnippet?: string }>;
+    };
+    expect(hits[0]?.title).toBe(title);
+    expect(hits[0]?.abstractSnippet).toBe(
+      'Background Asthma is a chronic airway inflammatory disease.',
+    );
+    const text = contractText(result);
+    expect(text).toContain(`#### ${title}`);
+    expect(text).not.toMatch(/<\/?b>|\\</);
+  });
+});
