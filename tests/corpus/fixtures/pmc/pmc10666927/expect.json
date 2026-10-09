@@ -1,5 +1,5 @@
 {
-  "why": "eLife review: 52 authors and 47 author <aff>s with ROR <institution-id>s; the reviewing and senior editor's two <aff>s (contrib-type=\"editor\", in a <contrib-group> of their own) are left out, as editors are left out of authors (#196). A floating <boxed-text> rendered in place, opened by a line naming it by its label and caption title and closed before the body resumes (#210), and fourth-level sections folded into their subsection text as heading lines. The source itself reads \"available in the .\" (an <xref> missing from the deposit).",
+  "why": "eLife review: 52 authors and 47 author <aff>s with ROR <institution-id>s; the reviewing and senior editor's two <aff>s (contrib-type=\"editor\", in a <contrib-group> of their own) are left out, as editors are left out of authors (#196). A floating <boxed-text> rendered in place, opened by a line naming it by its label and caption title and closed before the body resumes (#210), and fourth-level sections folded into their subsection text as heading lines. The source itself reads \"available in the .\" (an <xref> missing from the deposit). Its three back-matter <sec>s follow the body (#206): Additional information carries its titled <fn-group>s as subsections, one paragraph per <fn>, and Additional files holds the supplement that names it.",
   "title": "Eleven strategies for making reproducible research and open science training the norm at research institutions",
   "authors": 52,
   "affiliations": 47,
@@ -17,9 +17,16 @@
     "Selecting strategies and tips for implementing strategies",
     "Tips for implementing strategy 8: Perform replication or meta-research studies as course projects",
     "Limitations",
-    "Conclusions"
+    "Conclusions",
+    "Funding Information",
+    "Additional information",
+    "Competing interests",
+    "Author contributions",
+    "Additional files"
   ],
   "contains": [
+    "##### Author contributions\nInvestigation, Visualization, Writing – original draft, Project administration, Writing – review and editing.\n\nConceptualization, Investigation, Methodology",
+    "#### Additional files\n[Supplementary: Supplementary file 1.]\n",
     "(see Box 1) to discuss strategies for making reproducible research and open science training the norm at research institutions in Germany and beyond.\n\n[Box: Box 1. Virtual unconference format]\n\nIn March 2022, 96 participants",
     "asynchronous conversations on an online discussion board.\n\n[End of box]\n\nThe first section of this paper provides a brief overview",
     "\nStrategy 1: Adapt curriculum to require reproducibility and open science training\n",

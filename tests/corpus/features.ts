@@ -68,6 +68,7 @@ export const PUBMED_FEATURES = [
   'nested-inline-markup',
   // Authors
   'collective-author',
+  'investigators',
   'mixed-author-list',
   'orcid',
   'multiple-affiliations',

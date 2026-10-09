@@ -153,6 +153,28 @@ Below is the link to the electronic supplementary material.
 
 [Supplementary]
 
+#### Footnotes
+Publisher’s Note
+
+Springer Nature remains neutral with regard to jurisdictional claims in published maps and institutional affiliations.
+
+#### Acknowledgements
+None.
+
+#### Author contributions
+Conceptualization: AP and SJLB; Formal analysis: AP; Data Curation: WA, CAK, MRH-F; Writing - Original Draft: AP and SJLB; Writing - Review & Editing: DG, DK, TJK, DT, TW, RPFD, CFMF, IPK, MRH-F.
+
+#### Funding
+The generation of this cohort and its underlying biobank, known as the TransplantLines Food and Nutrition Biobank and Cohort Study (TxL-FN), trial registration number NCT02811835, was funded by the Top Institute Food and Nutrition (TiFN), grant number A-1003.
+
+#### Data availability
+Data described in the manuscript, code book, and analytic code will be made available upon request of the editor.
+
+#### Declarations
+
+##### Competing interests
+The authors declare no competing interests.
+
 #### Tables (5)
 
 ##### Table 1 — Creatine and its precursors in KTR and controls

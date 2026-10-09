@@ -1,5 +1,5 @@
 {
-  "why": "Tables with colspan/rowspan and many <break/>-split cells, every one matching the span-expanded source grid, and one footnote per table; Appendix C's Table A1 is returned from <back>/<app-group>. Nothing else from the appendices is pinned: Appendices A and B (search strategy; Newcastle–Ottawa scale with lists nested inside list-item paragraphs) are back matter the tool does not return, a reported gap.",
+  "why": "Tables with colspan/rowspan and many <break/>-split cells, every one matching the span-expanded source grid, and one footnote per table. The <back> matter follows the body as sections in source order (#206): <ack>, an untitled <fn-group> titled Footnotes, three <notes>, and the <app>s of an untitled <app-group> — Appendix A's search strategy, Appendix B's Newcastle–Ottawa scale with lists nested inside list-item paragraphs (#200), and Appendix C, a heading-only section whose Table A1 names it and keeps its cells in tables[].",
   "title": "The Current Knowledge of Cerebral Magnetic Resonance Imaging in Monochorionic Twins: A Systematic Review of the Last 20 Years",
   "authors": 8,
   "affiliations": 3,
@@ -13,9 +13,23 @@
     "3.2. Fetal MRI Findings in MC Twins",
     "4. Discussion",
     "4.3. Interpretation of Findings",
-    "5. Conclusions"
+    "5. Conclusions",
+    "Acknowledgments",
+    "Footnotes",
+    "Author Contributions",
+    "Data Availability Statement",
+    "Conflicts of Interest",
+    "Appendix A",
+    "Appendix B",
+    "Appendix C"
+  ],
+  "contains": [
+    "#### Appendix C\n\n#### Tables (5)",
+    "*Section: Appendix C · id: jcm-12-07211-t0A1 · header rows: 2 (folded into one)*"
   ],
   "structuredContains": [
-    "Abbreviations: G, good quality; F, fair quality; P, poor quality; *, one star."
+    "Abbreviations: G, good quality; F, fair quality; P, poor quality; *, one star.",
+    "Search strategy for the different databases.",
+    "\n  (a) Truly representative (one star)\n"
   ]
 }

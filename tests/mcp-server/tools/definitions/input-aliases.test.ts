@@ -7,14 +7,17 @@
  * call and both response surfaces carry the result.
  *
  * `pubmed_lookup_citation`'s `citation` alias is covered with its single-object
- * handling in `lookup-citation.tool.test.ts`.
+ * handling in `lookup-citation.tool.test.ts`. `pubmed_fetch_fulltext`'s singular
+ * id keys (#221) run its PMC tier through the real JATS parser.
  * @module tests/mcp-server/tools/definitions/input-aliases.test
  */
 
 import type { ContentBlock } from '@cyanheads/mcp-ts-core';
 import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
 import { runToolContract } from '@cyanheads/mcp-ts-core/testing';
+import { XMLParser } from 'fast-xml-parser';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { ORDERED_XML_PARSER_OPTIONS } from '@/services/ncbi/parsing/ordered-xml-parser-options.js';
 
 import { textBlocks } from '../../../_helpers.js';
 import {
@@ -28,6 +31,7 @@ const mockESearch = vi.fn();
 const mockESummary = vi.fn();
 const mockELink = vi.fn();
 const mockESpell = vi.fn();
+const mockIdConvert = vi.fn();
 const mockEpmcSearch = vi.fn();
 
 vi.mock('@/services/ncbi/ncbi-service.js', () => ({
@@ -37,6 +41,7 @@ vi.mock('@/services/ncbi/ncbi-service.js', () => ({
     eSummary: mockESummary,
     eLink: mockELink,
     eSpell: mockESpell,
+    idConvert: mockIdConvert,
   }),
 }));
 vi.mock('@/services/europe-pmc/europe-pmc-service.js', () => ({
@@ -59,6 +64,7 @@ const { pubmedEuropepmcSearchTool } = await import(
   '@/mcp-server/tools/definitions/pubmed-europepmc-search.tool.js'
 );
 const { spellCheckTool } = await import('@/mcp-server/tools/definitions/spell-check.tool.js');
+const { fetchFulltextTool } = await import('@/mcp-server/tools/definitions/fetch-fulltext.tool.js');
 
 /** PMID of {@link JOURNAL_ARTICLE_XML}. */
 const PMID = '42474064';
@@ -112,6 +118,7 @@ beforeEach(() => {
   mockESummary.mockReset();
   mockELink.mockReset();
   mockESpell.mockReset();
+  mockIdConvert.mockReset();
   mockEpmcSearch.mockReset();
   mockEFetch.mockResolvedValue({
     PubmedArticleSet: parseArticleSetXml(articleSetXml(JOURNAL_ARTICLE_XML)),
@@ -146,6 +153,9 @@ describe('ids → pmids', () => {
       error: { code: JsonRpcErrorCode.InvalidParams, data: { reason: 'invalid_arguments' } },
     });
     expect(textOf(result)).toContain('"ids"');
+    expect(textOf(result)).toContain(
+      'Recovery: ids is an alias of pmids; send one of them, not both.',
+    );
     expect(mockEFetch).not.toHaveBeenCalled();
   });
 });
@@ -258,6 +268,11 @@ describe('each alias is load-bearing', () => {
     ['pubmed_lookup_mesh', lookupMeshTool, { term: 'asthma' }, 'term'],
     ['pubmed_find_related', findRelatedTool, { pmid: '10', pageSize: 2 }, 'pageSize'],
     ['pubmed_spell_check', spellCheckTool, { term: 'asthmaa' }, 'term'],
+    // #221
+    ['pubmed_fetch_fulltext', fetchFulltextTool, { pmcid: 'PMC8875423' }, 'pmcid'],
+    ['pubmed_fetch_fulltext', fetchFulltextTool, { pmcId: 'PMC12924062' }, 'pmcId'],
+    ['pubmed_fetch_fulltext', fetchFulltextTool, { pmid: '38395217' }, 'pmid'],
+    ['pubmed_fetch_fulltext', fetchFulltextTool, { doi: '10.1093/nar/gks1195' }, 'doi'],
   ] as const)(
     '%s rejects `%s` once its inputAliases entry is removed',
     async (_name, tool, args, key) => {
@@ -446,41 +461,58 @@ describe('sibling names on pubmed_find_related and pubmed_spell_check (#190)', (
 
 describe('an alias sent with its target is still rejected (#190)', () => {
   it.each([
-    ['pubmed_search_articles', searchArticlesTool, { query: 'asthma', term: 'copd' }, 'term'],
+    [
+      'pubmed_search_articles',
+      searchArticlesTool,
+      { query: 'asthma', term: 'copd' },
+      'term',
+      'query',
+    ],
     [
       'pubmed_search_articles',
       searchArticlesTool,
       { query: 'asthma', maxResults: 3, retmax: 5 },
       'retmax',
+      'maxResults',
     ],
     [
       'pubmed_search_articles',
       searchArticlesTool,
       { query: 'asthma', offset: 0, retstart: 5 },
       'retstart',
+      'offset',
     ],
     [
       'pubmed_search_articles',
       searchArticlesTool,
       { query: 'asthma', sort: 'relevance', sortBy: 'pub_date' },
       'sortBy',
+      'sort',
     ],
     [
       'pubmed_europepmc_search',
       pubmedEuropepmcSearchTool,
       { query: 'crispr', pageSize: 5, maxResults: 7 },
       'maxResults',
+      'pageSize',
     ],
-    ['pubmed_lookup_mesh', lookupMeshTool, { query: 'asthma', offset: 0, retstart: 2 }, 'retstart'],
-    ['pubmed_lookup_mesh', lookupMeshTool, { query: 'asthma', term: 'copd' }, 'term'],
+    [
+      'pubmed_lookup_mesh',
+      lookupMeshTool,
+      { query: 'asthma', offset: 0, retstart: 2 },
+      'retstart',
+      'offset',
+    ],
+    ['pubmed_lookup_mesh', lookupMeshTool, { query: 'asthma', term: 'copd' }, 'term', 'query'],
     [
       'pubmed_find_related',
       findRelatedTool,
       { pmid: '10', maxResults: 2, pageSize: 3 },
       'pageSize',
+      'maxResults',
     ],
-    ['pubmed_spell_check', spellCheckTool, { query: 'asthma', term: 'copd' }, 'term'],
-  ] as const)('%s rejects `%s` beside its target', async (_name, tool, args, key) => {
+    ['pubmed_spell_check', spellCheckTool, { query: 'asthma', term: 'copd' }, 'term', 'query'],
+  ] as const)('%s rejects `%s` beside its target', async (_name, tool, args, key, target) => {
     const result = await callRaw(tool, { ...args });
 
     expect(result.isError).toBe(true);
@@ -488,6 +520,9 @@ describe('an alias sent with its target is still rejected (#190)', () => {
       error: { code: JsonRpcErrorCode.InvalidParams, data: { reason: 'invalid_arguments' } },
     });
     expect(textOf(result)).toContain(`Unrecognized key: "${key}"`);
+    expect(textOf(result)).toContain(
+      `Recovery: ${key} is an alias of ${target}; send one of them, not both.`,
+    );
     expect(mockESearch).not.toHaveBeenCalled();
     expect(mockEpmcSearch).not.toHaveBeenCalled();
     expect(mockELink).not.toHaveBeenCalled();
@@ -547,6 +582,160 @@ describe("an aliased value meets its target's bounds (#190)", () => {
       expect(mockEpmcSearch).not.toHaveBeenCalled();
       expect(mockELink).not.toHaveBeenCalled();
       expect(mockESpell).not.toHaveBeenCalled();
+    },
+  );
+});
+
+describe('singular id keys on pubmed_fetch_fulltext (#221)', () => {
+  /**
+   * Stub records keyed by PMC digits: the PMC ID Converter places the PMID and
+   * DOI on its PMC record, and PMC EFetch serves its JATS. Only the DOI ↔ PMC
+   * pairing of the GenBank paper is a real one.
+   */
+  const RECORDS = [
+    { pmc: '8875423', pmid: '38395217', doi: '10.1000/stub-8875423' },
+    { pmc: '12924062', pmid: '41000002', doi: '10.1000/stub-12924062' },
+    { pmc: '3531190', pmid: '23193287', doi: '10.1093/nar/gks1195' },
+    { pmc: '4000001', pmid: '24991140', doi: '10.1000/stub-4000001' },
+  ];
+
+  const jats = (r: (typeof RECORDS)[number]) =>
+    `<article article-type="research-article"><front><article-meta><article-id pub-id-type="pmcid">PMC${r.pmc}</article-id><article-id pub-id-type="pmid">${r.pmid}</article-id><title-group><article-title>Article PMC${r.pmc}</article-title></title-group></article-meta></front><body><sec><title>Introduction</title><p>Body text of PMC${r.pmc}.</p><sec><title>Background</title><p>Nested text of PMC${r.pmc}.</p></sec></sec></body></article>`;
+
+  beforeEach(() => {
+    mockIdConvert.mockImplementation(async (ids: string[], idType: 'pmid' | 'doi' | 'pmcid') =>
+      ids.flatMap((id) => {
+        const r = RECORDS.find((rec) => rec[idType === 'pmcid' ? 'pmc' : idType] === id);
+        return r ? [{ 'requested-id': id, pmid: r.pmid, pmcid: `PMC${r.pmc}`, doi: r.doi }] : [];
+      }),
+    );
+    mockEFetch.mockImplementation(async (params: { db: string; id: string }) => {
+      if (params.db !== 'pmc') throw new Error(`unexpected EFetch db=${params.db}`);
+      const articles = params.id
+        .split(',')
+        .map((pmc) => RECORDS.find((r) => r.pmc === pmc))
+        .map((r) => (r ? jats(r) : ''))
+        .join('');
+      return new XMLParser(ORDERED_XML_PARSER_OPTIONS).parse(
+        `<pmc-articleset>${articles}</pmc-articleset>`,
+      );
+    });
+  });
+
+  /** One call's result with the upstream requests it made, then the mocks cleared. */
+  async function observe(args: Record<string, unknown>) {
+    const result = await callRaw(fetchFulltextTool, args);
+    const upstream = {
+      eFetch: mockEFetch.mock.calls.map((c) => c[0]),
+      idConvert: mockIdConvert.mock.calls.map((c) => [c[0], c[1]]),
+    };
+    mockEFetch.mockClear();
+    mockIdConvert.mockClear();
+    return { result, upstream };
+  }
+
+  it.each([
+    ['pmcid', 'PMC8875423', 'pmcids', { eFetch: '8875423', idConvert: [] }],
+    ['pmcId', 'PMC12924062', 'pmcids', { eFetch: '12924062', idConvert: [] }],
+    ['pmid', '38395217', 'pmids', { eFetch: '8875423', idConvert: [[['38395217'], 'pmid']] }],
+    [
+      'doi',
+      '10.1093/nar/gks1195',
+      'dois',
+      { eFetch: '3531190', idConvert: [[['10.1093/nar/gks1195'], 'doi']] },
+    ],
+  ] as const)(
+    'resolves `%s`: "%s" as a one-element `%s`',
+    async (alias, value, target, expected) => {
+      const aliased = await observe({ [alias]: value });
+      const plural = await observe({ [target]: [value] });
+
+      expect(aliased.result.isError).toBeFalsy();
+      expect(aliased.upstream.idConvert).toEqual(expected.idConvert);
+      expect(aliased.upstream.eFetch).toEqual([
+        expect.objectContaining({ db: 'pmc', id: expected.eFetch }),
+      ]);
+      expect(aliased.upstream).toEqual(plural.upstream);
+      expect(aliased.result.structuredContent).toEqual(plural.result.structuredContent);
+      expect(aliased.result.content).toEqual(plural.result.content);
+      const structured = aliased.result.structuredContent as {
+        articles: { pmcId?: string; sections: { subsections?: { text: string }[] }[] }[];
+      };
+      expect(structured.articles.map((a) => a.pmcId)).toEqual([`PMC${expected.eFetch}`]);
+      expect(structured.articles[0]?.sections[0]?.subsections?.[0]?.text).toBe(
+        `Nested text of PMC${expected.eFetch}.`,
+      );
+      expect(textOf(aliased.result)).toContain(`**PMCID:** PMC${expected.eFetch}`);
+    },
+  );
+
+  it('resolves an array sent under a singular key as the plural field', async () => {
+    const aliased = await observe({ pmcid: ['PMC8875423', 'PMC12924062'] });
+    const plural = await observe({ pmcids: ['PMC8875423', 'PMC12924062'] });
+
+    expect(aliased.result.isError).toBeFalsy();
+    expect(aliased.upstream.eFetch).toEqual([
+      expect.objectContaining({ db: 'pmc', id: '8875423,12924062' }),
+    ]);
+    expect(aliased.result.structuredContent).toEqual(plural.result.structuredContent);
+    expect(aliased.result.content).toEqual(plural.result.content);
+  });
+
+  it('accepts a singular key beside another field’s plural as a mixed call', async () => {
+    const { result, upstream } = await observe({ pmcid: 'PMC8875423', pmids: ['24991140'] });
+
+    expect(result.isError).toBeFalsy();
+    expect(upstream.idConvert).toEqual([[['24991140'], 'pmid']]);
+    expect(upstream.eFetch).toEqual([
+      expect.objectContaining({ db: 'pmc', id: '8875423,4000001' }),
+    ]);
+    const structured = result.structuredContent as { articles: { pmcId?: string }[] };
+    expect(structured.articles.map((a) => a.pmcId)).toEqual(['PMC8875423', 'PMC4000001']);
+    expect(textOf(result)).toContain('**Articles Returned:** 2');
+  });
+
+  it.each([
+    [{ pmid: '1', pmids: ['2'] }, 'pmid is an alias of pmids; send one of them, not both.'],
+    [
+      { pmcid: 'PMC1', pmcids: ['PMC2'] },
+      'pmcid is an alias of pmcids; send one of them, not both.',
+    ],
+    [{ doi: '10.1/a', dois: ['10.1/b'] }, 'doi is an alias of dois; send one of them, not both.'],
+    [
+      { pmcid: 'PMC1', pmcId: 'PMC2' },
+      'pmcid and pmcId are aliases of pmcids; send one of them, not both.',
+    ],
+  ])('rejects %j, naming the alias, before any upstream request', async (args, hint) => {
+    const result = await callRaw(fetchFulltextTool, args);
+
+    expect(result.isError).toBe(true);
+    expect(result.structuredContent).toMatchObject({
+      error: { code: JsonRpcErrorCode.InvalidParams, data: { reason: 'invalid_arguments' } },
+    });
+    expect(textOf(result)).toContain(`Recovery: ${hint}`);
+    expect(mockIdConvert).not.toHaveBeenCalled();
+    expect(mockEFetch).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    ['pmid', '38395217,24991140', 'pmids'],
+    ['pmid', '38395217\n24991140', 'pmids'],
+    ['pmcid', 'PMC8875423,PMC12924062', 'pmcids'],
+    ['doi', '10.1093/nar/gks1195,10.1000/x', 'dois'],
+  ])(
+    'validates `%s`: %j as `%s` and rejects the delimited string before any upstream request',
+    async (alias, value, target) => {
+      const result = await callRaw(fetchFulltextTool, { [alias]: value });
+
+      expect(result.isError).toBe(true);
+      expect(result.structuredContent).toMatchObject({
+        error: { code: JsonRpcErrorCode.InvalidParams },
+      });
+      const text = textOf(result);
+      expect(text).not.toContain('Unrecognized key');
+      expect(text).toContain(`${target}: Invalid input: expected array, received string`);
+      expect(mockIdConvert).not.toHaveBeenCalled();
+      expect(mockEFetch).not.toHaveBeenCalled();
     },
   );
 });

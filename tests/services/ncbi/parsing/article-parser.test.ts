@@ -48,6 +48,15 @@ import {
   RETRACTED_ARTICLE_XML,
   RETRACTION_NOTICE_XML,
 } from './_comments-corrections-fixtures.js';
+import {
+  BDI,
+  CONSORTIUM_INVESTIGATORS,
+  CONSORTIUM_XML,
+  consortiumRecordXml,
+  KENNEDY,
+  SINGLETON_LIST_XML,
+  TGU,
+} from './_investigator-fixtures.js';
 
 describe('extractAuthors', () => {
   it('returns empty for undefined input', () => {
@@ -597,18 +606,27 @@ describe('parseFullArticle', () => {
     const xmlArticle: XmlPubmedArticle = {
       MedlineCitation: {
         PMID: { '#text': '1' },
-        Article: {},
+        Article: {
+          GrantList: {
+            Grant: [{ GrantID: { '#text': 'R01 CA1' }, Agency: { '#text': 'NCI NIH HHS' } }],
+          },
+        },
         MeshHeadingList: {
           MeshHeading: [{ DescriptorName: { '#text': 'Test', '@_MajorTopicYN': 'N' } }],
         },
       } as unknown as XmlMedlineCitation,
     };
+    const mesh = [{ descriptorName: 'Test', isMajorTopic: false }];
+    const grants = [{ grantId: 'R01 CA1', agency: 'NCI NIH HHS' }];
 
-    const withMesh = parseFullArticle(xmlArticle, { includeMesh: true });
-    expect(withMesh.meshTerms).toBeDefined();
+    // Defaults: MeSH on, grants off.
+    const byDefault = parseFullArticle(xmlArticle);
+    expect(byDefault.meshTerms).toEqual(mesh);
+    expect(byDefault).not.toHaveProperty('grantList');
 
-    const withoutMesh = parseFullArticle(xmlArticle, { includeMesh: false });
-    expect(withoutMesh.meshTerms).toBeUndefined();
+    const flipped = parseFullArticle(xmlArticle, { includeMesh: false, includeGrants: true });
+    expect(flipped).not.toHaveProperty('meshTerms');
+    expect(flipped.grantList).toEqual(grants);
   });
 
   describe('empty-array omission (issue #28)', () => {
@@ -1038,5 +1056,93 @@ describe('CommentsCorrectionsList (#178)', () => {
       ['20137807', 1],
       ['42474064', undefined],
     ]);
+  });
+});
+
+describe('InvestigatorList (#216)', () => {
+  const parseSet = (records: string[], options: { includeInvestigators?: boolean } = {}) =>
+    parseArticleSet(parseArticleSetXml(articleSetXml(...records)), options);
+  const withFlag = (xml: string) => parseSet([xml], { includeInvestigators: true })[0];
+  const byDefault = (xml: string) => parseSet([xml])[0];
+
+  it('reaches the parser as arrays at every level when each holds one element', () => {
+    const set = parseArticleSetXml(articleSetXml(consortiumRecordXml(SINGLETON_LIST_XML)));
+    const lists = ensureArray(set.PubmedArticle)[0]?.MedlineCitation.InvestigatorList;
+    expect(Array.isArray(lists)).toBe(true);
+    const investigators = ensureArray(lists)[0]?.Investigator;
+    expect(Array.isArray(investigators)).toBe(true);
+    expect(Array.isArray(ensureArray(investigators)[0]?.AffiliationInfo)).toBe(true);
+  });
+
+  it('flattens two lists in upstream order, with an ORCID and affiliations by index', () => {
+    expect(withFlag(CONSORTIUM_XML)?.investigators).toEqual(CONSORTIUM_INVESTIGATORS);
+  });
+
+  it("appends investigator affiliations after the authors' and reuses an author's index", () => {
+    const flagged = withFlag(CONSORTIUM_XML);
+    const plain = byDefault(CONSORTIUM_XML);
+    expect(plain?.affiliations).toEqual([BDI, TGU]);
+    expect(flagged?.affiliations).toEqual([BDI, TGU, KENNEDY]);
+    expect(flagged?.authors).toEqual(plain?.authors);
+    expect(flagged?.authors).toEqual([
+      { lastName: 'Ali', firstName: 'Sharib', initials: 'S', affiliationIndices: [0] },
+      { collectiveName: 'TGU Investigators', affiliationIndices: [1] },
+    ]);
+  });
+
+  it('parses a single <Investigator> as a one-element array', () => {
+    const parsed = withFlag(consortiumRecordXml(SINGLETON_LIST_XML));
+    expect(parsed?.investigators).toEqual([
+      { lastName: 'Walsh', firstName: 'Alissa', initials: 'A', affiliationIndices: [2] },
+    ]);
+    expect(parsed?.affiliations).toEqual([BDI, TGU, KENNEDY]);
+  });
+
+  it('omits a name part the investigator lacks, never writing ""', () => {
+    const parsed = withFlag(
+      consortiumRecordXml(
+        '<InvestigatorList><Investigator ValidYN="Y"><LastName>Solo</LastName></Investigator></InvestigatorList>',
+      ),
+    );
+    expect(parsed?.investigators).toStrictEqual([{ lastName: 'Solo' }]);
+  });
+
+  it("returns no investigators by default and leaves affiliations as the authors' own", () => {
+    const parsed = byDefault(CONSORTIUM_XML);
+    expect(parsed).not.toHaveProperty('investigators');
+    expect(parsed?.affiliations).toEqual([BDI, TGU]);
+  });
+
+  it('omits the field for a record with no list and for an empty list', () => {
+    expect(withFlag(JOURNAL_ARTICLE_XML)).not.toHaveProperty('investigators');
+    const empty = withFlag(consortiumRecordXml('<InvestigatorList></InvestigatorList>'));
+    expect(empty).not.toHaveProperty('investigators');
+    expect(empty?.affiliations).toEqual([BDI, TGU]);
+  });
+
+  it('never sets the field on a Bookshelf record, even one carrying a list', () => {
+    const chapter = GENEREVIEWS_CHAPTER_XML.replace(
+      '</AuthorList><PublicationType',
+      `</AuthorList>${SINGLETON_LIST_XML}<PublicationType`,
+    );
+    expect(chapter).toContain('<InvestigatorList>');
+    const [parsed] = parseSet([chapter], { includeInvestigators: true });
+    expect(parsed?.recordType).toBe('book-chapter');
+    expect(parsed).not.toHaveProperty('investigators');
+    expect(parsed?.affiliations).not.toContain(KENNEDY);
+  });
+
+  it("keeps each record's own investigators and affiliation numbering in a mixed batch", () => {
+    const records = parseSet(
+      [CONSORTIUM_XML, JOURNAL_ARTICLE_XML, consortiumRecordXml(SINGLETON_LIST_XML, '40000217')],
+      { includeInvestigators: true },
+    );
+    expect(records.map((r) => [r.pmid, r.investigators?.length])).toEqual([
+      ['40000216', 3],
+      ['42474064', undefined],
+      ['40000217', 1],
+    ]);
+    expect(records[2]?.investigators?.[0]?.affiliationIndices).toEqual([2]);
+    expect(records[2]?.affiliations).toEqual([BDI, TGU, KENNEDY]);
   });
 });

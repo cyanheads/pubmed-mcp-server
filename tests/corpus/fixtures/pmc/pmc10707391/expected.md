@@ -129,6 +129,96 @@ To better understand the potential risks and the pathophysiological mechanisms u
 #### 5. Conclusions
 This systematic review shows that MC twins are at increased risk of cerebral injury in the fetal and neonatal period. Yet, there is a lack of studies where MRI is performed with a routine and structured approach, resulting in variability in incidence and patterns of cerebral injury. Most studies focus on TTTS and sIUFD, while there are limited studies reporting on TAPS and sFGR. The knowledge gaps encountered in this review arise from the need to rely on retrospective studies, small and varied sample sizes, inconsistencies in definitions of cerebral injury, and insufficient data on the severity of cerebral injury. Future prospective studies, preferably in multicenter settings with standardized protocols using both serial cerebral ultrasound and MRI imaging during the fetal and neonatal period, should be performed to provide more insight into the potential risk and pathophysiological mechanisms underlying cerebral injury in MC pregnancies. Fetal and neonatal MRIs play an important role in the early detection, assessment, and treatment planning for fetuses or neonates with cerebral injury, which offers valuable benefits to both healthcare professionals and parents.
 
+#### Acknowledgments
+We have much appreciation for the Department of Pediatrics, Division of Neonatology, and Department of Obstetrics, Leiden University Medical Center, for their collaboration and adaptability, which provided us the opportunity to perform this single-center retrospective cohort study.
+
+#### Footnotes
+Disclaimer/Publisher’s Note: The statements, opinions and data contained in all publications are solely those of the individual author(s) and contributor(s) and not of MDPI and/or the editor(s). MDPI and/or the editor(s) disclaim responsibility for any injury to people or property resulting from any ideas, methods, instructions or products referred to in the content.
+
+#### Author Contributions
+M.R.: Writing—original draft preparation, conceptualization, methodology, software, validation, formal analysis, investigation, resources, data curation, writing—original draft preparation, writing—review and editing, visualization and project administration. E.L.: writing—review and editing, conceptualization, methodology, and visualization; L.S.d.V.: writing—review and editing, conceptualization, methodology, and visualization; F.S.: writing—review and editing and conceptualization; L.S.A.T.: writing—review and editing and conceptualization; J.M.M.v.K.: writing—review and editing, conceptualization, and methodology; S.G.G.: conceptualization, methodology, software, validation, formal analysis, investigation, resources, data curation, writing—original draft preparation, writing—review and editing, visualization, supervision, project administration, and funding acquisition; S.J.S.: conceptualization, methodology, software, validation, formal analysis, investigation, resources, data curation, writing—original draft preparation, writing—review and editing, visualization, supervision, project administration, and funding acquisition. All authors have read and agreed to the published version of the manuscript.
+
+#### Data Availability Statement
+All data generated or analyzed during this study are included in this article. Further inquiries can be directed to the corresponding author.
+
+#### Conflicts of Interest
+The authors declare no conflict of interest.
+
+#### Appendix A
+Search strategy for the different databases.
+
+Cochrane
+(“Monozygotic Twin” OR “Monozygotic Twins” OR “Identical Twin” OR “Identical Twins” OR “Monochorionic”):ti,ab,kw AND (“MRI” OR “Magnetic Resonance Imaging” OR “Diffusion-weighted imaging” OR “DWI MRI” OR “fMRI”):ti,ab,kw
+07-03-2023: 7 results
+Embase
+(exp monozygotic twins/OR “Monozygotic Twin”.ti,ab. OR “Monozygotic Twins”.ti,ab. OR “Identical Twin”.ti,ab. OR “Identical Twins”.ti,ab. OR “Monochorionic”.ti,ab.) AND (exp Magnetic Resonance Imaging/OR “Magnetic Resonance Imaging”.ti,ab. OR “MRI”.ti,ab. OR “Diffusion-weighted imaging”.ti,ab. OR “DWI MRI”.ti,ab. OR “fMRI”.ti,ab.) NOT (conference OR conference abstract OR “conference review”).pt. AND 2000:2024.(sa_year).
+07-03-2023: 940 results
+PubMed
+(“Twins, Monozygotic” [Mesh] OR “Monozygotic Twin” [tw] OR “Monozygotic Twins” [tw] OR “Identical Twin” [tw] OR “Identical Twins” [tw] OR “Monochorionic” [tw]) AND (“Magnetic Resonance Imaging” [Mesh] OR “Magnetic Resonance Imaging” [tw] OR “MRI” [tw] OR “Diffusion-weighted imaging” OR “DWI MRI” [tw] OR “fMRI” [tw]) AND (“2000”[Date-Publication]: “3000”[Date-Publication])
+07-03-2023: 627 results
+Web of Science
+TS = (“Monozygotic Twin” OR “Monozygotic Twins” OR “Identical Twin” OR “Identical Twins” OR “Monochorionic”) AND TS = (“Magnetic Resonance Imaging” OR “MRI” OR “Diffusion-weighted imaging” OR “DWI MRI” OR “fMRI”) AND PY = (2000-2024)
+07-03-2023: 479 results
+
+#### Appendix B
+Quality assessment of non-randomized studies included in this systematic review.
+
+Newcastle–Ottawa Scale
+Selection
+
+(1) Representativeness of the exposed cohort
+  (a) Truly representative (one star)
+  (b) Somewhat representative (one star)
+  (c) Selected group
+  (d) No description of the derivation of the cohort
+(2) Selection of the non-exposed cohort
+  (a) Drawn from the same community as the exposed cohort (one star)
+  (b) Drawn from a different source
+  (c) No description of the derivation of the non-exposed cohort
+(3) Ascertainment of exposure
+  (a) Secure record (e.g., surgical record) (one star)
+  (b) Structured interview (one star)
+  (c) Written self-report
+  (d) No description
+  (e) Other
+(4) Demonstration that outcome of interest was not present at the start of the study
+  (a) Yes (one star)
+  (b) No
+
+Comparability (tick one or both boxes, as appropriate)
+
+(1) Comparability of cohorts on the basis of the design or analysis controlled for confounders
+  (a) The study controls for age, sex, and marital status (one star)
+  (b) The study controls for other factors (list) ___________ (one star)
+  (c) Cohorts are not comparable on the basis of the design or analysis controlled for confounders
+
+Outcome
+
+(1) Assessment of outcome
+  (a) Independent blind assessment (one star)
+  (b) Record linkage (one star)
+  (c) Self-report
+  (d) No description
+  (e) Other
+(2) Was follow-up long enough for outcomes to occur
+  (a) Yes (one star)
+  (b) No
+
+Indicate the median duration of follow-up and a brief rationale for the assessment above:____________________
+
+(3) Adequacy of follow-up of cohorts
+  (a) Complete follow-up—all subjects accounted for (one star)
+  (b) Subjects lost to follow-up, unlikely to introduce bias—number lost less than or equal to 20% or description of those lost suggested no different from those followed (one star)
+  (c) Follow-up rate of less than 80% and no description of those lost
+  (d) No statement
+
+Thresholds for converting the Newcastle–Ottawa scales to AHRQ standards (good, fair, and poor):
+Good quality: three or four stars in the selection domain AND one or two stars in the comparability domain AND two or three stars in the outcome/exposure domain.
+Fair quality: two stars in the selection domain AND one or two stars in the comparability domain AND two or three stars in the outcome/exposure domain.
+Poor quality: 0 or 1 star(s) in the selection domain OR 0 stars in the comparability domain OR 0 or 1 star(s) in the outcome/exposure domain.
+
+#### Appendix C
+
 #### Tables (5)
 
 ##### Table 1 — Baseline characteristics of included studies.
@@ -235,7 +325,7 @@ Footnotes: Abbreviations: DWI, diffusion-weighted imaging; MCA, middle cerebral 
 Footnotes: Abbreviations: BPD, biparietal diameter; GMH, germinal matrix hemorrhage; MCA, middle cerebral artery; NR, not reported; PCM, polymicrogyria; PVL, periventricular leukomalacia; TOP, termination of pregnancy; VM, ventriculomegaly. \* Fetal MRI group. \*\* Neonatal MRI group.
 
 ##### Table A1 — Results of the quality assessment of the studies using the Newcastle–Ottawa scale.
-*id: jcm-12-07211-t0A1 · header rows: 2 (folded into one)*
+*Section: Appendix C · id: jcm-12-07211-t0A1 · header rows: 2 (folded into one)*
 
 | First Author · (Year of Publication) | Selection · Representativeness (*) | Selection · Non-Exposed Cohort (*) | Selection · Exposure (*) | Selection · Outcome of Interest (*) | Comparability · Comparability of Cohorts (\*\*) | Outcome · Assessment (*) | Outcome · Follow-Up (*) | Outcome · Adequacy (*) | Total |
 | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |

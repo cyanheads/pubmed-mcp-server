@@ -1,4 +1,4 @@
-<!-- pubmed_fetch_articles {"pmids":["38206746"],"includeMesh":true,"includeGrants":true} -->
+<!-- pubmed_fetch_articles {"pmids":["38206746"],"includeMesh":true,"includeGrants":true,"includeInvestigators":true} -->
 ## PubMed Articles
 **Articles Returned:** 1
 
@@ -68,10 +68,10 @@ CONCLUSION: The present study indicates that furmonertinib may be a first-line t
 **First report of furmonertinib as a first-line treatment in advanced lung adenocarcinoma patients harboring EGFR exon 20 insertion mutations after the kinase domain αC-helix: Two case reports and a literature review.**
 
 ### APA
-Han, H., Zhang, X., Liu, X., Zhao, J., Zhang, J., Zhang, J., Zhu, H., Jiao, S., & Tang, H. (2023). First report of furmonertinib as a first-line treatment in advanced lung adenocarcinoma patients harboring EGFR exon 20 insertion mutations after the kinase domain αC-helix: Two case reports and a literature review. *Medicine*, *102*(52), e36667. https://doi.org/10.1097/MD.0000000000036667
+Han, H., Zhang, X., Liu, X., Zhao, J., Zhang, J., Zhang, J., Zhu, H., Jiao, S., & Tang, H. (2023). First report of furmonertinib as a first-line treatment in advanced lung adenocarcinoma patients harboring EGFR exon 20 insertion mutations after the kinase domain αC-helix: Two case reports and a literature review. *Medicine*, *102*(52), Article e36667. https://doi.org/10.1097/MD.0000000000036667
 
 ### MLA
-Han, Huan, et al. "First report of furmonertinib as a first-line treatment in advanced lung adenocarcinoma patients harboring EGFR exon 20 insertion mutations after the kinase domain αC-helix: Two case reports and a literature review." *Medicine*, vol. 102, no. 52, 2023, p. e36667. https://doi.org/10.1097/MD.0000000000036667.
+Han, Huan, et al. "First report of furmonertinib as a first-line treatment in advanced lung adenocarcinoma patients harboring EGFR exon 20 insertion mutations after the kinase domain αC-helix: Two case reports and a literature review." *Medicine*, vol. 102, no. 52, 2023, art. e36667. https://doi.org/10.1097/MD.0000000000036667.
 
 ### BIBTEX
 ```bibtex

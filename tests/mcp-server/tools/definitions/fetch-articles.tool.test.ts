@@ -3,7 +3,9 @@
  * @module tests/mcp-server/tools/definitions/fetch-articles.tool.test
  */
 
+import { readFileSync } from 'node:fs';
 import { z } from '@cyanheads/mcp-ts-core';
+import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
 import { createMockContext, getEnrichment, runToolContract } from '@cyanheads/mcp-ts-core/testing';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
@@ -28,6 +30,14 @@ import {
   RETRACTED_ARTICLE_XML,
   RETRACTION_NOTICE_XML,
 } from '../../../services/ncbi/parsing/_comments-corrections-fixtures.js';
+import {
+  BDI,
+  CONSORTIUM_INVESTIGATORS,
+  CONSORTIUM_XML,
+  KENNEDY,
+  SINGLETON_LIST_XML,
+  TGU,
+} from '../../../services/ncbi/parsing/_investigator-fixtures.js';
 
 const mockEFetch = vi.fn();
 vi.mock('@/services/ncbi/ncbi-service.js', () => ({
@@ -147,8 +157,8 @@ describe('fetchArticlesTool', () => {
 
     expect(result.totalReturned).toBe(1);
     expect(result.articles[0]?.pmid).toBe('12345');
-    expect(result.articles[0]?.pubmedUrl).toContain('12345');
-    expect(result.articles[0]?.pmcUrl).toContain('PMC999');
+    expect(result.articles[0]?.pubmedUrl).toBe('https://pubmed.ncbi.nlm.nih.gov/12345/');
+    expect(result.articles[0]?.pmcUrl).toBe('https://www.ncbi.nlm.nih.gov/pmc/articles/PMC999/');
     // notice is absent on a successful fetch (issue #58)
     expect(getEnrichment(ctx).notice).toBeUndefined();
   });
@@ -926,13 +936,12 @@ describe('fetchArticlesTool whole-response budget (issue #99)', () => {
     });
     const notice = getEnrichment(ctx).notice ?? '';
     expect(notice).toContain(String(sizes[0]));
-    // 222 alone fits this ceiling, so "no article fits" would be false.
+    // 222 alone fits this ceiling, so the notice names the first article, not every one.
     expect(notice).toContain(
       `The first article alone exceeds the requested maxResponseCharacters of ${sizes[1]}, so none were returned.`,
     );
-    expect(notice).not.toMatch(/no article fits/i);
-    // The empty-result guidance is about invalid PMIDs — it must not fire here.
-    expect(notice).not.toMatch(/may be invalid/i);
+    // Both records resolved, so the empty-result guidance must not fire here.
+    expect(notice).not.toContain('No articles were returned');
     expect(getEnrichment(ctx).truncated).toBe(true);
   });
 
@@ -1014,6 +1023,58 @@ describe('fetchArticlesTool whole-response budget (issue #99)', () => {
     expect(
       fetchArticlesTool.input.safeParse({ pmids: ['111'], maxResponseCharacters: 1 }).success,
     ).toBe(true);
+  });
+
+  describe('as an output-only ceiling with no cap (issue #223)', () => {
+    const SPECS = [
+      { pmid: '111', abstract: 'A'.repeat(40), mesh: true },
+      { pmid: '222', abstract: 'B'.repeat(40) },
+    ];
+    const call = (extra: Record<string, unknown> = {}) => {
+      stageArticles(SPECS);
+      return runToolContract(fetchArticlesTool, { pmids: ['111', '222', '333'], ...extra });
+    };
+
+    it.each([[1_000_000], [1_000_001], [Number.MAX_SAFE_INTEGER]])(
+      'returns the response of the omitted field at maxResponseCharacters = %d',
+      async (value) => {
+        const omitted = await call();
+        const result = await call({ maxResponseCharacters: value });
+
+        expect(result.isError).toBeFalsy();
+        expect(result.structuredContent).toEqual(omitted.structuredContent);
+        expect(result.structuredContent).not.toHaveProperty('deferred');
+        expect(result.structuredContent).not.toHaveProperty('truncated');
+        expect(result.content).toEqual(omitted.content);
+      },
+    );
+
+    it.each([[0], [-1], [1.5], ['all'], [9_007_199_254_740_992]])(
+      'rejects maxResponseCharacters = %s as invalid params before EFetch',
+      async (value) => {
+        // Raw wire arguments: the probe values are not all of the input type.
+        const args = { pmids: ['111'], maxResponseCharacters: value };
+        const result = await runToolContract(fetchArticlesTool, args as never);
+
+        expect(result.isError).toBe(true);
+        expect(result.structuredContent).toMatchObject({
+          error: { code: JsonRpcErrorCode.InvalidParams },
+        });
+        expect(mockEFetch).not.toHaveBeenCalled();
+      },
+    );
+
+    it('advertises the safe-integer bound as its maximum', () => {
+      const schema = z.toJSONSchema(fetchArticlesTool.input, { io: 'input' }) as unknown as {
+        properties: Record<string, Record<string, unknown>>;
+      };
+      expect(schema.properties.maxResponseCharacters).toMatchObject({
+        type: 'integer',
+        minimum: 1,
+        maximum: Number.MAX_SAFE_INTEGER,
+      });
+      expect(schema.properties.pmids).toMatchObject({ maxItems: 200 });
+    });
   });
 });
 
@@ -1528,6 +1589,237 @@ describe('fetchArticlesTool comments and corrections (issue #178)', () => {
       expect(kept.deferred?.returnedCharacters).toBeLessThanOrEqual(
         kept.deferred?.maxResponseCharacters ?? 0,
       );
+      expect(kept.deferred?.ids).toEqual(['42474064']);
+    });
+  });
+});
+
+describe('fetchArticlesTool investigators (issue #216)', () => {
+  beforeEach(() => {
+    mockEFetch.mockReset();
+  });
+
+  /** PMID 34116029 as EFetch returns it: "TGU Investigators" and its 22-member list. */
+  const TGU_SOURCE = readFileSync(
+    new URL('../../../corpus/fixtures/pubmed/pmid34116029/source.xml', import.meta.url),
+    'utf8',
+  );
+
+  function stageBody(xml: string) {
+    mockEFetch.mockResolvedValue({ PubmedArticleSet: parseArticleSetXml(xml) });
+  }
+  const stageSet = (...records: string[]) => stageBody(articleSetXml(...records));
+
+  interface ArticleOut {
+    affiliations?: string[];
+    authors?: Record<string, unknown>[];
+    investigators?: Record<string, unknown>[];
+    pmid?: string;
+  }
+
+  /** Call through the contract boundary: output validation, format(), both surfaces. */
+  async function call(pmids: string[], extra: Record<string, unknown> = {}) {
+    const result = await runToolContract(fetchArticlesTool, { pmids, ...extra });
+    expect(result.isError).toBeFalsy();
+    const structured = result.structuredContent as {
+      articles: ArticleOut[];
+      deferred?: { ids: string[]; nextDeferredCharacters: number; returnedCharacters: number };
+    };
+    const text = result.content
+      .flatMap((block) => (block.type === 'text' ? [block.text] : []))
+      .join('\n');
+    return { structured, text };
+  }
+
+  /** The rendered investigators block, heading included, up to the blank line after it. */
+  const blockOf = (text: string) => {
+    const start = text.indexOf('**Investigators (');
+    if (start === -1) return '';
+    const end = text.indexOf('\n\n', start);
+    return text.slice(start, end === -1 ? undefined : end);
+  };
+
+  it('defaults includeInvestigators to false and rejects a value that is not a boolean', async () => {
+    expect(fetchArticlesTool.input.parse({ pmids: ['1'] }).includeInvestigators).toBe(false);
+
+    const result = await runToolContract(fetchArticlesTool, {
+      pmids: ['34116029'],
+      includeInvestigators: 'yes',
+    } as never);
+    expect(result.isError).toBe(true);
+    expect(result.structuredContent).toMatchObject({
+      error: { code: JsonRpcErrorCode.InvalidParams },
+    });
+    expect(mockEFetch).not.toHaveBeenCalled();
+  });
+
+  it('returns the 22 TGU Investigators of PMID 34116029 on both surfaces, authors and affiliations as the default call returns them', async () => {
+    stageBody(TGU_SOURCE);
+    const plain = await call(['34116029']);
+    stageBody(TGU_SOURCE);
+    const flagged = await call(['34116029'], { includeInvestigators: true });
+
+    const [article] = flagged.structured.articles;
+    const investigators = article?.investigators ?? [];
+    expect(investigators).toHaveLength(22);
+    expect(investigators[0]).toStrictEqual({
+      lastName: 'Allan',
+      firstName: 'Philip',
+      initials: 'P',
+    });
+    expect(investigators[2]).toStrictEqual({
+      lastName: 'Arancibia-Cárcamo',
+      firstName: 'Carolina',
+      initials: 'C',
+    });
+    expect(investigators[21]).toStrictEqual({
+      lastName: 'Walsh',
+      firstName: 'Alissa',
+      initials: 'A',
+    });
+    expect(article?.authors).toEqual(plain.structured.articles[0]?.authors);
+    expect(article?.affiliations).toEqual(plain.structured.articles[0]?.affiliations);
+
+    const lines = blockOf(flagged.text).split('\n');
+    expect(lines[0]).toBe('**Investigators (22):**');
+    expect(lines[1]).toBe('- Philip Allan (P)');
+    expect(lines[22]).toBe('- Alissa Walsh (A)');
+    expect(lines).toHaveLength(23);
+    // Between the authors and the affiliation list both sets of indices point into.
+    const at = (needle: string) => flagged.text.indexOf(needle);
+    expect(at('**Authors (10):**')).toBeLessThan(at('**Investigators (22):**'));
+    expect(at('**Investigators (22):**')).toBeLessThan(at('**Affiliations:**'));
+  });
+
+  it('leaves PMID 34116029 as the flagged call returns it minus the investigators when the flag is off', async () => {
+    stageBody(TGU_SOURCE);
+    const plain = await call(['34116029']);
+    stageBody(TGU_SOURCE);
+    const flagged = await call(['34116029'], { includeInvestigators: true });
+
+    const block = blockOf(flagged.text);
+    expect(block).not.toBe('');
+    expect(plain.text).toBe(flagged.text.replace(`\n\n${block}`, ''));
+    const { investigators, ...rest } = flagged.structured.articles[0] ?? {};
+    expect(investigators).toHaveLength(22);
+    expect(JSON.stringify(plain.structured)).toBe(
+      JSON.stringify({ ...flagged.structured, articles: [rest] }),
+    );
+  });
+
+  it('returns a byte-identical response without the flag on a record that carries lists', async () => {
+    stageSet(CONSORTIUM_XML);
+    const { structured, text } = await call(['40000216']);
+
+    expect(JSON.stringify(structured)).toBe(
+      '{"articles":[{"recordType":"journal-article","pmid":"40000216","title":"A Consortium Trial.","affiliations":["Big Data Institute, Oxford.","Translational Gastroenterology Unit, Oxford."],"authors":[{"lastName":"Ali","firstName":"Sharib","initials":"S","affiliationIndices":[0]},{"collectiveName":"TGU Investigators","affiliationIndices":[1]}],"journalInfo":{"title":"Journal of Consortia","volume":"12","publicationDate":{"year":"2024"}},"pubmedUrl":"https://pubmed.ncbi.nlm.nih.gov/40000216/","publicationTypes":["Journal Article"]}],"totalReturned":1}',
+    );
+    expect(text).toBe(
+      [
+        '## PubMed Articles',
+        '**Articles Returned:** 1',
+        '',
+        '### A Consortium Trial.',
+        '',
+        '**Authors (2):**',
+        '- Sharib Ali (S) [aff 0]',
+        '- TGU Investigators (collective) [aff 1]',
+        '',
+        '**Affiliations:**',
+        '- [0] Big Data Institute, Oxford.',
+        '- [1] Translational Gastroenterology Unit, Oxford.',
+        '',
+        '**Journal:** Journal of Consortia, 2024, **12**',
+        '**Record Type:** journal-article',
+        '**Type:** Journal Article',
+        '**PMID:** 40000216',
+        '**PubMed:** https://pubmed.ncbi.nlm.nih.gov/40000216/',
+      ].join('\n'),
+    );
+  });
+
+  it('renders two lists in order, an ORCID and affiliations by index, on both surfaces', async () => {
+    stageSet(CONSORTIUM_XML);
+    const { structured, text } = await call(['40000216'], { includeInvestigators: true });
+
+    const [article] = structured.articles;
+    expect(article?.investigators).toEqual(CONSORTIUM_INVESTIGATORS);
+    expect(article?.affiliations).toEqual([BDI, TGU, KENNEDY]);
+    expect(blockOf(text)).toBe(
+      [
+        '**Investigators (3):**',
+        '- Philip Allan (P)',
+        '- Carolina Arancibia-Cárcamo (C) [aff 1,2] · ORCID 0000-0002-1825-0097',
+        '- Alissa Walsh (A) [aff 2]',
+      ].join('\n'),
+    );
+    expect(text).toContain(
+      '**Affiliations:**\n- [0] Big Data Institute, Oxford.\n- [1] Translational Gastroenterology Unit, Oxford.\n- [2] Kennedy Institute, Oxford.\n',
+    );
+  });
+
+  it('omits the field and the block for a record with no list and for a Bookshelf record', async () => {
+    const chapter = GENEREVIEWS_CHAPTER_XML.replace(
+      '</AuthorList><PublicationType',
+      `</AuthorList>${SINGLETON_LIST_XML}<PublicationType`,
+    );
+    expect(chapter).toContain('<InvestigatorList>');
+    stageSet(JOURNAL_ARTICLE_XML, chapter);
+
+    const { structured, text } = await call(['42474064', '20301425'], {
+      includeInvestigators: true,
+    });
+
+    expect(structured.articles).toHaveLength(2);
+    for (const article of structured.articles) {
+      expect(article).not.toHaveProperty('investigators');
+      expect(article.affiliations ?? []).not.toContain(KENNEDY);
+    }
+    expect(text).not.toContain('**Investigators');
+  });
+
+  describe('under maxResponseCharacters', () => {
+    const sizeOf = (article: ArticleOut | undefined) => JSON.stringify(article).length;
+
+    it('counts the investigators in the record size the budget spends', async () => {
+      stageSet(CONSORTIUM_XML, JOURNAL_ARTICLE_XML);
+      const plain = (await call(['40000216', '42474064'])).structured.articles[0];
+      stageSet(CONSORTIUM_XML, JOURNAL_ARTICLE_XML);
+      const heavy = (await call(['40000216', '42474064'], { includeInvestigators: true }))
+        .structured.articles[0];
+      expect(heavy?.investigators).toHaveLength(3);
+      const plainSize = sizeOf(plain);
+      const fullSize = sizeOf(heavy);
+      expect(fullSize).toBeGreaterThan(plainSize);
+
+      // The ceiling that keeps the record without its investigators defers it with them.
+      stageSet(CONSORTIUM_XML, JOURNAL_ARTICLE_XML);
+      const cut = (
+        await call(['40000216', '42474064'], {
+          includeInvestigators: true,
+          maxResponseCharacters: plainSize,
+        })
+      ).structured;
+      expect(cut.articles).toEqual([]);
+      expect(cut.deferred?.ids).toEqual(['40000216', '42474064']);
+      expect(cut.deferred?.nextDeferredCharacters).toBe(fullSize);
+
+      stageSet(CONSORTIUM_XML, JOURNAL_ARTICLE_XML);
+      const unflagged = (await call(['40000216', '42474064'], { maxResponseCharacters: plainSize }))
+        .structured;
+      expect(unflagged.articles.map((a) => a.pmid)).toEqual(['40000216']);
+
+      // The full record size, investigators included, is exactly what keeps it.
+      stageSet(CONSORTIUM_XML, JOURNAL_ARTICLE_XML);
+      const kept = (
+        await call(['40000216', '42474064'], {
+          includeInvestigators: true,
+          maxResponseCharacters: fullSize,
+        })
+      ).structured;
+      expect(kept.articles.map((a) => a.pmid)).toEqual(['40000216']);
+      expect(kept.articles[0]?.investigators).toEqual(CONSORTIUM_INVESTIGATORS);
+      expect(kept.deferred?.returnedCharacters).toBe(fullSize);
       expect(kept.deferred?.ids).toEqual(['42474064']);
     });
   });

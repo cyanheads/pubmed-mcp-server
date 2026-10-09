@@ -7,7 +7,7 @@
  * @module tests/mcp-server/tools/definitions/pubmed-europepmc-fetch.tool.test
  */
 
-import type { ContentBlock } from '@cyanheads/mcp-ts-core';
+import { type ContentBlock, z } from '@cyanheads/mcp-ts-core';
 import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
 import { createMockContext, getEnrichment, runToolContract } from '@cyanheads/mcp-ts-core/testing';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
@@ -112,14 +112,22 @@ describe('pubmedEuropepmcFetchTool', () => {
   it('flattens EPMC `Y`/`N` flags and emits an epmcUrl', async () => {
     mockFetchRecords.mockResolvedValue([
       { id: 'PPR1', source: 'PPR', isOpenAccess: 'Y', inPMC: 'N' },
+      { id: 'PMC5', source: 'PMC', isOpenAccess: 'N', inPMC: 'Y' },
     ]);
     const ctx = createMockContext({ errors: pubmedEuropepmcFetchTool.errors });
     const result = await pubmedEuropepmcFetchTool.handler(
-      pubmedEuropepmcFetchTool.input.parse({ records: [{ source: 'PPR', epmcId: 'PPR1' }] }),
+      pubmedEuropepmcFetchTool.input.parse({
+        records: [
+          { source: 'PPR', epmcId: 'PPR1' },
+          { source: 'PMC', epmcId: 'PMC5' },
+        ],
+      }),
       ctx,
     );
-    expect(result.records[0]?.isOpenAccess).toBe(true);
-    expect(result.records[0]?.hasFullTextXml).toBe(false);
+    expect(result.records.map((r) => [r.isOpenAccess, r.hasFullTextXml])).toEqual([
+      [true, false],
+      [false, true],
+    ]);
     expect(result.records[0]?.epmcUrl).toBe('https://europepmc.org/article/PPR/PPR1');
   });
 
@@ -740,7 +748,8 @@ describe('pubmedEuropepmcFetchTool whole-response budget (#188)', () => {
     const baseline = (await call(HITS, REFS)).structured;
     const total = sum(sizesOf(baseline));
 
-    for (const ceiling of [total, total + 1, 1_000_000]) {
+    // No cap: past the former 1,000,000 limit the ceiling still means "no limit". (#223)
+    for (const ceiling of [total, total + 1, 1_000_000, 1_000_001, Number.MAX_SAFE_INTEGER]) {
       const { structured, text } = await call(HITS, REFS, { maxResponseCharacters: ceiling });
       expect(structured.records.map((r) => r.epmcId)).toEqual(['PPR1', '111', 'KR1']);
       expect(structured.deferred).toBeUndefined();
@@ -919,24 +928,35 @@ describe('pubmedEuropepmcFetchTool whole-response budget (#188)', () => {
     expect(structured.notice).toMatch(/no record for any requested pair/i);
   });
 
-  it('rejects a ceiling outside 1–1,000,000 or a fractional one', async () => {
+  it('rejects a non-positive, fractional, non-numeric, or unsafe-integer ceiling (#223)', async () => {
     const records: Pair[] = [{ source: 'PPR', epmcId: 'PPR1' }];
-    for (const value of [0, -1, 1.5, 1_000_001]) {
-      const result = await runToolContract(pubmedEuropepmcFetchTool, {
-        records,
-        maxResponseCharacters: value,
-      });
+    for (const value of [0, -1, 1.5, 'all', 9_007_199_254_740_992]) {
+      // Raw wire arguments: the probe values are not all of the input type.
+      const args = { records, maxResponseCharacters: value };
+      const result = await runToolContract(pubmedEuropepmcFetchTool, args as never);
       expect(result.isError).toBe(true);
       expect(result.structuredContent).toMatchObject({
         error: { code: JsonRpcErrorCode.InvalidParams },
       });
     }
-    for (const value of [1, 1_000_000]) {
+    for (const value of [1, 1_000_000, 1_000_001, Number.MAX_SAFE_INTEGER]) {
       expect(
         pubmedEuropepmcFetchTool.input.safeParse({ records, maxResponseCharacters: value }).success,
       ).toBe(true);
     }
     expect(mockFetchRecords).not.toHaveBeenCalled();
+  });
+
+  it('advertises the safe-integer bound as the ceiling maximum, keeping the 25-record batch cap (#223)', () => {
+    const schema = z.toJSONSchema(pubmedEuropepmcFetchTool.input, { io: 'input' }) as unknown as {
+      properties: Record<string, Record<string, unknown>>;
+    };
+    expect(schema.properties.maxResponseCharacters).toMatchObject({
+      type: 'integer',
+      minimum: 1,
+      maximum: Number.MAX_SAFE_INTEGER,
+    });
+    expect(schema.properties.records).toMatchObject({ maxItems: 25 });
   });
 
   it('advertises the budget and its continuation in the tool and field descriptions', () => {

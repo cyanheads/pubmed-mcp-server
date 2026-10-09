@@ -1,4 +1,4 @@
-<!-- pubmed_fetch_articles {"pmids":["39624286"],"includeMesh":true,"includeGrants":true} -->
+<!-- pubmed_fetch_articles {"pmids":["39624286"],"includeMesh":true,"includeGrants":true,"includeInvestigators":true} -->
 ## PubMed Articles
 **Articles Returned:** 1
 
@@ -46,11 +46,14 @@ This paper investigates the behavior of fractional-order nonlinear multi-agent s
 ## PMID 39624286
 **Securing consensus in fractional-order multi-agent systems: Algebraic approaches against Byzantine attacks.**
 
+**Notices:**
+- **ErratumIn:** Heliyon. 2025 Jun 30;11(12):e43572. doi: 10.1016/j.heliyon.2025.e43572. — PMID 41216527
+
 ### APA
-Zhong, Y., Khan, A., Javeed, M. A., Raza, H., Hassan, W. U., Niazi, A. U. K., & Mehmood, M. U. (2024). Securing consensus in fractional-order multi-agent systems: Algebraic approaches against Byzantine attacks. *Heliyon*, *10*(22), e40335. https://doi.org/10.1016/j.heliyon.2024.e40335
+Zhong, Y., Khan, A., Javeed, M. A., Raza, H., Hassan, W. U., Niazi, A. U. K., & Mehmood, M. U. (2024). Securing consensus in fractional-order multi-agent systems: Algebraic approaches against Byzantine attacks. *Heliyon*, *10*(22), Article e40335. https://doi.org/10.1016/j.heliyon.2024.e40335
 
 ### MLA
-Zhong, Yubin, et al. "Securing consensus in fractional-order multi-agent systems: Algebraic approaches against Byzantine attacks." *Heliyon*, vol. 10, no. 22, 2024, p. e40335. https://doi.org/10.1016/j.heliyon.2024.e40335.
+Zhong, Yubin, et al. "Securing consensus in fractional-order multi-agent systems: Algebraic approaches against Byzantine attacks." *Heliyon*, vol. 10, no. 22, 2024, art. e40335. https://doi.org/10.1016/j.heliyon.2024.e40335.
 
 ### BIBTEX
 ```bibtex
@@ -102,4 +105,4 @@ ER  -
 ```
 
 ### VANCOUVER
-Zhong Y, Khan A, Javeed MA, Raza H, Hassan WU, Niazi AUK, et al. Securing consensus in fractional-order multi-agent systems: Algebraic approaches against Byzantine attacks. Heliyon. 2024;10(22):e40335. doi: 10.1016/j.heliyon.2024.e40335
+Zhong Y, Khan A, Javeed MA, Raza H, Hassan WU, Niazi AUK, et al. Securing consensus in fractional-order multi-agent systems: Algebraic approaches against Byzantine attacks. Heliyon. 2024;10(22):e40335. doi: 10.1016/j.heliyon.2024.e40335. Erratum in: Heliyon. 2025 Jun 30;11(12):e43572. doi: 10.1016/j.heliyon.2025.e43572.

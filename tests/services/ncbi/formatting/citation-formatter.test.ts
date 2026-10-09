@@ -3,6 +3,8 @@
  * @module tests/services/ncbi/formatting/citation-formatter.test
  */
 
+import { readdirSync, readFileSync } from 'node:fs';
+import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
 import {
   formatApa,
@@ -15,6 +17,8 @@ import {
 } from '@/services/ncbi/formatting/citation-formatter.js';
 import { parseArticleSet } from '@/services/ncbi/parsing/article-parser.js';
 import type { ParsedArticle } from '@/services/ncbi/types.js';
+import { PMC_FIXTURES_DIR } from '../../../corpus/fixtures.js';
+import { PUBMED_FIXTURES_DIR } from '../../../corpus/pubmed-fixtures.js';
 import {
   ADA_WHOLE_BOOK_XML,
   articleSetXml,
@@ -28,6 +32,12 @@ import {
   PROBE_REPORTS_CHAPTER_XML,
   parseArticleSetXml,
 } from '../parsing/_book-fixtures.js';
+import {
+  ERRATUM_NOTE_ARTICLE_XML,
+  PUBLISHED_ERRATUM_XML,
+  RETRACTED_ARTICLE_XML,
+  RETRACTION_NOTICE_XML,
+} from '../parsing/_comments-corrections-fixtures.js';
 
 const sampleArticle: ParsedArticle = {
   recordType: 'journal-article',
@@ -66,7 +76,7 @@ describe('formatApa', () => {
     expect(citation).toContain('A Novel Approach to Gene Therapy.');
     expect(citation).toContain('*Nature Medicine*');
     expect(citation).toContain('*30*(5)');
-    expect(citation).toContain('123-130');
+    expect(citation).toContain('123\u{2013}130');
     expect(citation).toContain('https://doi.org/10.1038/s41591-024-00001-0');
   });
 
@@ -205,20 +215,6 @@ describe('formatMla', () => {
 });
 
 describe('formatBibtex', () => {
-  it('generates valid BibTeX entry', () => {
-    const citation = formatBibtex(sampleArticle);
-    expect(citation).toMatch(/^@article\{pmid12345678,/);
-    expect(citation).toContain('author');
-    expect(citation).toContain('{Smith}, John');
-    expect(citation).toContain('title');
-    expect(citation).toContain('journal');
-    expect(citation).toContain('year');
-    expect(citation).toContain('volume');
-    expect(citation).toContain('doi');
-    expect(citation).toContain('pmid');
-    expect(citation).toMatch(/\}$/);
-  });
-
   it('escapes special LaTeX characters in titles', () => {
     const article: ParsedArticle = {
       ...sampleArticle,
@@ -470,10 +466,6 @@ describe('formatVancouver', () => {
     const { doi: _doi, ...article } = sampleArticle;
     expect(formatVancouver(article)).not.toContain('doi:');
   });
-
-  it('handles a date-only article without crashing', () => {
-    expect(typeof formatVancouver(minimalArticle)).toBe('string');
-  });
 });
 
 describe('electronic article locators', () => {
@@ -521,7 +513,7 @@ describe('electronic article locators', () => {
 
   it('formatApa puts "Article <value>" in the page slot', () => {
     expect(formatApa(locatorArticle)).toContain(
-      '*The European respiratory journal*, *64*(3), Article 2400512.',
+      '*The European Respiratory Journal*, *64*(3), Article 2400512.',
     );
   });
 
@@ -548,7 +540,8 @@ describe('electronic article locators', () => {
 
   it('renders pagination, not the locator, when a record carries both', () => {
     // PLoS ONE and Scientific Reports report the article number as pagination
-    // *and* as an ELocationID. Output must be identical to the pages-only case.
+    // *and* as an ELocationID. Vancouver, BibTeX, and RIS print it once, as the
+    // pages-only case does; APA and MLA cite it as the article number it is. (#217)
     const pagesOnly: ParsedArticle = {
       ...locatorArticle,
       journalInfo: { ...unlocatedJournal, pages: 'e0300123' },
@@ -562,8 +555,10 @@ describe('electronic article locators', () => {
       },
     };
     expect(formatVancouver(both)).toBe(formatVancouver(pagesOnly));
-    expect(formatApa(both)).toBe(formatApa(pagesOnly));
-    expect(formatMla(both)).toBe(formatMla(pagesOnly));
+    expect(formatApa(both)).toContain('*64*(3), Article e0300123.');
+    expect(formatApa(pagesOnly)).toContain('*64*(3), e0300123.');
+    expect(formatMla(both)).toContain('vol. 64, no. 3, 2024, art. e0300123.');
+    expect(formatMla(pagesOnly)).toContain('vol. 64, no. 3, 2024, p. e0300123.');
     expect(formatBibtex(both)).toBe(formatBibtex(pagesOnly));
     expect(formatRis(both)).toBe(formatRis(pagesOnly));
   });
@@ -585,7 +580,7 @@ describe('paginated records render byte-identically across every style', () => {
   // present. Any diff here is a regression, not a formatting preference.
   it('formatApa', () => {
     expect(formatApa(sampleArticle)).toBe(
-      'Smith, J., Doe, J. A., & Johnson, R. B. (2024). A Novel Approach to Gene Therapy. *Nature Medicine*, *30*(5), 123-130. https://doi.org/10.1038/s41591-024-00001-0',
+      'Smith, J., Doe, J. A., & Johnson, R. B. (2024). A Novel Approach to Gene Therapy. *Nature Medicine*, *30*(5), 123\u{2013}130. https://doi.org/10.1038/s41591-024-00001-0',
     );
   });
 
@@ -966,11 +961,14 @@ describe('Bookshelf records (#114)', () => {
     });
   });
 
-  it('dispatches every style without throwing on the no-contributor shapes', () => {
+  it('cites the record title in every style on the no-contributor shapes', () => {
     for (const article of [lactMed(), adaBook()]) {
+      const title = article.title ?? '';
+      expect(title).not.toBe('');
       const citations = formatCitations(article, ['apa', 'mla', 'bibtex', 'ris', 'vancouver']);
+      expect(Object.keys(citations)).toHaveLength(5);
       for (const [style, text] of Object.entries(citations)) {
-        expect(text.length, style).toBeGreaterThan(0);
+        expect(text, `${article.pmid} ${style}`).toContain(title);
       }
     }
   });
@@ -1225,5 +1223,350 @@ describe('Bookshelf chapter dates (#189)', () => {
         expect(formatCitations(article, [style])[style], style).not.toContain('Inc..');
       }
     });
+  });
+});
+
+// ─── APA and MLA journal conventions (#217) ──────────────────────────────────
+//
+// NLM catalogs a journal name in sentence case, elides a page range's end, and
+// copies an article number into `MedlinePgn`. APA and MLA cite the name in
+// title case and an article number as one; APA writes a range in full with an
+// en dash. Vancouver, BibTeX, and RIS keep NLM's own values.
+
+describe('APA and MLA journal conventions (#217)', () => {
+  /** A real PubMed record from the corpus, through the production parser. */
+  const corpusRecord = (pmid: string): ParsedArticle => {
+    const xml = readFileSync(join(PUBMED_FIXTURES_DIR, `pmid${pmid}`, 'source.xml'), 'utf8');
+    const parsed = parseArticleSet(parseArticleSetXml(xml))[0];
+    if (!parsed) throw new Error(`corpus record ${pmid} did not parse`);
+    return parsed;
+  };
+  const record = (xml: string): ParsedArticle => {
+    const parsed = parseArticleSet(parseArticleSetXml(articleSetXml(xml)))[0];
+    if (!parsed) throw new Error('fixture did not parse');
+    return parsed;
+  };
+
+  /** PMID 34026693 — `MedlinePgn` 662953 equals `ELocationID` pii 662953. */
+  const frontiers = () => corpusRecord('34026693');
+  /** PMID 38869518 — `MedlinePgn` 42 equals pii 42, a Springer article number. */
+  const aminoAcids = () => corpusRecord('38869518');
+  /** PMID 34116029 — `865-878.e8`, a pii that is not the pagination, keyword case repeats. */
+  const gastro = () => corpusRecord('34116029');
+  /** PMID 9500320 — elided `637-41`, no non-DOI locator. */
+  const lancet1998 = () => record(RETRACTED_ARTICLE_XML);
+  /** PMID 20137807 — a single page, 445, beside a DOI-typed `ELocationID` only. */
+  const lancet2010 = () => record(RETRACTION_NOTICE_XML);
+
+  /** The italicized journal name APA prints for a record carrying only that name. */
+  const apaJournal = (title: string) =>
+    /\*(.+)\*/.exec(
+      formatApa({ recordType: 'journal-article', pmid: '1', journalInfo: { title } }),
+    )?.[1];
+  const mlaJournal = (title: string) =>
+    /\*(.+)\*/.exec(
+      formatMla({ recordType: 'journal-article', pmid: '1', journalInfo: { title } }),
+    )?.[1];
+
+  it("keeps Vancouver, BibTeX, and RIS on NLM's journal name and pagination", () => {
+    const article = frontiers();
+    expect(formatVancouver(article)).toContain(
+      'Front Pediatr. 2021;9:662953. doi: 10.3389/fped.2021.662953',
+    );
+    expect(formatBibtex(article)).toMatch(/^ {2}journal\s+= \{Frontiers in pediatrics\},$/m);
+    expect(formatBibtex(article)).toMatch(/^ {2}pages\s+= \{662953\},$/m);
+    expect(formatBibtex(article)).not.toMatch(/^ {2}eid\s/m);
+    expect(formatRis(article)).toContain('JF  - Frontiers in pediatrics\n');
+    expect(formatRis(article)).toContain('SP  - 662953\n');
+    expect(formatRis(article)).not.toContain('C7  -');
+
+    const elided = lancet1998();
+    expect(formatVancouver(elided)).toContain('Lancet. 1998;351(9103):637-41.');
+    expect(formatBibtex(elided)).toMatch(/^ {2}pages\s+= \{637-41\},$/m);
+    expect(formatRis(elided)).toContain('SP  - 637\nEP  - 641\n');
+  });
+
+  it('keeps a page that matches no non-DOI locator as a page in APA and MLA', () => {
+    const notice = lancet2010();
+    expect(formatApa(notice)).toContain('*Lancet (London, England)*, *375*(9713), 445.');
+    expect(formatMla(notice)).toContain('vol. 375, no. 9713, 2010, p. 445.');
+
+    // PMID 39964127: a Lancet page, 2413, whose pii is the article's own S-number.
+    const lancetPage: ParsedArticle = {
+      ...sampleArticle,
+      journalInfo: {
+        ...sampleArticle.journalInfo!,
+        pages: '2413',
+        elocationId: 'S0140-6736(24)02673-4',
+        elocationIdType: 'pii',
+      },
+    };
+    expect(formatApa(lancetPage)).toContain('*30*(5), 2413.');
+    expect(formatApa(lancetPage)).not.toContain('Article');
+    expect(formatMla(lancetPage)).toContain('2024, p. 2413.');
+    expect(formatMla(lancetPage)).not.toContain('art.');
+  });
+
+  it("keeps NLM's page text in MLA, which elides a range itself", () => {
+    expect(formatMla(lancet1998())).toContain('vol. 351, no. 9103, 1998, pp. 637-41.');
+    expect(formatMla(gastro())).toContain('vol. 161, no. 3, 2021, pp. 865-878.e8.');
+  });
+
+  it("writes an APA page range with an en dash and NLM's elided end expanded", () => {
+    expect(formatApa(lancet1998())).toContain(
+      '*Lancet (London, England)*, *351*(9103), 637\u{2013}641.',
+    );
+    expect(formatApa(gastro())).toContain('*Gastroenterology*, *161*(3), 865\u{2013}878.e8.');
+  });
+
+  it('cites pagination equal to the non-DOI locator as an article number in APA and MLA', () => {
+    expect(formatApa(frontiers())).toContain('*Frontiers in Pediatrics*, *9*, Article 662953.');
+    expect(formatMla(frontiers())).toContain(
+      '*Frontiers in Pediatrics*, vol. 9, 2021, art. 662953.',
+    );
+    expect(formatApa(aminoAcids())).toContain('*Amino Acids*, *56*(1), Article 42.');
+    expect(formatMla(aminoAcids())).toContain('vol. 56, no. 1, 2024, art. 42.');
+    expect(formatMla(aminoAcids())).not.toContain('p. 42');
+  });
+
+  it("title-cases the journal name in APA and MLA without touching NLM's own casing", () => {
+    const cases: [string, string][] = [
+      ['Frontiers in pediatrics', 'Frontiers in Pediatrics'],
+      ['Annales de dermatologie et de venereologie', 'Annales de Dermatologie et de Venereologie'],
+      ['Disease-a-month : DM', 'Disease-a-Month : DM'],
+      ['Brain : a journal of neurology', 'Brain : A Journal of Neurology'],
+      ['PloS one', 'PloS One'],
+      ['Cellular & molecular biology letters', 'Cellular & Molecular Biology Letters'],
+      [
+        'Angewandte Chemie (International ed. in English)',
+        'Angewandte Chemie (International Ed. in English)',
+      ],
+      [
+        'Health technology assessment (Winchester, England)',
+        'Health Technology Assessment (Winchester, England)',
+      ],
+      ['Lancet (London, England)', 'Lancet (London, England)'],
+      [
+        'Proceedings of the National Academy of Sciences of the United States of America',
+        'Proceedings of the National Academy of Sciences of the United States of America',
+      ],
+      ['eLife', 'eLife'],
+      ['mBio', 'mBio'],
+      ['JAMA', 'JAMA'],
+      ['iScience', 'iScience'],
+    ];
+    for (const [nlm, titleCase] of cases) {
+      expect(apaJournal(nlm), nlm).toBe(titleCase);
+      expect(mlaJournal(nlm), nlm).toBe(titleCase);
+    }
+  });
+
+  it('applies that rule to every journal title in the corpus', () => {
+    // readdirSync's order is the filesystem's; sort so the pins below line up
+    const pubmedTitles = readdirSync(PUBMED_FIXTURES_DIR)
+      .sort()
+      .map((dir) => corpusRecord(dir.replace(/^pmid/, '')).journalInfo?.title ?? '');
+    const pmcTitles = readdirSync(PMC_FIXTURES_DIR).map(
+      (dir) =>
+        /<journal-title>([^<]+)<\/journal-title>/.exec(
+          readFileSync(join(PMC_FIXTURES_DIR, dir, 'source.xml'), 'utf8'),
+        )?.[1] ?? '',
+    );
+    expect(pubmedTitles).toHaveLength(6);
+    expect(pmcTitles).toHaveLength(9);
+
+    /** A word part the rule may capitalize: lowercase letters, apostrophes inside. */
+    const lowercaseWord = /^[^\p{L}\p{N}]*\p{Ll}+(?:['\u{2019}]\p{Ll}+)*[^\p{L}\p{N}]*$/u;
+    for (const title of [...pubmedTitles, ...pmcTitles]) {
+      expect(title).not.toBe('');
+      for (const cased of [apaJournal(title), mlaJournal(title)]) {
+        const before = title.split(/([\s-]+)/);
+        const after = (cased ?? '').split(/([\s-]+)/);
+        expect(after, title).toHaveLength(before.length);
+        before.forEach((word, i) => {
+          const result = after[i];
+          if (result === word) return;
+          // Only an all-lowercase word changes, and only its first letter
+          expect(word, title).toMatch(lowercaseWord);
+          expect(result?.toLowerCase(), title).toBe(word);
+          expect(result?.replace(/^[^\p{L}]*\p{Lu}/u, ''), title).toBe(
+            word.replace(/^[^\p{L}]*\p{Ll}/u, ''),
+          );
+        });
+      }
+    }
+
+    // NLM's sentence-case names gain capitals; PMC's publisher-cased ones keep theirs
+    expect(pubmedTitles.map(apaJournal)).toEqual([
+      'Cellular & Molecular Biology Letters',
+      'Frontiers in Pediatrics',
+      'Gastroenterology',
+      'Medicine',
+      'Amino Acids',
+      'Heliyon',
+    ]);
+    expect(pmcTitles.map(apaJournal)).toEqual(pmcTitles);
+  });
+
+  it('lowercases a preposition longer than three letters in MLA only', () => {
+    expect(apaJournal('Notes from the field')).toBe('Notes From the Field');
+    expect(mlaJournal('Notes from the field')).toBe('Notes from the Field');
+  });
+
+  it('drops a keyword that repeats an earlier one ignoring case, keeping the first spelling', () => {
+    const article = gastro();
+    const bibtex = formatBibtex(article);
+    expect(bibtex).toContain('{Deep learning}');
+    expect(bibtex).toContain('{Risk assessment}');
+    expect(bibtex).not.toContain('{Deep Learning}');
+    expect(bibtex).not.toContain('{Risk Assessment}');
+    const ris = formatRis(article);
+    expect(ris).toContain('KW  - Deep learning\n');
+    expect(ris).toContain('KW  - Risk assessment\n');
+    expect(ris).not.toContain('KW  - Deep Learning\n');
+    expect(ris).not.toContain('KW  - Risk Assessment\n');
+
+    const mixed: ParsedArticle = {
+      ...sampleArticle,
+      keywords: ['CRISPR', 'gene therapy'],
+      meshTerms: [
+        { descriptorName: 'Gene Therapy', isMajorTopic: true },
+        { descriptorName: 'Humans', isMajorTopic: false },
+        { descriptorName: 'crispr', isMajorTopic: false },
+      ],
+    };
+    expect(formatBibtex(mixed)).toContain('keywords = {{CRISPR}, {gene therapy}, {Humans}}');
+    expect(formatRis(mixed)).toContain('KW  - CRISPR\nKW  - gene therapy\nKW  - Humans\nAB  -');
+  });
+});
+
+// ─── Retraction and erratum notices (#215) ───────────────────────────────────
+//
+// NCBI links a retracted or corrected article to its notice through
+// `CommentsCorrectionsList`. Vancouver prints Citing Medicine's `Retraction in:` /
+// `Erratum in:` note, as NCBI's own NLM export does; APA adds APA 7's retraction
+// parenthetical. Every record here is real (see the fixture files).
+
+describe('retraction and erratum notices (#215)', () => {
+  const corpusRecord = (pmid: string): ParsedArticle => {
+    const xml = readFileSync(join(PUBMED_FIXTURES_DIR, `pmid${pmid}`, 'source.xml'), 'utf8');
+    const parsed = parseArticleSet(parseArticleSetXml(xml))[0];
+    if (!parsed) throw new Error(`corpus record ${pmid} did not parse`);
+    return parsed;
+  };
+  const record = (xml: string): ParsedArticle => {
+    const parsed = parseArticleSet(parseArticleSetXml(articleSetXml(xml)))[0];
+    if (!parsed) throw new Error('fixture did not parse');
+    return parsed;
+  };
+  /** The same record with no linked notices at all. */
+  const withoutNotices = ({ commentsCorrections: _cc, ...article }: ParsedArticle) => article;
+
+  /** PMID 31844417 — one `RetractionIn`, PMID 40251503. */
+  const retracted = () => corpusRecord('31844417');
+  /** PMID 39624286 — one `ErratumIn`, PMID 41216527. */
+  const corrected = () => corpusRecord('39624286');
+  /** PMID 9500320 — two `RetractionIn`, one `ExpressionOfConcernIn`, 26 `CommentIn`. */
+  const wakefield = () => record(RETRACTED_ARTICLE_XML);
+  /** PMID 23300797 — `ErratumIn` with no PMID, a `Note`, and no final period. */
+  const erratumWithNote = () => record(ERRATUM_NOTE_ARTICLE_XML);
+  /** PMID 8643635 — `ErratumIn` with no period or DOI, then `ErratumFor`. */
+  const publishedErratum = () => record(PUBLISHED_ERRATUM_XML);
+
+  it('leaves a record whose links qualify nothing byte-identical in every style', () => {
+    // 20137807 is itself a retraction notice (`RetractionOf` only); 34116029
+    // carries only a `CommentIn`.
+    for (const article of [record(RETRACTION_NOTICE_XML), corpusRecord('34116029')]) {
+      expect(article.commentsCorrections?.length).toBeGreaterThan(0);
+      for (const style of ['apa', 'mla', 'bibtex', 'ris', 'vancouver'] as const) {
+        expect(formatCitation(article, style), `${article.pmid} ${style}`).toBe(
+          formatCitation(withoutNotices(article), style),
+        );
+      }
+    }
+  });
+
+  it('leaves MLA, BibTeX, and RIS byte-identical for every record', () => {
+    for (const article of [retracted(), corrected(), wakefield(), erratumWithNote()]) {
+      for (const style of ['mla', 'bibtex', 'ris'] as const) {
+        expect(formatCitation(article, style), `${article.pmid} ${style}`).toBe(
+          formatCitation(withoutNotices(article), style),
+        );
+      }
+    }
+  });
+
+  it("appends Vancouver's Retraction in: note after the DOI, which then closes with a period", () => {
+    expect(formatVancouver(retracted())).toBe(
+      'Li H, Tian X, Wang P, Huang M, Xu R, Nie T. MicroRNA-582-3p negatively regulates cell proliferation and cell cycle progression in acute myeloid leukemia by targeting cyclin B2. Cell Mol Biol Lett. 2019;24:66. doi: 10.1186/s11658-019-0184-7. Retraction in: Cell Mol Biol Lett. 2025 Apr 18;30(1):51. doi: 10.1186/s11658-025-00729-3.',
+    );
+  });
+
+  it("appends Vancouver's Erratum in: note, with no APA parenthetical", () => {
+    expect(formatVancouver(corrected())).toMatch(
+      /doi: 10\.1016\/j\.heliyon\.2024\.e40335\. Erratum in: Heliyon\. 2025 Jun 30;11\(12\):e43572\. doi: 10\.1016\/j\.heliyon\.2025\.e43572\.$/,
+    );
+    expect(formatApa(corrected())).toBe(formatApa(withoutNotices(corrected())));
+  });
+
+  it('prints every retraction in NCBI order and no expression of concern or comment', () => {
+    const vancouver = formatVancouver(wakefield());
+    expect(vancouver).toMatch(
+      /1998;351\(9103\):637-41\. doi: 10\.1016\/s0140-6736\(97\)11096-0\. Retraction in: Lancet\. 2004 Mar 6;363\(9411\):750\. doi: 10\.1016\/S0140-6736\(04\)15715-2\. Retraction in: Lancet\. 2010 Feb 6;375\(9713\):445\. doi: 10\.1016\/S0140-6736\(10\)60175-4\.$/,
+    );
+    expect(vancouver).not.toContain('Eur J Gastroenterol Hepatol');
+    expect(vancouver).not.toContain('author reply');
+  });
+
+  it("ends APA on APA 7's retraction parenthetical, several joined with a semicolon", () => {
+    expect(formatApa(retracted())).toMatch(
+      /https:\/\/doi\.org\/10\.1186\/s11658-019-0184-7 \(Retraction published Cell Mol Biol Lett\. 2025 Apr 18;30\(1\):51\. doi: 10\.1186\/s11658-025-00729-3\)$/,
+    );
+    expect(formatApa(wakefield())).toMatch(
+      / \(Retraction published Lancet\. 2004 Mar 6;363\(9411\):750\. doi: 10\.1016\/S0140-6736\(04\)15715-2; Lancet\. 2010 Feb 6;375\(9713\):445\. doi: 10\.1016\/S0140-6736\(10\)60175-4\)$/,
+    );
+  });
+
+  it('ends a note on exactly one period whatever NCBI gives, and keeps its Note out', () => {
+    const vancouver = formatVancouver(erratumWithNote());
+    expect(vancouver).toMatch(
+      / Erratum in: PLoS One\. 2013;8\(6\)\. doi:10\.1371\/annotation\/df743c15-c50e-4d00-a24d-510e15f9a73b\.$/,
+    );
+    for (const style of ['apa', 'mla', 'bibtex', 'ris', 'vancouver'] as const) {
+      expect(formatCitation(erratumWithNote(), style), style).not.toContain('corrected to');
+    }
+    // A published erratum: its own `ErratumIn` prints, its `ErratumFor` does not
+    expect(formatVancouver(publishedErratum())).toMatch(
+      /doi: 10\.1073\/pnas\.93\.11\.5674\. Erratum in: Proc Natl Acad Sci U S A 1996 Aug 20;93\(17\):9302\.$/,
+    );
+    expect(formatVancouver(publishedErratum())).not.toContain('7090-4');
+  });
+
+  it('follows the source with the notes when the record has no DOI', () => {
+    const { doi: _doi, ...noDoi } = retracted();
+    expect(formatVancouver(noDoi)).toMatch(
+      /Cell Mol Biol Lett\. 2019;24:66\. Retraction in: Cell Mol Biol Lett\. 2025 Apr 18;30\(1\):51\. doi: 10\.1186\/s11658-025-00729-3\.$/,
+    );
+    expect(formatApa(noDoi)).toMatch(
+      /\*24\*, Article 66\. \(Retraction published Cell Mol Biol Lett\. 2025 Apr 18;30\(1\):51\. doi: 10\.1186\/s11658-025-00729-3\)$/,
+    );
+  });
+
+  it('prints no note for a notice type Citing Medicine does not set in the reference', () => {
+    // RetractedandRepublishedIn, CorrectedandRepublishedIn, and
+    // ExpressionOfConcernIn qualify the article but take no in-string note.
+    const article: ParsedArticle = {
+      ...sampleArticle,
+      commentsCorrections: [
+        { refType: 'RetractedandRepublishedIn', refSource: 'Nat Med. 2025;31(1):1.', pmid: '1' },
+        { refType: 'CorrectedandRepublishedIn', refSource: 'Nat Med. 2025;31(2):2.', pmid: '2' },
+        { refType: 'ExpressionOfConcernIn', refSource: 'Nat Med. 2025;31(3):3.', pmid: '3' },
+      ],
+    };
+    for (const style of ['apa', 'mla', 'bibtex', 'ris', 'vancouver'] as const) {
+      expect(formatCitation(article, style), style).toBe(
+        formatCitation(withoutNotices(article), style),
+      );
+    }
   });
 });

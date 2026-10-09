@@ -125,6 +125,31 @@ Writing – original draft: Huan Han.
 
 Writing – review & editing: Huan Han, Xiao Zhang.
 
+#### Footnotes
+Abbreviations:
+- AEs — adverse events
+- CNS — central nervous system
+- CT — computed tomography
+- EGFR ex20ins — epidermal growth factor receptor exon 20 insertion
+- EGFR TKIs — epidermal growth factor receptor tyrosine kinase inhibitors
+- MRI — magnetic resonance imaging
+- NSCLC — non-small cell lung cancer
+- PFS — progression-free survival
+- PR — partial response
+- RECIST 1.1 — response evaluation criteria in solid tumors
+- SD — stable disease
+
+#### Footnotes
+HH and XZ contributed equally to this work.
+
+Data sharing not applicable to this article as no datasets were generated or analyzed during the current study.
+
+This work was supported by the Natural Science Foundation of Henan Province (No.212300410400).
+
+The authors have no funding and conflicts of interest to disclose.
+
+How to cite this article: Han H, Zhang X, Liu X, Zhao J, Zhang J, Zhang J, Zhu H, Jiao S, Tang H. First report of furmonertinib as a first-line treatment in advanced lung adenocarcinoma patients harboring EGFR exon 20 insertion mutations after the kinase domain αC-helix: Two case reports and a literature review. Medicine 2023;102:52(e36667).
+
 #### Tables (1)
 
 ##### Table 1 — Clinical trial summary about EGFR 20ins.

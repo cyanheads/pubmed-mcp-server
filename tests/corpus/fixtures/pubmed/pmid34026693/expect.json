@@ -30,9 +30,10 @@
   "citations": {
     "apa": [
       "Maruyama, D., Kocatürk, B., Lee, Y., Abe, M., Lane, M., Moreira, D., Chen, S., Fishbein, M. C., Porritt, R. A., Noval Rivas, M., & Arditi, M. (2021).",
+      "*Frontiers in Pediatrics*, *9*, Article 662953.",
       "https://doi.org/10.3389/fped.2021.662953"
     ],
-    "mla": ["Maruyama, Daisuke, et al.", "vol. 9, 2021"],
+    "mla": ["Maruyama, Daisuke, et al.", "*Frontiers in Pediatrics*, vol. 9, 2021, art. 662953."],
     "bibtex": [
       "{Noval Rivas}, Magali",
       "volume   = {9}",

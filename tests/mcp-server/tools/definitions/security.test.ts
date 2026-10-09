@@ -262,22 +262,24 @@ describe('fetch-fulltext input validation', () => {
     expect(result.success).toBe(false);
   });
 
-  it('rejects more than 10 PMC IDs', () => {
-    const tooMany = Array.from({ length: 11 }, (_, i) => `PMC${i + 1}`);
-    const result = fetchFulltextTool.input.safeParse({ pmcids: tooMany });
-    expect(result.success).toBe(false);
+  // 11–50 are accepted and split at the per-call fetch limit; the ceiling
+  // bounds input size against absurd lists. (#222)
+  it('rejects more than 50 PMC IDs', () => {
+    const ids = Array.from({ length: 51 }, (_, i) => `PMC${i + 1}`);
+    expect(fetchFulltextTool.input.safeParse({ pmcids: ids.slice(0, 50) }).success).toBe(true);
+    expect(fetchFulltextTool.input.safeParse({ pmcids: ids }).success).toBe(false);
   });
 
-  it('rejects more than 10 PMIDs', () => {
-    const tooMany = Array.from({ length: 11 }, (_, i) => String(i + 1));
-    const result = fetchFulltextTool.input.safeParse({ pmids: tooMany });
-    expect(result.success).toBe(false);
+  it('rejects more than 50 PMIDs', () => {
+    const ids = Array.from({ length: 51 }, (_, i) => String(i + 1));
+    expect(fetchFulltextTool.input.safeParse({ pmids: ids.slice(0, 50) }).success).toBe(true);
+    expect(fetchFulltextTool.input.safeParse({ pmids: ids }).success).toBe(false);
   });
 
-  it('rejects more than 10 DOIs', () => {
-    const tooMany = Array.from({ length: 11 }, (_, i) => `10.1000/test${i}`);
-    const result = fetchFulltextTool.input.safeParse({ dois: tooMany });
-    expect(result.success).toBe(false);
+  it('rejects more than 50 DOIs', () => {
+    const ids = Array.from({ length: 51 }, (_, i) => `10.1000/test${i}`);
+    expect(fetchFulltextTool.input.safeParse({ dois: ids.slice(0, 50) }).success).toBe(true);
+    expect(fetchFulltextTool.input.safeParse({ dois: ids }).success).toBe(false);
   });
 
   it('rejects DOIs shorter than 3 characters', () => {
@@ -817,9 +819,13 @@ describe('maxResponseCharacters bounds', () => {
       }
     });
 
-    it(`${name} rejects a ceiling above the 1,000,000 cap`, () => {
-      expect(parse(1_000_001).success).toBe(false);
-      expect(parse(1_000_000).success).toBe(true);
+    // An output-only ceiling drives no allocation or upstream request, so it
+    // takes no cap below the safe-integer bound `.int()` already enforces. (#223)
+    it(`${name} accepts any safe-integer ceiling past the former 1,000,000 cap`, () => {
+      for (const value of [1_000_000, 1_000_001, Number.MAX_SAFE_INTEGER]) {
+        expect(parse(value).success).toBe(true);
+      }
+      expect(parse(Number.MAX_SAFE_INTEGER + 1).success).toBe(false);
     });
 
     it(`${name} rejects a non-numeric ceiling`, () => {

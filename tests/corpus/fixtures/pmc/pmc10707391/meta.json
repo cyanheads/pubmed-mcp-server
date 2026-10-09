@@ -27,5 +27,5 @@
     "back-sections",
     "research-article"
   ],
-  "notes": "Every list, including the ones nested inside a list item's <p>, sits in <back>/<app-group>, which the tool does not return today."
+  "notes": "Every list, including the ones nested inside a list item's <p>, sits in <back>/<app-group>, returned as the Appendix A and Appendix B sections."
 }

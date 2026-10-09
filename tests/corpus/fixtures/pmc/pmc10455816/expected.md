@@ -199,6 +199,44 @@ A strength of our study is its comparatively large number of patients with negat
 #### 6. Conclusions
 The utilization of the four diagnostic categories suggested by the RSNA demonstrated greater diagnostic performance for most patients with COVID-19. These diagnostic categories can be a crucial tool in clinical decision-making and rapid treatment to complement RT-PCR testing.
 
+#### Acknowledgments
+The authors acknowledge the Deanship of Scientific Research, Vice Presidency for Graduate Studies and Scientific Research, King Faisal University, Saudi Arabia, For supporting this work [Project No. Grant 2654].
+
+#### Footnotes
+Disclaimer/Publisher’s Note: The statements, opinions and data contained in all publications are solely those of the individual author(s) and contributor(s) and not of MDPI and/or the editor(s). MDPI and/or the editor(s) disclaim responsibility for any injury to people or property resulting from any ideas, methods, instructions or products referred to in the content.
+
+#### Author Contributions
+M.H.: Conceptualization, Data curation, Writing—review & editing, Funding acquisition, Project administration and Supervision; Q.M.A. and M.Q.A.: Investigation, Visualization and Project administration; S.I.A.: Formal analysis and Validation; Y.A.A.: Methodology and Roles/Writing—original draft; I.K.A.J.: Writing—review & editing; M.I.A. and M.A.: Data curation; J.A.T. and S.A.F.A.: visualization and Resources. All authors have read and agreed to the published version of the manuscript.
+
+#### Institutional Review Board Statement
+Ethical approval (IRB KHH No. H-05-HS-065) was obtained from our institutional ethics review board; the requirement for informed consent was waived owing to the retrospective nature of the study.
+
+#### Informed Consent Statement
+The requirement for informed written consent was waived due to the retrospective nature of this study.
+
+#### Data Availability Statement
+The datasets used and/or analyzed data during the current study are available from the corresponding author on reasonable request.
+
+#### Conflicts of Interest
+The authors declare no conflict of interest.
+
+#### Abbreviations
+- RSNA — Radiological Society of North America
+- RT-PCR — reverse transcription polymerase chain reaction
+- COVID-19 — coronavirus disease 2019
+- PPV — positive predictive value
+- NPV — negative predictive value
+- SARS-CoV-2 — severe acute respiratory syndrome coronavirus 2
+- GGO — ground-glass opacity
+- IRB — Institutional Review Board
+- STR — Society of Thoracic Radiology
+- ACR — American College of Radiology
+- TP — true positive
+- FP — false positive
+- TN — true negative
+- FN — false negative
+- CI — confidence interval
+
 #### Tables (5)
 
 ##### Table 1 — Demographic and clinical features of patients with suspected COVID-19 infection (184 patients).

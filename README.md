@@ -36,11 +36,11 @@ Biomedical literature from PubMed, PubMed Central, and Europe PMC. Search it, fe
 | Tool | Description |
 |:---|:---|
 | `pubmed_search_articles` | Search PubMed with full query syntax, structured filters, date ranges, and optional summaries |
-| `pubmed_fetch_articles` | Fetch article metadata by PMID: abstract, authors, journal, MeSH terms, grants, linked retraction and correction notices |
+| `pubmed_fetch_articles` | Fetch article metadata by PMID: abstract, authors, journal, MeSH terms, grants, a collective author's investigators on request, linked retraction and correction notices |
 | `pubmed_fetch_fulltext` | Fetch full text by PMID, PMCID, or DOI, falling back from PMC to Europe PMC to Unpaywall |
 | `pubmed_europepmc_search` | Search Europe PMC for preprints, patents, Agricola, and open-access records PubMed doesn't carry |
 | `pubmed_europepmc_fetch` | Fetch complete Europe PMC records, including the untruncated abstract, by `source` + `epmcId` |
-| `pubmed_format_citations` | Format citations in APA 7th, MLA 9th, BibTeX, RIS, or Vancouver (ICMJE/NLM) |
+| `pubmed_format_citations` | Format citations in APA 7th, MLA 9th, BibTeX, RIS, or Vancouver (ICMJE/NLM), with linked retraction and correction notices |
 | `pubmed_find_related` | Find similar articles, citing articles, or references for a PMID |
 | `pubmed_spell_check` | Correct a misspelled PubMed query via NCBI ESpell |
 | `pubmed_lookup_mesh` | Look up MeSH headings with tree numbers, scope notes, and entry terms |
@@ -73,15 +73,15 @@ Biomedical literature from PubMed, PubMed Central, and Europe PMC. Search it, fe
 ### `pubmed_fetch_articles` <sub>tool</sub>
 
 - Up to 200 PMIDs per call; misses are listed in `unavailablePmids`
-- Abstract, authors, journal, DOI, publication types, linked retraction/erratum/comment notices, and links; MeSH terms on by default, grants via `includeGrants`
+- Abstract, authors, journal, DOI, publication types, linked retraction/erratum/comment notices, and links; MeSH terms on by default, grants via `includeGrants`, and the members of a collective author (its `InvestigatorList`, thousands on some consortium trials) via `includeInvestigators`
 - `recordType` separates journal articles from Bookshelf chapters and books; opt-in `maxResponseCharacters` defers overflow to `deferred.ids`
 
 ---
 
 ### `pubmed_fetch_fulltext` <sub>tool</sub>
 
-- `pmcids`, `pmids`, and `dois` in any mix, up to 10 distinct identifiers per call, tried against PMC, then Europe PMC, then Unpaywall (needs `UNPAYWALL_EMAIL`); an article several of them name is fetched and returned once, and `viaSource` names the tier that answered
-- `source: "pmc"` returns sections, tables, and figures; `source: "unpaywall"` returns a best-effort HTML or PDF text body
+- `pmcids`, `pmids`, and `dois` in any mix, up to 50 distinct identifiers per call: the first 10 are fetched and the rest returned in `overLimit` for a follow-up call. Each is tried against PMC, then Europe PMC, then Unpaywall (needs `UNPAYWALL_EMAIL`); an article several of them name is fetched and returned once, and `viaSource` names the tier that answered
+- `source: "pmc"` returns sections (the body, then back matter such as acknowledgments, declarations, and appendices), tables, and figures; `source: "unpaywall"` returns a best-effort HTML or PDF text body
 - Misses carry a typed `reason` and `triedTiers`; `sections`, `maxCharacters`, `overflowMode`, and `maxResponseCharacters` bound the response, and `truncation` reports what was cut
 
 ---
@@ -105,6 +105,7 @@ Biomedical literature from PubMed, PubMed Central, and Europe PMC. Search it, fe
 
 - Up to 50 PMIDs per call, in any mix of `apa`, `mla`, `bibtex`, `ris`, and `vancouver`
 - Bookshelf records cite as edited books, each chapter dated by its own last revision or contribution date; PMIDs that can't be fetched are reported as unavailable
+- Retractions, errata, and expressions of concern NCBI links to an article come back as `notices` and are shown ahead of its citations; Vancouver adds a `Retraction in:` / `Erratum in:` note and APA a retraction parenthetical
 
 ---
 

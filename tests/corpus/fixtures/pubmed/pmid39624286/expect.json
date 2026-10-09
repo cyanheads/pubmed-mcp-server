@@ -1,5 +1,5 @@
 {
-  "why": "An ErratumIn notice linked by PMID, author keywords, an electronic ArticleDate, and a print-typed ISSN on an article-number journal. No MeSH or grants on the record.",
+  "why": "An ErratumIn notice linked by PMID, author keywords, an electronic ArticleDate, and a print-typed ISSN on an article-number journal. No MeSH or grants on the record. The erratum reaches Vancouver as an Erratum in: note, and draws no APA parenthetical or retraction warning (#215).",
   "title": "Securing consensus in fractional-order multi-agent systems: Algebraic approaches against Byzantine attacks.",
   "authors": 7,
   "affiliations": 5,
@@ -25,13 +25,14 @@
     "- Azmat Ullah Khan Niazi (AUK) [aff 4]",
     "**Keywords:** Byzantine attacks, Fractional-order Lyapunov approach, Fractional-order systems, Leader-following consensus, Nonlinear dynamics"
   ],
+  "notContains": ["Retraction published", "**Retracted:**"],
   "citations": {
     "apa": [
       "Zhong, Y., Khan, A., Javeed, M. A., Raza, H., Hassan, W. U., Niazi, A. U. K., & Mehmood, M. U. (2024).",
-      "*10*(22), e40335.",
+      "*Heliyon*, *10*(22), Article e40335.",
       "https://doi.org/10.1016/j.heliyon.2024.e40335"
     ],
-    "mla": ["Zhong, Yubin, et al.", "vol. 10, no. 22, 2024"],
+    "mla": ["Zhong, Yubin, et al.", "*Heliyon*, vol. 10, no. 22, 2024, art. e40335."],
     "bibtex": [
       "{Niazi}, Azmat Ullah Khan",
       "number   = {22}",
@@ -47,7 +48,7 @@
     ],
     "vancouver": [
       "Zhong Y, Khan A, Javeed MA, Raza H, Hassan WU, Niazi AUK, et al.",
-      "Heliyon. 2024;10(22):e40335. doi: 10.1016/j.heliyon.2024.e40335"
+      "Heliyon. 2024;10(22):e40335. doi: 10.1016/j.heliyon.2024.e40335. Erratum in: Heliyon. 2025 Jun 30;11(12):e43572. doi: 10.1016/j.heliyon.2025.e43572."
     ]
   }
 }

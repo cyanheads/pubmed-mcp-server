@@ -6,7 +6,9 @@
 import { type ContentBlock, z } from '@cyanheads/mcp-ts-core';
 import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
 import { createMockContext, getEnrichment, runToolContract } from '@cyanheads/mcp-ts-core/testing';
+import { XMLParser } from 'fast-xml-parser';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { ORDERED_XML_PARSER_OPTIONS } from '@/services/ncbi/parsing/ordered-xml-parser-options.js';
 
 import { textBlocks } from '../../../_helpers.js';
 
@@ -55,6 +57,10 @@ vi.mock('@cyanheads/mcp-ts-core/utils', async () => {
 const { fetchFulltextTool, buildFulltextDescription } = await import(
   '@/mcp-server/tools/definitions/fetch-fulltext.tool.js'
 );
+/** The parser this suite mocks, for the cases that run real JATS through the tool. */
+const { parsePmcArticle: realParsePmcArticle } = await vi.importActual<
+  typeof import('@/services/ncbi/parsing/pmc-article-parser.js')
+>('@/services/ncbi/parsing/pmc-article-parser.js');
 
 /**
  * Configure `mockEFetch` to dispatch by `db` — mirrors production:
@@ -150,15 +156,15 @@ describe('fetchFulltextTool', () => {
       expect([input.pmcids, input.pmids, input.dois]).toEqual([['PMC1'], ['12345'], ['10.1/x']]);
     });
 
-    it('rejects 11 distinct identifiers across the fields, naming the count, before any upstream request (issue #192)', async () => {
+    it('rejects 51 distinct identifiers across the fields, naming the count, before any upstream request (issues #192, #222)', async () => {
       const input = {
-        pmcids: ['PMC1', 'PMC2', 'PMC3', 'PMC4', 'PMC5', 'PMC6'],
-        pmids: ['11', '12', '13', '14', '15'],
+        pmcids: Array.from({ length: 26 }, (_, i) => `PMC${i + 1}`),
+        pmids: Array.from({ length: 25 }, (_, i) => String(i + 101)),
       };
       const parsed = fetchFulltextTool.input.safeParse(input);
       expect(parsed.success).toBe(false);
       expect(parsed.error?.issues.map((i) => i.message)).toEqual([
-        '`pmcids`, `pmids`, and `dois` together name 11 distinct identifiers; a call accepts at most 10 — split them across calls.',
+        '`pmcids`, `pmids`, and `dois` together name 51 distinct identifiers; a call accepts at most 50 and fetches the first 10 — split them across calls.',
       ]);
 
       const result = await runToolContract(fetchFulltextTool, input);
@@ -167,22 +173,24 @@ describe('fetchFulltextTool', () => {
         error: { code: JsonRpcErrorCode.InvalidParams, data: { reason: 'invalid_arguments' } },
       });
       expect(textBlocks(result.content as ContentBlock[])[0]?.text).toContain(
-        '11 distinct identifiers',
+        '51 distinct identifiers',
       );
       expect(mockIdConvert).not.toHaveBeenCalled();
       expect(mockEFetch).not.toHaveBeenCalled();
     });
 
-    it('accepts exactly 10 distinct identifiers across the fields (issue #192)', () => {
-      const parsed = fetchFulltextTool.input.safeParse({
-        pmcids: ['PMC1', 'PMC2', 'PMC3', 'PMC4'],
-        pmids: ['11', '12', '13'],
-        dois: ['10.1/a', '10.1/b', '10.1/c'],
-      });
-      expect(parsed.success).toBe(true);
+    it('accepts 11 to 50 distinct identifiers across the fields (issues #192, #222)', () => {
+      for (const count of [10, 11, 50]) {
+        const parsed = fetchFulltextTool.input.safeParse({
+          pmcids: Array.from({ length: count - 6 }, (_, i) => `PMC${i + 1}`),
+          pmids: ['11', '12', '13'],
+          dois: ['10.1/a', '10.1/b', '10.1/c'],
+        });
+        expect(parsed.success, String(count)).toBe(true);
+      }
     });
 
-    it('counts every spelling one field accepts for an identifier once (issue #192)', () => {
+    it('counts every spelling one field accepts for an identifier once (issues #192, #222)', () => {
       // 22 elements, 10 identifiers: PMC IDs in any prefix case or zero-padded,
       // zero-padded PMIDs, and DOIs differing only in case each name one.
       const spelled = {
@@ -190,28 +198,56 @@ describe('fetchFulltextTool', () => {
         pmids: ['11', '011', '12', '0012', '13', '13'],
         dois: ['10.1/A', '10.1/a', '10.1/b', '10.1/B', '10.1/c', '10.1/C'],
       };
-      expect(fetchFulltextTool.input.safeParse(spelled).success).toBe(true);
+      // 40 more PMIDs, each sent twice: 50 identifiers in 46 `pmids` elements.
+      const atCeiling = {
+        ...spelled,
+        pmids: [
+          ...spelled.pmids,
+          ...Array.from({ length: 20 }, (_, i) => [String(i + 201), `0${i + 201}`]).flat(),
+        ],
+        dois: [...spelled.dois, ...Array.from({ length: 20 }, (_, i) => `10.2/${i}`)],
+      };
+      expect(atCeiling.pmids).toHaveLength(46);
+      expect(fetchFulltextTool.input.safeParse(atCeiling).success).toBe(true);
 
       const oneMore = fetchFulltextTool.input.safeParse({
-        ...spelled,
-        pmids: [...spelled.pmids, '14'],
+        ...atCeiling,
+        pmids: [...atCeiling.pmids, '14', '014'],
       });
       expect(oneMore.success).toBe(false);
-      expect(oneMore.error?.issues[0]?.message).toContain('11 distinct identifiers');
+      expect(oneMore.error?.issues[0]?.message).toContain('51 distinct identifiers');
     });
 
-    it('counts the same digits in two fields as two identifiers (issue #192)', () => {
+    it('counts the same digits in two fields as two identifiers (issues #192, #222)', () => {
       const parsed = fetchFulltextTool.input.safeParse({
-        pmcids: ['PMC1', 'PMC2', 'PMC3', 'PMC4', 'PMC5', 'PMC6'],
-        pmids: ['1', '2', '3', '4', '5'],
+        pmcids: Array.from({ length: 26 }, (_, i) => `PMC${i + 1}`),
+        pmids: Array.from({ length: 25 }, (_, i) => String(i + 1)),
       });
       expect(parsed.success).toBe(false);
-      expect(parsed.error?.issues[0]?.message).toContain('11 distinct identifiers');
+      expect(parsed.error?.issues[0]?.message).toContain('51 distinct identifiers');
     });
 
-    it('keeps the per-field cap of 10 elements (issue #192)', () => {
-      const eleven = Array.from({ length: 11 }, () => 'PMC1');
-      expect(fetchFulltextTool.input.safeParse({ pmcids: eleven }).success).toBe(false);
+    it('caps each field at 50 elements (issues #192, #222)', () => {
+      expect(
+        fetchFulltextTool.input.safeParse({ pmcids: Array.from({ length: 50 }, () => 'PMC1') })
+          .success,
+      ).toBe(true);
+      const parsed = fetchFulltextTool.input.safeParse({
+        pmcids: Array.from({ length: 51 }, () => 'PMC1'),
+      });
+      expect(parsed.success).toBe(false);
+      expect(parsed.error?.issues.map((i) => i.message)).toEqual([
+        'Too big: expected array to have <=50 items',
+      ]);
+    });
+
+    it('advertises 50 as each id field’s maxItems (issue #222)', () => {
+      const schema = z.toJSONSchema(fetchFulltextTool.input, { io: 'input' }) as unknown as {
+        properties: Record<'pmcids' | 'pmids' | 'dois', { maxItems?: number; minItems?: number }>;
+      };
+      for (const field of ['pmcids', 'pmids', 'dois'] as const) {
+        expect(schema.properties[field]).toMatchObject({ minItems: 1, maxItems: 50 });
+      }
     });
 
     it('advertises the DOI constraint as a JSON-Schema pattern (issue #120)', () => {
@@ -226,14 +262,16 @@ describe('fetchFulltextTool', () => {
       expect(advertised.test('10.1002/a,b')).toBe(false);
     });
 
-    it('describes each id field as combinable under the cross-field cap (issue #192)', () => {
+    it('describes each id field as combinable under the cross-field ceiling and fetch limit (issues #192, #222)', () => {
       const schema = z.toJSONSchema(fetchFulltextTool.input, { io: 'input' }) as unknown as {
         properties: Record<'pmcids' | 'pmids' | 'dois', { description?: string }>;
       };
       for (const field of ['pmcids', 'pmids', 'dois'] as const) {
         const description = schema.properties[field].description ?? '';
         expect(description).not.toContain('exactly one of');
-        expect(description).toContain('at most 10 distinct identifiers across the three');
+        expect(description).toContain(
+          'up to 50 distinct identifiers across the three; the first 10 are fetched per call, the rest returned in `overLimit`',
+        );
       }
     });
   });
@@ -280,11 +318,14 @@ describe('fetchFulltextTool', () => {
       }
     });
 
-    it('invites mixing the three fields under the 10-identifier cap (issue #192)', () => {
+    it('invites mixing the three fields under the 50-identifier ceiling and 10-per-call fetch limit (issues #192, #222)', () => {
       const d = buildFulltextDescription({ europePmc: true, unpaywall: true });
       expect(d).not.toContain('exactly one of');
       expect(d).toContain('any mix of the three');
-      expect(d).toContain('up to 10 distinct identifiers per call');
+      expect(d).toContain(
+        'up to 50 distinct identifiers; the first 10 are fetched per call, the rest returned in `overLimit`',
+      );
+      expect(d).not.toContain('up to 10 distinct identifiers');
       expect(d).toContain('fetched and returned once');
     });
   });
@@ -2178,10 +2219,11 @@ describe('fetchFulltextTool', () => {
   });
 
   describe('section-filter miss notice (issue #80)', () => {
-    it('emits a recovery notice when a sections filter matches no body sections', async () => {
-      // The article has real body sections, but the requested filter matches
-      // none of them — the body comes back empty because of the filter, not an
-      // upstream absence. The article is still returned (not an error).
+    it('emits a recovery notice when a sections filter matches no sections', async () => {
+      // The article has real body and back-matter sections, but the requested
+      // filter matches none of them — the sections come back empty because of
+      // the filter, not an upstream absence. The article is still returned (not
+      // an error). (#206)
       mockParsePmcArticle.mockReturnValue({
         pmcId: 'PMC3531190',
         pmcUrl: 'https://www.ncbi.nlm.nih.gov/pmc/articles/PMC3531190/',
@@ -2190,6 +2232,7 @@ describe('fetchFulltextTool', () => {
           { title: 'Introduction', text: 'Intro body.' },
           { title: 'Methods', text: 'Methods body.' },
         ],
+        backSections: [{ title: 'Acknowledgments', text: 'We thank the lab.' }],
       });
       mockEFetch.mockResolvedValue([{ 'pmc-articleset': [{ article: [] }] }]);
 
@@ -2200,7 +2243,8 @@ describe('fetchFulltextTool', () => {
       });
       const result = await fetchFulltextTool.handler(input, ctx);
 
-      // Success behavior preserved: the article is returned with an empty body.
+      // Success behavior preserved: the article is returned with no sections,
+      // back matter included.
       expect(result.totalReturned).toBe(1);
       const article = result.articles[0];
       expect(article?.source).toBe('pmc');
@@ -2212,6 +2256,7 @@ describe('fetchFulltextTool', () => {
       expect(notice).toBeDefined();
       expect(notice).toContain('DefinitelyNotARealSectionName');
       expect(notice).toContain('PMC3531190');
+      expect(notice).toContain('every section, back matter included, was filtered out');
       expect(notice).toMatch(/Retry without `sections`/);
       expect(notice).toMatch(/broader headings/);
     });
@@ -2617,7 +2662,9 @@ describe('fetchFulltextTool', () => {
         },
         { tier: 'unpaywall', outcome: 'no-oa', detail: 'No open-access copy indexed' },
       ]);
-      expect(getEnrichment(ctx).notice).toContain('42');
+      expect(getEnrichment(ctx).notice).toContain(
+        'No body text could be retrieved for article 42 —',
+      );
     });
   });
 
@@ -3247,8 +3294,9 @@ describe('fetchFulltextTool', () => {
         createMockContext({ errors: fetchFulltextTool.errors }),
       );
 
-      const article = result.articles[0];
-      if (article?.source === 'unpaywall') expect(article.content).toHaveLength(4000);
+      expect(result.articles).toEqual([
+        expect.objectContaining({ source: 'unpaywall', content: 'Z'.repeat(4000) }),
+      ]);
       expect(result.truncation).toBeUndefined();
     });
 
@@ -3493,7 +3541,7 @@ describe('fetchFulltextTool', () => {
 
       const text = blocks[0]?.text ?? '';
       expect(text).toContain('Full-Text Articles');
-      expect(text).toContain('Article');
+      expect(text).toContain('### Article\n**Source:** PMC (structured JATS)');
       expect(text).toContain('Unavailable (2)');
       expect(text).toContain('[pmid] 99999 — no-oa');
       expect(text).toContain('[pmcid] PMC404 — not-found');
@@ -3610,8 +3658,7 @@ describe('fetchFulltextTool', () => {
       );
 
       const text = blocks[0]?.text ?? '';
-      expect(text).toContain('A Paper');
-      expect(text).toContain('Unpaywall (HTML → Markdown, best-effort)');
+      expect(text).toContain('### A Paper\n**Source:** Unpaywall (HTML → Markdown, best-effort)');
       expect(text).toContain('License:** cc-by');
       expect(text).toContain('Main body');
     });
@@ -3783,13 +3830,6 @@ describe('fetchFulltextTool', () => {
       expect(text).toContain('- Pat White');
       expect(text).toContain('- Consortium X (collective)');
       expect(text).not.toContain('et al.');
-    });
-
-    it('renders the journal ISSN alongside other journal fields', () => {
-      const blocks = textBlocks(
-        fetchFulltextTool.format!({ articles: [baseArticle], totalReturned: 1 }),
-      );
-      expect(blocks[0]?.text).toContain('ISSN 1476-4687');
     });
 
     it('renders the journal line unchanged for a paginated record', () => {
@@ -4138,7 +4178,9 @@ describe('fetchFulltextTool whole-response budget (issue #100)', () => {
       nextDeferredCharacters: sizes[1],
     });
     expect(result.unavailable).toBeUndefined();
-    expect(getEnrichment(ctx).notice).toContain('2');
+    expect(getEnrichment(ctx).notice).toContain(
+      '1 resolved article(s) were deferred whole: 2. Re-call pubmed_fetch_fulltext with those ids under `pmids`',
+    );
   });
 
   it('reports deferred PMC-served articles under the PMIDs the caller requested', async () => {
@@ -4429,6 +4471,498 @@ describe('fetchFulltextTool whole-response budget (issue #100)', () => {
     expect(
       fetchFulltextTool.input.safeParse({ pmcids: ['PMC1'], maxResponseCharacters: 1 }).success,
     ).toBe(true);
+  });
+});
+
+describe('fetchFulltextTool output-only ceilings (issue #223)', () => {
+  beforeEach(() => {
+    mockEFetch.mockReset();
+    mockIdConvert.mockReset();
+    mockParsePmcArticle.mockReset();
+    mockGetUnpaywallService.mockReset();
+    mockGetEpmcService.mockReset();
+    mockGetUnpaywallService.mockReturnValue(undefined);
+    mockGetEpmcService.mockReturnValue(undefined);
+  });
+
+  const SAFE = Number.MAX_SAFE_INTEGER;
+  const CEILINGS = [
+    'maxSections',
+    'maxCharacters',
+    'maxCharactersPerSection',
+    'maxResponseCharacters',
+  ] as const;
+
+  /** Two PMC articles reached by PMID, each nesting subsections two levels deep. */
+  const ARTICLES = [
+    {
+      pmcId: 'PMC1',
+      pmid: '40551019',
+      title: 'First',
+      sections: [
+        { title: 'Introduction', text: 'Intro one.' },
+        {
+          title: 'Methods',
+          text: 'Methods one.',
+          subsections: [
+            {
+              title: 'Cohort',
+              text: 'Cohort one.',
+              subsections: [{ title: 'Inclusion', text: 'Inclusion one.' }],
+            },
+          ],
+        },
+        { title: 'Results', text: 'Results one.' },
+      ],
+    },
+    {
+      pmcId: 'PMC2',
+      pmid: '24991140',
+      title: 'Second',
+      sections: [
+        { title: 'Background', text: 'Background two.' },
+        {
+          title: 'Materials and Methods',
+          text: 'Materials two.',
+          subsections: [{ title: 'Assays', text: 'Assays two.' }],
+        },
+        { title: 'Discussion', text: 'Discussion two.' },
+      ],
+    },
+  ];
+  const PMIDS = ARTICLES.map((a) => a.pmid);
+
+  function stage() {
+    mockIdConvert.mockResolvedValue(
+      ARTICLES.map((a) => ({ 'requested-id': a.pmid, pmid: a.pmid, pmcid: a.pmcId })),
+    );
+    mockEFetch.mockResolvedValue([{ 'pmc-articleset': ARTICLES.map(() => ({ article: [] })) }]);
+    mockParsePmcArticle.mockReset();
+    for (const a of ARTICLES) {
+      mockParsePmcArticle.mockReturnValueOnce({
+        ...structuredClone(a),
+        pmcUrl: `https://www.ncbi.nlm.nih.gov/pmc/articles/${a.pmcId}/`,
+      });
+    }
+  }
+
+  const call = (extra: Record<string, unknown>) => {
+    stage();
+    return runToolContract(fetchFulltextTool, { pmids: PMIDS, ...extra });
+  };
+
+  it('returns the response of the omitted field for a ceiling at or above the content (characterization)', async () => {
+    const omitted = await call({});
+    expect(omitted.isError).toBeFalsy();
+    expect(omitted.structuredContent).toMatchObject({ totalReturned: 2 });
+
+    for (const extra of [
+      { maxSections: 3 },
+      { maxSections: 50 },
+      { maxCharacters: 1_000_000 },
+      { maxCharactersPerSection: 1_000_000 },
+      { maxResponseCharacters: 1_000_000 },
+    ]) {
+      const result = await call(extra);
+      expect(result.isError, JSON.stringify(extra)).toBeFalsy();
+      expect(result.structuredContent).toEqual(omitted.structuredContent);
+      expect(result.content).toEqual(omitted.content);
+    }
+  });
+
+  it.each(
+    CEILINGS.flatMap((field) => [
+      [field, 1_000_001],
+      [field, SAFE],
+    ]),
+  )('accepts %s = %d and returns the response of the omitted field', async (field, value) => {
+    const omitted = await call({});
+    const result = await call({ [field]: value });
+
+    expect(result.isError).toBeFalsy();
+    expect(result.structuredContent).toEqual(omitted.structuredContent);
+    expect(result.structuredContent).not.toHaveProperty('truncation');
+    expect(result.structuredContent).not.toHaveProperty('deferred');
+    expect(result.structuredContent).not.toHaveProperty('truncated');
+    expect(result.content).toEqual(omitted.content);
+    // The value bounds output only: the upstream requests are those of the
+    // omitted-field call.
+    expect(mockIdConvert.mock.calls.at(-1)?.[0]).toEqual(PMIDS);
+    expect(mockEFetch.mock.calls.at(-1)?.[0]).toMatchObject({ db: 'pmc', id: '1,2' });
+  });
+
+  it.each([['truncate'], ['outline']])(
+    'returns the full nested body with all four ceilings at the safe-integer bound in %s mode',
+    async (overflowMode) => {
+      const omitted = await call({ overflowMode });
+      const result = await call({
+        overflowMode,
+        ...Object.fromEntries(CEILINGS.map((field) => [field, SAFE])),
+      });
+
+      expect(result.isError).toBeFalsy();
+      expect(result.structuredContent).toEqual(omitted.structuredContent);
+      // The third level folds into its parent at the schema's depth clamp; the
+      // budget walk reaches it and leaves every character in place.
+      const [first] = (result.structuredContent as { articles: { sections: DeepSection[] }[] })
+        .articles;
+      expect(first?.sections[1]?.subsections?.[0]).toEqual({
+        title: 'Cohort',
+        text: 'Cohort one.\n\nInclusion\nInclusion one.',
+      });
+    },
+  );
+
+  it('answers the reported call — maxSections 100 beside a sections filter — as it does without maxSections', async () => {
+    const reported = {
+      sections: ['methods', 'materials and methods'],
+      maxCharacters: 50000,
+    };
+    const without = await call(reported);
+    const result = await call({ ...reported, maxSections: 100 });
+
+    expect(result.isError).toBeFalsy();
+    expect(result.structuredContent).toEqual(without.structuredContent);
+    expect(result.content).toEqual(without.content);
+    const articles = (result.structuredContent as { articles: { sections: DeepSection[] }[] })
+      .articles;
+    expect(articles.map((a) => a.sections.map((s) => s.title))).toEqual([
+      ['Methods'],
+      ['Materials and Methods'],
+    ]);
+  });
+
+  it.each(
+    CEILINGS.flatMap((field) =>
+      [0, -1, 1.5, 'all', 9_007_199_254_740_992].map((value) => [field, value] as const),
+    ),
+  )('rejects %s = %s as invalid params before any upstream request', async (field, value) => {
+    stage();
+    const result = await runToolContract(fetchFulltextTool, { pmids: PMIDS, [field]: value });
+
+    expect(result.isError).toBe(true);
+    expect(result.structuredContent).toMatchObject({
+      error: { code: JsonRpcErrorCode.InvalidParams, data: { reason: 'invalid_arguments' } },
+    });
+    expect(textBlocks(result.content as ContentBlock[])[0]?.text).toContain(field);
+    expect(mockIdConvert).not.toHaveBeenCalled();
+    expect(mockEFetch).not.toHaveBeenCalled();
+  });
+
+  it('advertises the safe-integer bound, and no other maximum, on the four ceilings', () => {
+    const schema = z.toJSONSchema(fetchFulltextTool.input, { io: 'input' }) as unknown as {
+      properties: Record<string, Record<string, unknown>>;
+    };
+    for (const field of CEILINGS) {
+      expect(schema.properties[field]).toMatchObject({
+        type: 'integer',
+        minimum: 1,
+        maximum: SAFE,
+      });
+    }
+    for (const field of ['maxCharacters', 'maxCharactersPerSection', 'maxResponseCharacters']) {
+      expect(schema.properties[field]?.description).not.toMatch(/1,?000,?000/);
+    }
+    expect(schema.properties.maxSections?.description).not.toMatch(/\b50\b/);
+  });
+});
+
+describe('fetchFulltextTool per-call fetch limit (issue #222)', () => {
+  /** Stub record `k`: PMID 3000000k, PMC 700000k, and DOI 10.9000/rec<k> name one article. */
+  const pmidOf = (k: number) => String(30_000_000 + k);
+  const pmcOf = (k: number) => `PMC${7_000_000 + k}`;
+  const pmcDigits = (k: number) => String(7_000_000 + k);
+  const doiOf = (k: number) => `10.9000/rec${k}`;
+  const range = (from: number, count: number) => Array.from({ length: count }, (_, i) => from + i);
+
+  /** The record a stub identifier names; ids outside the stub set name none. */
+  function recordOf(idType: 'pmid' | 'pmcid' | 'doi', id: string): number | undefined {
+    const k =
+      idType === 'pmid'
+        ? Number(id) - 30_000_000
+        : idType === 'pmcid'
+          ? Number(id.replace(/^PMC/i, '')) - 7_000_000
+          : Number(/^10\.9000\/rec(\d+)$/i.exec(id)?.[1]);
+    return Number.isInteger(k) && k > 0 ? k : undefined;
+  }
+
+  const jatsOf = (k: number) =>
+    `<article><front><article-meta><article-id pub-id-type="pmcid">${pmcOf(k)}</article-id><article-id pub-id-type="pmid">${pmidOf(k)}</article-id><title-group><article-title>Record ${k}</article-title></title-group></article-meta></front><body><sec><title>Introduction</title><p>Body of record ${k}.</p></sec></body></article>`;
+
+  beforeEach(() => {
+    mockEFetch.mockReset();
+    mockIdConvert.mockReset();
+    mockParsePmcArticle.mockReset();
+    mockGetUnpaywallService.mockReset();
+    mockGetEpmcService.mockReset();
+    mockGetUnpaywallService.mockReturnValue(undefined);
+    mockGetEpmcService.mockReturnValue(undefined);
+    mockParsePmcArticle.mockImplementation(realParsePmcArticle);
+    mockIdConvert.mockImplementation(async (ids: string[], idType: 'pmid' | 'pmcid' | 'doi') =>
+      ids.flatMap((id) => {
+        const k = recordOf(idType, id);
+        return k === undefined
+          ? []
+          : [{ 'requested-id': id, pmid: pmidOf(k), pmcid: pmcOf(k), doi: doiOf(k) }];
+      }),
+    );
+    mockEFetch.mockImplementation(async (params: { db: string; id: string }) => {
+      if (params.db === 'pubmed') return { PubmedArticleSet: { PubmedArticle: [] } };
+      const articles = params.id
+        .split(',')
+        .map((digits) => recordOf('pmcid', digits))
+        .map((k) => (k === undefined ? '' : jatsOf(k)))
+        .join('');
+      return new XMLParser(ORDERED_XML_PARSER_OPTIONS).parse(
+        `<pmc-articleset>${articles}</pmc-articleset>`,
+      );
+    });
+  });
+
+  interface LimitOutput {
+    articles: { pmcId?: string }[];
+    deferred?: { ids: string[]; idType?: string };
+    notice?: string;
+    overLimit?: {
+      dois?: string[];
+      idType?: string;
+      ids: string[];
+      limit: number;
+      pmcids?: string[];
+      pmids?: string[];
+    };
+    totalReturned: number;
+    truncated?: boolean;
+    unavailable?: { id: string; idType: string }[];
+  }
+
+  async function call(args: Record<string, unknown>) {
+    const result = await runToolContract(fetchFulltextTool, args as never);
+    expect(result.isError, JSON.stringify(result.structuredContent)).toBeFalsy();
+    return {
+      out: result.structuredContent as LimitOutput,
+      text: textBlocks(result.content as ContentBlock[])
+        .map((b) => b.text)
+        .join('\n'),
+    };
+  }
+
+  /** What the ID Converter and PMC EFetch were asked for, in order. */
+  const upstream = () => ({
+    idConvert: mockIdConvert.mock.calls.map((c) => [c[0], c[1]]),
+    pmcEFetch: mockEFetch.mock.calls
+      .filter((c) => c[0].db === 'pmc')
+      .map((c) => String(c[0].id).split(',')),
+  });
+
+  it('returns a call naming 10 distinct identifiers as before: every one fetched, no overLimit (characterization)', async () => {
+    const pmcids = range(1, 4).map(pmcOf);
+    const pmids = range(5, 3).map(pmidOf);
+    const dois = range(8, 3).map(doiOf);
+    const { out, text } = await call({ pmcids, pmids, dois });
+
+    expect(Object.keys(out)).toEqual(['articles', 'totalReturned']);
+    expect(out.articles.map((a) => a.pmcId)).toEqual(range(1, 10).map(pmcOf));
+    expect(upstream()).toEqual({
+      idConvert: [
+        [pmids, 'pmid'],
+        [dois, 'doi'],
+      ],
+      pmcEFetch: [range(1, 10).map(pmcDigits)],
+    });
+    expect(text).toContain('**Articles Returned:** 10');
+    expect(text).not.toContain('Re-call');
+  });
+
+  it('fetches the first 10 of 14 distinct PMIDs and returns the last 4 in overLimit', async () => {
+    const pmids = range(1, 14).map(pmidOf);
+    const { out, text } = await call({ pmids });
+
+    // The ID Converter and PMC EFetch see the first 10 only, once each.
+    expect(upstream()).toEqual({
+      idConvert: [[pmids.slice(0, 10), 'pmid']],
+      pmcEFetch: [range(1, 10).map(pmcDigits)],
+    });
+    expect(out.totalReturned).toBe(10);
+    expect(out.articles.map((a) => a.pmcId)).toEqual(range(1, 10).map(pmcOf));
+    expect(out.overLimit).toEqual({ limit: 10, idType: 'pmid', ids: pmids.slice(10) });
+    expect(out.unavailable).toBeUndefined();
+    expect(out.deferred).toBeUndefined();
+    expect(out.truncated).toBe(true);
+    expect(out.notice).toBe(
+      `This call fetched the first 10 distinct identifiers; 4 more were not fetched: ${pmids.slice(10).join(', ')}. Re-call pubmed_fetch_fulltext with those ids under \`pmids\`, at most 10 per call, to retrieve them.`,
+    );
+    expect(text).toContain(
+      '**Over the per-call limit:** 4 identifier(s) not fetched — a call fetches the first 10 distinct identifiers',
+    );
+    expect(text).toContain(
+      `Re-call \`pubmed_fetch_fulltext\` with these pmid ids as \`pmids\`: ${pmids.slice(10).join(', ')}`,
+    );
+    expect(text).toContain(out.notice);
+  });
+
+  it('fetches every PMC ID, every PMID, and the first DOI of 4 + 5 + 5, listing the last 4 DOIs', async () => {
+    const pmcids = range(1, 4).map(pmcOf);
+    const pmids = range(5, 5).map(pmidOf);
+    const dois = range(10, 5).map(doiOf);
+    const { out } = await call({ pmcids, pmids, dois });
+
+    expect(upstream()).toEqual({
+      idConvert: [
+        [pmids, 'pmid'],
+        [[dois[0]], 'doi'],
+      ],
+      pmcEFetch: [range(1, 10).map(pmcDigits)],
+    });
+    expect(out.articles.map((a) => a.pmcId)).toEqual(range(1, 10).map(pmcOf));
+    expect(out.overLimit).toEqual({ limit: 10, idType: 'doi', ids: dois.slice(1) });
+  });
+
+  it('groups over-limit ids from more than one field by field, without `idType`', async () => {
+    const pmcids = range(1, 9).map(pmcOf);
+    const pmids = range(10, 2).map(pmidOf);
+    const dois = range(12, 2).map(doiOf);
+    const { out, text } = await call({ pmcids, pmids, dois });
+
+    // The tenth identifier is the first PMID; no DOI reaches the converter.
+    expect(upstream().idConvert).toEqual([[[pmids[0]], 'pmid']]);
+    expect(out.overLimit).toEqual({
+      limit: 10,
+      ids: [pmids[1], ...dois],
+      pmids: [pmids[1]],
+      dois,
+    });
+    const lists = `\`pmids\`: ${pmids[1]}; \`dois\`: ${dois.join(', ')}`;
+    expect(text).toContain(
+      `Re-call \`pubmed_fetch_fulltext\` with these ids, each under its own field — ${lists}`,
+    );
+    expect(out.notice).toContain(
+      `Re-call pubmed_fetch_fulltext with each id under its own field (${lists})`,
+    );
+    expect(text).not.toContain('undefined');
+  });
+
+  it('counts spellings of one identifier once and lists an 11th identifier once, under its first spelling', async () => {
+    // 22 elements naming 10 identifiers: no overLimit.
+    const spelled = {
+      pmcids: ['PMC1', 'pmc1', '1', 'PMC01', 'PMC2', '2', 'PMC3', 'PMC003', 'PMC4', 'pmc04'],
+      pmids: ['11', '011', '12', '0012', '13', '13'],
+      dois: ['10.1/A', '10.1/a', '10.1/b', '10.1/B', '10.1/c', '10.1/C'],
+    };
+    const ten = await call(spelled);
+    expect(ten.out).not.toHaveProperty('overLimit');
+    // Every spelling is reported; a PMC ID once, in `PMC<digits>` form.
+    expect(ten.out.unavailable).toHaveLength(15);
+
+    mockIdConvert.mockClear();
+    mockEFetch.mockClear();
+    const eleven = await call({ ...spelled, dois: [...spelled.dois, '10.1/D', '10.1/d'] });
+    expect(eleven.out.overLimit).toEqual({ limit: 10, idType: 'doi', ids: ['10.1/D'] });
+    // Neither spelling of the 11th reaches the converter or `unavailable`.
+    expect(upstream().idConvert).toContainEqual([['10.1/A', '10.1/b', '10.1/c'], 'doi']);
+    expect(eleven.out.unavailable?.map((u) => u.id)).toEqual(ten.out.unavailable?.map((u) => u.id));
+
+    // A zero-padded PMID is listed as sent; a PMC ID in `PMC<digits>` form, as
+    // `deferred` and `unavailable` report it.
+    const tenPmcids = range(1, 10).map(pmcOf);
+    const padded = await call({ pmcids: tenPmcids, pmids: ['030000011', pmidOf(11)] });
+    expect(padded.out.overLimit).toEqual({ limit: 10, idType: 'pmid', ids: ['030000011'] });
+    const lower = await call({ pmcids: [...tenPmcids, 'pmc07000011', pmcOf(11)] });
+    expect(lower.out.overLimit).toEqual({ limit: 10, idType: 'pmcid', ids: [pmcOf(11)] });
+  });
+
+  it('accepts 50 distinct identifiers and fetches only the first 10 of them', async () => {
+    const pmcids = range(1, 4).map(pmcOf);
+    const pmids = range(5, 23).map(pmidOf);
+    const dois = range(28, 23).map(doiOf);
+    const { out } = await call({ pmcids, pmids, dois });
+
+    expect(upstream()).toEqual({
+      idConvert: [[pmids.slice(0, 6), 'pmid']],
+      pmcEFetch: [range(1, 10).map(pmcDigits)],
+    });
+    expect(out.totalReturned).toBe(10);
+    expect(out.overLimit).toEqual({
+      limit: 10,
+      ids: [...pmids.slice(6), ...dois],
+      pmids: pmids.slice(6),
+      dois,
+    });
+    expect(out.overLimit?.ids).toHaveLength(40);
+  });
+
+  it.each([
+    [
+      '51 distinct identifiers across the fields',
+      {
+        pmcids: range(1, 17).map(pmcOf),
+        pmids: range(18, 17).map(pmidOf),
+        dois: range(35, 17).map(doiOf),
+      },
+      ['51 distinct identifiers'],
+    ],
+    [
+      'a field holding 51 distinct identifiers',
+      { pmids: range(1, 51).map(pmidOf) },
+      ['pmids: Too big: expected array to have <=50 items', '51 distinct identifiers'],
+    ],
+    [
+      'a field holding 51 elements that name one identifier',
+      { pmcids: Array.from({ length: 51 }, () => pmcOf(1)) },
+      ['pmcids: Too big: expected array to have <=50 items'],
+    ],
+  ])('rejects %s as invalid params before any upstream request', async (_name, args, messages) => {
+    const result = await runToolContract(fetchFulltextTool, args);
+
+    expect(result.isError).toBe(true);
+    expect(result.structuredContent).toMatchObject({
+      error: { code: JsonRpcErrorCode.InvalidParams, data: { reason: 'invalid_arguments' } },
+    });
+    const text = textBlocks(result.content as ContentBlock[])[0]?.text ?? '';
+    for (const message of messages) expect(text).toContain(message);
+    expect(mockIdConvert).not.toHaveBeenCalled();
+    expect(mockEFetch).not.toHaveBeenCalled();
+  });
+
+  it('keeps deferred and overLimit disjoint, naming both lists in content[] and the notice', async () => {
+    const pmids = range(1, 12).map(pmidOf);
+    const sizes = (await call({ pmids: pmids.slice(0, 10) })).out.articles.map(
+      (a) => JSON.stringify(a).length,
+    );
+
+    const { out, text } = await call({ pmids, maxResponseCharacters: sizes[0] });
+
+    expect(out.articles.map((a) => a.pmcId)).toEqual([pmcOf(1)]);
+    expect(out.deferred).toMatchObject({ idType: 'pmid', ids: pmids.slice(1, 10) });
+    expect(out.overLimit).toEqual({ limit: 10, idType: 'pmid', ids: pmids.slice(10) });
+    const deferred = new Set(out.deferred?.ids);
+    expect(out.overLimit?.ids.filter((id) => deferred.has(id))).toEqual([]);
+    expect(out.truncated).toBe(true);
+    expect(out.notice).toContain(`deferred whole: ${pmids.slice(1, 10).join(', ')}.`);
+    expect(out.notice).toContain(`2 more were not fetched: ${pmids.slice(10).join(', ')}.`);
+    expect(text).toContain(`as \`pmids\`: ${pmids.slice(1, 10).join(', ')}`);
+    expect(text).toContain(`as \`pmids\`: ${pmids.slice(10).join(', ')}`);
+  });
+
+  it('reports unavailable ids among the fetched 10 only, and lists overLimit when none resolved', async () => {
+    // PMIDs outside the stub set: no converter record, no PubMed DOI.
+    const pmids = range(101, 12).map(String);
+    const { out, text } = await call({ pmids });
+
+    expect(upstream().idConvert).toEqual([[pmids.slice(0, 10), 'pmid']]);
+    expect(out.totalReturned).toBe(0);
+    expect(out.unavailable?.map((u) => u.id)).toEqual(pmids.slice(0, 10));
+    expect(out.overLimit).toEqual({ limit: 10, idType: 'pmid', ids: pmids.slice(10) });
+    expect(text).toContain('No full-text articles returned');
+    expect(text).toContain(`as \`pmids\`: ${pmids.slice(10).join(', ')}`);
+  });
+
+  it('describes overLimit apart from deferred, and the enrichment that flags it', () => {
+    const overLimit = fetchFulltextTool.output.shape.overLimit.unwrap().description ?? '';
+    expect(overLimit).toContain('`deferred`');
+    expect(overLimit).toContain('more than `limit` distinct identifiers');
+    expect(fetchFulltextTool.enrichment?.truncated?.description).toContain('`overLimit`');
+    expect(fetchFulltextTool.enrichment?.notice?.description).toContain('per-call limit');
   });
 });
 
@@ -4847,14 +5381,6 @@ describe('fetchFulltextTool JATS tables (issue #111)', () => {
     });
 
     expect(readTables(call)).toEqual([TABLE_IN_SECTION]);
-  });
-
-  it('returns every table when no sections filter is supplied', async () => {
-    stageArticle({ tables: [TABLE_IN_SECTION, TABLE_NO_SECTION, TABLE_UNEXTRACTABLE] });
-
-    const call = await runToolContract(fetchFulltextTool, { pmcids: ['PMC11391094'] });
-
-    expect(readTables(call)).toHaveLength(3);
   });
 
   it('drops every table when the sections filter leaves no matching section', async () => {
@@ -5727,14 +6253,6 @@ describe('fetchFulltextTool JATS assets (issue #130)', () => {
     expect(readAssets(call)).toBeUndefined();
   });
 
-  it('returns every asset when no sections filter is supplied', async () => {
-    stageArticle({ assets: [FIGURE_IN_SECTION, FIGURE_NO_SECTION, SUPPLEMENT_BARE] });
-
-    const call = await runToolContract(fetchFulltextTool, { pmcids: ['PMC11726426'] });
-
-    expect(readAssets(call)).toHaveLength(3);
-  });
-
   it('returns what an omitted filter returns when every sections element is empty (#186)', async () => {
     stageArticle({ assets: [FIGURE_IN_SECTION, FIGURE_NO_SECTION, SUPPLEMENT_BARE] });
     const omitted = await runToolContract(fetchFulltextTool, { pmcids: ['PMC11726426'] });
@@ -6132,43 +6650,40 @@ describe('fetchFulltextTool JATS assets (issue #130)', () => {
   });
 
   /**
-   * The three legacy OCR deposits issue #130 names. `parsePmcArticle` is mocked
-   * at this layer, so these are the parser output the fenced-`<preformat>` walk
-   * now produces for those records, keyed to their PMCIDs — the tool-layer
-   * contract is exercised; the upstream records themselves are not fetched.
+   * The legacy OCR deposits issue #130 names (PMC9663051, PMC9663116,
+   * PMC5420876) share one shape: a `<body>` holding a single `<preformat>`.
+   * `parsePmcArticle` is mocked at this layer, so this is the parser output the
+   * fenced-`<preformat>` walk produces for that shape — the tool-layer contract
+   * is exercised; the upstream records themselves are not fetched.
    */
-  const OCR_PMCIDS = ['PMC9663051', 'PMC9663116', 'PMC5420876'] as const;
-
-  for (const pmcid of OCR_PMCIDS) {
-    it(`returns an article with the fenced OCR section for ${pmcid}, with no no-body reason`, async () => {
-      const ocr = '```\nTHE JOURNAL OF BIOLOGICAL CHEMISTRY\n   Vol. 247, No. 12\n```';
-      mockParsePmcArticle.mockReturnValue({
-        pmcId: pmcid,
-        pmcUrl: `https://www.ncbi.nlm.nih.gov/pmc/articles/${pmcid}/`,
-        title: 'Legacy OCR deposit',
-        sections: [{ text: ocr }],
-      });
-      mockEFetch.mockResolvedValue([{ 'pmc-articleset': [{ article: [] }] }]);
-
-      const ctx = createMockContext({ errors: fetchFulltextTool.errors });
-      const input = fetchFulltextTool.input.parse({ pmcids: [pmcid] });
-      const result = await fetchFulltextTool.handler(input, ctx);
-
-      // A `<preformat>`-only body is a body: the record is a hit, not a PMC miss
-      // routed to the fallback tiers and reported as metadata-only.
-      expect(result.totalReturned).toBe(1);
-      expect(result.unavailable).toBeUndefined();
-      expect(getEnrichment(ctx).notice).toBeUndefined();
-      expect(result.articles[0]?.source).toBe('pmc');
-
-      const text = textBlocks(fetchFulltextTool.format!(result))
-        .map((b) => b.text ?? '')
-        .join('\n');
-      expect(text).toContain('THE JOURNAL OF BIOLOGICAL CHEMISTRY');
-      expect(text).toContain('```');
-      expect(text).not.toContain('front matter and abstract only');
+  it('returns an article with the fenced OCR section for PMC9663051, with no no-body reason', async () => {
+    const ocr = '```\nTHE JOURNAL OF BIOLOGICAL CHEMISTRY\n   Vol. 247, No. 12\n```';
+    mockParsePmcArticle.mockReturnValue({
+      pmcId: 'PMC9663051',
+      pmcUrl: 'https://www.ncbi.nlm.nih.gov/pmc/articles/PMC9663051/',
+      title: 'Legacy OCR deposit',
+      sections: [{ text: ocr }],
     });
-  }
+    mockEFetch.mockResolvedValue([{ 'pmc-articleset': [{ article: [] }] }]);
+
+    const ctx = createMockContext({ errors: fetchFulltextTool.errors });
+    const input = fetchFulltextTool.input.parse({ pmcids: ['PMC9663051'] });
+    const result = await fetchFulltextTool.handler(input, ctx);
+
+    // A `<preformat>`-only body is a body: the record is a hit, not a PMC miss
+    // routed to the fallback tiers and reported as metadata-only.
+    expect(result.totalReturned).toBe(1);
+    expect(result.unavailable).toBeUndefined();
+    expect(getEnrichment(ctx).notice).toBeUndefined();
+    expect(result.articles[0]?.source).toBe('pmc');
+
+    const text = textBlocks(fetchFulltextTool.format!(result))
+      .map((b) => b.text ?? '')
+      .join('\n');
+    expect(text).toContain('THE JOURNAL OF BIOLOGICAL CHEMISTRY');
+    expect(text).toContain('```');
+    expect(text).not.toContain('front matter and abstract only');
+  });
 
   it('advertises includeAssets as a boolean defaulting to true', () => {
     const parsed = fetchFulltextTool.input.parse({ pmcids: ['PMC11726426'] });
@@ -7003,44 +7518,38 @@ describe('fetchFulltextTool blank section selectors (issue #186)', () => {
   });
 
   describe('linear time on caller-sized blank input', () => {
-    /** CPU time of `run`, in ms — this thread's user + system time, not wall clock. */
-    const cpuMs = (run: () => void): number => {
-      const start = process.threadCpuUsage();
-      run();
-      const { user, system } = process.threadCpuUsage(start);
-      return (user + system) / 1000;
-    };
-
     /**
-     * Fastest of five measurements of ten rejected calls each. The rejection is
-     * raised before the handler's first `await`, so the whole check runs inside
-     * the synchronous call being measured.
+     * Fastest of five measurements of ten calls each, in ms of this thread's user
+     * + system CPU time, not wall clock. Each call is awaited until it settles,
+     * so the check is measured wherever in the handler it runs; a warm-up call
+     * first confirms the input is the one being timed, rejected as `blank_filter`.
      */
-    const fastestMs = (sections: string[]): number => {
+    const fastestMs = async (sections: string[]): Promise<number> => {
       const input = fetchFulltextTool.input.parse({ pmcids: ['PMC10164684'], sections });
-      const reject = () =>
+      const settle = () =>
         Promise.resolve(
           fetchFulltextTool.handler(input, createMockContext({ errors: fetchFulltextTool.errors })),
-        ).catch(() => undefined);
-      reject();
-      return Math.min(
-        ...Array.from({ length: 5 }, () =>
-          cpuMs(() => {
-            for (let i = 0; i < 10; i++) reject();
-          }),
-        ),
-      );
+        ).catch((error: unknown) => error);
+      expect(await settle()).toMatchObject({ data: { reason: 'blank_filter' } });
+      let fastest = Number.POSITIVE_INFINITY;
+      for (let round = 0; round < 5; round++) {
+        const start = process.threadCpuUsage();
+        for (let call = 0; call < 10; call++) await settle();
+        const { user, system } = process.threadCpuUsage(start);
+        fastest = Math.min(fastest, (user + system) / 1000);
+      }
+      return fastest;
     };
 
     it.each([
       ['one element of N blank characters', (n: number) => [' ​'.repeat(n / 2)]],
       ['N single-space elements', (n: number) => Array.from({ length: n }, () => ' ')],
       ['N empty elements and one blank one', (n: number) => [...Array(n).fill(''), '​']],
-    ])('rejects %s in linear CPU time', (_label, build) => {
-      const t5k = fastestMs(build(5_000));
-      const t80k = fastestMs(build(80_000));
+    ])('rejects %s in linear CPU time', async (_label, build) => {
+      const t5k = await fastestMs(build(5_000));
+      const t80k = await fastestMs(build(80_000));
 
-      // Measured at a ratio of 12–20 and ~80 ms for the slowest shape.
+      // Measured at a ratio of 6–21 and ~80 ms for the slowest shape.
       expect(t80k / t5k).toBeLessThan(64);
       expect(t80k).toBeLessThan(1_000);
     });
@@ -7071,5 +7580,453 @@ describe('fetchFulltextTool blank section selectors (issue #186)', () => {
     expect(description).toMatch(
       /an element of only whitespace or invisible characters, such as a zero-width space, is rejected/,
     );
+  });
+});
+
+describe('fetchFulltextTool back matter (issue #206)', () => {
+  beforeEach(() => {
+    mockEFetch.mockReset();
+    mockIdConvert.mockReset();
+    mockParsePmcArticle.mockReset();
+    mockGetUnpaywallService.mockReset();
+    mockGetEpmcService.mockReset();
+    mockEpmcSearch.mockReset();
+    mockEpmcFullTextXml.mockReset();
+    mockEpmcParseFullTextXml.mockReset();
+    mockGetUnpaywallService.mockReturnValue(undefined);
+    mockGetEpmcService.mockReturnValue(undefined);
+  });
+
+  /** Reader-side view of the one returned article. */
+  interface ReadArticle {
+    assets?: { id?: string; sectionTitle?: string }[];
+    sections: DeepSection[];
+    tables?: { label?: string; sectionTitle?: string }[];
+  }
+
+  function articleOf(call: { structuredContent?: unknown }): ReadArticle {
+    const article = (call.structuredContent as { articles: ReadArticle[] }).articles[0];
+    if (!article) throw new Error('no article returned');
+    return article;
+  }
+
+  const titlesOf = (sections: { title?: string | undefined }[]) => sections.map((s) => s.title);
+
+  function rendered(call: { content?: unknown }): string {
+    return (call.content as { type: string; text?: string }[]).map((b) => b.text ?? '').join('\n');
+  }
+
+  describe('as the parser hands them over', () => {
+    const BODY = [
+      { title: '1. Introduction', text: 'Monochorionic twins share a placenta.' },
+      { title: '5. Conclusions', text: 'MRI findings are common.' },
+    ];
+    const BACK = [
+      { title: 'Acknowledgments', text: 'We have much appreciation for the department.' },
+      { title: 'Footnotes', text: 'Disclaimer/Publisher’s Note: the statements are the authors’.' },
+      { title: 'Appendix A', text: 'Search strategy for the different databases.' },
+      { title: 'Appendix C', text: '' },
+    ];
+    const TABLE_A1 = {
+      id: 'tab1',
+      label: 'Table A1',
+      caption: 'Quality assessment.',
+      sectionTitle: 'Appendix C',
+      headerRowCount: 1,
+      rows: [
+        ['Study', 'Score'],
+        ['Hu et al. (2006)', '5/9'],
+      ],
+    };
+
+    function stage(article: Record<string, unknown> = {}) {
+      mockParsePmcArticle.mockReturnValue({
+        pmcId: 'PMC10707391',
+        pmcUrl: 'https://www.ncbi.nlm.nih.gov/pmc/articles/PMC10707391/',
+        title: 'Cerebral MRI in monochorionic twins',
+        sections: BODY,
+        backSections: BACK,
+        tables: [TABLE_A1],
+        ...article,
+      });
+      mockEFetch.mockResolvedValue([{ 'pmc-articleset': [{ article: [] }] }]);
+    }
+
+    it('appends back-matter sections after the body on both surfaces, never as a field of their own', async () => {
+      stage();
+      const call = await runToolContract(fetchFulltextTool, { pmcids: ['PMC10707391'] });
+
+      const article = articleOf(call);
+      expect(article.sections).toEqual([...BODY, ...BACK]);
+      expect(article).not.toHaveProperty('backSections');
+      expect(article.tables?.map((tb) => tb.sectionTitle)).toEqual(['Appendix C']);
+
+      const text = rendered(call);
+      const at = (heading: string) => text.indexOf(`#### ${heading}\n`);
+      const order = [
+        '1. Introduction',
+        '5. Conclusions',
+        'Acknowledgments',
+        'Footnotes',
+        'Appendix A',
+        'Appendix C',
+      ].map(at);
+      expect(order.every((position) => position >= 0)).toBe(true);
+      expect(order).toEqual([...order].sort((a, b) => a - b));
+      expect(text).toContain('Search strategy for the different databases.');
+      expect(text).toContain('Section: Appendix C');
+    });
+
+    it('counts back-matter sections toward maxSections after the body, so a cap drops them first', async () => {
+      stage();
+      const call = await runToolContract(fetchFulltextTool, {
+        pmcids: ['PMC10707391'],
+        maxSections: 3,
+      });
+      expect(titlesOf(articleOf(call).sections)).toEqual([
+        '1. Introduction',
+        '5. Conclusions',
+        'Acknowledgments',
+      ]);
+    });
+
+    describe('under maxCharacters in truncate mode', () => {
+      /** 100 characters of body, 30 of each of two back-matter sections, 56 of Table A1. */
+      function stageBudgeted() {
+        stage({
+          sections: [{ title: 'Introduction', text: 'A'.repeat(100) }],
+          backSections: [
+            { title: 'Acknowledgments', text: 'B'.repeat(30) },
+            { title: 'Appendix A', text: 'C'.repeat(30) },
+          ],
+        });
+      }
+
+      it('serves tables before back matter, which spends only what the body and tables leave', async () => {
+        // Body (100) plus the table (56) fits in 170; body plus back matter (160)
+        // plus the table does not. The table stays, and the back matter takes the
+        // 14 characters left: Acknowledgments is cut, Appendix A is dropped.
+        stageBudgeted();
+        const call = await runToolContract(fetchFulltextTool, {
+          pmcids: ['PMC10707391'],
+          maxCharacters: 170,
+        });
+
+        const article = articleOf(call);
+        expect(article.sections).toEqual([
+          { title: 'Introduction', text: 'A'.repeat(100) },
+          { title: 'Acknowledgments', text: 'B'.repeat(14) },
+        ]);
+        expect(article.tables?.map((tb) => tb.label)).toEqual(['Table A1']);
+        const truncation = (call.structuredContent as { truncation?: Record<string, unknown> })
+          .truncation;
+        expect(truncation).toMatchObject({ omittedSections: 1, returnedCharacters: 170 });
+        expect(truncation).not.toHaveProperty('omittedTables');
+        expect(truncation?.articles).toEqual([
+          expect.objectContaining({
+            originalCharacters: 216,
+            returnedCharacters: 170,
+            sections: [
+              {
+                title: 'Introduction',
+                originalCharacters: 100,
+                returnedCharacters: 100,
+                truncated: false,
+              },
+              {
+                title: 'Acknowledgments',
+                originalCharacters: 30,
+                returnedCharacters: 14,
+                truncated: true,
+              },
+              {
+                title: 'Appendix A',
+                originalCharacters: 30,
+                returnedCharacters: 0,
+                truncated: true,
+              },
+            ],
+          }),
+        ]);
+        expect(truncation?.articles).toEqual([expect.not.objectContaining({ omittedTables: 1 })]);
+
+        const text = rendered(call);
+        expect(text).toContain('Hu et al. (2006)');
+        expect(text).toContain('#### Acknowledgments\n');
+        expect(text).toContain('B'.repeat(14));
+        expect(text).not.toContain('B'.repeat(15));
+        expect(text).not.toContain('#### Appendix A');
+        expect(text).not.toContain('C'.repeat(5));
+      });
+
+      it('still spends back matter last once a sections filter drops body sections', async () => {
+        // The filter leaves one body section and one back-matter section. Were
+        // Acknowledgments budgeted as body, it would take 30 and leave the table
+        // (56) no room in 170.
+        stage({
+          sections: [
+            { title: 'Introduction', text: 'A'.repeat(100) },
+            { title: 'Methods', text: 'M'.repeat(50) },
+          ],
+          backSections: [
+            { title: 'Acknowledgments', text: 'B'.repeat(30) },
+            { title: 'Appendix A', text: 'C'.repeat(30) },
+          ],
+          tables: [{ ...TABLE_A1, sectionTitle: 'Introduction' }],
+        });
+        const call = await runToolContract(fetchFulltextTool, {
+          pmcids: ['PMC10707391'],
+          sections: ['Introduction', 'Acknowledgments'],
+          maxCharacters: 170,
+        });
+
+        const article = articleOf(call);
+        expect(article.sections).toEqual([
+          { title: 'Introduction', text: 'A'.repeat(100) },
+          { title: 'Acknowledgments', text: 'B'.repeat(14) },
+        ]);
+        expect(article.tables?.map((tb) => tb.label)).toEqual(['Table A1']);
+        expect(rendered(call)).toContain('Hu et al. (2006)');
+        expect(
+          (call.structuredContent as { truncation?: Record<string, unknown> }).truncation,
+        ).toMatchObject({ omittedSections: 0, returnedCharacters: 170 });
+      });
+
+      it('cuts and drops the back matter the budget does not reach, listing it in the truncation ledger', async () => {
+        stageBudgeted();
+        const call = await runToolContract(fetchFulltextTool, {
+          pmcids: ['PMC10707391'],
+          maxCharacters: 120,
+        });
+
+        const article = articleOf(call);
+        expect(article.sections).toEqual([
+          { title: 'Introduction', text: 'A'.repeat(100) },
+          { title: 'Acknowledgments', text: 'B'.repeat(20) },
+        ]);
+        const truncation = (
+          call.structuredContent as {
+            truncation?: { articles: { sections: unknown[] }[]; omittedSections: number };
+          }
+        ).truncation;
+        expect(truncation?.omittedSections).toBe(1);
+        expect(truncation?.articles[0]?.sections).toEqual([
+          {
+            title: 'Introduction',
+            originalCharacters: 100,
+            returnedCharacters: 100,
+            truncated: false,
+          },
+          {
+            title: 'Acknowledgments',
+            originalCharacters: 30,
+            returnedCharacters: 20,
+            truncated: true,
+          },
+          { title: 'Appendix A', originalCharacters: 30, returnedCharacters: 0, truncated: true },
+        ]);
+      });
+    });
+  });
+
+  describe('through the real JATS parser', () => {
+    /** PMC10707391's shape, reduced: two body sections, then its kinds of back matter. */
+    const JATS =
+      '<article article-type="research-article"><front><article-meta>' +
+      '<article-id pub-id-type="pmcid">PMC10707391</article-id>' +
+      '<title-group><article-title>Cerebral MRI in monochorionic twins</article-title></title-group>' +
+      '</article-meta></front><body>' +
+      '<sec><title>1. Introduction</title><p>Twins share a placenta (<xref ref-type="app" rid="app1">Appendix A</xref>).</p></sec>' +
+      '<sec><title>5. Conclusions</title><p>MRI findings are common.</p></sec></body><back>' +
+      '<ack><title>Acknowledgments</title><p>We have much appreciation for the department.</p></ack>' +
+      '<fn-group><fn><p><bold>Disclaimer/Publisher’s Note:</bold> the statements are the authors’.</p></fn></fn-group>' +
+      '<notes notes-type="data-availability"><title>Data Availability Statement</title><p>All data are included.</p></notes>' +
+      '<app-group><app id="app1"><title>Appendix A</title><p>Search strategy for the different databases.</p></app>' +
+      '<app id="app3"><title>Appendix C</title><table-wrap id="tab1"><label>Table A1</label><caption><p>Quality assessment.</p></caption>' +
+      '<table><tbody><tr><td>Study</td><td>Score</td></tr><tr><td>Hu et al. (2006)</td><td>5/9</td></tr></tbody></table>' +
+      '</table-wrap></app></app-group>' +
+      '<ref-list><ref id="B1"><mixed-citation>Alpha A. A study. 2020.</mixed-citation></ref></ref-list></back></article>';
+
+    /** The `<article>` node the ordered parser makes of `xml`. */
+    function articleNode(xml: string) {
+      const nodes = new XMLParser(ORDERED_XML_PARSER_OPTIONS).parse(xml) as Record<
+        string,
+        unknown
+      >[];
+      const node = nodes.find((n) => 'article' in n);
+      if (!node) throw new Error('fixture has no <article>');
+      return node;
+    }
+
+    /** Answer PMC EFetch with `xml` and parse it with the real parser. */
+    function servePmc(xml: string) {
+      mockParsePmcArticle.mockImplementation(realParsePmcArticle);
+      mockEFetch.mockResolvedValue([{ 'pmc-articleset': [articleNode(xml)] }]);
+    }
+
+    it('returns back matter after the body and names the appendix that holds a table', async () => {
+      servePmc(JATS);
+      const call = await runToolContract(fetchFulltextTool, { pmcids: ['PMC10707391'] });
+
+      const article = articleOf(call);
+      expect(titlesOf(article.sections)).toEqual([
+        '1. Introduction',
+        '5. Conclusions',
+        'Acknowledgments',
+        'Footnotes',
+        'Data Availability Statement',
+        'Appendix A',
+        'Appendix C',
+      ]);
+      expect(article.sections.at(-1)).toEqual({ title: 'Appendix C', text: '' });
+      expect(article.tables?.map((tb) => [tb.label, tb.sectionTitle])).toEqual([
+        ['Table A1', 'Appendix C'],
+      ]);
+      expect(JSON.stringify(article.sections)).not.toContain('Hu et al.');
+      expect(rendered(call)).toContain('Search strategy for the different databases.');
+    });
+
+    it('selects the appendices and their table with a sections filter, reporting no miss', async () => {
+      servePmc(JATS);
+      const ctx = createMockContext({ errors: fetchFulltextTool.errors });
+      const result = await fetchFulltextTool.handler(
+        fetchFulltextTool.input.parse({ pmcids: ['PMC10707391'], sections: ['Appendix'] }),
+        ctx,
+      );
+
+      const article = result.articles[0];
+      if (article?.source !== 'pmc') throw new Error('expected a pmc article');
+      expect(titlesOf(article.sections)).toEqual(['Appendix A', 'Appendix C']);
+      expect(article.tables?.map((tb) => tb.label)).toEqual(['Table A1']);
+      expect(getEnrichment(ctx).notice).toBeUndefined();
+    });
+
+    it('keeps a back section’s supplementary file with a sections filter on that section', async () => {
+      // PMC10666927's eLife `Additional files`: a back <sec> holding only its supplement.
+      servePmc(
+        '<article><front><article-meta><article-id pub-id-type="pmcid">PMC10666927</article-id></article-meta></front>' +
+          '<body><sec><title>Introduction</title><p>Unconferences.</p></sec></body><back>' +
+          '<sec sec-type="supplementary-material"><title>Additional files</title>' +
+          '<supplementary-material id="mdar"><label>Supplementary file 1.</label><media xlink:href="elife-mdarchecklist1.docx"/></supplementary-material>' +
+          '</sec></back></article>',
+      );
+      const ctx = createMockContext({ errors: fetchFulltextTool.errors });
+      const result = await fetchFulltextTool.handler(
+        fetchFulltextTool.input.parse({ pmcids: ['PMC10666927'], sections: ['Additional files'] }),
+        ctx,
+      );
+
+      const article = result.articles[0];
+      if (article?.source !== 'pmc') throw new Error('expected a pmc article');
+      expect(article.sections).toEqual([
+        { title: 'Additional files', text: '[Supplementary: Supplementary file 1.]' },
+      ]);
+      expect(article.assets?.map((a) => [a.label, a.sectionTitle])).toEqual([
+        ['Supplementary file 1.', 'Additional files'],
+      ]);
+      expect(getEnrichment(ctx).notice).toBeUndefined();
+    });
+
+    /** A record carrying front matter and back matter, with no `<body>`. */
+    const BODYLESS =
+      '<article><front><article-meta><article-id pub-id-type="pmcid">PMC2600426</article-id>' +
+      '<title-group><article-title>Publisher blocks XML download</article-title></title-group></article-meta></front>' +
+      '<back><ack><title>Acknowledgments</title><p>We thank the reviewers.</p></ack>' +
+      '<notes><title>Conflicts of Interest</title><p>None.</p></notes></back></article>';
+
+    it('routes a record with back matter and no body as no-body on the PMC tier', async () => {
+      servePmc(BODYLESS);
+      const call = await runToolContract(fetchFulltextTool, { pmcids: ['PMC2600426'] });
+
+      const structured = call.structuredContent as {
+        articles: unknown[];
+        unavailable?: { reason: string; triedTiers: unknown[] }[];
+      };
+      expect(structured.articles).toEqual([]);
+      expect(structured.unavailable?.[0]?.reason).toBe('no-body');
+      expect(structured.unavailable?.[0]?.triedTiers[0]).toEqual({
+        tier: 'pmc',
+        outcome: 'no-body',
+        detail: 'PMC returned front matter and abstract only, with no body sections',
+      });
+    });
+
+    describe('on the Europe PMC tier', () => {
+      function serveEpmc(xml: string) {
+        mockGetEpmcService.mockReturnValue({
+          search: mockEpmcSearch,
+          fullTextXml: mockEpmcFullTextXml,
+          parseFullTextXml: mockEpmcParseFullTextXml,
+        });
+        mockIdConvert.mockResolvedValue([{ 'requested-id': '42', pmid: '42' }]);
+        mockEFetchBy({ pubmedDois: {} });
+        mockEpmcSearch.mockResolvedValue({
+          hits: [{ id: '42', source: 'MED', pmid: '42', pmcid: 'PMC42' }],
+          hitCount: 1,
+          cursorMark: '*',
+        });
+        mockEpmcFullTextXml.mockResolvedValue({
+          kind: 'found',
+          xml,
+          epmcId: 'PMC42',
+          source: 'MED',
+        });
+        mockEpmcParseFullTextXml.mockReturnValue(articleNode(xml));
+        mockParsePmcArticle.mockImplementation(realParsePmcArticle);
+      }
+
+      it('routes a record with back matter and no body as no-body', async () => {
+        serveEpmc(BODYLESS);
+        const call = await runToolContract(fetchFulltextTool, { pmids: ['42'] });
+
+        const structured = call.structuredContent as {
+          articles: unknown[];
+          unavailable?: { triedTiers: unknown[] }[];
+        };
+        expect(structured.articles).toEqual([]);
+        expect(structured.unavailable?.[0]?.triedTiers).toContainEqual({
+          tier: 'europepmc',
+          outcome: 'no-body',
+          detail: 'EPMC fullTextXML carried front matter and abstract only, with no body sections',
+        });
+      });
+
+      it('appends the back matter of a deposit that keeps its <back>, as the PMC tier does', async () => {
+        // Europe PMC serves some deposits (MDPI, BMC) with their <back> left in place.
+        serveEpmc(
+          '<article><front><article-meta><article-id pub-id-type="pmcid">PMC42</article-id></article-meta></front>' +
+            '<body><sec><title>Results</title><p>Body text.</p></sec></body><back>' +
+            '<ack><p>We thank the lab.</p></ack><fn-group><fn><p>Publisher’s note.</p></fn></fn-group>' +
+            '<ref-list><ref id="R1"><mixed-citation>Alpha A. A study. 2020.</mixed-citation></ref></ref-list>' +
+            '</back></article>',
+        );
+        const call = await runToolContract(fetchFulltextTool, { pmids: ['42'] });
+
+        const article = articleOf(call);
+        expect(article.sections).toEqual([
+          { title: 'Results', text: 'Body text.' },
+          { title: 'Acknowledgments', text: 'We thank the lab.' },
+          { title: 'Footnotes', text: 'Publisher’s note.' },
+        ]);
+        expect(article).not.toHaveProperty('backSections');
+      });
+
+      it('leaves a deposit that already carries its back matter as <body> sections as it was', async () => {
+        // Europe PMC moves PMC10707391's <back> children into <body> as <sec>s.
+        serveEpmc(
+          '<article><front><article-meta><article-id pub-id-type="pmcid">PMC42</article-id></article-meta></front><body>' +
+            '<sec><title>5. Conclusions</title><p>MRI findings are common.</p></sec>' +
+            '<sec><title>Acknowledgments</title><p>We have much appreciation.</p></sec>' +
+            '<sec><title>Footnotes</title><p>Publisher’s note.</p></sec></body></article>',
+        );
+        const call = await runToolContract(fetchFulltextTool, { pmids: ['42'] });
+
+        expect(articleOf(call).sections).toEqual([
+          { title: '5. Conclusions', text: 'MRI findings are common.' },
+          { title: 'Acknowledgments', text: 'We have much appreciation.' },
+          { title: 'Footnotes', text: 'Publisher’s note.' },
+        ]);
+      });
+    });
   });
 });

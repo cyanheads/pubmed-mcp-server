@@ -9,15 +9,63 @@
 import { tool, z } from '@cyanheads/mcp-ts-core';
 import { NCBI_SERVICE_ERRORS } from '@/services/error-contracts.js';
 import {
+  CITATION_NOTICE_TYPES,
   type CitationStyle,
+  citationNotices,
   formatCitations,
 } from '@/services/ncbi/formatting/citation-formatter.js';
 import { getNcbiService } from '@/services/ncbi/ncbi-service.js';
 import { parseArticleSet } from '@/services/ncbi/parsing/article-parser.js';
 import { conceptMeta, EDAM_DATA_FORMATTING, SCHEMA_CREATIVE_WORK } from './_concepts.js';
 import { normalizePmid, pmidStringSchema } from './_schemas.js';
+import { escapeMarkdownInline } from './_text.js';
 
 const CitationStyleEnum = z.enum(['apa', 'mla', 'bibtex', 'ris', 'vancouver']);
+
+const CitationNoticeSchema = z
+  .object({
+    refType: z
+      .enum(CITATION_NOTICE_TYPES)
+      .describe(
+        "NCBI's `RefType` for the link: RetractionIn, RetractedandRepublishedIn, ExpressionOfConcernIn, ErratumIn, or CorrectedandRepublishedIn.",
+      ),
+    refSource: z
+      .string()
+      .describe(
+        'Citation of the notice as NCBI writes it (e.g. "Lancet. 2010 Feb 6;375(9713):445. doi: 10.1016/S0140-6736(10)60175-4.").',
+      ),
+    pmid: z
+      .string()
+      .optional()
+      .describe(
+        'PMID of the notice — pass it to `pubmed_fetch_articles` to read it. Absent when the notice has no PMID, as with many errata.',
+      ),
+    note: z
+      .string()
+      .optional()
+      .describe(
+        "NCBI's note on the link, e.g. the correction an erratum makes. Absent when NCBI gives none.",
+      ),
+  })
+  .describe('A linked notice that qualifies the cited article');
+
+/**
+ * The `content[]` lines for one article's notices, opening on a warning when it
+ * was retracted. Each line takes `pubmed_fetch_articles`' form for the same link.
+ */
+function noticeLines(notices: z.infer<typeof CitationNoticeSchema>[]): string[] {
+  const retracted = notices.some(
+    (notice) => notice.refType === 'RetractionIn' || notice.refType === 'RetractedandRepublishedIn',
+  );
+  return [
+    retracted ? '**Retracted:** NCBI links a retraction notice to this article.' : '**Notices:**',
+    ...notices.map((notice) => {
+      const pmid = notice.pmid ? ` — PMID ${notice.pmid}` : '';
+      const note = notice.note ? ` — Note: ${escapeMarkdownInline(notice.note)}` : '';
+      return `- **${notice.refType}:** ${escapeMarkdownInline(notice.refSource)}${pmid}${note}`;
+    }),
+  ];
+}
 
 /**
  * A union rejects a bad `format` with Zod's top-level `Invalid input`, which
@@ -32,7 +80,7 @@ const CITATION_STYLE_ERROR = `Invalid option: expected one of ${CitationStyleEnu
 
 export const formatCitationsTool = tool('pubmed_format_citations', {
   description:
-    'Get formatted citations for PubMed articles in one or more formats (apa, mla, bibtex, ris, vancouver). Pass a single format as a string or multiple as an array.',
+    'Get formatted citations for PubMed articles in one or more formats (apa, mla, bibtex, ris, vancouver). Pass a single format as a string or multiple as an array. Retractions, errata, and expressions of concern NCBI links to an article come back in `notices`; Vancouver and APA also cite a retraction in the reference itself.',
   annotations: { readOnlyHint: true, openWorldHint: true },
   _meta: conceptMeta([SCHEMA_CREATIVE_WORK, EDAM_DATA_FORMATTING]),
   sourceUrl:
@@ -74,6 +122,12 @@ export const formatCitationsTool = tool('pubmed_format_citations', {
             pmid: z.string().describe('PubMed ID'),
             title: z.string().optional().describe('Article title'),
             citations: z.record(z.string(), z.string()).describe('Citations keyed by style'),
+            notices: z
+              .array(CitationNoticeSchema)
+              .optional()
+              .describe(
+                "Retraction, erratum, and expression-of-concern notices NCBI links to this article, in NCBI's order. Vancouver notes each `RetractionIn` and `ErratumIn` after the reference and APA each `RetractionIn`; the other types, and MLA, BibTeX, and RIS, carry none, so check this before citing. Absent when NCBI links none.",
+              ),
           })
           .describe('Citations for a single article'),
       )
@@ -116,11 +170,15 @@ export const formatCitationsTool = tool('pubmed_format_citations', {
     // Reads both members of the set. Taking `PubmedArticleSet.PubmedArticle`
     // alone discards every NCBI Bookshelf record, leaving a chapter or book
     // uncitable and its PMID reported unavailable. (#114)
-    const citations = parseArticleSet(raw?.PubmedArticleSet).map((parsed) => ({
-      pmid: parsed.pmid,
-      title: parsed.title,
-      citations: formatCitations(parsed, formats),
-    }));
+    const citations = parseArticleSet(raw?.PubmedArticleSet).map((parsed) => {
+      const notices = citationNotices(parsed);
+      return {
+        pmid: parsed.pmid,
+        title: parsed.title,
+        citations: formatCitations(parsed, formats),
+        ...(notices.length > 0 && { notices }),
+      };
+    });
 
     const returnedPmids = new Set(citations.map((entry) => entry.pmid));
     const unavailablePmids = input.pmids.filter((pmid) => !returnedPmids.has(normalizePmid(pmid)));
@@ -149,6 +207,9 @@ export const formatCitationsTool = tool('pubmed_format_citations', {
     for (const entry of result.citations) {
       lines.push(`\n## PMID ${entry.pmid}`);
       if (entry.title) lines.push(`**${entry.title}**`);
+      // Ahead of every style: a notice qualifies how each citation is read. The
+      // blank line keeps Markdown from folding it into the title's paragraph.
+      if (entry.notices?.length) lines.push('', ...noticeLines(entry.notices));
       for (const [style, citation] of Object.entries(entry.citations)) {
         lines.push(`\n### ${style.toUpperCase()}`);
         if (style === 'bibtex' || style === 'ris') {

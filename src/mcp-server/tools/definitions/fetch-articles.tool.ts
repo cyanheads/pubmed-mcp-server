@@ -26,7 +26,12 @@ const AuthorSchema = z
     lastName: z.string().optional().describe('Last name'),
     firstName: z.string().optional().describe('First/given name'),
     initials: z.string().optional().describe('Author initials'),
-    collectiveName: z.string().optional().describe('Group/collective author name'),
+    collectiveName: z
+      .string()
+      .optional()
+      .describe(
+        'Group/collective author name. NCBI may list the members of the group separately; set `includeInvestigators` to return them as `investigators`.',
+      ),
     affiliationIndices: z
       .array(z.number())
       .optional()
@@ -34,6 +39,21 @@ const AuthorSchema = z
     orcid: z.string().optional().describe('ORCID identifier'),
   })
   .describe('Author record');
+
+const InvestigatorSchema = z
+  .object({
+    lastName: z.string().optional().describe('Last name'),
+    firstName: z.string().optional().describe('First/given name'),
+    initials: z.string().optional().describe('Initials'),
+    affiliationIndices: z
+      .array(z.number())
+      .optional()
+      .describe(
+        "Indices into the top-level affiliations array, where an investigator's affiliations follow the authors'",
+      ),
+    orcid: z.string().optional().describe('ORCID identifier'),
+  })
+  .describe("One member of a collective author, from NCBI's `InvestigatorList`");
 
 const JournalPublicationDateSchema = z
   .object({
@@ -269,12 +289,23 @@ const FetchedArticleSchema = z
         'Article title — the chapter title on a `book-chapter`, and the book title on a `book` record, where it repeats `book.title`.',
       ),
     abstractText: z.string().optional().describe('Abstract text'),
-    affiliations: z.array(z.string()).optional().describe('Deduplicated author affiliations'),
+    affiliations: z
+      .array(z.string())
+      .optional()
+      .describe(
+        "Deduplicated affiliations, referenced by `affiliationIndices`: the authors' entries first, then any that only `investigators` carry",
+      ),
     authors: z
       .array(AuthorSchema)
       .optional()
       .describe(
         "Author list. On a `book-chapter` these are the chapter's own authors, never the book's editors, which are in `book.editors`. Empty on a Bookshelf record that credits neither.",
+      ),
+    investigators: z
+      .array(InvestigatorSchema)
+      .optional()
+      .describe(
+        "Members of the article's collective author, from NCBI's `InvestigatorList`: every list flattened in NCBI's order, uncapped. They are not authors, and no citation style lists them. Present only when `includeInvestigators` is set and the record lists any; never on `book-chapter` or `book` records.",
       ),
     journalInfo: JournalInfoSchema.optional(),
     book: BookInfoSchema.optional(),
@@ -334,7 +365,7 @@ const DeferredSchema = z
 
 export const fetchArticlesTool = tool('pubmed_fetch_articles', {
   description:
-    'Fetch full article metadata by PubMed IDs. Returns detailed article information including abstract, authors, journal, MeSH terms, and linked retraction, erratum, and comment notices. Set `maxResponseCharacters` to bound the whole response: articles past the ceiling are deferred whole and listed in `deferred.ids` for a follow-up call.',
+    'Fetch full article metadata by PubMed IDs. Returns detailed article information including abstract, authors, journal, MeSH terms, and linked retraction, erratum, and comment notices; grants and the members of a collective author are opt-in (`includeGrants`, `includeInvestigators`). Set `maxResponseCharacters` to bound the whole response: articles past the ceiling are deferred whole and listed in `deferred.ids` for a follow-up call.',
   annotations: { readOnlyHint: true, openWorldHint: true },
   _meta: conceptMeta([SCHEMA_SCHOLARLY_ARTICLE, EDAM_DATA_RETRIEVAL, EDAM_PUBMED_ID]),
   sourceUrl:
@@ -358,11 +389,16 @@ export const fetchArticlesTool = tool('pubmed_fetch_articles', {
     pmids: z.array(pmidStringSchema).min(1).max(200).describe('PubMed IDs to fetch'),
     includeMesh: z.boolean().default(true).describe('Include MeSH terms'),
     includeGrants: z.boolean().default(false).describe('Include grant information'),
+    includeInvestigators: z
+      .boolean()
+      .default(false)
+      .describe(
+        'Include `investigators`: the members NCBI lists for a collective author such as "TGU Investigators". Off by default because the list is unbounded: consortium trials name thousands, at about 60 characters of JSON each — PMID 33933206 lists 6,349, adding about 372,000 characters to its record. Under `maxResponseCharacters` they count toward the size of their article, which is deferred whole when it no longer fits.',
+      ),
     maxResponseCharacters: z
       .number()
       .int()
       .min(1)
-      .max(1_000_000)
       .optional()
       .describe(
         'Opt-in ceiling for the whole response, in characters. Each article is measured as the JSON record it is returned as — title, abstract, authors, journal, MeSH terms, grants, identifiers, every field it carries. Articles are kept in response order until the next one would cross the ceiling; that article and the rest are deferred whole (never partially populated) and listed in `deferred.ids`. Response envelope fields — counts, `unavailablePmids`, `deferred` itself — are not counted. Omit to return every resolved article.',
@@ -430,6 +466,7 @@ export const fetchArticlesTool = tool('pubmed_fetch_articles', {
     const articles = parseArticleSet(xmlData.PubmedArticleSet, {
       includeMesh: input.includeMesh,
       includeGrants: input.includeGrants,
+      includeInvestigators: input.includeInvestigators,
     }).map((parsed) => ({
       ...parsed,
       pubmedUrl: `https://pubmed.ncbi.nlm.nih.gov/${parsed.pmid}/`,
@@ -509,6 +546,13 @@ export const fetchArticlesTool = tool('pubmed_fetch_articles', {
         lines.push(`\n**Authors (${a.authors.length}):**`);
         for (const au of a.authors) {
           lines.push(`- ${formatAuthor(au)}`);
+        }
+      }
+
+      if (a.investigators?.length) {
+        lines.push(`\n**Investigators (${a.investigators.length}):**`);
+        for (const inv of a.investigators) {
+          lines.push(`- ${formatAuthor(inv)}`);
         }
       }
 

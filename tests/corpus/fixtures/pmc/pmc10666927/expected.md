@@ -303,6 +303,130 @@ Several limitations of the present work and the virtual brainstorming event have
 #### Conclusions
 The eleven strategies discussed here highlight that there are several actions that can be taken to make reproducible research and open science training the norm at research institutions. Many of these strategies go beyond offering courses and workshops on these topics. Researchers can take action in their roles as scientists, supervisors, mentors, instructors, and members of curriculum design or hiring and evaluation committees. Combining these bottom-up activities with top-down efforts by institutional leadership and research support staff (including librarians, information technology professionals, and members of administrative committees) could accelerate institutional implementation of reproducible research and open science practices across disciplines. Research institutions can further support these activities by allocating resources and monitoring participation and impact. Sharing expertise among institutions may also be beneficial. Making reproducible research and open science training the norm will require a broad coalition, and we hope that this piece will inspire others to join these efforts.
 
+#### Funding Information
+This paper was supported by the following grants:
+
+- Wellcome Trust SPOKES Subproject to Friederike E Kohrs.
+- Federal Ministry of Education and Research ATLAS grant 031L0304B to Matthias König.
+- German Research Foundation FOR 5151 QuaLiPerF to Matthias König.
+- SIMLIVA 465194077 to Matthias König.
+- Wellcome Trust Translational Partnership with Charité Universitätsmedizin Berlin to Friederike E Kohrs.
+- Wellcome Trust 218358 to Friederike E Kohrs.
+- German Research Foundation 436883643 to Matthias König.
+
+#### Additional information
+
+##### Competing interests
+No competing interests declared.
+
+##### Author contributions
+Investigation, Visualization, Writing – original draft, Project administration, Writing – review and editing.
+
+Conceptualization, Investigation, Methodology, Writing – original draft, Writing – review and editing.
+
+Conceptualization, Investigation, Methodology, Writing – original draft, Writing – review and editing.
+
+Conceptualization, Investigation, Methodology, Writing – original draft, Writing – review and editing.
+
+Conceptualization, Investigation, Methodology, Writing – original draft, Writing – review and editing.
+
+Conceptualization, Investigation, Methodology, Writing – original draft, Writing – review and editing.
+
+Conceptualization, Investigation, Methodology, Writing – original draft, Writing – review and editing.
+
+Investigation, Writing – review and editing.
+
+Investigation, Writing – review and editing.
+
+Investigation, Writing – review and editing.
+
+Investigation, Writing – review and editing.
+
+Investigation, Writing – review and editing.
+
+Investigation, Writing – review and editing.
+
+Investigation, Writing – review and editing.
+
+Investigation, Writing – review and editing.
+
+Investigation, Writing – review and editing.
+
+Investigation, Writing – review and editing.
+
+Investigation, Writing – review and editing.
+
+Investigation, Writing – review and editing.
+
+Investigation, Writing – review and editing.
+
+Investigation, Writing – review and editing.
+
+Investigation, Writing – review and editing.
+
+Investigation, Writing – review and editing.
+
+Investigation, Writing – review and editing.
+
+Investigation, Writing – review and editing.
+
+Investigation, Writing – review and editing.
+
+Investigation, Writing – review and editing.
+
+Investigation, Writing – review and editing.
+
+Investigation, Writing – review and editing.
+
+Investigation, Writing – review and editing.
+
+Investigation, Writing – review and editing.
+
+Investigation, Writing – review and editing.
+
+Investigation, Writing – review and editing.
+
+Investigation, Writing – review and editing.
+
+Investigation, Writing – review and editing.
+
+Investigation, Writing – review and editing.
+
+Investigation, Writing – review and editing.
+
+Investigation, Writing – review and editing.
+
+Investigation, Writing – review and editing.
+
+Investigation, Writing – review and editing.
+
+Investigation, Writing – review and editing.
+
+Investigation, Writing – review and editing.
+
+Investigation, Writing – review and editing.
+
+Investigation, Writing – review and editing.
+
+Investigation, Writing – review and editing.
+
+Investigation, Writing – review and editing.
+
+Investigation, Writing – review and editing.
+
+Investigation, Writing – review and editing.
+
+Investigation, Writing – review and editing.
+
+Investigation, Writing – review and editing.
+
+Investigation, Writing – review and editing.
+
+Conceptualization, Funding acquisition, Investigation, Visualization, Methodology, Writing – original draft, Project administration, Writing – review and editing.
+
+#### Additional files
+[Supplementary: Supplementary file 1.]
+
 #### Assets (3)
 
 > `file` is the pointer exactly as deposited — a name inside the PMC deposit, not a fetchable URL. Open the article at the PMC link above to view it.

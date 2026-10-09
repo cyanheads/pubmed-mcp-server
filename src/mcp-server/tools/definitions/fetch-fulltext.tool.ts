@@ -1,8 +1,9 @@
 /**
  * @fileoverview Full-text fetch tool. Resolves full-text articles through a
  * three-stage chain: NCBI PMC EFetch → Europe PMC `fullTextXML` → Unpaywall.
- * Accepts three input fields, alone or together, naming at most 10 distinct
- * identifiers between them:
+ * Accepts three input fields, alone or together, naming at most 50 distinct
+ * identifiers between them. The first 10 in routing order are fetched; the rest
+ * are returned unfetched in `overLimit`, before any upstream request:
  *
  *   - `pmcids` — fetch directly by PMC ID, once per record however it is
  *     spelled (`PMC123`, `pmc123`, `123`, zero-padded `PMC0123`), and reported
@@ -17,12 +18,16 @@
  *     DOIs are case-insensitive: every casing of one DOI runs the chain once,
  *     and `unavailable[]` reports each casing as the caller wrote it.
  *
+ * The singular `pmcid`, `pmcId`, `pmid`, and `doi` are unadvertised aliases of
+ * these fields, and a lone string under any of them reads as a one-element
+ * array. (#221)
+ *
  * Routing runs `pmcids`, then `pmids`, then `dois`. Every tier keys its work on
  * the record — PMC on the PMCID, Europe PMC on the search hit's `source` + `id`,
  * Unpaywall on the lowercased DOI — and the first id to reach a record owns it:
  * a later id naming the same article joins the owner's chain as another caller
- * id, so the article is fetched and returned once. Each `unavailable[]` entry
- * and deferred id carries the field its id was sent in.
+ * id, so the article is fetched and returned once. Each `unavailable[]` entry,
+ * deferred id, and over-limit id carries the field its id was sent in.
  *
  * Output uses a discriminated union on `source` (`pmc` | `unpaywall`) with an
  * extra `viaSource` discriminator that records which layer produced the
@@ -179,7 +184,7 @@ interface PmcFilterOptions {
   sections?: string[] | undefined;
 }
 
-/** One body section at any nesting level, as the parser produces it. */
+/** One section, body or back matter, at any nesting level, as the parser produces it. */
 type ParsedSection = ParsedPmcArticle['sections'][number];
 
 /**
@@ -338,6 +343,30 @@ function applyAssetFilters(article: ParsedPmcArticle, filters: PmcFilterOptions)
 }
 
 /**
+ * The top-level sections the `sections` filter and the `maxSections` slice
+ * select, in order. Both act on each top-level section independently or cut a
+ * prefix, so applied to the body alone this returns exactly the body prefix of
+ * what it returns for body plus back matter — which is how {@link
+ * bodySectionCount} finds where the back matter starts.
+ */
+function selectSections(sections: ParsedSection[], filters: PmcFilterOptions): ParsedSection[] {
+  const pruned = filters.sections?.length
+    ? pruneSections(sections, filters.sections.map(lowerCase))
+    : sections;
+  return filters.maxSections === undefined ? pruned : pruned.slice(0, filters.maxSections);
+}
+
+/**
+ * How many leading entries of the filtered `sections` are body sections, the
+ * rest being back matter: the filter applied to the parsed body alone. The depth
+ * clamp that follows the filter maps sections one to one, so the count holds for
+ * the filtered article. (#206)
+ */
+function bodySectionCount(parsed: ParsedPmcArticle, filters: PmcFilterOptions): number {
+  return selectSections(parsed.sections, filters).length;
+}
+
+/**
  * Apply the requested section/reference/table/asset filters, then clamp the
  * section tree to the depth the output schema carries. All of it runs here so every path
  * producing a `pmc` article — PMC EFetch and the Europe PMC stage — shares one
@@ -354,13 +383,7 @@ function applyAssetFilters(article: ParsedPmcArticle, filters: PmcFilterOptions)
  * folded-away section survives in the text it was folded into. (#111, #130)
  */
 function applyPmcFilters(article: ParsedPmcArticle, filters: PmcFilterOptions): ParsedPmcArticle {
-  let out = article;
-  if (filters.sections?.length) {
-    out = { ...out, sections: pruneSections(out.sections, filters.sections.map(lowerCase)) };
-  }
-  if (filters.maxSections !== undefined) {
-    out = { ...out, sections: out.sections.slice(0, filters.maxSections) };
-  }
+  let out: ParsedPmcArticle = { ...article, sections: selectSections(article.sections, filters) };
   if (!filters.includeReferences) {
     const { references: _, ...rest } = out;
     out = rest as ParsedPmcArticle;
@@ -371,11 +394,12 @@ function applyPmcFilters(article: ParsedPmcArticle, filters: PmcFilterOptions): 
 }
 
 /**
- * True when a `sections` filter removed every body section from an article that
- * actually had sections upstream — the signal that the requested headings
- * matched nothing, as opposed to the article genuinely shipping no body. Only
- * the `sections` filter can zero a non-empty list: `maxSections` carries a
- * `.min(1)` floor, so it never reduces to zero. (#80)
+ * True when a `sections` filter removed every section, back matter included,
+ * from an article that actually had sections upstream — the signal that the
+ * requested headings matched nothing, as opposed to the article genuinely
+ * shipping no body. Only the `sections` filter can zero a non-empty list:
+ * `maxSections` carries a `.min(1)` floor, so it never reduces to zero. (#80,
+ * #206)
  */
 function isSectionFilterMiss(
   before: ParsedPmcArticle,
@@ -394,10 +418,22 @@ function isSectionFilterMiss(
  * while carrying nothing to read. Distinct from {@link isSectionFilterMiss},
  * which needs a non-empty pre-filter body: the two never overlap. Evaluated
  * against the *pre-filter* article so a `sections` filter can't be mistaken for
- * an upstream absence. (#86)
+ * an upstream absence, and before {@link withBackMatter}, so acknowledgments and
+ * a data-availability note alone are no body and the chain still moves on to the
+ * next tier. (#86, #206)
  */
-function isBodylessArticle(before: ParsedPmcArticle): boolean {
-  return before.sections.length === 0;
+function isBodylessArticle(parsed: ParsedPmcArticle): boolean {
+  return parsed.sections.length === 0;
+}
+
+/**
+ * The parsed article with its back-matter sections appended after the body
+ * ones, where every filter, slice, and budget downstream treats them as ordinary
+ * sections, and with no `backSections` field of its own left to reach the
+ * output. (#206)
+ */
+function withBackMatter({ backSections, ...article }: ParsedPmcArticle): ParsedPmcArticle {
+  return backSections ? { ...article, sections: [...article.sections, ...backSections] } : article;
 }
 
 /** Pick the best human-readable identifier for an article, for recovery notices
@@ -426,7 +462,7 @@ function buildSectionFilterMissNotice(affectedIds: string[], sectionFilter: stri
   const terms = sectionFilter.join(', ');
   const subject =
     affectedIds.length === 1 ? `article ${affectedIds[0]}` : `articles ${affectedIds.join(', ')}`;
-  return `No section or subsection title, at any nesting depth, matched the requested section filter (${terms}) for ${subject}. The full text was retrieved but every body section was filtered out. Retry without \`sections\`, or filter on broader headings such as Introduction, Methods, Results, or Discussion.`;
+  return `No section or subsection title, at any nesting depth, matched the requested section filter (${terms}) for ${subject}. The full text was retrieved but every section, back matter included, was filtered out. Retry without \`sections\`, or filter on broader headings such as Introduction, Methods, Results, or Discussion.`;
 }
 
 /**
@@ -485,7 +521,7 @@ const SectionSchema = z
     text: z.string().describe('Section body text'),
     subsections: z.array(SubsectionSchema).optional().describe('Nested subsections'),
   })
-  .describe('Article body section');
+  .describe('Article section, from the body or from the back matter after it');
 
 const AuthorSchema = z
   .object({
@@ -548,7 +584,7 @@ const TableSchema = z
       .string()
       .optional()
       .describe(
-        'Title of the innermost section enclosing the table, wherever that section sits — body, `<back>` matter, or an appendix all count, and in back matter the section name is the only positional cue there is. Absent only for a table inside no section at all, such as a `<floats-group>` deposit.',
+        'Title of the innermost titled section enclosing the table — a body section or a back-matter one such as an appendix — as that section is titled in `sections`, or, for a heading nested deeper than `sections` carries, as its heading line inside the text of the section that contains it. A `sections` filter keeps the table with that section. In back matter the section name is the only positional cue there is. Absent for a table inside no titled section, such as a `<floats-group>` deposit.',
       ),
     headerRowCount: z
       .number()
@@ -609,7 +645,7 @@ const AssetSchema = z
       .string()
       .optional()
       .describe(
-        'Title of the innermost section enclosing the asset, wherever that section sits — body, `<back>` matter, or an appendix all count. Absent for an asset inside no section at all, such as a `<floats-group>` deposit.',
+        'Title of the innermost titled section enclosing the asset — a body section or a back-matter one such as an appendix — as that section is titled in `sections`, or, for a heading nested deeper than `sections` carries, as its heading line inside the text of the section that contains it. Absent for an asset inside no titled section, such as a `<floats-group>` deposit.',
       ),
     href: z
       .string()
@@ -661,7 +697,11 @@ const PmcArticleSchema = z
     keywords: z.array(z.string()).optional().describe('Keywords'),
     articleType: z.string().optional().describe('Article type'),
     publicationDate: PublicationDateSchema.optional(),
-    sections: z.array(SectionSchema).describe('Article body sections'),
+    sections: z
+      .array(SectionSchema)
+      .describe(
+        'Article sections in source order: the body, then the back matter — acknowledgments, notes and declarations, footnotes, glossary, appendices. A back-matter element with no heading of its own is titled by its kind, such as `Footnotes` or `Appendix`.',
+      ),
     tables: z
       .array(TableSchema)
       .optional()
@@ -672,7 +712,7 @@ const PmcArticleSchema = z
       .array(AssetSchema)
       .optional()
       .describe(
-        'Every `<fig>` and `<supplementary-material>` the article carries, in document order — from the body and from `<floats-group>`, `<back>` and appendices alike. Each one lifted from the body leaves a `[Figure: <label>]` or `[Supplementary: <label>]` marker at its position in the section text, so reading order survives the lift. Absent when the article deposits none, when `includeAssets` is false, or when a `sections` filter left none standing.',
+        'Every `<fig>` and `<supplementary-material>` the article carries, in document order — from the body and from `<floats-group>`, `<back>` and appendices alike. Each one lifted from a section, body or back matter, leaves a `[Figure: <label>]` or `[Supplementary: <label>]` marker at its position in the section text, so reading order survives the lift. Absent when the article deposits none, when `includeAssets` is false, or when a `sections` filter left none standing.',
       ),
     references: z.array(ReferenceSchema).optional().describe('Reference list'),
     epmcId: z
@@ -895,7 +935,7 @@ const TruncatedSectionSchema = z
         'Per-subsection accounting for a shortened section, in document order, including subsections dropped for budget — where inside the section the cut landed. Absent when the section was returned whole or carries no subsections.',
       ),
   })
-  .describe('Character accounting for one body section of a budgeted article');
+  .describe('Character accounting for one section of a budgeted article');
 
 /** One ledger entry at either level — the shape the budget pass builds and `format()` walks. */
 type SectionLedgerEntry = z.infer<typeof TruncatedSubsectionSchema> & {
@@ -912,7 +952,7 @@ const TruncatedArticleSchema = z
     source: z
       .enum(['pmc', 'unpaywall'])
       .describe(
-        'Which output shape was budgeted: `pmc` budgets body sections and subsections, `unpaywall` budgets the single `content` body',
+        'Which output shape was budgeted: `pmc` budgets sections and subsections, `unpaywall` budgets the single `content` body',
       ),
     originalCharacters: z
       .number()
@@ -940,7 +980,7 @@ const TruncatedArticleSchema = z
       .number()
       .optional()
       .describe(
-        'Figures and supplementary items this article dropped whole because the budget left no room once sections and tables were served. An asset is never returned with a truncated caption, so it is either returned complete or counted here. Absent when none were dropped.',
+        'Figures and supplementary items this article dropped whole because the budget left no room once body sections and tables were served. An asset is never returned with a truncated caption, so it is either returned complete or counted here. Absent when none were dropped.',
       ),
     omittedAssetNames: z
       .array(z.string())
@@ -970,7 +1010,7 @@ const TruncationSchema = z
     omittedSections: z
       .number()
       .describe(
-        'Body sections and subsections dropped entirely because an article budget was exhausted before reaching them. A dropped section counts once, together with its subsections. Always 0 in `outline` mode, which keeps every heading.',
+        'Sections and subsections, back matter included, dropped entirely because an article budget was exhausted before reaching them. Back matter is reached last, after tables and assets. A dropped section counts once, together with its subsections. Always 0 in `outline` mode, which keeps every heading.',
       ),
     omittedTables: z
       .number()
@@ -1040,6 +1080,47 @@ const DeferredSchema = z
   })
   .describe(
     'Continuation state for articles the whole-response budget withheld. Present only when `maxResponseCharacters` deferred at least one article.',
+  );
+
+const OverLimitSchema = z
+  .object({
+    limit: z
+      .number()
+      .describe(
+        'Distinct identifiers one call fetches. The first this many, in routing order — `pmcids`, then `pmids`, then `dois`, request order within each — were fetched; the ids below were not.',
+      ),
+    idType: z
+      .enum(['pmid', 'pmcid', 'doi'])
+      .optional()
+      .describe(
+        'The input field every over-limit id was sent in — re-submit them as `pmids`, `pmcids`, or `dois` respectively. Absent when the over-limit ids came from more than one field; `pmcids` / `pmids` / `dois` then group them.',
+      ),
+    ids: z
+      .array(z.string())
+      .describe(
+        'Identifiers past the per-call limit, none of them fetched, in routing order — each listed once, under the first spelling sent (PMC IDs in `PMC<digits>` form). Re-call `pubmed_fetch_fulltext` with these under the `idType` field — or, when `idType` is absent, with the `pmcids` / `pmids` / `dois` lists below — and the same other inputs, at most `limit` per call. Never contains an id from `unavailable` or `deferred`.',
+      ),
+    pmcids: z
+      .array(z.string())
+      .optional()
+      .describe(
+        'The over-limit ids sent as PMC IDs, in routing order — re-submit them as `pmcids`. Present only when the over-limit ids came from more than one field (so `idType` is absent) and one of them was a PMC ID.',
+      ),
+    pmids: z
+      .array(z.string())
+      .optional()
+      .describe(
+        'The over-limit ids sent as PMIDs, in routing order — re-submit them as `pmids`. Present only when the over-limit ids came from more than one field (so `idType` is absent) and one of them was a PMID.',
+      ),
+    dois: z
+      .array(z.string())
+      .optional()
+      .describe(
+        'The over-limit ids sent as DOIs, in routing order — re-submit them as `dois`. Present only when the over-limit ids came from more than one field (so `idType` is absent) and one of them was a DOI.',
+      ),
+  })
+  .describe(
+    'Identifiers the call named past the per-call fetch limit, returned unfetched for a follow-up call. Present only when the call named more than `limit` distinct identifiers. Separate from `deferred`, which lists articles that were fetched but withheld by `maxResponseCharacters`.',
   );
 
 // ─── Character budget ────────────────────────────────────────────────────────
@@ -1297,11 +1378,16 @@ function allotSectionBudgets(sizes: number[], budget: BudgetOptions): number[] {
  * or cut — the budget spends on body text and table content, keeping every
  * article citable.
  *
- * Body sections are served first, then tables, then assets, each spending what
- * `maxCharacters` has left, in document order: an item that does not fit is
- * dropped whole and counted, never truncated into a partial grid or a caption cut
- * short. With no `maxCharacters` — a bare `maxCharactersPerSection` request —
- * nothing bounds either list and every entry is kept. (#111, #130)
+ * Body sections are served first, then tables, then assets, then back-matter
+ * sections, each spending what `maxCharacters` has left, in document order. A
+ * table or asset that does not fit is dropped whole and counted, never
+ * truncated into a partial grid or a caption cut short. Back matter comes last
+ * so it never displaces a table or figure: it is shortened or dropped the way
+ * body sections are, from whatever the rest left. The first `bodySections`
+ * entries of `article.sections` are the body; spend order aside, `sections` and
+ * the ledger stay in document order. With no `maxCharacters` — a bare
+ * `maxCharactersPerSection` request — nothing bounds the tables or assets and
+ * every entry is kept. (#111, #130, #206)
  *
  * Returns the article untouched (same object identity) when no budget was
  * requested or nothing exceeded it. A section or subsection left with zero
@@ -1314,6 +1400,7 @@ function applyPmcBudget<
 >(
   article: T,
   budget: BudgetOptions,
+  bodySections: number,
 ): { article: T; omittedSections: number; truncation?: UnkeyedTruncation } {
   const tables = article.tables ?? [];
   const assets = article.assets ?? [];
@@ -1329,28 +1416,33 @@ function applyPmcBudget<
   const assetsOriginal = assets.reduce((sum, asset) => sum + assetCharacters(asset), 0);
   const originalCharacters =
     sizes.reduce((sum, size) => sum + size, 0) + tablesOriginal + assetsOriginal;
-  const allowances = allotSectionBudgets(sizes, budget);
 
   const kept: ParsedPmcArticle['sections'] = [];
   const sectionReports: SectionLedgerEntry[] = [];
   let returnedCharacters = 0;
 
-  article.sections.forEach((section, i) => {
-    const fitted = fitFields(sectionTextFields(section), allowances[i] ?? 0);
-    const fit = fitSectionTree(section, fitted, { i: 0 }, budget.overflowMode);
-    returnedCharacters += fit.entry.returnedCharacters;
-    sectionReports.push(fit.entry);
-    if (fit.kept) kept.push(fit.kept);
-  });
-  const omittedSections = countDroppedSections(sectionReports, budget.overflowMode);
-
-  // Sections are served first, then tables, then assets — each spending whatever
-  // `maxCharacters` has left. A bare per-section budget sets no total, so nothing
-  // bounds either list.
+  // Each stage spends whatever `maxCharacters` has left. A bare per-section
+  // budget sets no total, so nothing bounds the tables or assets.
   const remainingAllowance = () =>
     budget.maxCharacters === undefined
       ? Number.POSITIVE_INFINITY
       : Math.max(budget.maxCharacters - returnedCharacters, 0);
+
+  const fitSections = (sections: ParsedSection[], total: number | undefined) => {
+    const allowances = allotSectionBudgets(sections.map(sectionCharacters), {
+      ...budget,
+      maxCharacters: total,
+    });
+    sections.forEach((section, i) => {
+      const fitted = fitFields(sectionTextFields(section), allowances[i] ?? 0);
+      const fit = fitSectionTree(section, fitted, { i: 0 }, budget.overflowMode);
+      returnedCharacters += fit.entry.returnedCharacters;
+      sectionReports.push(fit.entry);
+      if (fit.kept) kept.push(fit.kept);
+    });
+  };
+
+  fitSections(article.sections.slice(0, bodySections), budget.maxCharacters);
 
   const fittedTables = fitWholeNamed(
     tables,
@@ -1369,6 +1461,12 @@ function applyPmcBudget<
   );
   returnedCharacters += fittedAssets.spent;
   const omittedAssets = fittedAssets.omittedNames.length;
+
+  fitSections(
+    article.sections.slice(bodySections),
+    budget.maxCharacters === undefined ? undefined : remainingAllowance(),
+  );
+  const omittedSections = countDroppedSections(sectionReports, budget.overflowMode);
 
   if (
     returnedCharacters === originalCharacters &&
@@ -1545,24 +1643,47 @@ function buildDeferralNotice(deferred: z.infer<typeof DeferredSchema>): string {
       : `Response character budget reached: ${deferred.returnedCharacters} of ${deferred.maxResponseCharacters} characters returned.`;
   const resend = deferred.idType
     ? `Re-call pubmed_fetch_fulltext with those ids under \`${deferred.idType}s\``
-    : `Re-call pubmed_fetch_fulltext with each id under its own field (${deferredFieldLists(deferred)})`;
+    : `Re-call pubmed_fetch_fulltext with each id under its own field (${idFieldLists(deferred)})`;
   return `${spent} ${deferred.deferredCount} resolved article(s) were deferred whole: ${deferred.ids.join(', ')}. ${resend} to retrieve them, or raise maxResponseCharacters to at least ${deferred.nextDeferredCharacters} — the size of the next deferred article.`;
 }
 
 /**
- * The per-field lists of a deferral that spans fields, in field order —
+ * Compose the recovery notice for identifiers past the per-call fetch limit:
+ * how many were left unfetched, which ones, and where to resend them — so a
+ * caller reading only `content[]` can retrieve the rest without inspecting
+ * `overLimit`. (#222)
+ */
+function buildOverLimitNotice(overLimit: z.infer<typeof OverLimitSchema>): string {
+  const resend = overLimit.idType
+    ? `Re-call pubmed_fetch_fulltext with those ids under \`${overLimit.idType}s\``
+    : `Re-call pubmed_fetch_fulltext with each id under its own field (${idFieldLists(overLimit)})`;
+  return `This call fetched the first ${overLimit.limit} distinct identifiers; ${overLimit.ids.length} more were not fetched: ${overLimit.ids.join(', ')}. ${resend}, at most ${overLimit.limit} per call, to retrieve them.`;
+}
+
+/**
+ * The per-field lists of ids handed back across fields, in field order —
  * `` `pmcids`: PMC1; `dois`: 10.1/x `` — or `''` when `idType` covers them all.
  */
-function deferredFieldLists(deferred: z.infer<typeof DeferredSchema>): string {
+function idFieldLists(group: IdFields): string {
   return (['pmcids', 'pmids', 'dois'] as const)
     .flatMap((field) => {
-      const ids = deferred[field];
+      const ids = group[field];
       return ids?.length ? [`\`${field}\`: ${ids.join(', ')}`] : [];
     })
     .join('; ');
 }
 
 // ─── Tool Definition ─────────────────────────────────────────────────────────
+
+/**
+ * Distinct identifiers one call fetches across `pmcids`, `pmids`, and `dois`,
+ * in routing order; the rest are returned unfetched in `overLimit`. Bounds the
+ * candidates every tier works per call. (#192, #222)
+ */
+const FETCH_LIMIT = 10;
+
+/** Distinct identifiers one call may name across the three fields. (#222) */
+const MAX_IDENTIFIERS = 50;
 
 /**
  * Compose the tool description for the fallback tiers enabled in this
@@ -1576,7 +1697,7 @@ export function buildFulltextDescription(tiers: {
   unpaywall: boolean;
 }): string {
   const base =
-    'Fetch full-text articles from PubMed Central with structured sections, tables, and references.';
+    'Fetch full-text articles from PubMed Central as structured sections — the body, then back matter such as acknowledgments, declarations, and appendices — with tables and references.';
   const epmcClause =
     'Europe PMC `fullTextXML` (structured JATS for records with a PMC counterpart)';
   const unpaywallClause =
@@ -1602,7 +1723,7 @@ export function buildFulltextDescription(tiers: {
         : tiers.unpaywall
           ? '; DOIs with no PMC copy recover via Unpaywall open access'
           : '';
-  const input = `Name articles by \`pmcids\` (PMC IDs directly), \`pmids\` (PubMed IDs, auto-resolved), \`dois\` (DOIs, auto-resolved to PMC via the ID Converter${doiTail}), or any mix of the three — up to 10 distinct identifiers per call; an article several of them name is fetched and returned once.`;
+  const input = `Name articles by \`pmcids\` (PMC IDs directly), \`pmids\` (PubMed IDs, auto-resolved), \`dois\` (DOIs, auto-resolved to PMC via the ID Converter${doiTail}), or any mix of the three — up to ${MAX_IDENTIFIERS} distinct identifiers; the first ${FETCH_LIMIT} are fetched per call, the rest returned in \`overLimit\`; an article several of them name is fetched and returned once.`;
   const budget =
     'Two independent character controls: `maxCharacters` caps body text per article, `maxResponseCharacters` caps the whole response and defers articles past the ceiling whole, listing them in `deferred.ids` for a follow-up call.';
 
@@ -1610,9 +1731,6 @@ export function buildFulltextDescription(tiers: {
 }
 
 const serverConfig = getServerConfig();
-
-/** Distinct identifiers one call may name across `pmcids`, `pmids`, and `dois`. (#192) */
-const MAX_IDENTIFIERS = 10;
 
 export const fetchFulltextTool = tool('pubmed_fetch_fulltext', {
   description: buildFulltextDescription({
@@ -1641,31 +1759,36 @@ export const fetchFulltextTool = tool('pubmed_fetch_fulltext', {
     },
   ] as const,
 
+  // Never advertised; rewritten to the canonical key before the schema parses.
+  // Singular spellings sibling tools and this tool's own output use; a lone
+  // string under one becomes a one-element array. (#221)
+  inputAliases: { pmcid: 'pmcids', pmcId: 'pmcids', pmid: 'pmids', doi: 'dois' },
+
   input: z
     .object({
       pmcids: z
         .array(pmcidStringSchema)
         .min(1)
-        .max(10)
+        .max(MAX_IDENTIFIERS)
         .optional()
         .describe(
-          'PMC IDs to fetch (e.g. ["PMC9575052"]). Combinable with `pmids` and `dois` — at most 10 distinct identifiers across the three. PMC IDs with no retrievable full text fall through to Europe PMC, then to Unpaywall on the DOI the chain resolves for them.',
+          `PMC IDs to fetch (e.g. ["PMC9575052"]). Combinable with \`pmids\` and \`dois\` — up to ${MAX_IDENTIFIERS} distinct identifiers across the three; the first ${FETCH_LIMIT} are fetched per call, the rest returned in \`overLimit\`. PMC IDs with no retrievable full text fall through to Europe PMC, then to Unpaywall on the DOI the chain resolves for them.`,
         ),
       pmids: z
         .array(pmidStringSchema)
         .min(1)
-        .max(10)
+        .max(MAX_IDENTIFIERS)
         .optional()
         .describe(
-          'PubMed IDs. Combinable with `pmcids` and `dois` — at most 10 distinct identifiers across the three. Articles in PMC are returned as structured JATS; articles not in PMC fall through to Europe PMC (when EPMC has a `fullTextXML`), then to Unpaywall when `UNPAYWALL_EMAIL` is set and a DOI is available.',
+          `PubMed IDs. Combinable with \`pmcids\` and \`dois\` — up to ${MAX_IDENTIFIERS} distinct identifiers across the three; the first ${FETCH_LIMIT} are fetched per call, the rest returned in \`overLimit\`. Articles in PMC are returned as structured JATS; articles not in PMC fall through to Europe PMC (when EPMC has a \`fullTextXML\`), then to Unpaywall when \`UNPAYWALL_EMAIL\` is set and a DOI is available.`,
         ),
       dois: z
         .array(doiStringSchema)
         .min(1)
-        .max(10)
+        .max(MAX_IDENTIFIERS)
         .optional()
         .describe(
-          'DOIs to resolve (e.g. ["10.21203/rs.3.rs-9010375/v1"]), one per element. Combinable with `pmcids` and `pmids` — at most 10 distinct identifiers across the three. Resolved to a PMCID via the PMC ID Converter and returned as structured JATS when the article is in PMC; DOIs with no PMC counterpart (preprints, EPMC-only OA) fall through to Europe PMC, then Unpaywall, when those layers are enabled.',
+          `DOIs to resolve (e.g. ["10.21203/rs.3.rs-9010375/v1"]), one per element. Combinable with \`pmcids\` and \`pmids\` — up to ${MAX_IDENTIFIERS} distinct identifiers across the three; the first ${FETCH_LIMIT} are fetched per call, the rest returned in \`overLimit\`. Resolved to a PMCID via the PMC ID Converter and returned as structured JATS when the article is in PMC; DOIs with no PMC counterpart (preprints, EPMC-only OA) fall through to Europe PMC, then Unpaywall, when those layers are enabled.`,
         ),
       includeReferences: z
         .boolean()
@@ -1687,58 +1810,52 @@ export const fetchFulltextTool = tool('pubmed_fetch_fulltext', {
         .number()
         .int()
         .min(1)
-        .max(50)
         .optional()
-        .describe('Maximum top-level body sections. Applies to `source=pmc` results only.'),
+        .describe(
+          'Maximum top-level sections. Back-matter sections count and follow the body, so a cap drops them first. Applies to `source=pmc` results only.',
+        ),
       sections: z
         .array(z.string())
         .optional()
         .describe(
-          'Filter to specific sections by title (e.g. ["Introduction", "Methods", "Results", "Discussion"]). A term matches a section or subsection title at any nesting depth, case-insensitively, as a substring — "resul" matches "Results". A section whose own title matches is returned whole; one kept only because a nested subsection matched keeps its heading as a breadcrumb, with its own text cleared and only the matching branch beneath it. Tables and assets narrow with the filter: one whose section did not survive, or that names no section, is dropped. Empty strings are skipped, so `[""]` applies no filter; an element of only whitespace or invisible characters, such as a zero-width space, is rejected. Applies to `source=pmc` results only.',
+          'Filter to specific sections by title (e.g. ["Introduction", "Methods", "Results", "Discussion"]). A term matches a section or subsection title at any nesting depth, case-insensitively, as a substring — "resul" matches "Results". Back-matter sections match the same way: by their own titles, or by their kind when they carry neither a title nor a label — "appendix" matches a section titled "Appendix A", "footnotes" an untitled footnote group. A label is never matched, so an appendix labelled "Appendix A" under a title of its own matches only on that title. A section whose own title matches is returned whole; one kept only because a nested subsection matched keeps its heading as a breadcrumb, with its own text cleared and only the matching branch beneath it. Tables and assets narrow with the filter: one whose section did not survive, or that names no section, is dropped. Empty strings are skipped, so `[""]` applies no filter; an element of only whitespace or invisible characters, such as a zero-width space, is rejected. Applies to `source=pmc` results only.',
         ),
       maxCharacters: z
         .number()
         .int()
         .min(1)
-        .max(1_000_000)
         .optional()
         .describe(
-          'Per-article budget for body text, in characters. Counts `source=pmc` section and subsection text — which carries the inline blocks the parser renders in place, such as lists, definition lists, block quotes, boxed text, preformatted blocks and displayed formulae — plus table label, caption, cell and footnote text and asset label, caption and `href` text; or the `source=unpaywall` `content` body. Titles, abstracts, identifiers, and references are never counted or shortened. Shortened text ends at the last word boundary inside its allowance, so it can come back a few characters under it. The counted unit is that text alone — the Markdown grid `content[]` renders around the cells (pipes, padding, the divider row, headings) is scaffolding this budget does not measure, so a table renders longer than it costs here. Sections are served first, then tables, then assets, each spending what is left, in document order — admission stops at the first entry that does not fit, and every entry from there on is dropped whole rather than cut mid-row or returned with a shortened caption, counted in `truncation.omittedTables` / `truncation.omittedAssets` and named in `truncation.articles[].omittedTableNames` / `omittedAssetNames`. Applied after `sections`, `maxSections`, `includeReferences`, `includeTables`, and `includeAssets`, so semantic filtering is unaffected. This knob alone bounds only bodies: the response-wide ceiling it implies is this value times the number of articles returned, plus every uncounted field. Use `maxResponseCharacters` for a true whole-response ceiling. Omit for the full body.',
+          'Per-article budget for body text, in characters. Counts `source=pmc` section and subsection text — which carries the inline blocks the parser renders in place, such as lists, definition lists, block quotes, boxed text, preformatted blocks and displayed formulae — plus table label, caption, cell and footnote text and asset label, caption and `href` text; or the `source=unpaywall` `content` body. Titles, abstracts, identifiers, and references are never counted or shortened. Shortened text ends at the last word boundary inside its allowance, so it can come back a few characters under it. The counted unit is that text alone — the Markdown grid `content[]` renders around the cells (pipes, padding, the divider row, headings) is scaffolding this budget does not measure, so a table renders longer than it costs here. Body sections are served first, then tables, then assets, then back-matter sections, each spending what is left, in document order. For tables and assets, admission stops at the first entry that does not fit, and every entry from there on is dropped whole rather than cut mid-row or returned with a shortened caption, counted in `truncation.omittedTables` / `truncation.omittedAssets` and named in `truncation.articles[].omittedTableNames` / `omittedAssetNames`. Back matter takes only what remains and is shortened or dropped as body sections are; `sections` still returns it after the body. Applied after `sections`, `maxSections`, `includeReferences`, `includeTables`, and `includeAssets`, so semantic filtering is unaffected. This knob alone bounds only bodies: the response-wide ceiling it implies is this value times the number of articles returned, plus every uncounted field. Use `maxResponseCharacters` for a true whole-response ceiling. Omit for the full body.',
         ),
       maxCharactersPerSection: z
         .number()
         .int()
         .min(1)
-        .max(1_000_000)
         .optional()
         .describe(
-          'Budget for a single top-level body section, in characters, counting the section text plus its subsections. Combine with `maxCharacters` to cap both one section and the article; the tighter of the two wins. Applies to `source=pmc` results only.',
+          'Budget for a single top-level section, in characters, counting the section text plus its subsections. Combine with `maxCharacters` to cap both one section and the article; the tighter of the two wins. Applies to `source=pmc` results only.',
         ),
       maxResponseCharacters: z
         .number()
         .int()
         .min(1)
-        .max(1_000_000)
         .optional()
         .describe(
-          'Opt-in ceiling for the whole response, in characters — the true response-wide counterpart to the per-article `maxCharacters`. Each article is measured as the JSON record it is returned as, after every filter and the per-article body budget: title, abstract, body sections, references, identifiers, license and source metadata — every field it carries. One ledger covers all tiers, so PMC-, Europe PMC-, and Unpaywall-served articles spend the same budget. Articles are kept in response order until the next one would cross the ceiling; that article and the rest are deferred whole (never partially populated) and listed in `deferred.ids`. Response envelope fields — counts, `unavailable`, `truncation`, `deferred` itself — are not counted. Omit to return every resolved article.',
+          'Opt-in ceiling for the whole response, in characters — the true response-wide counterpart to the per-article `maxCharacters`. Each article is measured as the JSON record it is returned as, after every filter and the per-article body budget: title, abstract, sections, references, identifiers, license and source metadata — every field it carries. One ledger covers all tiers, so PMC-, Europe PMC-, and Unpaywall-served articles spend the same budget. Articles are kept in response order until the next one would cross the ceiling; that article and the rest are deferred whole (never partially populated) and listed in `deferred.ids`. Response envelope fields — counts, `unavailable`, `truncation`, `deferred` itself — are not counted. Omit to return every resolved article.',
         ),
       overflowMode: z
         .enum(['truncate', 'outline'])
         .default('truncate')
         .describe(
-          'How to spend `maxCharacters` across an article that exceeds it. truncate: fill sections in document order, so early sections stay whole, the section the budget runs out in is cut, and every section or subsection past that point is dropped (counted in `truncation.omittedSections`). outline: split the budget evenly so every section and subsection keeps its heading, and an excerpt as far as the budget reaches — a heading the budget left empty is marked as such in the rendered text. Use it to survey what an article contains before requesting specific `sections`. Ignored when no budget is set, and identical for `source=unpaywall` bodies, which have no headings to preserve.',
+          'How to spend `maxCharacters` across an article that exceeds it. truncate: fill sections in document order, so early sections stay whole, the section the budget runs out in is cut, and every section or subsection past that point is dropped (counted in `truncation.omittedSections`). outline: split the budget evenly so every section and subsection keeps its heading, and an excerpt as far as the budget reaches — a heading the budget left empty is marked as such in the rendered text. In both modes the body sections spend the budget first and back-matter sections share what the body, tables, and assets leave. Use it to survey what an article contains before requesting specific `sections`. Ignored when no budget is set, and identical for `source=unpaywall` bodies, which have no headings to preserve.',
         ),
     })
     // Counted in each field's canonical form, the one its chain keys on, so the
-    // cap is settled before any upstream request and holds every fallback tier
-    // to at most 10 candidates. (#192)
+    // ceiling is settled before any upstream request; the handler then fetches
+    // the first FETCH_LIMIT the same way. (#192, #222)
     .superRefine((v, refinement) => {
-      const distinct = new Set([
-        ...(v.pmcids ?? []).map((id) => `pmcid:${normalizePmcId(id)}`),
-        ...(v.pmids ?? []).map((id) => `pmid:${normalizePmid(id)}`),
-        ...(v.dois ?? []).map((id) => `doi:${id.toLowerCase()}`),
-      ]);
+      const distinct = new Set(requestedIds(v).map((r) => r.key));
       if (distinct.size === 0) {
         refinement.addIssue({
           code: 'custom',
@@ -1747,7 +1864,7 @@ export const fetchFulltextTool = tool('pubmed_fetch_fulltext', {
       } else if (distinct.size > MAX_IDENTIFIERS) {
         refinement.addIssue({
           code: 'custom',
-          message: `\`pmcids\`, \`pmids\`, and \`dois\` together name ${distinct.size} distinct identifiers; a call accepts at most ${MAX_IDENTIFIERS} — split them across calls.`,
+          message: `\`pmcids\`, \`pmids\`, and \`dois\` together name ${distinct.size} distinct identifiers; a call accepts at most ${MAX_IDENTIFIERS} and fetches the first ${FETCH_LIMIT} — split them across calls.`,
         });
       }
     }),
@@ -1763,31 +1880,32 @@ export const fetchFulltextTool = tool('pubmed_fetch_fulltext', {
       .array(UnavailableSchema)
       .optional()
       .describe(
-        'Per-identifier explanations for any requested PMIDs, PMCIDs, or DOIs with no returnable full text. `idType` names the field each id was sent in. Distinct from `deferred`: nothing here is retrievable by re-calling, and an id never appears in both.',
+        'Per-identifier explanations for any requested PMIDs, PMCIDs, or DOIs with no returnable full text. `idType` names the field each id was sent in. Distinct from `deferred`: nothing here is retrievable by re-calling, and an id never appears in both. Ids past the per-call limit are listed in `overLimit`, never here.',
       ),
     truncation: TruncationSchema.optional(),
     deferred: DeferredSchema.optional(),
+    overLimit: OverLimitSchema.optional(),
   }),
 
-  // Recovery guidance for five cases — a `sections` filter that removed every
-  // body section (#80), a record the chain could only retrieve as front matter
+  // Recovery guidance for six cases — a `sections` filter that removed every
+  // section (#80), a record the chain could only retrieve as front matter
   // (#86), a table returned with no cell values (#111), a body the per-article
-  // character budget shortened (#81), and articles the whole-response budget
-  // withheld (#100). Agent-facing context surfaced via
-  // ctx.enrich.notice() to structuredContent and content[]; absent when none
-  // applies.
+  // character budget shortened (#81), articles the whole-response budget
+  // withheld (#100), and identifiers past the per-call fetch limit (#222).
+  // Agent-facing context surfaced via ctx.enrich.notice() to structuredContent
+  // and content[]; absent when none applies.
   enrichment: {
     notice: z
       .string()
       .optional()
       .describe(
-        'Optional guidance for a partial or empty body. A `sections`-filter miss names the requested terms and affected article id(s) and suggests retrying without `sections` or using broader headings. A metadata-only record names the id(s) the chain could retrieve as front matter only and points at `pubmed_fetch_articles` for the abstract. A table returned with no cell values names the affected table(s), the article each came from, and why the cells cannot be recovered. A budgeted response names the characters returned versus carried and points at `truncation`. A response-wide budget that deferred articles names the ids to re-request. Absent when none of those applies.',
+        'Optional guidance for a partial or empty body. A `sections`-filter miss names the requested terms and affected article id(s) and suggests retrying without `sections` or using broader headings. A metadata-only record names the id(s) the chain could retrieve as front matter only and points at `pubmed_fetch_articles` for the abstract. A table returned with no cell values names the affected table(s), the article each came from, and why the cells cannot be recovered. A budgeted response names the characters returned versus carried and points at `truncation`. A response-wide budget that deferred articles names the ids to re-request. Identifiers past the per-call limit are named with the field to resend each under. Absent when none of those applies.',
       ),
     truncated: z
       .boolean()
       .optional()
       .describe(
-        'True when a character budget shortened at least one returned body, or withheld a whole article. Absent when every resolved article is present with its full post-filter body. The per-article body accounting is in `truncation`; the withheld ids are in `deferred`.',
+        'True when a character budget shortened at least one returned body or withheld a whole article, or when the call named more distinct identifiers than one call fetches. Absent when every requested identifier was fetched and every resolved article is present with its full post-filter body. The per-article body accounting is in `truncation`; the withheld ids are in `deferred`; the unfetched ids are in `overLimit`.',
       ),
   },
 
@@ -1813,6 +1931,10 @@ export const fetchFulltextTool = tool('pubmed_fetch_fulltext', {
       );
     }
     const filters: PmcFilterOptions = { ...input, sections: sectionFilter.terms };
+
+    // Settled before any upstream request: every tier below works the fetched
+    // ids alone, and the rest are handed back in `overLimit`. (#222)
+    const { fetched, overLimit: overLimitIds } = splitAtFetchLimit(input);
 
     // ── Chain tracking ──────────────────────────────────────────────────────
     // Per-input-id tier history (the `triedTiers` array on unavailable entries).
@@ -1841,9 +1963,9 @@ export const fetchFulltextTool = tool('pubmed_fetch_fulltext', {
     // `dois` entry that named it — so a PMC miss can still reach Unpaywall
     // without another lookup, whichever field owns the record.
     const doiByPmcRecord = new Map<string, string>();
-    // Ids of returned articles whose `sections` filter removed every body
-    // section — collected across the PMC and EPMC stages to drive one recovery
-    // notice via ctx.enrich.notice (#80).
+    // Ids of returned articles whose `sections` filter removed every section —
+    // collected across the PMC and EPMC stages to drive one recovery notice via
+    // ctx.enrich.notice (#80).
     const sectionFilterMisses: string[] = [];
     // Input ids whose PMC or EPMC record carried no body sections at all. Those
     // records are not full-text hits, so the chain continues past them; ids still
@@ -1942,7 +2064,7 @@ export const fetchFulltextTool = tool('pubmed_fetch_fulltext', {
 
     // `PMC123`, `pmc123`, `123` and `PMC0123` name one record; it runs the
     // chain once, keyed and reported in `PMC<digits>` form. (#170)
-    for (const id of input.pmcids ?? []) {
+    for (const id of fetched.pmcids) {
       const normalized = normalizePmcId(id);
       const key = withPmcPrefix(normalized);
       if (!chainByInput.has(key)) chainByInput.set(key, []);
@@ -1953,8 +2075,8 @@ export const fetchFulltextTool = tool('pubmed_fetch_fulltext', {
     // The ID Converter parses `00000001` as PMID 1 yet reports it "not found
     // in PMC", and every later stage answers with NCBI's own PMID, so the chain
     // runs once per distinct PMID in its canonical form. (#161)
-    for (const id of input.pmids ?? []) addCallerId(normalizePmid(id), { id, idType: 'pmid' });
-    const pmids = [...new Set((input.pmids ?? []).map(normalizePmid))];
+    for (const id of fetched.pmids) addCallerId(normalizePmid(id), { id, idType: 'pmid' });
+    const pmids = [...new Set(fetched.pmids.map(normalizePmid))];
     // DOIs resolve through the converter too, so PMC-indexed DOIs reach PMC
     // EFetch instead of going straight to the EPMC/Unpaywall fallback (which
     // misses articles whose only OA copy is the PMC JATS).
@@ -1964,7 +2086,7 @@ export const fetchFulltextTool = tool('pubmed_fetch_fulltext', {
     // DOI shares one chain, keyed by the first spelling submitted, and
     // converter records are matched to it case-insensitively. (#166)
     const chainKeyByDoi = new Map<string, string>();
-    for (const doi of input.dois ?? []) {
+    for (const doi of fetched.dois) {
       const key = chainKeyByDoi.get(doi.toLowerCase()) ?? doi;
       chainKeyByDoi.set(doi.toLowerCase(), key);
       addCallerId(key, { id: doi, idType: 'doi' });
@@ -2081,16 +2203,17 @@ export const fetchFulltextTool = tool('pubmed_fetch_fulltext', {
         const bodylessPmcIds = new Set<string>();
         const parsed: z.infer<typeof PmcArticleSchema>[] = [];
         for (const node of findAll(articleSet, 'article')) {
-          const before = parsePmcArticle(node);
-          if (isBodylessArticle(before)) {
-            if (before.pmcId) bodylessPmcIds.add(before.pmcId);
+          const parsedArticle = parsePmcArticle(node);
+          if (isBodylessArticle(parsedArticle)) {
+            if (parsedArticle.pmcId) bodylessPmcIds.add(parsedArticle.pmcId);
             continue;
           }
+          const before = withBackMatter(parsedArticle);
           const after = applyPmcFilters(before, filters);
           if (isSectionFilterMiss(before, after, filters.sections)) {
             sectionFilterMisses.push(articleDisplayId(after));
           }
-          const budgeted = applyPmcBudget(after, budget);
+          const budgeted = applyPmcBudget(after, budget, bodySectionCount(parsedArticle, filters));
           omittedSections += budgeted.omittedSections;
           if (budgeted.truncation) {
             truncatedArticles.push({
@@ -2397,27 +2520,19 @@ export const fetchFulltextTool = tool('pubmed_fetch_fulltext', {
         owner ?? { id: articleDisplayId(a), idType: a.pmcId ? 'pmcid' : a.pmid ? 'pmid' : 'doi' }
       );
     });
-    const deferredFields = new Set(deferredIds.map((d) => d.idType));
-    const [onlyField] = deferredFields;
-    const deferredUnder = (idType: IdType) =>
-      deferredIds.filter((d) => d.idType === idType).map((d) => d.id);
     const deferred: z.infer<typeof DeferredSchema> | undefined =
       ceiling !== undefined && nextDeferredCharacters !== undefined && fit
         ? {
             maxResponseCharacters: ceiling,
             returnedCharacters: fit.keptCharacters,
             deferredCount: fit.deferred.length,
-            // One field names them all — always so for a single-field call — or
-            // each field's list says where to resend its ids. (#192)
-            ...(deferredFields.size === 1 && onlyField && { idType: onlyField }),
-            ids: deferredIds.map((d) => d.id),
-            ...(deferredFields.size > 1 && {
-              ...(deferredFields.has('pmcid') && { pmcids: deferredUnder('pmcid') }),
-              ...(deferredFields.has('pmid') && { pmids: deferredUnder('pmid') }),
-              ...(deferredFields.has('doi') && { dois: deferredUnder('doi') }),
-            }),
+            ...groupIdsByField(deferredIds),
             nextDeferredCharacters,
           }
+        : undefined;
+    const overLimit: z.infer<typeof OverLimitSchema> | undefined =
+      overLimitIds.length > 0
+        ? { limit: FETCH_LIMIT, ...groupIdsByField(overLimitIds) }
         : undefined;
 
     // A deferred article takes its body accounting out of the response with it —
@@ -2442,6 +2557,7 @@ export const fetchFulltextTool = tool('pubmed_fetch_fulltext', {
       unpaywallHits: fallbackArticles.length,
       unavailable: unavailable.length,
       ...(deferred && { deferred: deferred.deferredCount }),
+      ...(overLimit && { overLimit: overLimit.ids.length }),
     });
 
     // Summed off the per-article entries rather than carried through every
@@ -2490,6 +2606,10 @@ export const fetchFulltextTool = tool('pubmed_fetch_fulltext', {
       notices.push(buildDeferralNotice(deferred));
       ctx.enrich({ truncated: true });
     }
+    if (overLimit) {
+      notices.push(buildOverLimitNotice(overLimit));
+      ctx.enrich({ truncated: true });
+    }
     if (notices.length > 0) ctx.enrich.notice(notices.join(' '));
 
     return {
@@ -2498,6 +2618,7 @@ export const fetchFulltextTool = tool('pubmed_fetch_fulltext', {
       ...(unavailable.length > 0 && { unavailable }),
       ...(truncation && { truncation }),
       ...(deferred && { deferred }),
+      ...(overLimit && { overLimit }),
     };
   },
 
@@ -2534,20 +2655,16 @@ export const fetchFulltextTool = tool('pubmed_fetch_fulltext', {
       const d = result.deferred;
       lines.push(
         `\n**Deferred by the response budget:** ${d.deferredCount} article(s) — ${d.returnedCharacters} of ${d.maxResponseCharacters} budgeted characters returned; next deferred article ${d.nextDeferredCharacters} characters`,
+        ...resendLines(d),
       );
-      // Rendered on presence, each independently: a response carries `idType`
-      // or the per-field lists, never both.
-      if (d.idType) {
-        lines.push(
-          `Re-call \`pubmed_fetch_fulltext\` with these ${d.idType} ids as \`${d.idType}s\`: ${d.ids.join(', ')}`,
-        );
-      }
-      const fieldLists = deferredFieldLists(d);
-      if (fieldLists) {
-        lines.push(
-          `Re-call \`pubmed_fetch_fulltext\` with these ids, each under its own field — ${fieldLists}`,
-        );
-      }
+    }
+
+    if (result.overLimit) {
+      const o = result.overLimit;
+      lines.push(
+        `\n**Over the per-call limit:** ${o.ids.length} identifier(s) not fetched — a call fetches the first ${o.limit} distinct identifiers`,
+        ...resendLines(o),
+      );
     }
 
     // An empty response under a budget is a deferral, not an absence — the
@@ -2589,6 +2706,108 @@ type IdType = z.infer<typeof UnavailableSchema>['idType'];
 interface CallerId {
   id: string;
   idType: IdType;
+}
+
+/** The three identifier fields, as the input carries them. */
+type IdFields = { [Field in `${IdType}s`]?: string[] | undefined };
+
+/**
+ * Ids handed back for a follow-up call — deferred or over the limit — in the
+ * shape both share: `ids` in order, with `idType` when one field sent them all,
+ * else a list per field saying where to resend each. (#192, #222)
+ */
+type IdGroup = IdFields & { ids: string[]; idType?: IdType | undefined };
+
+/** A requested id with its key: the field plus the canonical form its chain runs on. */
+interface RequestedId extends CallerId {
+  key: string;
+}
+
+/**
+ * Every requested id in routing order — `pmcids`, then `pmids`, then `dois`,
+ * request order within each — as sent. Every spelling one field accepts for an
+ * identifier shares a key, and the same digits in two fields are two keys.
+ * (#192, #222)
+ */
+function requestedIds(fields: IdFields): RequestedId[] {
+  return [
+    ...(fields.pmcids ?? []).map(
+      (id): RequestedId => ({ id, idType: 'pmcid', key: `pmcid:${normalizePmcId(id)}` }),
+    ),
+    ...(fields.pmids ?? []).map(
+      (id): RequestedId => ({ id, idType: 'pmid', key: `pmid:${normalizePmid(id)}` }),
+    ),
+    ...(fields.dois ?? []).map(
+      (id): RequestedId => ({ id, idType: 'doi', key: `doi:${id.toLowerCase()}` }),
+    ),
+  ];
+}
+
+/**
+ * Split the requested ids at the per-call fetch limit, before any upstream
+ * request. The first {@link FETCH_LIMIT} distinct identifiers in routing order
+ * are fetched, each with every spelling that names it; each later identifier is
+ * handed back once, under its first spelling — a PMC ID in the `PMC<digits>`
+ * form every output reports it in. (#222)
+ */
+function splitAtFetchLimit(fields: IdFields): {
+  fetched: Record<`${IdType}s`, string[]>;
+  overLimit: CallerId[];
+} {
+  const fetched: Record<`${IdType}s`, string[]> = { pmcids: [], pmids: [], dois: [] };
+  const overLimit: CallerId[] = [];
+  const admitted = new Set<string>();
+  const listed = new Set<string>();
+  for (const { id, idType, key } of requestedIds(fields)) {
+    if (admitted.has(key) || admitted.size < FETCH_LIMIT) {
+      admitted.add(key);
+      fetched[`${idType}s`].push(id);
+    } else if (!listed.has(key)) {
+      listed.add(key);
+      overLimit.push({ id: idType === 'pmcid' ? withPmcPrefix(normalizePmcId(id)) : id, idType });
+    }
+  }
+  return { fetched, overLimit };
+}
+
+/**
+ * Group ids handed back for a follow-up call: one field names them all —
+ * always so for a single-field call — or each field's list says where to
+ * resend its ids. (#192, #222)
+ */
+function groupIdsByField(callerIds: CallerId[]): IdGroup {
+  const fields = new Set(callerIds.map((c) => c.idType));
+  const [onlyField] = fields;
+  const under = (idType: IdType) => callerIds.filter((c) => c.idType === idType).map((c) => c.id);
+  return {
+    ...(fields.size === 1 && onlyField && { idType: onlyField }),
+    ids: callerIds.map((c) => c.id),
+    ...(fields.size > 1 && {
+      ...(fields.has('pmcid') && { pmcids: under('pmcid') }),
+      ...(fields.has('pmid') && { pmids: under('pmid') }),
+      ...(fields.has('doi') && { dois: under('doi') }),
+    }),
+  };
+}
+
+/**
+ * The `content[]` lines that resend a group of ids. Rendered on presence, each
+ * independently: a group carries `idType` or the per-field lists, never both.
+ */
+function resendLines(group: IdGroup): string[] {
+  const fieldLists = idFieldLists(group);
+  return [
+    ...(group.idType
+      ? [
+          `Re-call \`pubmed_fetch_fulltext\` with these ${group.idType} ids as \`${group.idType}s\`: ${group.ids.join(', ')}`,
+        ]
+      : []),
+    ...(fieldLists
+      ? [
+          `Re-call \`pubmed_fetch_fulltext\` with these ids, each under its own field — ${fieldLists}`,
+        ]
+      : []),
+  ];
 }
 
 /**
@@ -2663,13 +2882,13 @@ interface EpmcStageOutput {
    * stand for it. (#192)
    */
   joins: { id: string; owner: string }[];
-  /** Body sections the character budget dropped across EPMC-served articles. */
+  /** Sections the character budget dropped across EPMC-served articles. */
   omittedSections: number;
   /** Per-candidate outcome, keyed by candidate id, for every candidate that is not a joiner. */
   outcomes: Map<string, EpmcCandidateOutcome>;
   /** Candidates EPMC did not serve, carrying what their hit told the Unpaywall stage. */
   remaining: FallbackCandidate[];
-  /** Ids of EPMC-served articles whose `sections` filter removed every body section. */
+  /** Ids of EPMC-served articles whose `sections` filter removed every section. */
   sectionFilterMisses: string[];
   /** Character accounting for EPMC-served articles the budget shortened. */
   truncatedArticles: z.infer<typeof TruncatedArticleSchema>[];
@@ -2915,17 +3134,22 @@ async function fetchEpmcArticle(
       return { kind: 'no-fulltext', detail: 'EPMC fullTextXML payload had no <article> element' };
     }
 
-    const beforeFilter = parsePmcArticle(articleNode);
-    if (isBodylessArticle(beforeFilter)) {
+    const parsedArticle = parsePmcArticle(articleNode);
+    if (isBodylessArticle(parsedArticle)) {
       return {
         kind: 'no-body',
         detail: 'EPMC fullTextXML carried front matter and abstract only, with no body sections',
       };
     }
 
+    const beforeFilter = withBackMatter(parsedArticle);
     const parsed = applyPmcFilters(beforeFilter, args.input);
     const sectionFilterMiss = isSectionFilterMiss(beforeFilter, parsed, args.input.sections);
-    const budgeted = applyPmcBudget(parsed, args.budget);
+    const budgeted = applyPmcBudget(
+      parsed,
+      args.budget,
+      bodySectionCount(parsedArticle, args.input),
+    );
 
     // `parsePmcArticle` always returns string fields (sometimes empty). Strip
     // empty `pmcId`/`pmcUrl` for EPMC-only records (preprints) so the schema's
@@ -3663,7 +3887,7 @@ function sectionHeading(section: {
 }
 
 /**
- * A body section at any nesting level. The schema inlines one type per level so
+ * A section at any nesting level. The schema inlines one type per level so
  * the emitted JSON Schema stays `$ref`-free, and every one of those types is a
  * subset of this shape, so the renderer takes it for all of them.
  */
@@ -3675,7 +3899,7 @@ interface RenderableSection {
 }
 
 /**
- * Render one body section and everything nested under it, one markdown heading
+ * Render one section and everything nested under it, one markdown heading
  * level per nesting level. Walks the full depth the output schema carries, so
  * `content[]` shows every section `structuredContent` does. Headings stop
  * deepening at `######`, the deepest markdown supports. (#112)

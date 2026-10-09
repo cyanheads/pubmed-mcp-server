@@ -256,8 +256,9 @@ describe('findOne', () => {
   });
 
   it('skips text nodes when searching by tag', () => {
-    const parent = el('p', [t('text'), el('title', [t('heading')])]);
-    expect(findOne(parent, 'title')).toBeDefined();
+    const title = el('title', [t('heading')]);
+    const parent = el('p', [t('text'), title]);
+    expect(findOne(parent, 'title')).toBe(title);
   });
 });
 
@@ -473,6 +474,7 @@ describe('tex-math and alternatives (#135)', () => {
     const node = el('alternatives', [
       el('graphic', [], { '@_xlink:href': 'eq1.gif' }),
       el('mml:math', [t('ηcrit')]),
+      el('textual-form', [t('eta crit')]),
     ]);
     expect(textContent(node)).toBe('ηcrit');
   });
@@ -497,11 +499,13 @@ describe('tex-math and alternatives (#135)', () => {
   it('skips an <alternatives> child the caller excluded and reads the next', () => {
     // The rendering a caller excluded by tag is not a rendering it can read, so
     // selecting it would contribute nothing where a sibling carries the text.
+    // The excluded child is the <tex-math> selection prefers, not a pointer it
+    // would pass over anyway.
     const node = el('alternatives', [
-      el('graphic', [el('alt-text', [t('eq1.gif')])], { '@_xlink:href': 'eq1.gif' }),
+      el('tex-math', [t(texDocument('$$\\eta_{crit}$$'))]),
       el('mml:math', [t('ηcrit')]),
     ]);
-    expect(textContentExcluding(node, new Set(['graphic']))).toBe('ηcrit');
+    expect(textContentExcluding(node, new Set(['tex-math']))).toBe('ηcrit');
   });
 
   it('resolves an <alternatives> nested inside inline markup', () => {
@@ -530,7 +534,7 @@ describe('selectAlternative', () => {
 
   it('returns the first child carrying text otherwise', () => {
     const mathml = el('mml:math', [t('y')]);
-    const node = el('alternatives', [el('graphic', []), mathml]);
+    const node = el('alternatives', [el('graphic', []), mathml, el('textual-form', [t('z')])]);
     expect(selectAlternative(node)).toBe(mathml);
   });
 
@@ -867,5 +871,191 @@ describe('identifiers are never text (#208)', () => {
       t(', Springfield'),
     ]);
     expect(textContent(wrap)).toBe('1 Example University, Springfield');
+  });
+});
+
+describe('MathML-only formulas in a TeX-style linear form (#207)', () => {
+  const MML = 'xmlns:mml="http://www.w3.org/1998/Math/MathML"';
+  /** The text a `<mml:math>` holding `inner` contributes, read with the source spacing intact. */
+  const math = (inner: string): string =>
+    rawTextContent(jats(`<mml:math ${MML}>${inner}</mml:math>`));
+  const mi = (text: string) => `<mml:mi>${text}</mml:mi>`;
+  const mn = (text: string) => `<mml:mn>${text}</mml:mn>`;
+  const mo = (text: string) => `<mml:mo>${text}</mml:mo>`;
+  const mrow = (...children: string[]) => `<mml:mrow>${children.join('')}</mml:mrow>`;
+
+  it('reads a formula of tokens alone, and text a <math> holds directly, as before', () => {
+    expect(math(mi('x'))).toBe('x');
+    expect(math(mrow(mi('i'), mo('='), mn('1'), mo(','), mn('2')))).toBe('i=1,2');
+    expect(rawTextContent(el('mml:math', [t('ηcrit')]))).toBe('ηcrit');
+    // A token's own whitespace is its text.
+    expect(math(`${mi('a')}<mml:mtext> </mml:mtext>${mi('b')}`)).toBe('a b');
+    // An empty formula, and a script element missing its script, add nothing.
+    expect(
+      textContent(jats(`<p>A <inline-formula><mml:math ${MML}/></inline-formula> B</p>`)),
+    ).toBe('A B');
+    expect(math(`<mml:msub>${mi('x')}</mml:msub>`)).toBe('x');
+  });
+
+  it('leaves a formula carrying a <tex-math>, and an <inline-formula> with no MathML, as before', () => {
+    const tex = `<tex-math>\\begin{document}$$x^2$$\\end{document}</tex-math>`;
+    expect(
+      textContent(
+        jats(
+          `<p>A <inline-formula><alternatives>${tex}<mml:math ${MML}><mml:msup>${mi('x')}${mn('2')}</mml:msup></mml:math></alternatives></inline-formula> B</p>`,
+        ),
+      ),
+    ).toBe('A $$x^2$$ B');
+    expect(
+      textContent(
+        jats('<p>A <inline-formula><inline-graphic xlink:href="x.gif"/></inline-formula> B</p>'),
+      ),
+    ).toBe('A B');
+  });
+
+  it('reads token text as deposited and drops whitespace-only text between elements', () => {
+    expect(
+      math(`\n  ${mi('x')}\n  ${mo('−')}<mml:mtext>if </mml:mtext><mml:ms>s</mml:ms>\n${mn('1')}`),
+    ).toBe('x−if s1');
+  });
+
+  it.each([
+    ['msub', `<mml:msub>${mrow(mi('l'))}${mrow(mi('i'), mi('j'))}</mml:msub>`, 'l_{ij}'],
+    [
+      'munder',
+      `<mml:munder>${mo('lim')}${mrow(mi('n'), mo('→'), mi('∞'))}</mml:munder>`,
+      'lim_{n→∞}',
+    ],
+    ['msup', `<mml:msup>${mrow(mi('M'))}${mrow(mi('T'))}</mml:msup>`, 'M^{T}'],
+    ['mover', `<mml:mover>${mi('x')}${mo('¯')}</mml:mover>`, 'x^{¯}'],
+    [
+      'msubsup',
+      `<mml:msubsup>${mo('∑')}${mrow(mi('j'), mo('='), mn('1'))}${mi('N')}</mml:msubsup>`,
+      '∑_{j=1}^{N}',
+    ],
+    ['munderover', `<mml:munderover>${mo('∏')}${mi('k')}${mi('n')}</mml:munderover>`, '∏_{k}^{n}'],
+    [
+      'mfrac',
+      `<mml:mfrac>${mrow(mi('d'), mi('S'))}${mrow(mi('d'), mi('t'))}</mml:mfrac>`,
+      '\\frac{dS}{dt}',
+    ],
+    ['msqrt', `<mml:msqrt>${mi('x')}${mo('+')}${mn('1')}</mml:msqrt>`, '\\sqrt{x+1}'],
+    ['mroot', `<mml:mroot>${mi('x')}${mn('3')}</mml:mroot>`, '\\sqrt[3]{x}'],
+    ['mspace', `${mn('0')}<mml:mspace width="0.25em"/>${mi('a')}`, '0 a'],
+    ['mphantom', `${mi('x')}<mml:mphantom>${mo('}')}</mml:mphantom>`, 'x'],
+  ])('reads <%s> in the linear form', (_tag, inner, expected) => {
+    expect(math(inner)).toBe(expected);
+  });
+
+  it('reads <mmultiscripts> one script pair at a time, prescripts before the base', () => {
+    expect(
+      math(
+        `<mml:mmultiscripts>${mi('R')}${mi('i')}${mi('j')}${mi('k')}<mml:none/></mml:mmultiscripts>`,
+      ),
+    ).toBe('R_{i}^{j}_{k}');
+    expect(
+      math(
+        `<mml:mmultiscripts>${mi('C')}<mml:mprescripts/>${mn('6')}${mn('14')}</mml:mmultiscripts>`,
+      ),
+    ).toBe('{}_{6}^{14}C');
+  });
+
+  it('reads <mfenced> as its fences around children split by its separators', () => {
+    const abcd = mi('a') + mi('b') + mi('c') + mi('d');
+    expect(math(`<mml:mfenced>${mi('a')} ${mi('b')}</mml:mfenced>`)).toBe('(a,b)');
+    expect(math(`<mml:mfenced separators="">${mi('a')}${mi('b')}</mml:mfenced>`)).toBe('(ab)');
+    // Separators are read one character at a time, whitespace aside; the last repeats.
+    expect(math(`<mml:mfenced separators="; |">${abcd}</mml:mfenced>`)).toBe('(a;b|c|d)');
+    expect(math(`<mml:mfenced open="[" close="]" separators="|">${mi('a')}</mml:mfenced>`)).toBe(
+      '[a]',
+    );
+    expect(math(`<mml:mfenced open="{" close="">${mi('a')}${mi('b')}</mml:mfenced>`)).toBe('{a,b');
+  });
+
+  it('reads <mtable> cells separated by & and rows by \\\\', () => {
+    const cell = (...children: string[]) =>
+      `<mml:mtd columnalign="center">${children.join('')}</mml:mtd>`;
+    expect(
+      math(
+        `${mo('(')}<mml:mtable><mml:mtr>${cell(mi('L'))}${cell(mi('M'))}</mml:mtr>\n<mml:mtr>${cell(`<mml:msup>${mi('M')}${mi('T')}</mml:msup>`)}${cell(mi('N'))}</mml:mtr></mml:mtable>${mo(')')}`,
+      ),
+    ).toBe('(L & M \\\\ M^{T} & N)');
+  });
+
+  it('reads <math>, <mrow>, <mstyle>, <mpadded>, <mtd> and any unlisted element as its children in order', () => {
+    expect(
+      math(
+        `<mml:msup><mml:mstyle displaystyle="true">${mi('e')}</mml:mstyle><mml:mpadded><mml:menclose notation="box">${mi('x')}</mml:menclose></mml:mpadded></mml:msup>`,
+      ),
+    ).toBe('e^{x}');
+  });
+
+  it('omits an empty script slot', () => {
+    expect(math(`<mml:msubsup>${mi('x')}<mml:mrow/>${mn('2')}</mml:msubsup>`)).toBe('x^{2}');
+    expect(math(`<mml:msubsup>${mi('x')}${mn('1')}<mml:none/></mml:msubsup>`)).toBe('x_{1}');
+    expect(math(`<mml:msub>${mi('x')}<mml:mphantom>${mi('y')}</mml:mphantom></mml:msub>`)).toBe(
+      'x',
+    );
+    // A fraction's slots are not scripts: an empty one keeps its braces.
+    expect(math(`<mml:mfrac>${mi('a')}<mml:mrow/></mml:mfrac>`)).toBe('\\frac{a}{}');
+  });
+
+  it('nests scripts, fractions, roots and tables inside one another', () => {
+    expect(
+      math(
+        `<mml:msub>${mi('A')}<mml:mfenced><mml:mfrac>${mn('1')}<mml:msqrt><mml:msubsup>${mi('b')}${mi('i')}${mn('2')}</mml:msubsup></mml:msqrt></mml:mfrac></mml:mfenced></mml:msub>`,
+      ),
+    ).toBe('A_{(\\frac{1}{\\sqrt{b_{i}^{2}}})}');
+    expect(
+      math(
+        `<mml:msup><mml:mfenced open="[" close="]"><mml:mtable><mml:mtr><mml:mtd><mml:msub>${mi('x')}${mn('1')}</mml:msub></mml:mtd></mml:mtr><mml:mtr><mml:mtd><mml:msub>${mi('x')}${mn('2')}</mml:msub></mml:mtd></mml:mtr></mml:mtable></mml:mfenced>${mi('T')}</mml:msup>`,
+      ),
+    ).toBe('[x_{1} \\\\ x_{2}]^{T}');
+  });
+
+  it('matches MathML elements by local name, whatever the namespace prefix', () => {
+    const square = (prefix: string) =>
+      rawTextContent(
+        jats(
+          `<${prefix}math><${prefix}msup><${prefix}mi>x</${prefix}mi><${prefix}mn>2</${prefix}mn></${prefix}msup></${prefix}math>`,
+        ),
+      );
+    expect(square('')).toBe('x^{2}');
+    expect(square('m:')).toBe('x^{2}');
+  });
+
+  it('applies wherever the formula sits: a table cell, a title, and an <alternatives> with no <tex-math>', () => {
+    const formula = `<mml:math ${MML}><mml:msup>${mi('x')}${mn('2')}</mml:msup></mml:math>`;
+    expect(
+      lineTextContent(
+        jats(`<td>Value <inline-formula>${formula}</inline-formula><break/>next</td>`),
+      ),
+    ).toBe('Value x^{2}\nnext');
+    expect(lineTextContent(jats(`<td>${formula}</td>`))).toBe('x^{2}');
+    expect(
+      textContent(jats(`<title>The case <inline-formula>${formula}</inline-formula></title>`)),
+    ).toBe('The case x^{2}');
+    expect(
+      textContent(
+        jats(
+          `<p>A <inline-formula><alternatives><inline-graphic xlink:href="x.gif"/>${formula}</alternatives></inline-formula> B</p>`,
+        ),
+      ),
+    ).toBe('A x^{2} B');
+  });
+
+  it('reads a formula nested 200 levels deep without overflowing', () => {
+    // Built directly: the XML parser itself refuses a document nested past 100 tags.
+    const depth = 200;
+    const nest = (wrap: (inner: JatsNode) => JatsNode, innermost: JatsNode): JatsNode =>
+      Array.from({ length: depth }).reduce<JatsNode>((inner) => wrap(inner), innermost);
+    const a = el('mml:mi', [t('a')]);
+    const square = el('mml:msup', [el('mml:mi', [t('x')]), el('mml:mn', [t('2')])]);
+    const rows = nest((inner) => el('mml:mrow', [a, el('mml:mo', [t('+')]), inner]), square);
+    expect(rawTextContent(el('mml:math', [rows]))).toBe(`${'a+'.repeat(depth)}x^{2}`);
+    const scripts = nest((inner) => el('mml:msup', [a, inner]), el('mml:mi', [t('b')]));
+    expect(rawTextContent(el('mml:math', [scripts]))).toBe(
+      `${'a^{'.repeat(depth)}b${'}'.repeat(depth)}`,
+    );
   });
 });

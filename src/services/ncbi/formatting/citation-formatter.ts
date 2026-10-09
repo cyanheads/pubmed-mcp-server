@@ -10,11 +10,42 @@ import type {
   ParsedArticleAuthor,
   ParsedBookEditor,
   ParsedBookInfo,
+  ParsedCommentsCorrection,
   ParsedJournalInfo,
 } from '../types.js';
 
 /** Supported citation output formats. */
 export type CitationStyle = 'apa' | 'mla' | 'bibtex' | 'ris' | 'vancouver';
+
+/**
+ * NCBI `RefType`s that qualify the cited article itself — it was retracted,
+ * corrected, or questioned. A link from a record that is itself a notice
+ * (`RetractionOf`, `ErratumFor`) and comment or update links are not among them:
+ * citing a retraction notice is not citing a retracted work. (#215)
+ */
+export const CITATION_NOTICE_TYPES = [
+  'RetractionIn',
+  'RetractedandRepublishedIn',
+  'ExpressionOfConcernIn',
+  'ErratumIn',
+  'CorrectedandRepublishedIn',
+] as const;
+
+export type CitationNoticeType = (typeof CITATION_NOTICE_TYPES)[number];
+
+/** A linked notice that qualifies the cited article. */
+export type CitationNotice = ParsedCommentsCorrection & { refType: CitationNoticeType };
+
+const NOTICE_TYPES: ReadonlySet<string> = new Set(CITATION_NOTICE_TYPES);
+
+function isCitationNotice(link: ParsedCommentsCorrection): link is CitationNotice {
+  return NOTICE_TYPES.has(link.refType);
+}
+
+/** The record's linked notices that qualify the cited article, in NCBI's order. */
+export function citationNotices(article: ParsedArticle): CitationNotice[] {
+  return (article.commentsCorrections ?? []).filter(isCitationNotice);
+}
 
 /** A Bookshelf record — a chapter or a whole book — with its book metadata. */
 type BookRecord = ParsedArticle & { book: ParsedBookInfo };
@@ -230,16 +261,168 @@ function splitPages(pages?: string): { start?: string; end?: string } {
 }
 
 /**
- * The electronic article locator that stands in for a page range, or undefined.
+ * The electronic article locator that Vancouver, BibTeX, and RIS print in place
+ * of a page range, or undefined.
  *
  * Returns a value only when the record carries no pagination. Publishers that
  * report the article number as both `Pagination` and `ELocationID` (PLoS ONE,
  * Scientific Reports) are already covered by the `pages` rendering, and printing
- * both would duplicate the number in every style.
+ * both would duplicate the number. APA and MLA use {@link articleNumber}.
  */
 function articleLocator(journal?: ParsedJournalInfo): string | undefined {
   if (journal?.pages) return;
   return journal?.elocationId || undefined;
+}
+
+/**
+ * The article number APA and MLA cite in place of a page range: the record's
+ * non-DOI locator when it has no pagination, or when its pagination is that
+ * same value — NCBI copies an article number into `MedlinePgn` (Frontiers
+ * `662953`, Springer `42`). A page that matches no locator stays a page, though
+ * some are article numbers the record cannot identify (an Elsevier `105471`
+ * beside an `S…` pii looks exactly like a Lancet page `2413`). (#217)
+ */
+function articleNumber(journal?: ParsedJournalInfo): string | undefined {
+  if (!journal?.elocationId) return;
+  return !journal.pages || journal.pages === journal.elocationId ? journal.elocationId : undefined;
+}
+
+/** One range inside NLM's pagination: a start, a dash, an end. */
+const PAGE_RANGE =
+  /([^\s,;\u{2013}\u{2014}-]+)\s*[-\u{2013}\u{2014}]\s*([^\s,;\u{2013}\u{2014}-]+)/gu;
+
+/**
+ * The end of a range as NLM's elision means it. An end made of digits is
+ * written against the start's digits and takes the start's prefix (`637-41` →
+ * `641`, `S5-15` → `S15`, `1255.e1-5` → `1255.e5`); any other end is already
+ * whole (`878.e8`, `e65`, `xv`).
+ */
+function fullPageEnd(start: string, end: string): string {
+  const startParts = /^(.*?)(\d+)$/.exec(start);
+  if (!startParts || !/^\d+$/.test(end)) return end;
+  const [, prefix = '', digits = ''] = startParts;
+  const elided = end.length < digits.length;
+  return `${prefix}${elided ? digits.slice(0, digits.length - end.length) : ''}${end}`;
+}
+
+/**
+ * APA 7 pagination: each range written in full with an en dash (`637-41` →
+ * `637–641`, `S5-15` → `S5–S15`), the rest of NLM's text as given — a list's
+ * separators and labels too (`1407-8; author reply 1409-10` → `1407–1408;
+ * author reply 1409–1410`).
+ */
+function formatPagesApa(pages: string): string {
+  return pages.replace(
+    PAGE_RANGE,
+    (_, start: string, end: string) => `${start}\u{2013}${fullPageEnd(start, end)}`,
+  );
+}
+
+/**
+ * Words APA 7 keeps lowercase in a title unless one opens it or its subtitle:
+ * articles, coordinating conjunctions, and prepositions of three letters or
+ * fewer — plus the articles, conjunctions, and prepositions of the non-English
+ * journal names NLM catalogs, in NLM's unaccented spelling: Romance (`Annales
+ * de dermatologie et de venereologie`), Germanic and Scandinavian (`Beitrage
+ * zur gerichtlichen Medizin`), Slavic (`Akusherstvo i ginekologiia`), and the
+ * Hungarian, Turkish, Finnish, Japanese, and Latin ones NLM's titles use. A
+ * word that is also a romanized Chinese syllable stays out (`za` of `za zhi`,
+ * `ai`, `nei`), as does one NLM uses for an abbreviation (`ed.`, `med.`).
+ */
+const APA_MINOR_WORDS: ReadonlySet<string> = new Set([
+  ...['a', 'an', 'the', 'and', 'but', 'for', 'nor', 'or', 'so', 'yet'],
+  ...['as', 'at', 'by', 'in', 'of', 'off', 'on', 'per', 'to', 'up', 'via'],
+  ...['de', 'des', 'du', 'la', 'le', 'les', 'et', 'sur', 'au', 'aux', 'pour', 'par', 'dans'],
+  ...['avec', 'un', 'une', 'el', 'los', 'las', 'y', 'e', 'al', 'para', 'por', 'o', 'os', 'em'],
+  ...['no', 'na', 'ao', 'da', 'das', 'do', 'dos', 'di', 'del', 'della', 'dello', 'delle', 'dei'],
+  ...['degli', 'alla', 'alle', 'fra', 'si', 'din', 'pentru', 'der', 'die', 'dem', 'den', 'und'],
+  ...['für', 'fur', 'zu', 'zur', 'im', 'am', 'auf', 'aus', 'mit', 'uber', 'van', 'von', 'voor'],
+  ...['en', 'het', 'tot', 'op', 'uit', 'te', 'og', 'och', 'af', 'til', 'fran', 'mot', 'vir'],
+  ...['i', 'v', 'w', 'z', 'u', 'po', 'pro', 'nad', 've', 'es', 'az', 'ja', 'ad'],
+]);
+
+/** MLA 9 also keeps a preposition of any length lowercase. */
+const MLA_MINOR_WORDS: ReadonlySet<string> = new Set([
+  ...APA_MINOR_WORDS,
+  ...['about', 'above', 'across', 'against', 'along', 'among', 'around', 'behind', 'below'],
+  ...['beneath', 'beside', 'between', 'beyond', 'during', 'from', 'into', 'onto', 'over'],
+  ...['through', 'throughout', 'toward', 'towards', 'under', 'upon', 'with', 'within'],
+  ...['without'],
+]);
+
+/** One hyphen-delimited part of a word: surrounding punctuation, then lowercase letters. */
+const LOWERCASE_WORD = /^([^\p{L}\p{N}]*)(\p{Ll}+(?:['\u{2019}]\p{Ll}+)*)([^\p{L}\p{N}]*)$/u;
+
+/** A French or Italian elided particle and the word it joins (`d'ophtalmologie`, `dell'apparato`). */
+const ELISION = /^(d|l|qu|dell|dall|nell|all|sull)(['\u{2019}])(.+)$/u;
+
+/** Brands NLM writes in lowercase, which keep it (`npj quantum materials`). */
+const LOWERCASE_BRANDS: ReadonlySet<string> = new Set(['npj']);
+
+const capitalize = (word: string) => `${word.charAt(0).toUpperCase()}${word.slice(1)}`;
+
+/**
+ * Title-case a journal name, which NLM catalogs in sentence case (`Frontiers in
+ * pediatrics`), for APA and MLA, which cite it in title case. Only a word part
+ * written entirely in lowercase letters gains a capital — each part of a
+ * hyphenated word on its own — so a name NLM already cases (`eLife`, `mBio`,
+ * `JAMA`, `PloS`) and any part carrying a digit stay as written, as do a
+ * lowercase brand and a single-letter prefix (`npj`, `i-Perception`, `e-SPEN`).
+ * An elision capitalizes the word, not its particle (`d'Ophtalmologie`). A minor
+ * word stays lowercase unless it opens the name, or a subtitle or parallel title
+ * after a colon, semicolon, or ` = ` (`CA: A Cancer Journal`). (#217)
+ */
+function titleCaseJournal(title: string, minorWords: ReadonlySet<string>): string {
+  let opensPhrase = true;
+  const caseWord = (word: string, opens: boolean): string => {
+    if (!opens && minorWords.has(word)) return word;
+    const elision = ELISION.exec(word);
+    if (!elision) return capitalize(word);
+    const [, particle = '', apostrophe = '', rest = ''] = elision;
+    return `${opens ? capitalize(particle) : particle}${apostrophe}${caseWord(rest, false)}`;
+  };
+  return title
+    .split(/(\s+)/)
+    .map((token) => {
+      if (!/\S/.test(token)) return token;
+      if (token === ':' || token === ';' || token === '=') {
+        opensPhrase = true;
+        return token;
+      }
+      const parts = token.split('-');
+      const cased = parts
+        .map((part, index) => {
+          const match = LOWERCASE_WORD.exec(part);
+          if (!match) return part;
+          const [, lead = '', word = '', trail = ''] = match;
+          const isPrefix = index === 0 && parts.length > 1 && word.length === 1;
+          if (isPrefix || LOWERCASE_BRANDS.has(word)) return part;
+          return `${lead}${caseWord(word, opensPhrase && index === 0)}${trail}`;
+        })
+        .join('-');
+      opensPhrase = /[:;]$/.test(token);
+      return cased;
+    })
+    .join('');
+}
+
+/**
+ * Author keywords, then MeSH descriptor names, each term once: a term equal to
+ * an earlier one ignoring case is dropped, so the author's spelling and position
+ * win (`Deep learning` over MeSH `Deep Learning`). (#217)
+ */
+function mergedKeywords(article: ParsedArticle): string[] {
+  const terms = new Map<string, string>();
+  const candidates = [
+    ...(article.keywords ?? []),
+    ...(article.meshTerms ?? []).map((m) => m.descriptorName),
+  ];
+  for (const term of candidates) {
+    if (!term) continue;
+    const key = term.toLowerCase();
+    if (!terms.has(key)) terms.set(key, term);
+  }
+  return [...terms.values()];
 }
 
 /**
@@ -501,7 +684,8 @@ function formatApaBook(article: BookRecord): string {
  * ```
  * Title. (Year). *Journal*, *Volume*(Issue), Pages. https://doi.org/DOI
  * ```
- * A Bookshelf record routes to {@link formatApaBook}.
+ * A retracted article ends on `(Retraction published <RefSource>)`. A Bookshelf
+ * record routes to {@link formatApaBook}.
  */
 export function formatApa(article: ParsedArticle): string {
   if (isBookRecord(article)) return formatApaBook(article);
@@ -535,19 +719,19 @@ export function formatApa(article: ParsedArticle): string {
   // Journal, volume, issue, pages
   const journal = article.journalInfo;
   if (journal?.title) {
-    let journalPart = `*${journal.title}*`;
+    let journalPart = `*${titleCaseJournal(journal.title, APA_MINOR_WORDS)}*`;
     if (journal.volume) {
       journalPart += `, *${journal.volume}*`;
       if (journal.issue) {
         journalPart += `(${journal.issue})`;
       }
     }
-    if (journal.pages) {
-      journalPart += `, ${journal.pages}`;
-    } else {
-      // APA 7 p. 294-295: an article number takes the page range's place
-      const locator = articleLocator(journal);
-      if (locator) journalPart += `, Article ${locator}`;
+    // APA 7 p. 294-295: an article number takes the page range's place
+    const number = articleNumber(journal);
+    if (number) {
+      journalPart += `, Article ${number}`;
+    } else if (journal.pages) {
+      journalPart += `, ${formatPagesApa(journal.pages)}`;
     }
     journalPart += '.';
     parts.push(journalPart);
@@ -556,6 +740,16 @@ export function formatApa(article: ParsedArticle): string {
   // DOI — no trailing period after DOI URL
   if (article.doi) {
     parts.push(`https://doi.org/${article.doi}`);
+  }
+
+  // APA 7 notes a retraction after the DOI. Its own form names the notice's
+  // year, full journal title, and location, which `RefSource` does not carry
+  // apart; NCBI's exporter fills the parenthetical with `RefSource` instead.
+  const retractions = citationNotices(article)
+    .filter((notice) => notice.refType === 'RetractionIn')
+    .map((notice) => stripTrailingPeriod(notice.refSource));
+  if (retractions.length > 0) {
+    parts.push(`(Retraction published ${retractions.join('; ')})`);
   }
 
   return parts.join(' ');
@@ -646,7 +840,7 @@ export function formatMla(article: ParsedArticle): string {
   const journal = article.journalInfo;
   if (journal?.title) {
     const detailParts: string[] = [];
-    detailParts.push(`*${journal.title}*`);
+    detailParts.push(`*${titleCaseJournal(journal.title, MLA_MINOR_WORDS)}*`);
 
     if (journal.volume) {
       detailParts.push(`vol. ${journal.volume}`);
@@ -660,15 +854,15 @@ export function formatMla(article: ParsedArticle): string {
       detailParts.push(year);
     }
 
-    if (journal.pages) {
+    // MLA 9 codifies no article-number form; citation guides converge on
+    // "art. <value>" in the page position.
+    const number = articleNumber(journal);
+    if (number) {
+      detailParts.push(`art. ${number}`);
+    } else if (journal.pages) {
       // MLA 9 §6.56: "p." for a single page, "pp." for a range
       const isRange = /[-\u2013\u2014]/.test(journal.pages);
       detailParts.push(`${isRange ? 'pp.' : 'p.'} ${journal.pages}`);
-    } else {
-      // MLA 9 codifies no article-number form; citation guides converge on
-      // "art. <value>" in the page position.
-      const locator = articleLocator(journal);
-      if (locator) detailParts.push(`art. ${locator}`);
     }
 
     parts.push(`${detailParts.join(', ')}.`);
@@ -799,18 +993,13 @@ export function formatBibtex(article: ParsedArticle): string {
     if (url) fields.push(['url', url]);
   }
 
-  // Keywords — merge article keywords with MeSH descriptor names
-  const keywordSet = new Set<string>();
-  for (const k of article.keywords ?? []) keywordSet.add(k);
-  for (const m of article.meshTerms ?? []) {
-    if (m.descriptorName) keywordSet.add(m.descriptorName);
-  }
-  // Brace-wrap each term so MeSH descriptors that carry internal commas in
-  // their inverted form (e.g. "Databases, Protein") stay a single keyword —
-  // biblatex's comma-separated list parser reads a braced item as one element.
-  if (keywordSet.size > 0) {
-    const keywords = [...keywordSet].map((k) => `{${escapeBibtex(k)}}`).join(', ');
-    fields.push(['keywords', keywords]);
+  // Keywords — article keywords merged with MeSH descriptor names. Brace-wrap
+  // each term so MeSH descriptors that carry internal commas in their inverted
+  // form (e.g. "Databases, Protein") stay a single keyword — biblatex's
+  // comma-separated list parser reads a braced item as one element.
+  const keywords = mergedKeywords(article);
+  if (keywords.length > 0) {
+    fields.push(['keywords', keywords.map((k) => `{${escapeBibtex(k)}}`).join(', ')]);
   }
 
   // Build entry
@@ -935,13 +1124,8 @@ export function formatRis(article: ParsedArticle): string {
     if (url) lines.push(`UR  - ${url}`);
   }
 
-  // Keywords — merge article keywords with MeSH descriptor names
-  const keywordSet = new Set<string>();
-  for (const k of article.keywords ?? []) keywordSet.add(k);
-  for (const m of article.meshTerms ?? []) {
-    if (m.descriptorName) keywordSet.add(m.descriptorName);
-  }
-  for (const kw of keywordSet) {
+  // Keywords — article keywords merged with MeSH descriptor names
+  for (const kw of mergedKeywords(article)) {
     tag('KW', kw);
   }
 
@@ -1049,6 +1233,15 @@ function formatVancouverBook(article: BookRecord): string {
 }
 
 /**
+ * The notices Vancouver notes after the reference, each with Citing Medicine's
+ * label (Boxes 58–59). NCBI's own NLM export prints these two and no others.
+ */
+const VANCOUVER_NOTE_LABELS: Partial<Record<CitationNoticeType, string>> = {
+  RetractionIn: 'Retraction in',
+  ErratumIn: 'Erratum in',
+};
+
+/**
  * Format a PubMed article as a Vancouver (ICMJE/NLM) reference — the numbered
  * style used by NEJM, Lancet, JAMA, BMJ, and most biomedical journals.
  *
@@ -1059,8 +1252,9 @@ function formatVancouverBook(article: BookRecord): string {
  * ```
  * Journal name uses the NLM/ISO abbreviation when available; pages are used as
  * PubMed supplies them (often elided, e.g. "583-9"); the DOI carries no trailing
- * period so it stays copy-pasteable. An article number replaces nothing — with
+ * period so it stays copy-pasteable, unless a note follows it. An article number replaces nothing — with
  * no pagination it trails the source as an NLM note (`. pii: 2400512.`). A
+ * retraction or erratum follows as a note (`Retraction in: <RefSource>`). A
  * Bookshelf record routes to {@link formatVancouverBook}.
  */
 export function formatVancouver(article: ParsedArticle): string {
@@ -1106,10 +1300,20 @@ export function formatVancouver(article: ParsedArticle): string {
     segments.push(label ? `${label}: ${locator}.` : `${locator}.`);
   }
 
-  // DOI — NLM "doi: <doi>" form; no trailing period (would corrupt the DOI)
+  // Citing Medicine's retraction and erratum notes (Boxes 58–59), one per
+  // notice in NCBI's order with `RefSource` verbatim, as NCBI's NLM export
+  // prints them. Each ends on exactly one period: some `RefSource`s carry none.
+  const notes = citationNotices(article).flatMap((notice) => {
+    const label = VANCOUVER_NOTE_LABELS[notice.refType];
+    return label ? [terminate(`${label}: ${notice.refSource}`)] : [];
+  });
+
+  // DOI — NLM "doi: <doi>" form with no trailing period, which a reader copying
+  // it would take as part of the DOI; a note after it closes it, as in NLM's export
   if (article.doi) {
-    segments.push(`doi: ${article.doi}`);
+    segments.push(notes.length > 0 ? `doi: ${article.doi}.` : `doi: ${article.doi}`);
   }
+  segments.push(...notes);
 
   return segments.join(' ');
 }

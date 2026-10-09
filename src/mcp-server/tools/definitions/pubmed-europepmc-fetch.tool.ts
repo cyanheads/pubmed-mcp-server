@@ -172,7 +172,6 @@ export const pubmedEuropepmcFetchTool = tool('pubmed_europepmc_fetch', {
       .number()
       .int()
       .min(1)
-      .max(1_000_000)
       .optional()
       .describe(
         'Opt-in ceiling for the whole response, in characters. Each record is measured as the JSON record it is returned as — title, authors, journal, abstract, identifiers, every field it carries. Records are kept in the order Europe PMC returned them until the next one would cross the ceiling; that record and the rest are deferred whole (never partially populated) and listed in `deferred.records`. Response envelope fields — `notFound`, `deferred` itself — are not counted. Omit to return every resolved record.',

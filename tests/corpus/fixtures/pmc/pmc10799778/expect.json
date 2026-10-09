@@ -1,5 +1,5 @@
 {
-  "why": "Regression fixture for #196: every <aff> sits inside <contrib-group>, and all four reach affiliations. The abstract is all <sec>s (Abstract, Key points, Graphical Abstract, Supplementary Information), so each is read with its title. 220 references and an unlabelled graphical-abstract <fig> beside five labelled figures.",
+  "why": "Regression fixture for #196: every <aff> sits inside <contrib-group>, and all four reach affiliations. The abstract is all <sec>s (Abstract, Key points, Graphical Abstract, Supplementary Information), so each is read with its title. Its Key points are three <p>s that each open with a literal `•` rather than a <list>, laid out one per line below the heading with the bullet kept (#218). 220 references and an unlabelled graphical-abstract <fig> beside five labelled figures. Its back matter follows the body (#206), the Declarations <notes> carrying its two nested <notes> as subsections rather than running their titles into its text.",
   "title": "Therapeutic applications of gut microbes in cardiometabolic diseases: current state and perspectives",
   "authors": 11,
   "affiliations": 4,
@@ -16,9 +16,27 @@
     "TMAO",
     "Potential therapeutic means",
     "Conclusions and future perspectives",
-    "Supplementary Information"
+    "Supplementary Information",
+    "Footnotes",
+    "Declarations",
+    "Ethics approval",
+    "Conflict of interest"
   ],
   "contains": [
-    "- 1 School of Food and Biological Engineering, Shaanxi University of Science and Technology, Xi’an, 710021 China"
+    "- 1 School of Food and Biological Engineering, Shaanxi University of Science and Technology, Xi’an, 710021 China",
+    "#### Declarations\n\n##### Ethics approval\nThis article does not contain any studies",
+    "Key points:\n• To highlight the complex interaction",
+    "phenotypes.\n• We also discuss",
+    "nanomedicine.\n• Our study provides"
+  ],
+  "notContains": [
+    "Ethics approval This article",
+    "Conflict of interest The authors",
+    "Key points: •"
+  ],
+  "structuredContains": [
+    "Key points:\n• To highlight the complex interaction",
+    "phenotypes.\n• We also discuss",
+    "nanomedicine.\n• Our study provides"
   ]
 }

@@ -1,5 +1,5 @@
 {
-  "why": "A mixed author list with the collective author TGU Investigators fifth; a structured abstract whose first label holds an entity (BACKGROUND &amp; AIMS) and whose text holds cm<sup>2</sup>; 20 MeSH headings; nine grants, one with no GrantID and two with all-digit GrantIDs; a CommentIn notice; Video-Audio Media type; an .e8 page range. The collective author carries its own AffiliationInfo, which it must point at like a person does — all 9 distinct affiliations are returned, and the authors after it are numbered from 5 (#212). The ID-less grant renders its acronym after its agency, never in the ID slot (#214).",
+  "why": "A mixed author list with the collective author TGU Investigators fifth; a structured abstract whose first label holds an entity (BACKGROUND &amp; AIMS) and whose text holds cm<sup>2</sup>; 20 MeSH headings; nine grants, one with no GrantID and two with all-digit GrantIDs; a CommentIn notice; Video-Audio Media type; an .e8 page range. The collective author carries its own AffiliationInfo, which it must point at like a person does — all 9 distinct affiliations are returned, and the authors after it are numbered from 5 (#212). The ID-less grant renders its acronym after its agency, never in the ID slot (#214). The record's InvestigatorList names the collective's 22 members, name parts only; with includeInvestigators they follow the authors on both surfaces, in NCBI's order, and add no affiliation (#216).",
   "title": "A Pilot Study on Automatic Three-Dimensional Quantification of Barrett's Esophagus for Risk Stratification and Therapy Monitoring.",
   "abstractLabels": ["BACKGROUND & AIMS", "METHODS", "RESULTS", "CONCLUSIONS"],
   "authors": 10,
@@ -43,6 +43,8 @@
   "articleDates": "Electronic 2021-06-08",
   "contains": [
     "**Authors (10):**",
+    "**Investigators (22):**\n- Philip Allan (P)\n- Tim Ambrose (T)\n- Carolina Arancibia-Cárcamo (C)\n",
+    "- Alissa Walsh (A)\n\n**Affiliations:**\n",
     "- Maryam Haghighat (M) [aff 3]\n- TGU Investigators (collective) [aff 4]\n- Simon J Leedham (SJ) [aff 5]",
     "- [4] Translational Gastroenterology Unit, Experimental Medicine Division, Nuffield Department of Medicine, John Radcliffe Hospital, University of Oxford, Oxford, United Kingdom.\n",
     "BACKGROUND & AIMS: Barrett's epithelium measurement using widely accepted Prague C&M classification",
@@ -56,17 +58,28 @@
   "citations": {
     "apa": [
       "Ali, S., Bailey, A., Ash, S., Haghighat, M., TGU Investigators, Leedham, S. J., Lu, X., East, J. E., Rittscher, J., & Braden, B. (2021).",
-      "*161*(3)",
+      "*Gastroenterology*, *161*(3), 865–878.e8.",
       "https://doi.org/10.1053/j.gastro.2021.05.059"
     ],
-    "mla": ["Ali, Sharib, et al.", "vol. 161, no. 3, 2021"],
+    "mla": ["Ali, Sharib, et al.", "vol. 161, no. 3, 2021, pp. 865-878.e8."],
     "bibtex": [
       "{Haghighat}, Maryam and {TGU Investigators} and {Leedham}, Simon J",
       "number   = {3}",
       "pages    = {865-878.e8}",
-      "issn     = {1528-0012}"
+      "issn     = {1528-0012}",
+      "keywords = {{Deep learning}, {Esophageal cancer}, {Imaging}, {Risk assessment}, {Three-dimensional}, {Aged}, {Automation}, {Barrett Esophagus}, {Disease Progression},",
+      "{Reproducibility of Results}, {Risk Factors},"
     ],
-    "ris": ["AU  - TGU Investigators", "VL  - 161", "IS  - 3", "SP  - 865", "EP  - 878.e8"],
+    "ris": [
+      "AU  - TGU Investigators",
+      "VL  - 161",
+      "IS  - 3",
+      "SP  - 865",
+      "EP  - 878.e8",
+      "KW  - Deep learning\n",
+      "KW  - Barrett Esophagus\nKW  - Disease Progression\n",
+      "KW  - Reproducibility of Results\nKW  - Risk Factors\n"
+    ],
     "vancouver": [
       "Ali S, Bailey A, Ash S, Haghighat M, TGU Investigators, Leedham SJ, et al.",
       "Gastroenterology. 2021;161(3):865-878.e8. doi: 10.1053/j.gastro.2021.05.059"

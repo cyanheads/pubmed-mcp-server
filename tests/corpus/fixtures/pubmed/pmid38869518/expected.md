@@ -1,4 +1,4 @@
-<!-- pubmed_fetch_articles {"pmids":["38869518"],"includeMesh":true,"includeGrants":true} -->
+<!-- pubmed_fetch_articles {"pmids":["38869518"],"includeMesh":true,"includeGrants":true,"includeInvestigators":true} -->
 ## PubMed Articles
 **Articles Returned:** 1
 
@@ -69,10 +69,10 @@ Creatine is a natural nitrogenous organic acid that is integral to energy metabo
 **Creatine homeostasis and the kidney: comparison between kidney transplant recipients and healthy controls.**
 
 ### APA
-Post, A., Groothof, D., Kremer, D., Knobbe, T. J., Abma, W., Koops, C. A., Tsikas, D., Wallimann, T., Dullaart, R. P. F., Franssen, C. F. M., Kema, I. P., Heiner-Fokkema, M. R., & Bakker, S. J. L. (2024). Creatine homeostasis and the kidney: comparison between kidney transplant recipients and healthy controls. *Amino acids*, *56*(1), 42. https://doi.org/10.1007/s00726-024-03401-w
+Post, A., Groothof, D., Kremer, D., Knobbe, T. J., Abma, W., Koops, C. A., Tsikas, D., Wallimann, T., Dullaart, R. P. F., Franssen, C. F. M., Kema, I. P., Heiner-Fokkema, M. R., & Bakker, S. J. L. (2024). Creatine homeostasis and the kidney: comparison between kidney transplant recipients and healthy controls. *Amino Acids*, *56*(1), Article 42. https://doi.org/10.1007/s00726-024-03401-w
 
 ### MLA
-Post, Adrian, et al. "Creatine homeostasis and the kidney: comparison between kidney transplant recipients and healthy controls." *Amino acids*, vol. 56, no. 1, 2024, p. 42. https://doi.org/10.1007/s00726-024-03401-w.
+Post, Adrian, et al. "Creatine homeostasis and the kidney: comparison between kidney transplant recipients and healthy controls." *Amino Acids*, vol. 56, no. 1, 2024, art. 42. https://doi.org/10.1007/s00726-024-03401-w.
 
 ### BIBTEX
 ```bibtex

@@ -26,9 +26,11 @@ import {
   findAllDescendants,
   findOne,
   IDENTIFIER_TAGS,
+  isMathTag,
   isTextNode,
   type JatsNode,
   type JatsNodeList,
+  linearMath,
   lineTextContent,
   rawTextContent,
   selectAlternative,
@@ -382,6 +384,12 @@ function extractAbstract(articleMeta: JatsNode | undefined): string | undefined 
  * so its `[Box]` and `[End of box]` lines stand alone. `ownLineFirst` reports
  * either on the first line, which the caller starts below the section's
  * heading (PMC10869376). (#202, #210)
+ *
+ * A run of {@link BULLET_STATEMENT} paragraphs — a "Key points" section a
+ * deposit writes as `<p>• …</p>` rather than as a `<list>` — lays out the same
+ * way: one paragraph per line with its bullet kept, set apart from the
+ * statements around it by a blank line, and the first below the heading
+ * (PMC10799778). (#218)
  */
 function abstractProse(nodes: JatsNodeList): { ownLineFirst: boolean; text: string } {
   const prose = nodes.filter((node) => {
@@ -389,14 +397,27 @@ function abstractProse(nodes: JatsNodeList): { ownLineFirst: boolean; text: stri
     return tag !== 'title' && tag !== 'label';
   });
   const blocks = flowParts(prose, STATEMENT_BLOCK_TAGS);
+  const bullet = blocks.map((block) => !block.ownLineFirst && BULLET_STATEMENT.test(block.text));
   let text = '';
   for (const [i, block] of blocks.entries()) {
     const previous = blocks[i - 1];
-    if (previous) text += previous.ownLineLast || block.ownLineFirst ? '\n\n' : ' ';
+    if (previous) {
+      const blankLine = previous.ownLineLast || block.ownLineFirst || bullet[i - 1] !== bullet[i];
+      text += blankLine ? '\n\n' : bullet[i] ? '\n' : ' ';
+    }
     text += block.text;
   }
-  return { ownLineFirst: blocks[0]?.ownLineFirst ?? false, text };
+  return { ownLineFirst: (blocks[0]?.ownLineFirst ?? false) || (bullet[0] ?? false), text };
 }
+
+/**
+ * A statement deposited as a bullet point: its text opens with a bullet
+ * character — `•` U+2022, `‣` U+2023, `⁃` U+2043 or `◦` U+25E6 — and carries
+ * text after it. Characters that open a paragraph with another meaning stay
+ * out: `·` and `∙` (multiplication), `*` and daggers (footnote marks), hyphens
+ * and dashes (minus signs, ranges), `■` (an end-of-proof mark). (#218)
+ */
+const BULLET_STATEMENT = /^[•‣⁃◦]\s*\S/;
 
 function extractKeywords(articleMeta: JatsNode | undefined): string[] {
   if (!articleMeta) return [];
@@ -463,13 +484,15 @@ function flushRun(flow: Flow): void {
  * prose, {@link STATEMENT_BLOCK_TAGS} for a container whose `<title>` and `<p>`
  * children are separate statements rather than one continuous sentence.
  *
- * `<tex-math>`, `<alternatives>` and the {@link IDENTIFIER_TAGS} are the elements
- * whose text is not the concatenation of their subtree, so this walk defers to
- * the shared rule rather than reading their children one at a time: a
- * `<tex-math>` contributes its LaTeX document body via `rawTextContent`, an
+ * `<tex-math>`, MathML `<math>`, `<alternatives>` and the {@link IDENTIFIER_TAGS}
+ * are the elements whose text is not the concatenation of their subtree, so
+ * this walk defers to the shared rule rather than reading their children one at
+ * a time: a `<tex-math>` contributes its LaTeX document body via
+ * `rawTextContent`, a `<math>` its TeX-style linear form via `linearMath`
+ * wherever it sits — an inline formula or directly in a `<p>` — an
  * `<alternatives>` re-enters this walk with its single chosen child, which keeps
  * a `<disp-formula>` found there at block position, and an `<institution-id>`
- * in a funding statement contributes nothing. (#135, #208)
+ * in a funding statement contributes nothing. (#135, #207, #208)
  *
  * The run is a {@link TextAssembler}, so prose follows the separator rules every
  * other text field does: a `<break/>`, an inline `<fn>` or a `<label>` beside its
@@ -491,6 +514,10 @@ function walkFlow(nodes: JatsNodeList, flow: Flow, blockTags: ReadonlySet<string
     }
     if (tag === 'tex-math') {
       flow.run.text(rawTextContent(node));
+      continue;
+    }
+    if (isMathTag(tag)) {
+      flow.run.text(linearMath(node));
       continue;
     }
     if (blockTags.has(tag)) {
@@ -549,9 +576,9 @@ function renderCaption(caption: JatsNode | undefined): string | undefined {
  * nothing, which is what keeps a `<sec>` that only wraps one from surviving as
  * an empty "References" heading. (#116, #130)
  *
- * A `<list>` or `<def-list>`, and a delimited `<boxed-text>`, stand on lines of
- * their own at both edges; a container read through the default arm takes the
- * edges of its first and last blocks. (#202, #210)
+ * A `<list>`, `<def-list>` or `<array>`, and a delimited `<boxed-text>`, stand on
+ * lines of their own at both edges; a container read through the default arm
+ * takes the edges of its first and last blocks. (#202, #206, #210)
  */
 function renderBlock(node: JatsNode): FlowBlock {
   switch (tagNameOf(node)) {
@@ -566,6 +593,8 @@ function renderBlock(node: JatsNode): FlowBlock {
       return flowBlock(renderList(node, 0), true);
     case 'def-list':
       return flowBlock(renderDefList(node, 0), true);
+    case 'array':
+      return flowBlock(renderArray(node), true);
     case 'disp-quote':
       return flowBlock(renderDispQuote(node));
     case 'boxed-text':
@@ -771,6 +800,28 @@ function renderDefList(defList: JatsNode, depth: number, withTitle = true): stri
   return lines.join('\n');
 }
 
+/**
+ * Render an `<array>` — tabular material with no caption of its own, such as a
+ * glossary's grid of abbreviations — one row per line, its cells joined the way
+ * {@link renderDefList} joins a term to its definition:
+ * `- RSNA — Radiological Society of North America`. Read as flow, every cell ran
+ * into the next (`RSNARadiological Society of North AmericaRT-PCR…`). (#206)
+ */
+function renderArray(array: JatsNode): string {
+  const lines: string[] = [];
+  for (const row of findAllDescendants(array, 'tr')) {
+    const cells = childrenOf(row)
+      .filter((cell) => {
+        const tag = tagNameOf(cell);
+        return tag === 'td' || tag === 'th';
+      })
+      .map((cell) => textContent(cell))
+      .filter(Boolean);
+    if (cells.length > 0) lines.push(`- ${cells.join(' — ')}`);
+  }
+  return lines.join('\n');
+}
+
 /** Render a `<disp-quote>`: every line quoted, its `<attrib>` as a trailing attribution line. */
 function renderDispQuote(quote: JatsNode): string {
   const lines: string[] = [];
@@ -884,7 +935,7 @@ const DISP_FORMULA_NON_BODY: ReadonlySet<string> = new Set(['label', 'graphic', 
 
 /**
  * Render a `<disp-formula>`: its label, then a `<tex-math>` where the deposit
- * carries one (directly or under `<alternatives>`) and the flattened content
+ * carries one (directly or under `<alternatives>`) and the content's text
  * otherwise — usually `<mml:math>`, which is 69 of the 78 formulae in a
  * 68-record draw against 3 for `<tex-math>`. A graphic-only deposit has no
  * fallback text and contributes nothing at all rather than a bare label on an
@@ -893,6 +944,9 @@ const DISP_FORMULA_NON_BODY: ReadonlySet<string> = new Set(['label', 'graphic', 
  * A `<tex-math>` contributes only the expression between `\begin{document}` and
  * `\end{document}`; `textContent` applies that rule, so the LaTeX preamble
  * publishers wrap around every formula never reaches the rendered line. (#135)
+ * A MathML `<math>` reads in the TeX-style linear form `textContent` gives it
+ * (`(L & M \\ M^{T} & N)<0`), so a formula keeps its scripts and matrix cells
+ * whichever notation the deposit carries. (#207)
  */
 function renderDispFormula(formula: JatsNode): string {
   const texMath =
@@ -927,8 +981,26 @@ function renderDispFormula(formula: JatsNode): string {
  * content and stay in untitled sections of their own. (#148)
  */
 export function extractBodySections(body: JatsNode | undefined): ParsedPmcSection[] {
-  if (!body) return [];
+  return body ? extractSections(childrenOf(body), false) : [];
+}
 
+/**
+ * Extract back-matter sections from a `<back>` node: every child but
+ * `<ref-list>` — which `references[]` carries — and `<back>`'s own label and
+ * title, in source order. Each back-matter element is read as a `<sec>` is (see
+ * {@link BACK_SECTION_TAGS}), taking the title its element names when it carries
+ * neither a title nor a label (see {@link BACK_MATTER_TITLES}). (#206)
+ */
+function extractBackSections(back: JatsNode | undefined): ParsedPmcSection[] {
+  return back ? extractSections(childrenOf(back), true) : [];
+}
+
+/**
+ * Read the children of `<body>` — or, with `back`, of `<back>` — into sections,
+ * in document order. {@link extractBodySections} states the rules; back matter
+ * adds its own section elements and skips `<back>`'s label and title.
+ */
+function extractSections(children: JatsNodeList, back: boolean): ParsedPmcSection[] {
   const sections: ParsedPmcSection[] = [];
   let pendingBlocks: string[] = [];
 
@@ -939,13 +1011,14 @@ export function extractBodySections(body: JatsNode | undefined): ParsedPmcSectio
     }
   };
 
-  for (const child of childrenOf(body)) {
-    if (tagNameOf(child) === 'sec') {
+  for (const child of children) {
+    const nested = nestedSections(child, back);
+    if (nested) {
       flushPending();
-      const section = extractSection(child);
-      if (section) sections.push(section);
+      sections.push(...nested);
       continue;
     }
+    if (back && SECTION_META_TAGS.has(tagNameOf(child) ?? '')) continue;
     const title = ownBlockTitle(child);
     if (title) {
       flushPending();
@@ -958,6 +1031,99 @@ export function extractBodySections(body: JatsNode | undefined): ParsedPmcSectio
 
   return sections;
 }
+
+// ─── Back Matter ────────────────────────────────────────────────────────────
+
+/**
+ * Back-matter elements read as sections, each mapped to the title it goes by
+ * when it carries neither a `<title>` nor a `<label>`. Most `<fn-group>`s carry
+ * neither, and without a title a section renders as `untitled section` where no
+ * `sections` filter term can reach it. The title names the element, not a fact
+ * about the article; Europe PMC titles the same `<fn-group>` `Footnotes` when it
+ * moves back matter into `<body>`. A labelled element takes no fallback, so an
+ * `Appendix A` label never reads `Appendix Appendix A`. (#206)
+ */
+const BACK_MATTER_TITLES: ReadonlyMap<string, string> = new Map([
+  ['ack', 'Acknowledgments'],
+  ['app', 'Appendix'],
+  ['bio', 'Biography'],
+  ['fn-group', 'Footnotes'],
+  ['glossary', 'Glossary'],
+  ['notes', 'Notes'],
+]);
+
+/**
+ * Elements that form a section of their own in back matter: `<sec>`,
+ * `<app-group>`, and each element {@link BACK_MATTER_TITLES} names. One nested in
+ * another is a subsection, as a `<sec>` in a `<sec>` is, so a Springer
+ * `Declarations` `<notes>` keeps its inner notes' titles out of its text. In
+ * `<body>` only a `<sec>` forms one: a `<notes>` or `<fn-group>` closing a body
+ * `<sec>` stays that section's text, as it always read. (#206)
+ */
+const BACK_SECTION_TAGS: ReadonlySet<string> = new Set([
+  'sec',
+  'app-group',
+  ...BACK_MATTER_TITLES.keys(),
+]);
+
+/**
+ * True for an `<app-group>` with neither a title nor a label. It has no heading
+ * to give a section, so its children are read as if they sat in `<back>`: its
+ * `<app>`s stand as sections in its place, and the paragraphs, lists or figures
+ * JATS lets it carry ahead of them form an untitled section rather than being
+ * dropped. (#206)
+ */
+function isHeadlessAppGroup(node: JatsNode): boolean {
+  return (
+    tagNameOf(node) === 'app-group' &&
+    !textContent(findOne(node, 'title')) &&
+    !textContent(findOne(node, 'label'))
+  );
+}
+
+/**
+ * The sections `node` forms where it sits among a section's children, or among
+ * `<body>`'s or `<back>`'s: a `<sec>` anywhere, and in back matter each element
+ * of {@link BACK_SECTION_TAGS} — a headless `<app-group>` by way of its
+ * children (see {@link isHeadlessAppGroup}). Undefined for anything that is
+ * section content instead. (#206)
+ */
+function nestedSections(node: JatsNode, back: boolean): ParsedPmcSection[] | undefined {
+  const tag = tagNameOf(node) ?? '';
+  if (tag !== 'sec' && !(back && BACK_SECTION_TAGS.has(tag))) return;
+  if (isHeadlessAppGroup(node)) return extractSections(childrenOf(node), back);
+  const section = extractSection(node, back);
+  return section ? [section] : [];
+}
+
+/**
+ * The title a back-matter element with neither a `<title>` nor a `<label>` goes
+ * by (see {@link BACK_MATTER_TITLES}); undefined for every other element, a
+ * `<sec>` included. (#206)
+ */
+function fallbackTitle(node: JatsNode): string | undefined {
+  if (textContent(findOne(node, 'label'))) return;
+  return BACK_MATTER_TITLES.get(tagNameOf(node) ?? '');
+}
+
+/**
+ * The paragraphs of a back-matter `<fn>`: each `<p>`, and each block one holds,
+ * on its own, with the footnote's `<label>` leading the first. Read as one run,
+ * a footnote whose heading sits in a `<p>` of its own fused that heading into
+ * the statement after it (`Competing interests The authors declare…`), the
+ * fusion a titled `<notes>` is kept from. (#206)
+ */
+function footnoteParagraphs(fn: JatsNode): string[] {
+  const label = textContent(findOne(fn, 'label'));
+  const [first, ...rest] = flowBlocks(
+    childrenOf(fn).filter((child) => tagNameOf(child) !== 'label'),
+    STATEMENT_BLOCK_TAGS,
+  );
+  if (first === undefined) return label ? [label] : [];
+  return [label ? `${label} ${first}` : first, ...rest];
+}
+
+// ─── Section Reading ────────────────────────────────────────────────────────
 
 /**
  * The title a block carries of its own, where the JATS content model puts one:
@@ -1001,13 +1167,14 @@ function loneTitledBlock(sec: JatsNode): { node: JatsNode; title: string } | und
 }
 
 /**
- * The title a `<sec>` goes by in the output: its own `<title>`, else the one
- * {@link loneTitledBlock} lifts. {@link extractSection} titles the section and
- * {@link collectSectioned} names the tables and assets inside it from this one
- * rule, so a `sections` filter keeps them together. (#169)
+ * The title a `<sec>` — or a back-matter element read as one — goes by in the
+ * output: its own `<title>`, else the one {@link loneTitledBlock} lifts, else
+ * the one {@link fallbackTitle} names. {@link extractSection} titles the section
+ * and {@link collectSectioned} names the tables and assets inside it from this
+ * one rule, so a `sections` filter keeps them together. (#169, #206)
  */
 function secTitle(sec: JatsNode): string | undefined {
-  return textContent(findOne(sec, 'title')) || loneTitledBlock(sec)?.title;
+  return textContent(findOne(sec, 'title')) || loneTitledBlock(sec)?.title || fallbackTitle(sec);
 }
 
 /** A block whose {@link ownBlockTitle} became its section's title, rendered without it. */
@@ -1033,8 +1200,15 @@ function renderBlockWithoutTitle(node: JatsNode): string {
  *
  * An untitled `<sec>` whose only content is a titled block takes that block's
  * title, and the block renders without it (see {@link loneTitledBlock}). (#169)
+ *
+ * With `back`, `sec` may be any back-matter element {@link nestedSections}
+ * reads as a section: the back-matter elements among its children are
+ * subsections too, and with neither a title nor a label it takes the title its
+ * element names. Each child contributes its own block, so every `<fn>` of a
+ * `<fn-group>` is a paragraph of its own, and each `<p>` inside one too (see
+ * {@link footnoteParagraphs}). (#206)
  */
-function extractSection(sec: JatsNode): ParsedPmcSection | null {
+function extractSection(sec: JatsNode, back = false): ParsedPmcSection | null {
   const lone = loneTitledBlock(sec);
   if (lone) {
     const label = textContent(findOne(sec, 'label')) || undefined;
@@ -1056,13 +1230,14 @@ function extractSection(sec: JatsNode): ParsedPmcSection | null {
       label ??= textContent(child) || undefined;
       continue;
     }
-    if (tag === 'sec') {
-      const subsection = extractSection(child);
-      if (subsection) subsections.push(subsection);
+    const nested = nestedSections(child, back);
+    if (nested) {
+      subsections.push(...nested);
       continue;
     }
-    textParts.push(...flowBlocks([child]));
+    textParts.push(...(back && tag === 'fn' ? footnoteParagraphs(child) : flowBlocks([child])));
   }
+  title ??= fallbackTitle(sec);
 
   const text = textParts.join('\n\n');
   // A section left empty *because* its block content was lifted into `tables[]`
@@ -1088,10 +1263,10 @@ function extractSection(sec: JatsNode): ParsedPmcSection | null {
  * The walk covers the whole article rather than `<body>` alone: about a quarter
  * of real tables sit in `<floats-group>`, `<back>/<sec>`, `<table-wrap-group>`
  * or `<app-group>/<app>`, so a body-scoped extractor drops them. Each table
- * names the innermost enclosing `<sec>` wherever that sits — a back-matter or
- * appendix section counts, and naming it is the reader's only positional cue
- * there. Only a table inside no `<sec>` at all, such as a `<floats-group>`
- * deposit, carries no section name.
+ * names the innermost enclosing section wherever that sits — a back-matter
+ * `<sec>`, `<app>`, `<notes>` or `<fn-group>` counts, and naming it is the
+ * reader's only positional cue there. Only a table inside no section at all,
+ * such as a `<floats-group>` deposit, carries no section name. (#206)
  *
  * Only XHTML `<tr>`/`<td>`/`<th>` bodies are read. **Decision, not an
  * oversight:** across a 283-table survey of open-access records, 276 were XHTML,
@@ -1116,13 +1291,14 @@ export function extractPmcTables(root: JatsNode | undefined): ParsedPmcTable[] {
  * positional cue, and an element inside no section at all gets none. A
  * recognized element is not descended into — it parses its own subtree.
  *
- * A section here is whatever {@link extractBodySections} reports as one, under
- * the title it reports: a `<sec>` by {@link secTitle}, and a titled block
- * sitting directly in `<body>` by its own title — so a figure in a titled
- * body-level box names the box, and a `sections` filter on the box keeps it.
- * A `<sec>` inside a `<boxed-text>` is no section: the box flattens it into its
- * text (see {@link renderBoxedText}), so what sits in it names the section the
- * box belongs to. (#169)
+ * A section here is whatever {@link extractBodySections} and
+ * {@link extractBackSections} report as one, under the title they report: a
+ * `<sec>` — and inside `<back>`, each back-matter element read as one — by
+ * {@link secTitle}, and a titled block sitting directly in `<body>` or `<back>`
+ * by its own title — so a figure in a titled body-level box names the box, and
+ * a `sections` filter on the box keeps it. A `<sec>` inside a `<boxed-text>` is
+ * no section: the box flattens it into its text (see {@link renderBoxedText}),
+ * so what sits in it names the section the box belongs to. (#169, #206)
  *
  * Shared by the table and asset walks so the section-title rule has one
  * definition and cannot drift between them.
@@ -1133,8 +1309,10 @@ function collectSectioned<T>(
   out: T[],
   take: (child: JatsNode, tag: string, sectionTitle: string | undefined) => T | undefined,
   inBox = false,
+  inBack = false,
 ): void {
-  const inBody = tagNameOf(node) === 'body';
+  const parentTag = tagNameOf(node);
+  const atTopLevel = parentTag === 'body' || parentTag === 'back';
   for (const child of childrenOf(node)) {
     const tag = tagNameOf(child);
     if (!tag) continue;
@@ -1145,12 +1323,19 @@ function collectSectioned<T>(
     }
     const own = inBox
       ? undefined
-      : tag === 'sec'
+      : tag === 'sec' || (inBack && BACK_SECTION_TAGS.has(tag))
         ? secTitle(child)
-        : inBody
+        : atTopLevel
           ? ownBlockTitle(child)
           : undefined;
-    collectSectioned(child, own || sectionTitle, out, take, inBox || tag === 'boxed-text');
+    collectSectioned(
+      child,
+      own || sectionTitle,
+      out,
+      take,
+      inBox || tag === 'boxed-text',
+      inBack || tag === 'back',
+    );
   }
 }
 
@@ -1310,9 +1495,10 @@ function extractTableRows(table: JatsNode): { headerRowCount: number; rows: stri
  * supplementary material sit outside `<body>` entirely — `<floats-group>`
  * deposits, `<back>/<sec>` and `<app-group>/<app>` placements, and figures
  * hanging off the abstract in `<front>`. Each asset names the innermost
- * enclosing `<sec>` wherever that sits, an untitled one inheriting its parent's
- * title, so the reader keeps a positional cue; an asset inside no `<sec>` at all
- * carries no section name. (#130)
+ * enclosing section wherever that sits — a back-matter element read as one
+ * included — an untitled `<sec>` inheriting its parent's title, so the reader
+ * keeps a positional cue; an asset inside no section at all carries no section
+ * name. (#130, #206)
  */
 export function extractPmcAssets(root: JatsNode | undefined): ParsedPmcAsset[] {
   if (!root) return [];
@@ -1449,6 +1635,18 @@ const SUPPLIED_ETAL = 'et al.';
 /** Any character other than whitespace. */
 const VISIBLE_TEXT = /\S/;
 
+/** Punctuation that closes the citation field before it: `Henry L.`, `Li X,`, `(2020)`. (#219) */
+const CLOSING_PUNCTUATION: ReadonlySet<string> = new Set(['.', ',', ';', ':', ')', ']']);
+
+/**
+ * How much of the citation written so far a `<pub-id>` reads for a literal
+ * prefix naming its type: the prefix, its `:` or `.`, and the whitespace around
+ * them. A bounded window keeps each read constant-time, since every `<pub-id>`
+ * in a citation asks again and reading the whole text would make the walk
+ * quadratic. (#209)
+ */
+const ID_PREFIX_WINDOW = 256;
+
 /** Raw citation text, and whether it ends in a {@link SUPPLIED_ETAL}, whitespace aside. */
 interface CitationRun {
   suppliedEtal: boolean;
@@ -1463,8 +1661,8 @@ interface CitationPart extends CitationRun {
 
 /**
  * Render one child element of a `<mixed-citation>` or name wrapper. `before` is
- * the citation text written so far, which a `<pub-id>` reads for a literal
- * prefix already naming its type. An `<etal>` reads as its own text, or as
+ * the end of the citation text written so far ({@link ID_PREFIX_WINDOW}), which
+ * a `<pub-id>` reads for a literal prefix already naming its type. An `<etal>` reads as its own text, or as
  * `et al.` when it is empty — as nearly every deposit leaves it.
  */
 function renderCitationPart(child: JatsNode, tag: string, before: string): CitationPart {
@@ -1499,6 +1697,12 @@ function renderCitationPart(child: JatsNode, tag: string, before: string): Citat
  * - A label this renderer inserts is separated from whatever precedes it. (#115)
  * - A source `.` straight after a supplied `et al.` closes it rather than
  *   doubling its period (`<etal/></person-group>. <article-title>`). (#209)
+ * - The whitespace between an element and the {@link CLOSING_PUNCTUATION}
+ *   after it is dropped when any of it lies inside the element or it holds a
+ *   line break: the indentation a pretty-printed deposit leaves before
+ *   `</person-group>` or `</string-name>`, or the line break after
+ *   `</collab>`, reads `Henry L.` rather than `Henry L .`. Spaces the
+ *   citation's own text puts there (`</source> : <volume>`) are kept. (#219)
  *
  * Gaps the source already fills — `, ` text between names, a newline between a
  * `<string-name>`'s parts — are kept as written, so a fixed separator never
@@ -1515,9 +1719,18 @@ function renderCitationRun(node: JatsNode, wrapper: boolean): CitationRun {
   let text = '';
   /** Whitespace not yet written: the end of the last element's text, then source whitespace after it. */
   let gap = '';
+  /** `gap` begins inside the element written last. */
+  let gapInside = false;
   /** The element written last, while no visible source text has followed it. */
   let previous: string | undefined;
   let suppliedEtal = false;
+  /** At least the last {@link ID_PREFIX_WINDOW} characters of `text`, at most twice that. */
+  let recent = '';
+  const write = (chunk: string): void => {
+    text += chunk;
+    recent += chunk;
+    if (recent.length > 2 * ID_PREFIX_WINDOW) recent = recent.slice(-ID_PREFIX_WINDOW);
+  };
 
   for (const child of childrenOf(node)) {
     if (isTextNode(child)) {
@@ -1527,7 +1740,17 @@ function renderCitationRun(node: JatsNode, wrapper: boolean): CitationRun {
         continue;
       }
       if (suppliedEtal) raw = raw.replace(/^(\s*)\./, '$1');
-      text += gap + raw;
+      if (previous !== undefined) {
+        const lead = raw.search(VISIBLE_TEXT);
+        if (
+          CLOSING_PUNCTUATION.has(raw.charAt(lead)) &&
+          (gapInside || gap.includes('\n') || raw.slice(0, lead).includes('\n'))
+        ) {
+          gap = '';
+          raw = raw.slice(lead);
+        }
+      }
+      write(gap + raw);
       gap = '';
       previous = undefined;
       suppliedEtal = false;
@@ -1535,14 +1758,15 @@ function renderCitationRun(node: JatsNode, wrapper: boolean): CitationRun {
     }
 
     const tag = tagNameOf(child) ?? '';
-    const part = renderCitationPart(child, tag, text);
+    const part = renderCitationPart(child, tag, recent);
     if (!part.text && (wrapper || tag === 'pub-id')) continue;
 
-    if (previous && PERSON_TAGS.has(previous) && PERSON_TAGS.has(tag)) text += ', ';
-    else text += (previous && !gap) || part.labeled ? `${gap} ` : gap;
+    if (previous && PERSON_TAGS.has(previous) && PERSON_TAGS.has(tag)) write(', ');
+    else write((previous && !gap) || part.labeled ? `${gap} ` : gap);
     const body = part.text.trimEnd();
-    text += body;
+    write(body);
     gap = part.text.slice(body.length);
+    gapInside = gap !== '';
     previous = tag;
     suppliedEtal = part.suppliedEtal;
   }
@@ -1669,6 +1893,7 @@ export function parsePmcArticle(articleNode: JatsNode): ParsedPmcArticle {
   const articleMeta = findOne(front, 'article-meta');
   const journalMeta = findOne(front, 'journal-meta');
   const body = findOne(articleNode, 'body');
+  const back = findOne(articleNode, 'back');
 
   const pmcId =
     extractArticleId(articleMeta, 'pmcid') ?? extractArticleId(articleMeta, 'pmc-uid') ?? '';
@@ -1685,6 +1910,7 @@ export function parsePmcArticle(articleNode: JatsNode): ParsedPmcArticle {
   const abstract = extractAbstract(articleMeta);
   const keywords = extractKeywords(articleMeta);
   const sections = extractBodySections(body);
+  const backSections = extractBackSections(back);
   const references = extractReferences(articleNode);
   const tables = extractPmcTables(articleNode);
   const assets = extractPmcAssets(articleNode);
@@ -1704,6 +1930,7 @@ export function parsePmcArticle(articleNode: JatsNode): ParsedPmcArticle {
     ...(abstract && { abstract }),
     ...(keywords.length > 0 && { keywords }),
     sections,
+    ...(backSections.length > 0 && { backSections }),
     ...(references.length > 0 && { references }),
     ...(tables.length > 0 && { tables }),
     ...(assets.length > 0 && { assets }),

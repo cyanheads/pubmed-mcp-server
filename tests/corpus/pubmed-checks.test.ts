@@ -1,9 +1,9 @@
 /**
  * @fileoverview The PubMed corpus checks can fail. One real fixture (pmid34116029:
- * collective author, structured abstract, MeSH, grants, a notice) is run through the
- * tools once; each case then changes the source the output is judged against, the
- * output itself, or one `expect.json` pin, and the change must surface as the named
- * problem. A check that stayed silent here would pass any output.
+ * collective author and its investigators, structured abstract, MeSH, grants, a
+ * notice) is run through the tools once; each case then changes the source the output
+ * is judged against, the output itself, or one `expect.json` pin, and the change must
+ * surface as the named problem. A check that stayed silent here would pass any output.
  * @module tests/corpus/pubmed-checks.test
  */
 import { readFileSync } from 'node:fs';
@@ -122,6 +122,29 @@ describe('PubMed corpus invariants', () => {
       'a different author surname',
       (s: string) => s.replace('<LastName>Ali</LastName>', '<LastName>Alli</LastName>'),
       'author 0 lastName is "Alli" in the source, "Ali" returned',
+    ],
+    [
+      'a different investigator surname',
+      (s: string) => s.replace('<LastName>Allan</LastName>', '<LastName>Allen</LastName>'),
+      'investigator 0 lastName is "Allen" in the source, "Allan" returned',
+    ],
+    [
+      'an investigator the output lacks',
+      (s: string) =>
+        s.replace(
+          '</InvestigatorList>',
+          '<Investigator ValidYN="Y"><LastName>Zhou</LastName><ForeName>Wei</ForeName><Initials>W</Initials></Investigator></InvestigatorList>',
+        ),
+      '23 investigators in the source, 22 returned',
+    ],
+    [
+      'an investigator affiliation the output lacks',
+      (s: string) =>
+        s.replace(
+          '<Initials>P</Initials></Investigator>',
+          '<Initials>P</Initials><AffiliationInfo><Affiliation>Kennedy Institute, Oxford.</Affiliation></AffiliationInfo></Investigator>',
+        ),
+      'investigator 0 affiliations is ["Kennedy Institute, Oxford."] in the source, [] returned',
     ],
   ])('flag %s', (_case, mutate, problem) => {
     expect(checkPubmedInvariants({ ...input, source: mutate(input.source) })).toContain(problem);

@@ -1,5 +1,5 @@
 {
-  "why": "A retracted article: Retracted Publication type plus a RetractionIn notice linked by PMID. Also a four-label structured abstract (CONCLUSION labelled, CONCLUSIONS categorised) with <i> runs, 23 MeSH headings with 17 qualifiers, an entity-encoded en dash in a keyword, &amp; in the journal title, and no Issue element, so journalInfo carries no issue key (the journal invariant fails on an empty string, #213) while the Journal line and every citation read as before. The citations carry no retraction marker; nothing here pins that either way.",
+  "why": "A retracted article: Retracted Publication type plus a RetractionIn notice linked by PMID. Also a four-label structured abstract (CONCLUSION labelled, CONCLUSIONS categorised) with <i> runs, 23 MeSH headings with 17 qualifiers, an entity-encoded en dash in a keyword, &amp; in the journal title, and no Issue element, so journalInfo carries no issue key (the journal invariant fails on an empty string, #213) while the Journal line and every citation read as before. The RetractionIn notice reaches the citations: Vancouver ends on its Retraction in: note, APA on its retraction parenthetical, and pubmed_format_citations' content[] warns before the first style (#215).",
   "title": "MicroRNA-582-3p negatively regulates cell proliferation and cell cycle progression in acute myeloid leukemia by targeting cyclin B2.",
   "abstractLabels": ["BACKGROUND", "METHODS", "RESULTS", "CONCLUSION"],
   "authors": 6,
@@ -38,10 +38,13 @@
   "citations": {
     "apa": [
       "Li, H., Tian, X., Wang, P., Huang, M., Xu, R., & Nie, T. (2019).",
-      "*24*, 66.",
-      "https://doi.org/10.1186/s11658-019-0184-7"
+      "*Cellular & Molecular Biology Letters*, *24*, Article 66.",
+      "https://doi.org/10.1186/s11658-019-0184-7 (Retraction published Cell Mol Biol Lett. 2025 Apr 18;30(1):51. doi: 10.1186/s11658-025-00729-3)"
     ],
-    "mla": ["Li, Haixia, et al.", "vol. 24, 2019"],
+    "mla": [
+      "Li, Haixia, et al.",
+      "*Cellular & Molecular Biology Letters*, vol. 24, 2019, art. 66."
+    ],
     "bibtex": [
       "journal  = {Cellular \\& molecular biology letters}",
       "volume   = {24}",
@@ -56,7 +59,7 @@
     ],
     "vancouver": [
       "Li H, Tian X, Wang P, Huang M, Xu R, Nie T. MicroRNA-582-3p negatively regulates",
-      "Cell Mol Biol Lett. 2019;24:66. doi: 10.1186/s11658-019-0184-7"
+      "Cell Mol Biol Lett. 2019;24:66. doi: 10.1186/s11658-019-0184-7. Retraction in: Cell Mol Biol Lett. 2025 Apr 18;30(1):51. doi: 10.1186/s11658-025-00729-3."
     ]
   }
 }

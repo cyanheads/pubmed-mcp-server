@@ -783,7 +783,9 @@ describe('extractPmcTables', () => {
     expect(extractPmcTables(article)[0]?.sectionTitle).toBe('Sputum');
   });
 
-  it('walks the whole <article>, not just <body>, in document order (regression #111)', () => {
+  it('walks the whole <article>, not just <body>, in document order (regression #111, #206)', () => {
+    // The untitled <app> holding TB4 is a back-matter section titled by its
+    // element, so the table names it. (#206)
     const article = el('article', [
       el('body', [
         el('sec', [
@@ -809,7 +811,7 @@ describe('extractPmcTables', () => {
       'Results',
       undefined,
       'Appendix A',
-      undefined,
+      'Appendix',
     ]);
     for (const tb of tables) expect(tb.rows).toHaveLength(3);
   });
@@ -1648,7 +1650,7 @@ describe('extractReferences', () => {
     expect(refs).toHaveLength(1);
     expect(refs[0]?.id).toBe('ref1');
     expect(refs[0]?.label).toBe('1');
-    expect(refs[0]?.citation).toContain('Smith J');
+    expect(refs[0]?.citation).toBe('Smith J et al. Nature 2024.');
   });
 
   it('falls back to element-citation', () => {
@@ -2116,8 +2118,8 @@ describe('parsePmcArticle', () => {
     expect(result.authors).toHaveLength(1);
     expect(result.sections).toHaveLength(1);
     expect(result.articleType).toBe('research-article');
-    expect(result.pmcUrl).toContain('PMC1234567');
-    expect(result.pubmedUrl).toContain('12345');
+    expect(result.pmcUrl).toBe('https://www.ncbi.nlm.nih.gov/pmc/articles/PMC1234567/');
+    expect(result.pubmedUrl).toBe('https://pubmed.ncbi.nlm.nih.gov/12345/');
   });
 
   it('normalizes PMCID without PMC prefix', () => {
@@ -3136,6 +3138,97 @@ describe('a list inside an abstract reads on lines of its own (#202)', () => {
   });
 });
 
+describe('bullet-character paragraphs in an abstract (#218)', () => {
+  /** The `abstract` parsed from an `<abstract>` holding `content`. */
+  const abstractOf = (content: string): string | undefined =>
+    parsePmcArticle(jatsArticle(articleXml(`<abstract>${content}</abstract>`))).abstract;
+
+  it('space-joins paragraphs that do not open with a bullet character followed by text', () => {
+    expect(
+      abstractOf(
+        '<p>Intro.</p><p>· Middle dot.</p><p>■ Square.</p><p>* Star.</p><p>- Hyphen.</p><p>– Dash.</p>' +
+          '<p>Text • with a bullet inside.</p><p>•</p><p>• </p><p>After.</p>',
+      ),
+    ).toBe(
+      'Intro. · Middle dot. ■ Square. * Star. - Hyphen. – Dash. Text • with a bullet inside. • • After.',
+    );
+  });
+
+  it('keeps a list of bullet-labelled items on its own lines, as #202 lays it out (PMC11292240)', () => {
+    const list =
+      '<list list-type="simple"><list-item><label>•</label><p>First.</p></list-item><list-item><label>•</label><p>Second.</p></list-item></list>';
+    expect(abstractOf(`<p>Intro.</p>${list}<p>After.</p>`)).toBe(
+      'Intro.\n\n• First.\n• Second.\n\nAfter.',
+    );
+    expect(abstractOf(`<sec><title>Highlights</title>${list}${list}</sec>`)).toBe(
+      'Highlights:\n• First.\n• Second.\n\n• First.\n• Second.',
+    );
+  });
+
+  it('lays out a run of bullet paragraphs one per line below the section heading (PMC10799778)', () => {
+    const abstract = abstractOf(
+      '<sec><title>Abstract</title><p>Cardiometabolic disease (CMD) encompasses a range of diseases.</p></sec>' +
+        '<sec><title>Key points</title>' +
+        '<p id="Par2">• <italic toggle="yes">To highlight the complex interaction of the gut microbiota and their metabolites with CMD progression and to further centralize and conceptualize the mechanisms of action between microbial and host disease phenotypes</italic>.</p>' +
+        '<p id="Par3">• <italic toggle="yes">We also discuss the potential of targeting modulations of gut microbes and metabolites as new targets for prevention and treatment of CMD, including the use of emerging technologies such as FMT and nanomedicine</italic>.</p>' +
+        '<p id="Par4">• <italic toggle="yes">Our study provides insight into identification-specific microbiomes and metabolites involved in CMD, and microbial-host changes and physiological factors as disease phenotypes develop, which will help to map the microbiome individually and capture pathogenic mechanisms as a whole</italic>.</p></sec>' +
+        '<sec><title>Supplementary Information</title><p>The online version contains supplementary material.</p></sec>',
+    );
+    expect(abstract).toBe(
+      [
+        'Abstract: Cardiometabolic disease (CMD) encompasses a range of diseases.',
+        '',
+        'Key points:',
+        '• To highlight the complex interaction of the gut microbiota and their metabolites with CMD progression and to further centralize and conceptualize the mechanisms of action between microbial and host disease phenotypes.',
+        '• We also discuss the potential of targeting modulations of gut microbes and metabolites as new targets for prevention and treatment of CMD, including the use of emerging technologies such as FMT and nanomedicine.',
+        '• Our study provides insight into identification-specific microbiomes and metabolites involved in CMD, and microbial-host changes and physiological factors as disease phenotypes develop, which will help to map the microbiome individually and capture pathogenic mechanisms as a whole.',
+        '',
+        'Supplementary Information: The online version contains supplementary material.',
+      ].join('\n'),
+    );
+  });
+
+  it('sets a bullet paragraph apart from the plain statements on either side with a blank line', () => {
+    expect(abstractOf('<p>Intro.</p><p>• Point.</p><p>After.</p>')).toBe(
+      'Intro.\n\n• Point.\n\nAfter.',
+    );
+    expect(
+      abstractOf(
+        '<sec><title>Results</title><p>We found:</p><p>• One.</p><p>• Two.</p><p>So.</p></sec>',
+      ),
+    ).toBe('Results: We found:\n\n• One.\n• Two.\n\nSo.');
+  });
+
+  it.each([
+    ['•', 'U+2022'],
+    ['‣', 'U+2023'],
+    ['⁃', 'U+2043'],
+    ['◦', 'U+25E6'],
+  ])(
+    'reads a paragraph opening with %s (%s) as a bullet, with or without a space after it',
+    (bullet) => {
+      expect(abstractOf(`<p>${bullet} One.</p><p>${bullet}Two.</p>`)).toBe(
+        `${bullet} One.\n${bullet}Two.`,
+      );
+    },
+  );
+
+  it('lays out bullet paragraphs in a section nested inside another', () => {
+    expect(
+      abstractOf(
+        '<sec><title>Summary</title><p>Lead.</p><sec><title>Key points</title><p>• A.</p><p>• B.</p></sec></sec>',
+      ),
+    ).toBe('Summary: Lead. Key points\n\n• A.\n• B.');
+  });
+
+  it('sets a bullet paragraph apart from a list beside it, leaving the list as #202 lays it out', () => {
+    const list = '<list list-type="bullet"><list-item><p>Item.</p></list-item></list>';
+    expect(abstractOf(`<p>• Point.</p>${list}<p>• Other.</p>`)).toBe(
+      '• Point.\n\n- Item.\n\n• Other.',
+    );
+  });
+});
+
 describe('prose after a nested list that is a direct child of its item (#203)', () => {
   /** The text of the first body section holding `secContent`. */
   const sectionText = (secContent: string): string | undefined =>
@@ -3399,6 +3492,99 @@ describe('institution identifiers in body text (#208)', () => {
   });
 });
 
+describe('MathML-only formulas in prose (#207)', () => {
+  const MML = 'xmlns:mml="http://www.w3.org/1998/Math/MathML"';
+  /** A MathML formula with no `<tex-math>`, as PMC11609225 deposits every one. */
+  const formula = (id: string, inner: string) =>
+    `<mml:math ${MML} id="${id}" altimg="${id}.svg">${inner}</mml:math>`;
+  /** `x^{2}`, deposited as MathML alone. */
+  const square = formula('Mx', '<mml:msup><mml:mi>x</mml:mi><mml:mn>2</mml:mn></mml:msup>');
+  /** The first body section's text, its `<sec>` holding `content`. */
+  const sectionText = (content: string) =>
+    parsePmcArticle(jatsArticle(articleXml('', `<sec><title>S</title>${content}</sec>`)))
+      .sections[0]?.text;
+
+  it('keeps the limits, scripts and spacing of inline formulas in a paragraph (PMC11609225)', () => {
+    const text = sectionText(
+      '<p>It is evident that <inline-formula>' +
+        formula(
+          'M24',
+          '<mml:msubsup><mml:mrow><mml:mo>∑</mml:mo></mml:mrow><mml:mrow><mml:mtable><mml:mtr><mml:mtd columnalign="center"><mml:mi>j</mml:mi><mml:mo>=</mml:mo><mml:mn>1</mml:mn></mml:mtd></mml:mtr></mml:mtable></mml:mrow><mml:mrow><mml:mi>N</mml:mi></mml:mrow></mml:msubsup><mml:msub><mml:mrow><mml:mi>l</mml:mi></mml:mrow><mml:mrow><mml:mi>i</mml:mi><mml:mi>j</mml:mi></mml:mrow></mml:msub><mml:mo linebreak="goodbreak" linebreakstyle="after">=</mml:mo><mml:mn>0</mml:mn>',
+        ) +
+        '</inline-formula> for <inline-formula>' +
+        formula(
+          'M25',
+          '<mml:mi>i</mml:mi><mml:mo>=</mml:mo><mml:mn>1</mml:mn><mml:mo>,</mml:mo><mml:mn>2</mml:mn><mml:mo>,</mml:mo><mml:mo>.</mml:mo><mml:mo>.</mml:mo><mml:mo>.</mml:mo><mml:mo>,</mml:mo><mml:mi>N</mml:mi>',
+        ) +
+        '</inline-formula>.</p>' +
+        '<p><italic toggle="yes">Which also hold the</italic>\n<inline-formula>' +
+        formula(
+          'M27',
+          '<mml:mo stretchy="false">(</mml:mo><mml:mi>N</mml:mi><mml:mo>−</mml:mo><mml:msup><mml:mrow><mml:mi>M</mml:mi></mml:mrow><mml:mrow><mml:mi>T</mml:mi></mml:mrow></mml:msup><mml:msup><mml:mrow><mml:mi>L</mml:mi></mml:mrow><mml:mrow><mml:mo>−</mml:mo><mml:mn>1</mml:mn></mml:mrow></mml:msup><mml:mi>M</mml:mi><mml:mo stretchy="false">)</mml:mo><mml:mo>&lt;</mml:mo><mml:mn>0</mml:mn><mml:mspace width="0.25em"/><mml:mi>a</mml:mi><mml:mi>n</mml:mi><mml:mi>d</mml:mi><mml:mspace width="0.25em"/><mml:mi>L</mml:mi><mml:mo>&lt;</mml:mo><mml:mn>0</mml:mn>',
+        ) +
+        '</inline-formula></p>',
+    );
+    expect(text).toBe(
+      'It is evident that ∑_{j=1}^{N}l_{ij}=0 for i=1,2,...,N.\n\nWhich also hold the (N−M^{T}L^{−1}M)<0 and L<0',
+    );
+  });
+
+  it('keeps the rows and cells of a matrix in a displayed formula (PMC11609225)', () => {
+    const cell = (inner: string) => `<mml:mtd columnalign="center">${inner}</mml:mtd>`;
+    const row = (...cells: string[]) => `<mml:mtr>${cells.map(cell).join('')}</mml:mtr>`;
+    const neg = (n: string) => `<mml:mo>−</mml:mo><mml:mn>${n}</mml:mn>`;
+    const n = (v: string) => `<mml:mn>${v}</mml:mn>`;
+    const text = sectionText(
+      '<statement id="en0010"><label>Lemma 2.1</label><p><italic>Inequality hold for the matrices L, M, N</italic></p><p>\n<disp-formula id="fm0020">' +
+        formula(
+          'M26',
+          `<mml:mrow><mml:mo>(</mml:mo><mml:mtable>${row('<mml:mi>L</mml:mi>', '<mml:mi>M</mml:mi>')}${row('<mml:msup><mml:mrow><mml:mi>M</mml:mi></mml:mrow><mml:mrow><mml:mi>T</mml:mi></mml:mrow></mml:msup>', '<mml:mi>N</mml:mi>')}</mml:mtable><mml:mo>)</mml:mo></mml:mrow><mml:mo>&lt;</mml:mo><mml:mn>0</mml:mn><mml:mo>.</mml:mo>`,
+        ) +
+        '</disp-formula>\n</p></statement>' +
+        '<disp-formula id="fm0300">' +
+        formula(
+          'M127',
+          `<mml:mi>M</mml:mi><mml:mo>=</mml:mo><mml:mrow><mml:mo>(</mml:mo><mml:mtable>${row(neg('4.4'), n('0'), n('1.2'))}${row(n('0'), neg('4.3'), n('0'))}${row(n('0.9'), n('0'), neg('4.6'))}</mml:mtable><mml:mo>)</mml:mo></mml:mrow><mml:mo>.</mml:mo>`,
+        ) +
+        '</disp-formula>',
+    );
+    expect(text).toBe(
+      'Lemma 2.1 Inequality hold for the matrices L, M, N\n\n(L & M \\\\ M^{T} & N)<0.\n\nM=(−4.4 & 0 & 1.2 \\\\ 0 & −4.3 & 0 \\\\ 0.9 & 0 & −4.6).',
+    );
+  });
+
+  it('reads a formula sitting directly in a <p>, an abstract, a list item and a caption', () => {
+    const article = parsePmcArticle(
+      jatsArticle(
+        articleXml(
+          `<abstract><p>We bound <inline-formula>${square}</inline-formula>.</p></abstract>`,
+          `<sec><title>S</title><p>Direct ${square} here.</p>` +
+            `<list list-type="bullet"><list-item><p>Item ${square}.</p></list-item></list>` +
+            `<fig id="F1"><label>Figure 1</label><caption><title>Plot of <inline-formula>${square}</inline-formula>.</title><p>Axis ${square}.</p></caption><graphic xlink:href="f1.jpg"/></fig>` +
+            `<table-wrap id="T1"><caption><p>Values of ${square}</p></caption><table><tbody><tr><td>${square}</td></tr></tbody></table></table-wrap></sec>`,
+        ),
+      ),
+    );
+    expect(article.abstract).toBe('We bound x^{2}.');
+    expect(article.sections[0]?.text).toBe(
+      'Direct x^{2} here.\n\n- Item x^{2}.\n\n[Figure: Figure 1]',
+    );
+    expect(article.assets?.[0]?.caption).toBe('Plot of x^{2}. Axis x^{2}.');
+    expect(article.tables?.[0]?.caption).toBe('Values of x^{2}');
+    expect(article.tables?.[0]?.rows).toEqual([['x^{2}']]);
+  });
+
+  it('reads the MathML of an <alternatives> that holds no <tex-math>, and the TeX of one that does, once each', () => {
+    const graphic = '<inline-graphic xlink:href="x.gif"/>';
+    const tex = '<tex-math>\\begin{document}$$y^2$$\\end{document}</tex-math>';
+    expect(
+      sectionText(
+        `<p>A <inline-formula><alternatives>${graphic}${square}</alternatives></inline-formula>, B <inline-formula><alternatives>${tex}${square}</alternatives></inline-formula>.</p>`,
+      ),
+    ).toBe('A x^{2}, B $$y^2$$.');
+  });
+});
+
 describe('reference fields that run together (#209)', () => {
   /** The `references[]` of an article whose `<back>` holds `refs`. */
   const referencesOf = (refs: string) =>
@@ -3483,6 +3669,95 @@ describe('reference fields that run together (#209)', () => {
   });
 });
 
+describe('formatting whitespace before closing punctuation in a reference (#219)', () => {
+  /** The citations of an article whose `<back>` holds `refs`. */
+  const citationsOf = (refs: string) =>
+    extractReferences(
+      jatsArticle(
+        `<article><front><article-meta><article-id pub-id-type="pmcid">PMC1</article-id></article-meta></front><back><ref-list>${refs}</ref-list></back></article>`,
+      ),
+    ).map((ref) => ref.citation);
+  /** A pretty-printed `<name>` on a line of its own, as PMC12266799 deposits it. */
+  const name = (surname: string, given: string) =>
+    `\n<name name-style="western"><surname>${surname}</surname><given-names>${given}</given-names></name>`;
+  /** A pretty-printed `<string-name>`, every part on a line of its own (PMC12806063). */
+  const stringName = (surname: string, given?: string) =>
+    `<string-name name-style="western">\n<surname>${surname}</surname>${given ? `\n<given-names>${given}</given-names>` : ''}\n</string-name>`;
+
+  it('keeps the spacing the citation text itself puts before punctuation, and the space before an opening bracket', () => {
+    expect(
+      citationsOf(
+        '<ref id="a"><mixed-citation><source>Lancet</source> : <volume>12</volume>  ; <fpage>3</fpage>\t.</mixed-citation></ref>' +
+          `<ref id="b"><mixed-citation><person-group>${name('Henry', 'L')}\n</person-group> (<year>2020</year>) [<fpage>1</fpage>]</mixed-citation></ref>` +
+          `<ref id="c"><mixed-citation>${stringName('Henry', 'L')}\n– <source>Cell</source>\n– <year>2020</year></mixed-citation></ref>`,
+      ),
+    ).toEqual(['Lancet : 12 ; 3 .', 'Henry L (2020) [1]', 'Henry L – Cell – 2020']);
+  });
+
+  it('leaves whitespace that only the citation text holds, with no element before it, as written', () => {
+    expect(
+      citationsOf(
+        '<ref id="a"><mixed-citation>Smith J\n. <source>Cell</source>, 2020 ,\n12.</mixed-citation></ref>',
+      ),
+    ).toEqual(['Smith J . Cell, 2020 , 12.']);
+  });
+
+  it('drops the line break a <person-group> holds before its close tag (PMC12266799 R1)', () => {
+    expect(
+      citationsOf(
+        `<ref id="R1"><label>1</label><mixed-citation publication-type="journal">\n<person-group person-group-type="author">${name('Younossi', 'ZM')}${name('Wong', 'G')}${name('Anstee', 'QM')}${name('Henry', 'L')}\n</person-group>. <article-title>The global burden of liver disease</article-title>. <source>Clin Gastroenterol Hepatol</source>. <year>2023</year>;<volume>21</volume>:<fpage>1978</fpage>–<lpage>1991</lpage>.<pub-id pub-id-type="pmid">37121527</pub-id>\n<pub-id pub-id-type="doi" assigning-authority="pmc">10.1016/j.cgh.2023.04.015</pub-id></mixed-citation></ref>`,
+      ),
+    ).toEqual([
+      'Younossi ZM, Wong G, Anstee QM, Henry L. The global burden of liver disease. Clin Gastroenterol Hepatol. 2023;21:1978–1991. PMID 37121527 DOI 10.1016/j.cgh.2023.04.015',
+    ]);
+  });
+
+  it('drops the indentation inside a <string-name> and the line break after a <collab> (PMC12806063)', () => {
+    expect(
+      citationsOf(
+        `<ref id="b1"><mixed-citation>\n${stringName('Li', 'X')}, ${stringName('Shi', 'J')}, ${stringName('Li', 'LM')}. <article-title>The human intelligence evolved from proximal <italic toggle="yes">cis</italic>‐regulatory saltations</article-title>. <source>Quant Biol</source>.</mixed-citation></ref>` +
+          '<ref id="b11"><mixed-citation>\n<collab collab-type="authors">The UniProt Consortium</collab>\n. <article-title>UniProt: a worldwide hub of protein knowledge</article-title>. <source>Nucleic Acids Res</source>.</mixed-citation></ref>',
+      ),
+    ).toEqual([
+      'Li X, Shi J, Li LM. The human intelligence evolved from proximal cis‐regulatory saltations. Quant Biol.',
+      'The UniProt Consortium. UniProt: a worldwide hub of protein knowledge. Nucleic Acids Res.',
+    ]);
+  });
+
+  it('applies inside a <person-group> as well as at the citation level (PMC12874376)', () => {
+    const deMoura =
+      '<string-name name-style="western">\n<surname>de Moura</surname>, <given-names>C. E. V.</given-names>\n</string-name>';
+    const sokolov =
+      '<string-name name-style="western">\n<surname>Sokolov</surname>, <given-names>A. Yu.</given-names>\n</string-name>';
+    expect(
+      citationsOf(
+        // `;` inside the wrapper after a <string-name>; nothing before the title.
+        `<ref id="a"><mixed-citation>\n<person-group person-group-type="allauthors">\n${deMoura}; ${sokolov}\n</person-group>\n<article-title>Prism</article-title>. <year>2025</year>.</mixed-citation></ref>` +
+          // Whitespace two wrappers deep — a <string-name>'s, then its <person-group>'s — before `,`.
+          `<ref id="b"><mixed-citation><person-group>${stringName('Stanton', 'J.')}\n</person-group>, <source>Cell</source>.</mixed-citation></ref>`,
+      ),
+    ).toEqual(['de Moura, C. E. V.; Sokolov, A. Yu. Prism. 2025.', 'Stanton J., Cell.']);
+  });
+
+  it.each([
+    ['.', 'Lancet.'],
+    [',', 'Lancet,'],
+    [';', 'Lancet;'],
+    [':', 'Lancet:'],
+    [')', 'Lancet)'],
+    [']', 'Lancet]'],
+  ])('drops it before "%s"', (mark, expected) => {
+    // Inside the element, outside it with a line break, and both.
+    expect(
+      citationsOf(
+        `<ref id="a"><mixed-citation><source>Lancet  </source>${mark}</mixed-citation></ref>` +
+          `<ref id="b"><mixed-citation><source>Lancet</source>\n  ${mark}</mixed-citation></ref>` +
+          `<ref id="c"><mixed-citation><source>Lancet\t</source>  ${mark}</mixed-citation></ref>`,
+      ),
+    ).toEqual([expected, expected, expected]);
+  });
+});
+
 describe('boxed text set apart from the body (#210)', () => {
   /** The sections of an article whose `<body>` holds `body`. */
   const sectionsOf = (body: string) => parsePmcArticle(jatsArticle(articleXml('', body))).sections;
@@ -3540,27 +3815,306 @@ describe('boxed text set apart from the body (#210)', () => {
   });
 });
 
-describe('reference rendering runs in linear time (#209)', () => {
-  /** CPU time of `run`, in ms — this thread's user + system time, not wall clock. */
-  const cpuMs = (run: () => void): number => {
-    const start = process.threadCpuUsage();
-    run();
-    const { user, system } = process.threadCpuUsage(start);
-    return (user + system) / 1000;
-  };
+describe('back matter as sections (#206)', () => {
+  const BODY = '<sec><title>Results</title><p>Body text.</p></sec>';
+  const REFS =
+    '<ref-list><ref id="R1"><mixed-citation>Alpha A. A study. 2020.</mixed-citation></ref></ref-list>';
 
-  /** Fastest of five measurements of five renders each. */
-  const fastestMs = (render: () => void): number => {
-    render();
-    return Math.min(
-      ...Array.from({ length: 5 }, () =>
-        cpuMs(() => {
-          for (let i = 0; i < 5; i++) render();
-        }),
+  /** Parse an `<article>` carrying `body` and `back` as its `<body>` and `<back>`, each only when given. */
+  const parseArticle = ({ body, back }: { body?: string | undefined; back?: string | undefined }) =>
+    parsePmcArticle(
+      jatsArticle(
+        '<article><front><article-meta><article-id pub-id-type="pmcid">PMC1</article-id></article-meta></front>' +
+          (body === undefined ? '' : `<body>${body}</body>`) +
+          (back === undefined ? '' : `<back>${back}</back>`) +
+          '</article>',
       ),
     );
-  };
 
+  it('leaves an article whose <back> holds only references, or that has no <back>, as it read before', () => {
+    for (const back of [REFS, `<app-group>${REFS}</app-group>`, undefined]) {
+      const parsed = parseArticle({ body: BODY, back });
+      expect(parsed.sections).toEqual([{ title: 'Results', text: 'Body text.' }]);
+      expect('backSections' in parsed).toBe(false);
+      expect(parsed.references ?? []).toEqual(
+        back ? [{ id: 'R1', citation: 'Alpha A. A study. 2020.' }] : [],
+      );
+    }
+  });
+
+  it('reads a back-matter element inside a body <sec> as that section’s text, as before', () => {
+    const parsed = parseArticle({
+      body:
+        '<sec><title>Methods</title><p>Text.</p>' +
+        '<notes><title>Note</title><p>Body note.</p><table-wrap id="T1"><table><tbody><tr><td>a</td><td>b</td></tr></tbody></table></table-wrap></notes>' +
+        '<fn-group><title>Group</title><fn><p>One.</p></fn><fn><p>Two.</p></fn></fn-group></sec>',
+    });
+    expect(parsed.sections).toEqual([
+      { title: 'Methods', text: 'Text.\n\nNote Body note.\n\nGroup One. Two.' },
+    ]);
+    expect(parsed.tables?.map((tb) => tb.sectionTitle)).toEqual(['Methods']);
+  });
+
+  it('returns every <back> child but <ref-list> as a section in source order, titled by its element when it carries no title or label', () => {
+    const parsed = parseArticle({
+      body: BODY,
+      back:
+        '<ack><p>Thanks to the lab.</p></ack>' +
+        '<fn-group><fn><p>Publisher’s note.</p></fn></fn-group>' +
+        REFS +
+        '<notes notes-type="data-availability"><title>Data Availability Statement</title><p>On request.</p></notes>' +
+        '<notes><p>An untitled note.</p></notes>' +
+        '<bio><p>The author studies twins.</p></bio>' +
+        '<glossary><array><tbody>' +
+        '<tr><td>RSNA</td><td>Radiological Society of North America</td></tr>' +
+        '<tr><td>CI</td><td>confidence interval </td></tr>' +
+        '</tbody></array></glossary>' +
+        '<sec sec-type="funding-information"><title>Funding</title><p>Grant 1.</p></sec>' +
+        '<notes><label>Note 1</label><p>A labelled note.</p></notes>',
+    });
+    expect(parsed.sections).toEqual([{ title: 'Results', text: 'Body text.' }]);
+    expect(parsed.backSections).toEqual([
+      { title: 'Acknowledgments', text: 'Thanks to the lab.' },
+      { title: 'Footnotes', text: 'Publisher’s note.' },
+      { title: 'Data Availability Statement', text: 'On request.' },
+      { title: 'Notes', text: 'An untitled note.' },
+      { title: 'Biography', text: 'The author studies twins.' },
+      {
+        title: 'Glossary',
+        text: '- RSNA — Radiological Society of North America\n- CI — confidence interval',
+      },
+      { title: 'Funding', text: 'Grant 1.' },
+      { label: 'Note 1', text: 'A labelled note.' },
+    ]);
+    expect(parsed.references).toHaveLength(1);
+  });
+
+  it('takes the title of a titled block that is all a back-matter element holds', () => {
+    const parsed = parseArticle({
+      body: BODY,
+      back: '<glossary><def-list><title>Abbreviations</title><def-item><term>CI</term><def><p>confidence interval</p></def></def-item></def-list></glossary>',
+    });
+    expect(parsed.backSections).toEqual([
+      { title: 'Abbreviations', text: '- CI — confidence interval' },
+    ]);
+  });
+
+  it('splices an untitled <app-group> into its <app>s and nests the <app>s of a titled one', () => {
+    const parsed = parseArticle({
+      body: BODY,
+      back:
+        '<app-group><app id="app1"><title>Appendix A</title><p>Search strategy.</p></app>' +
+        `<app id="app2"><p>Untitled appendix.</p></app>${REFS}</app-group>` +
+        '<app-group><title>Appendices</title><app><title>Appendix C</title><p>Scale.</p></app></app-group>',
+    });
+    expect(parsed.backSections).toEqual([
+      { title: 'Appendix A', text: 'Search strategy.' },
+      { title: 'Appendix', text: 'Untitled appendix.' },
+      { title: 'Appendices', text: '', subsections: [{ title: 'Appendix C', text: 'Scale.' }] },
+    ]);
+  });
+
+  it('keeps the content an untitled <app-group> holds besides its <app>s', () => {
+    // JATS lets an <app-group> carry paragraphs, lists and figures ahead of its
+    // <app>s; splicing in only the <app>s dropped them.
+    const parsed = parseArticle({
+      body: BODY,
+      back:
+        '<app-group><p>Two appendices follow.</p>' +
+        '<list list-type="bullet"><list-item><p>Search terms</p></list-item></list>' +
+        '<app><title>Appendix A</title><p>Search strategy.</p></app></app-group>',
+    });
+    expect(parsed.backSections).toEqual([
+      { text: 'Two appendices follow.\n\n- Search terms' },
+      { title: 'Appendix A', text: 'Search strategy.' },
+    ]);
+  });
+
+  it('nests a back-matter element inside another as a subsection, at every depth', () => {
+    const parsed = parseArticle({
+      body: BODY,
+      back:
+        // PMC10799778's Springer `Declarations`, one level deeper.
+        '<notes><title>Declarations</title>' +
+        '<notes id="FPar1"><title>Ethics approval</title><p>Not applicable.</p></notes>' +
+        '<notes id="FPar2"><title>Conflict of interest</title><p>None.</p>' +
+        '<notes><title>Funding disclosure</title><p>Grant.</p></notes></notes></notes>' +
+        // PMC10666927's eLife `Additional information`: titled groups in a back <sec>.
+        '<sec sec-type="additional-information"><title>Additional information</title>' +
+        '<fn-group content-type="competing-interest"><title>Competing interests</title><fn><p>No competing interests declared.</p></fn></fn-group>' +
+        '<fn-group content-type="author-contribution"><title>Author contributions</title><fn><p>Investigation.</p></fn><fn><p>Conceptualization, Methodology.</p></fn></fn-group></sec>',
+    });
+    expect(parsed.backSections).toEqual([
+      {
+        title: 'Declarations',
+        text: '',
+        subsections: [
+          { title: 'Ethics approval', text: 'Not applicable.' },
+          {
+            title: 'Conflict of interest',
+            text: 'None.',
+            subsections: [{ title: 'Funding disclosure', text: 'Grant.' }],
+          },
+        ],
+      },
+      {
+        title: 'Additional information',
+        text: '',
+        subsections: [
+          { title: 'Competing interests', text: 'No competing interests declared.' },
+          {
+            title: 'Author contributions',
+            text: 'Investigation.\n\nConceptualization, Methodology.',
+          },
+        ],
+      },
+    ]);
+  });
+
+  it('reads each <fn> as a paragraph of its own', () => {
+    const parsed = parseArticle({
+      body: BODY,
+      back:
+        // PMC10754557's two footnote groups, and the Springer and Elsevier note shapes.
+        '<fn-group><fn fn-type="abbr"><p><def-list><title>Abbreviations:</title>' +
+        '<def-item><term>AEs</term><def><p>adverse events</p></def></def-item>' +
+        '<def-item><term>CNS</term><def><p>central nervous system</p></def></def-item></def-list></p></fn></fn-group>' +
+        '<fn-group><fn fn-type="equal"><p>HH and XZ contributed equally to this work.</p></fn>' +
+        '<fn fn-type="other"><p>Data sharing not applicable to this article.</p></fn>' +
+        '<fn id="appsec2" fn-type="supplementary-material"><label>Appendix A</label><p>Supplementary data online.</p></fn>' +
+        '<fn><p><bold>Publisher’s Note</bold></p><p>Springer Nature remains neutral.</p></fn></fn-group>',
+    });
+    expect(parsed.backSections).toEqual([
+      {
+        title: 'Footnotes',
+        text: 'Abbreviations:\n- AEs — adverse events\n- CNS — central nervous system',
+      },
+      {
+        title: 'Footnotes',
+        text:
+          'HH and XZ contributed equally to this work.\n\n' +
+          'Data sharing not applicable to this article.\n\n' +
+          'Appendix A Supplementary data online.\n\n' +
+          'Publisher’s Note\n\nSpringer Nature remains neutral.',
+      },
+    ]);
+  });
+
+  it('reads each <p> of a back-matter <fn> as a paragraph of its own, its <label> leading the first', () => {
+    // BMC's footnote shape (PMC4392481): read as one run, the heading <p> fused
+    // into the statement after it (`Competing interests The authors declare…`).
+    const parsed = parseArticle({
+      body: BODY,
+      back:
+        '<fn-group><fn><p><bold>Competing interests</bold></p><p>The authors declare none.</p>' +
+        '<p>THA was employed by FHI 360.</p></fn>' +
+        '<fn><label>1</label><p>First note.</p><p>Second paragraph.</p></fn>' +
+        '<fn>Inline <italic>only</italic> note.</fn></fn-group>',
+    });
+    expect(parsed.backSections).toEqual([
+      {
+        title: 'Footnotes',
+        text:
+          'Competing interests\n\nThe authors declare none.\n\nTHA was employed by FHI 360.\n\n' +
+          '1 First note.\n\nSecond paragraph.\n\n' +
+          'Inline only note.',
+      },
+    ]);
+  });
+
+  it('renders an <array> one row per line, its cells joined as a <def-list> item joins term and definition', () => {
+    // The default arm flattened every cell into one run (`CodeMeaningAAlpha…`).
+    const [section] = parseArticle({
+      body:
+        '<sec><title>Methods</title><p>Codes used:</p><array><tbody>' +
+        '<tr><th>Code</th><th>Meaning</th></tr>' +
+        '<tr><td>A</td><td>Alpha</td><td/></tr>' +
+        '<tr><td>B</td><td>Beta <italic>b</italic></td><td>2</td></tr>' +
+        '</tbody></array></sec>',
+    }).sections;
+    expect(section?.text).toBe('Codes used:\n\n- Code — Meaning\n- A — Alpha\n- B — Beta b — 2');
+  });
+
+  it('names the back-matter section a table or asset sits in, and keeps one the table emptied as a heading', () => {
+    const parsed = parseArticle({
+      body: BODY,
+      back:
+        '<notes><title>Data Availability</title><p>Files:<supplementary-material id="S1"><label>File S1</label><media xlink:href="s1.csv"/></supplementary-material></p></notes>' +
+        '<fn-group><fn><p>Table note.<table-wrap id="TF"><table><tbody><tr><td>f</td></tr></tbody></table></table-wrap></p></fn></fn-group>' +
+        '<notes><title>Declarations</title><notes><title>Ethics</title><p>Approved.</p>' +
+        '<table-wrap id="TN"><table><tbody><tr><td>n</td></tr></tbody></table></table-wrap></notes></notes>' +
+        '<app-group><app><title>Appendix C</title><table-wrap id="TA1"><label>Table A1</label>' +
+        '<table><tbody><tr><td>Study</td><td>Score</td></tr></tbody></table></table-wrap></app>' +
+        '<app><label>Appendix D</label><table-wrap id="TL"><table><tbody><tr><td>l</td></tr></tbody></table></table-wrap></app></app-group>',
+    });
+    expect(parsed.tables?.map((tb) => [tb.id, tb.sectionTitle])).toEqual([
+      ['TF', 'Footnotes'],
+      ['TN', 'Ethics'],
+      ['TA1', 'Appendix C'],
+      // A labelled appendix takes no element title, so it names nothing, as a labelled <sec> would.
+      ['TL', undefined],
+    ]);
+    expect(parsed.assets?.map((a) => [a.id, a.sectionTitle])).toEqual([
+      ['S1', 'Data Availability'],
+    ]);
+    expect(parsed.backSections).toEqual([
+      { title: 'Data Availability', text: 'Files:\n\n[Supplementary: File S1]' },
+      { title: 'Footnotes', text: 'Table note.' },
+      { title: 'Declarations', text: '', subsections: [{ title: 'Ethics', text: 'Approved.' }] },
+      { title: 'Appendix C', text: '' },
+      { label: 'Appendix D', text: '' },
+    ]);
+    // Cells reach `tables[]` alone, never the section text.
+    expect(JSON.stringify(parsed.backSections)).not.toContain('Study');
+  });
+
+  it('returns the back matter of an article with no body apart from its empty body sections', () => {
+    const parsed = parseArticle({ back: '<ack><title>Acknowledgements</title><p>None.</p></ack>' });
+    expect(parsed.sections).toEqual([]);
+    expect(parsed.backSections).toEqual([{ title: 'Acknowledgements', text: 'None.' }]);
+  });
+});
+
+/** CPU time of `run`, in ms — this thread's user + system time, not wall clock. */
+const cpuMs = (run: () => void): number => {
+  const start = process.threadCpuUsage();
+  run();
+  const { user, system } = process.threadCpuUsage(start);
+  return (user + system) / 1000;
+};
+
+/**
+ * CPU time of one call each of `small` and `large`, in ms. Each call repeats
+ * until a reading spans a millisecond, well above the clock's resolution; then
+ * the two are read in turn for seven rounds and each keeps its fastest. Taking
+ * turns lands a stretch of contention, a slower core or a collection on both
+ * sizes, where reading one size after the other lets it skew their ratio. The
+ * rounds stop early once they have spent two seconds, so a quadratic call fails
+ * the ratio rather than the test's timeout.
+ */
+const cpuMsPerCall = (small: () => void, large: () => void): [number, number] => {
+  const readers = [small, large].map((call) => {
+    const read = (reps: number) =>
+      cpuMs(() => {
+        for (let i = 0; i < reps; i++) call();
+      });
+    let reps = 1;
+    while (read(reps) < 1) reps *= 2;
+    return { reps, read: () => read(reps) };
+  });
+  const fastest = [Number.POSITIVE_INFINITY, Number.POSITIVE_INFINITY];
+  let spentMs = 0;
+  for (let round = 0; round < 7 && spentMs < 2_000; round++) {
+    readers.forEach(({ reps, read }, i) => {
+      const ms = read();
+      spentMs += ms;
+      fastest[i] = Math.min(fastest[i] as number, ms / reps);
+    });
+  }
+  return fastest as [number, number];
+};
+
+describe('reference rendering runs in linear time (#209)', () => {
   /** `unit` repeated until its serialized form spans about `chars` characters. */
   const repeat = (unit: JatsNode[], unitChars: number, chars: number): JatsNode[] =>
     Array.from({ length: Math.ceil(chars / unitChars) }, () => unit).flat();
@@ -3600,14 +4154,214 @@ describe('reference rendering runs in linear time (#209)', () => {
       [el('fpage', [t('1')]), el('lpage', [t('2')])],
       32,
     ],
-  ])('renders %s in linear CPU time', (_label, wrap, unit, unitChars) => {
-    const at = (chars: number) =>
-      el('ref-list', [el('ref', [wrap(repeat(unit as JatsNode[], unitChars as number, chars))])]);
-    const small = at(5_000);
-    const large = at(80_000);
-    const t5k = fastestMs(() => extractReferences(small));
-    const t80k = fastestMs(() => extractReferences(large));
-    expect(t80k / t5k).toBeLessThan(64);
-    expect(t80k).toBeLessThan(250);
-  });
+  ])(
+    'renders %s in linear CPU time',
+    (_label, wrap, unit, unitChars) => {
+      // extractReferences reads the `<ref-list>`s below the node it is given
+      const at = (chars: number) =>
+        el('back', [
+          el('ref-list', [
+            el('ref', [wrap(repeat(unit as JatsNode[], unitChars as number, chars))]),
+          ]),
+        ]);
+      const small = at(5_000);
+      const large = at(320_000);
+      // The whole input must render, or the timing below measures an empty walk
+      const [smallRefs, largeRefs] = [extractReferences(small), extractReferences(large)];
+      expect(smallRefs).toHaveLength(1);
+      expect(largeRefs).toHaveLength(1);
+      const smallChars = smallRefs[0]?.citation.length ?? 0;
+      expect(smallChars).toBeGreaterThan(0);
+      expect(largeRefs[0]?.citation.length).toBeGreaterThan(smallChars * 60);
+      /**
+       * A 64x span: linear is 64 and quadratic 4,096. A quadratic step with a
+       * large linear term (each `<pub-id>` re-reading the whole citation) measured
+       * about 100 over a 16x span, too near that span's bound of 64 to fail
+       * reliably, and about 450 over this one.
+       */
+      const [t5k, t320k] = cpuMsPerCall(
+        () => extractReferences(small),
+        () => extractReferences(large),
+      );
+      expect(t320k / t5k).toBeLessThan(256);
+      expect(t320k).toBeLessThan(200);
+    },
+    30_000,
+  );
+});
+
+describe('reference, abstract and formula rendering run in linear time (#207, #218, #219)', () => {
+  /** `unit` repeated until its serialized form spans about `chars` characters. */
+  const repeat = (unit: JatsNode[], unitChars: number, chars: number): JatsNode[] =>
+    Array.from({ length: Math.ceil(chars / unitChars) }, () => unit).flat();
+
+  /** Characters other than whitespace in `text`. */
+  const visible = (text: string): number => text.replace(/\s+/g, '').length;
+
+  /** Characters other than whitespace the text nodes under `node` deposit. */
+  const deposited = (node: JatsNode): number =>
+    '#text' in node
+      ? visible(String(node['#text']))
+      : (Object.values(node).filter(Array.isArray).flat() as JatsNode[]).reduce<number>(
+          (count, child) => count + deposited(child),
+          0,
+        );
+
+  /**
+   * `render`, once its output is checked to carry every character `fixture`
+   * deposits: a walk that reads nothing, or stops short, runs as fast as a
+   * linear one and passes the bound below.
+   */
+  const whole = (fixture: JatsNode, render: () => string) => {
+    const want = deposited(fixture);
+    if (!want || visible(render()) < want) throw new Error('fixture does not render whole');
+    return render;
+  };
+
+  /**
+   * Render a `<mixed-citation>` holding `citation` through `extractReferences`,
+   * from a `<back>`: the search starts below the node it is handed, so a
+   * `<ref-list>` passed itself is never read.
+   */
+  const references = (citation: JatsNode[]) => {
+    const back = el('back', [el('ref-list', [el('ref', [el('mixed-citation', citation)])])]);
+    return whole(back, () =>
+      extractReferences(back)
+        .map((ref) => ref.citation)
+        .join(''),
+    );
+  };
+
+  /** Parse an article whose `<abstract>` holds `content`. */
+  const abstract = (content: JatsNode[]) => {
+    const article = el('article', [el('front', [el('article-meta', [el('abstract', content)])])]);
+    return whole(article, () => parsePmcArticle(article).abstract ?? '');
+  };
+
+  /**
+   * Parse an article whose one body section holds `formula` twice: in a
+   * paragraph, read by the prose walk, and in a table cell, read by the shared
+   * text reader.
+   */
+  const formula = (math: JatsNode) => {
+    const inline = el('inline-formula', [el('mml:math', [math])]);
+    const table = el('table-wrap', [el('table', [el('tbody', [el('tr', [el('td', [inline])])])])]);
+    const article = el('article', [el('body', [el('sec', [el('p', [inline]), table])])]);
+    return whole(article, () => {
+      const { sections, tables } = parsePmcArticle(article);
+      return `${sections[0]?.text ?? ''}${tables?.[0]?.rows.flat().join('') ?? ''}`;
+    });
+  };
+
+  /** `wrap` applied `levels` times around `innermost`. */
+  const nest = (levels: number, wrap: (inner: JatsNode) => JatsNode, innermost: JatsNode) =>
+    Array.from({ length: Math.ceil(levels) }).reduce<JatsNode>((inner) => wrap(inner), innermost);
+
+  /** A pretty-printed `<string-name>` whose close tag sits on a line of its own. */
+  const indentedName = el('string-name', [t('\n'), el('surname', [t('A')]), t('\n  ')]);
+
+  const p = (text: string) => el('p', [t(text)]);
+  const mi = el('mml:mi', [t('a')]);
+
+  /** Every fixture but the nested ones spans 5k to 320k characters. */
+  const WIDE: [number, number] = [5_000, 320_000];
+  /**
+   * The nested fixtures span 8 to 500 levels. The renderers recurse once per
+   * level, and before the JIT optimizes them their frames are large enough
+   * that about 1,200 nested `<msup>`s overflow the stack, so a first render
+   * deep enough to need the optimized frames fails on how warm the JIT is.
+   */
+  const NESTED: [number, number] = [20_000 / 64, 20_000];
+
+  it.each([
+    // #219 `<string-name>…\n  </string-name>, `: whitespace inside every name dropped before its comma.
+    [
+      'names closed by punctuation',
+      (chars: number) => references(repeat([indentedName, t(', ')], 52, chars)),
+      WIDE,
+    ],
+    // #219 The same two wrappers deep, the `;` inside the <person-group>.
+    [
+      'names closed by punctuation inside a person-group',
+      (chars: number) =>
+        references([el('person-group', repeat([indentedName, t('\n; ')], 53, chars)), t('\n.')]),
+      WIDE,
+    ],
+    // #219 `<source>A</source>\n   ….`: one line break and run of spaces scanned before the period.
+    [
+      'one long run before the punctuation',
+      (chars: number) => references([el('source', [t('A')]), t(`\n${' '.repeat(chars)}.`)]),
+      WIDE,
+    ],
+    // #219 `<source>A   …</source>.`: one long run inside the element.
+    [
+      'one long run inside the element',
+      (chars: number) => references([el('source', [t(`A${' '.repeat(chars)}`)]), t('.')]),
+      WIDE,
+    ],
+    // #219 `<source>A</source>\n   …x`: a long run scanned that ends in no punctuation.
+    [
+      'one long run before ordinary text',
+      (chars: number) => references([el('source', [t('A')]), t(`\n${' '.repeat(chars)}x`)]),
+      WIDE,
+    ],
+    // #218 `<p>• Point.</p>`: every paragraph a bullet, each joined to the last by a line break.
+    ['bullet paragraphs', (chars: number) => abstract(repeat([p('• Point.')], 15, chars)), WIDE],
+    // #218 Bullet and plain paragraphs alternating: a blank line owed at every join.
+    [
+      'bullet and plain paragraphs alternating',
+      (chars: number) => abstract(repeat([p('• Point.'), p('Plain.')], 28, chars)),
+      WIDE,
+    ],
+    // #218 One bullet paragraph whose text runs on.
+    [
+      'one long bullet paragraph',
+      (chars: number) => abstract([p(`• ${'word '.repeat(chars / 5)}`), p('• End.')]),
+      WIDE,
+    ],
+    // #207 `<msup><mi>a</mi><msup>…`: scripts nested one inside the next.
+    [
+      'superscripts nested one inside the next',
+      (chars: number) =>
+        formula(nest(chars / 40, (inner) => el('mml:msup', [mi, inner]), el('mml:mi', [t('b')]))),
+      NESTED,
+    ],
+    // #207 `<mrow><mi>a</mi><mspace/><mrow>…`: rows nested one inside the next.
+    [
+      'rows nested one inside the next',
+      (chars: number) =>
+        formula(nest(chars / 48, (inner) => el('mml:mrow', [mi, el('mml:mspace', []), inner]), mi)),
+      NESTED,
+    ],
+    // #207 One <mtable> of ten-cell rows: a separator before every cell and row.
+    [
+      'a matrix of many cells',
+      (chars: number) =>
+        formula(
+          el(
+            'mml:mtable',
+            repeat([el('mml:mtr', repeat([el('mml:mtd', [mi])], 1, 10))], 300, chars),
+          ),
+        ),
+      WIDE,
+    ],
+    // #207 One <mfenced> whose separators attribute names a separator per child.
+    [
+      'a fenced list with a separator per child',
+      (chars: number) =>
+        formula(
+          el('mml:mfenced', repeat([mi], 18, chars), { '@_separators': ';'.repeat(chars / 18) }),
+        ),
+      WIDE,
+    ],
+  ])(
+    'renders %s in linear CPU time across a 64x span',
+    (_label, at, [smallChars, largeChars]) => {
+      // Linear work grows 64x across the span; quadratic grows 4,096x.
+      const [tSmall, tLarge] = cpuMsPerCall(at(smallChars), at(largeChars));
+      expect(tLarge / tSmall).toBeLessThan(256);
+      expect(tLarge).toBeLessThan(200);
+    },
+    30_000,
+  );
 });

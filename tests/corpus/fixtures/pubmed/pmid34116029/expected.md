@@ -1,4 +1,4 @@
-<!-- pubmed_fetch_articles {"pmids":["34116029"],"includeMesh":true,"includeGrants":true} -->
+<!-- pubmed_fetch_articles {"pmids":["34116029"],"includeMesh":true,"includeGrants":true,"includeInvestigators":true} -->
 ## PubMed Articles
 **Articles Returned:** 1
 
@@ -15,6 +15,30 @@
 - James E East (JE) [aff 1]
 - Jens Rittscher (J) [aff 7]
 - Barbara Braden (B) [aff 8]
+
+**Investigators (22):**
+- Philip Allan (P)
+- Tim Ambrose (T)
+- Carolina Arancibia-Cárcamo (C)
+- Ellie Barnes (E)
+- Elizabeth Bird-Lieberman (E)
+- Jan Bornschein (J)
+- Oliver Brain (O)
+- Jane Collier (J)
+- Emma Culver (E)
+- Alessandra Geremia (A)
+- Bruce George (B)
+- Lucy Howarth (L)
+- Kelsey Jones (K)
+- Paul Klenerman (P)
+- Rebecca Palmer (R)
+- Fiona Powrie (F)
+- Astor Rodrigues (A)
+- Jack Satsangi (J)
+- Alison Simmons (A)
+- Simon Travis (S)
+- Holm Uhlig (H)
+- Alissa Walsh (A)
 
 **Affiliations:**
 - [0] Institute of Biomedical Engineering, Department of Engineering Science, University of Oxford, Oxford, United Kingdom; Oxford National Institute for Health Research Biomedical Research Centre, Oxford, United Kingdom; Big Data Institute, University of Oxford, Li Ka Shing Centre for Health Information and Discovery, Oxford, United Kingdom. Electronic address: sharib.ali@eng.ox.ac.uk.
@@ -93,7 +117,7 @@ CONCLUSIONS: The proposed methodology automatically extracts Prague C&M scores w
 **A Pilot Study on Automatic Three-Dimensional Quantification of Barrett's Esophagus for Risk Stratification and Therapy Monitoring.**
 
 ### APA
-Ali, S., Bailey, A., Ash, S., Haghighat, M., TGU Investigators, Leedham, S. J., Lu, X., East, J. E., Rittscher, J., & Braden, B. (2021). A Pilot Study on Automatic Three-Dimensional Quantification of Barrett's Esophagus for Risk Stratification and Therapy Monitoring. *Gastroenterology*, *161*(3), 865-878.e8. https://doi.org/10.1053/j.gastro.2021.05.059
+Ali, S., Bailey, A., Ash, S., Haghighat, M., TGU Investigators, Leedham, S. J., Lu, X., East, J. E., Rittscher, J., & Braden, B. (2021). A Pilot Study on Automatic Three-Dimensional Quantification of Barrett's Esophagus for Risk Stratification and Therapy Monitoring. *Gastroenterology*, *161*(3), 865–878.e8. https://doi.org/10.1053/j.gastro.2021.05.059
 
 ### MLA
 Ali, Sharib, et al. "A Pilot Study on Automatic Three-Dimensional Quantification of Barrett's Esophagus for Risk Stratification and Therapy Monitoring." *Gastroenterology*, vol. 161, no. 3, 2021, pp. 865-878.e8. https://doi.org/10.1053/j.gastro.2021.05.059.
@@ -112,7 +136,7 @@ Ali, Sharib, et al. "A Pilot Study on Automatic Three-Dimensional Quantification
   doi      = {10.1053/j.gastro.2021.05.059},
   pmid     = {34116029},
   pmcid    = {PMC7617121},
-  keywords = {{Deep learning}, {Esophageal cancer}, {Imaging}, {Risk assessment}, {Three-dimensional}, {Aged}, {Automation}, {Barrett Esophagus}, {Deep Learning}, {Disease Progression}, {Esophageal Mucosa}, {Esophagogastric Junction}, {Esophagoscopy}, {Female}, {Humans}, {Image Interpretation, Computer-Assisted}, {Imaging, Three-Dimensional}, {Male}, {Pilot Projects}, {Predictive Value of Tests}, {Reproducibility of Results}, {Risk Assessment}, {Risk Factors}, {Severity of Illness Index}, {Treatment Outcome}}
+  keywords = {{Deep learning}, {Esophageal cancer}, {Imaging}, {Risk assessment}, {Three-dimensional}, {Aged}, {Automation}, {Barrett Esophagus}, {Disease Progression}, {Esophageal Mucosa}, {Esophagogastric Junction}, {Esophagoscopy}, {Female}, {Humans}, {Image Interpretation, Computer-Assisted}, {Imaging, Three-Dimensional}, {Male}, {Pilot Projects}, {Predictive Value of Tests}, {Reproducibility of Results}, {Risk Factors}, {Severity of Illness Index}, {Treatment Outcome}}
 }
 ```
 
@@ -150,7 +174,6 @@ KW  - Three-dimensional
 KW  - Aged
 KW  - Automation
 KW  - Barrett Esophagus
-KW  - Deep Learning
 KW  - Disease Progression
 KW  - Esophageal Mucosa
 KW  - Esophagogastric Junction
@@ -163,7 +186,6 @@ KW  - Male
 KW  - Pilot Projects
 KW  - Predictive Value of Tests
 KW  - Reproducibility of Results
-KW  - Risk Assessment
 KW  - Risk Factors
 KW  - Severity of Illness Index
 KW  - Treatment Outcome

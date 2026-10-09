@@ -1035,6 +1035,68 @@ describe('pmcids, pmids, and dois together (#192)', () => {
   });
 });
 
+// ─── #222: the per-call fetch limit ──────────────────────────────────────────
+
+describe('the per-call fetch limit (#222)', () => {
+  /** Nine PMIDs with no PMC copy, each carrying a DOI the converter reports. */
+  const PMIDS = Array.from({ length: 9 }, (_, i) => String(40_000_001 + i));
+  const pmidDoi = (pmid: string) => `10.7777/pm${pmid}`;
+  /** Thirty-nine DOIs no tier knows. */
+  const DOIS = Array.from({ length: 39 }, (_, i) => `10.7777/ol${i + 1}`);
+  const fifty = { pmcids: [SECOND.pmcid, THIRD.pmcid], pmids: PMIDS, dois: DOIS };
+  /** The ten identifiers the 50-identifier call fetches: routing order, first ten. */
+  const firstTen = { pmcids: fifty.pmcids, pmids: PMIDS.slice(0, 8) };
+
+  function serveRecords() {
+    pmcJats.set('7000001', jats(SECOND.pmcid, 'Second', SECOND.doi));
+    pmcJats.set('7000002', jats(THIRD.pmcid, 'Third', THIRD.doi));
+    for (const pmid of PMIDS) converter.set(pmid, { doi: pmidDoi(pmid) });
+  }
+
+  it('sends the first 10 of a 50-identifier mixed call through every tier, issuing exactly the requests of those 10 alone', async () => {
+    serveRecords();
+    const alone = await fetchFulltext(firstTen);
+    const aloneRequests = requests()
+      .map((u) => u.href)
+      .sort();
+    fetchSpy.mockClear();
+
+    const { result, text, enrichment } = await fetchFulltext(fifty);
+
+    expect(
+      requests()
+        .map((u) => u.href)
+        .sort(),
+    ).toEqual(aloneRequests);
+    // One converter request for the 8 PMIDs, none for the DOIs; one PMC
+    // EFetch; then one Europe PMC search and one Unpaywall lookup per PMID.
+    expect(converterIds()).toEqual([PMIDS.slice(0, 8).join(',')]);
+    expect(pmcEfetchIds()).toEqual(['7000001,7000002']);
+    expect(epmcQueries()).toEqual(PMIDS.slice(0, 8).map((p) => `EXT_ID:${p} AND SRC:MED`));
+    expect(unpaywallLookups()).toHaveLength(8);
+    expect(requests()).toHaveLength(18);
+    // Decoded: a DOI's `/` reaches every upstream URL percent-encoded.
+    const overLimitIds = [PMIDS[8] as string, ...DOIS];
+    const sentText = requests().map((u) => decodeURIComponent(u.href));
+    expect(sentText.filter((href) => overLimitIds.some((id) => href.includes(id)))).toEqual([]);
+
+    expect(result.articles.map((a) => a.pmcId)).toEqual([SECOND.pmcid, THIRD.pmcid]);
+    expect(result.unavailable?.map((u) => u.id)).toEqual(PMIDS.slice(0, 8));
+    expect(result.unavailable).toEqual(alone.result.unavailable);
+    expect(result.overLimit).toEqual({
+      limit: 10,
+      ids: overLimitIds,
+      pmids: [PMIDS[8]],
+      dois: DOIS,
+    });
+    expect(text).toContain(
+      `each under its own field — \`pmids\`: ${PMIDS[8]}; \`dois\`: ${DOIS.join(', ')}`,
+    );
+    expect(enrichment.truncated).toBe(true);
+    expect(enrichment.notice).toContain('40 more were not fetched');
+  });
+});
+
 // ─── #144: title, journal, and year on an Unpaywall-served article ───────────
 
 describe('Unpaywall article metadata', () => {

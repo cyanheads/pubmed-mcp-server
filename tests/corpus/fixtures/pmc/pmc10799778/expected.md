@@ -36,7 +36,10 @@
 #### Abstract
 Abstract: Cardiometabolic disease (CMD) encompasses a range of diseases such as hypertension, atherosclerosis, heart failure, obesity, and type 2 diabetes. Recent findings about CMD’s interaction with gut microbiota have broadened our understanding of how diet and nutrition drive microbes to influence CMD. However, the translation of basic research into the clinic has not been smooth, and dietary nutrition and probiotic supplementation have yet to show significant evidence of the therapeutic benefits of CMD. In addition, the published reviews do not suggest the core microbiota or metabolite classes that influence CMD, and systematically elucidate the causal relationship between host disease phenotypes-microbiome. The aim of this review is to highlight the complex interaction of the gut microbiota and their metabolites with CMD progression and to further centralize and conceptualize the mechanisms of action between microbial and host disease phenotypes. We also discuss the potential of targeting modulations of gut microbes and metabolites as new targets for prevention and treatment of CMD, including the use of emerging technologies such as fecal microbiota transplantation and nanomedicine.
 
-Key points: • To highlight the complex interaction of the gut microbiota and their metabolites with CMD progression and to further centralize and conceptualize the mechanisms of action between microbial and host disease phenotypes. • We also discuss the potential of targeting modulations of gut microbes and metabolites as new targets for prevention and treatment of CMD, including the use of emerging technologies such as FMT and nanomedicine. • Our study provides insight into identification-specific microbiomes and metabolites involved in CMD, and microbial-host changes and physiological factors as disease phenotypes develop, which will help to map the microbiome individually and capture pathogenic mechanisms as a whole.
+Key points:
+• To highlight the complex interaction of the gut microbiota and their metabolites with CMD progression and to further centralize and conceptualize the mechanisms of action between microbial and host disease phenotypes.
+• We also discuss the potential of targeting modulations of gut microbes and metabolites as new targets for prevention and treatment of CMD, including the use of emerging technologies such as FMT and nanomedicine.
+• Our study provides insight into identification-specific microbiomes and metabolites involved in CMD, and microbial-host changes and physiological factors as disease phenotypes develop, which will help to map the microbiome individually and capture pathogenic mechanisms as a whole.
 
 Graphical Abstract: [Figure]
 
@@ -174,6 +177,28 @@ The small intestine plays a key role in digestion and nutrient absorption, and b
 Below is the link to the electronic supplementary material.
 
 [Supplementary]
+
+#### Footnotes
+Publisher's Note
+
+Springer Nature remains neutral with regard to jurisdictional claims in published maps and institutional affiliations.
+
+#### Author contribution
+Y.L. drafted and wrote this review. X.X. and Q.W. guided review writing. L.Y., M.C., L.X., J.W., Y.D., Q.G., J.Z., and H.Z. conducted language modification. All authors read and approved the manuscript.
+
+#### Funding
+This research was jointly funded by Guangdong Province National key research and development project (2021YFA0910200), Guangdong Province key research and development project (2022B1111070006), and Innovation Development Project of Guangdong Academy of Sciences (2020GDASYL20200102003).
+
+#### Data Availability
+The authors declare that all of the data and the material used in this study are available within this article. All data generated or analyzed in this study can be obtained from the authors upon reasonable request.
+
+#### Declarations
+
+##### Ethics approval
+This article does not contain any studies with human participants performed by any of the authors.
+
+##### Conflict of interest
+The authors declare no competing interests.
 
 #### Assets (7)
 

@@ -12,6 +12,7 @@ import type {
   ParsedBookInfo,
   ParsedCommentsCorrection,
   ParsedGrant,
+  ParsedInvestigator,
   ParsedJournalInfo,
   ParsedMeshQualifier,
   ParsedMeshTerm,
@@ -26,7 +27,6 @@ import type {
   XmlCommentsCorrectionsList,
   XmlGrant,
   XmlGrantList,
-  XmlIdentifier,
   XmlJournal,
   XmlKeyword,
   XmlKeywordList,
@@ -58,6 +58,46 @@ export interface ExtractedAuthors {
 }
 
 /**
+ * An article's deduplicated affiliation list: one index per distinct text, a new
+ * text appended at the end. Seeded with an existing list, it continues that
+ * list's numbering, so the seed's indices never move.
+ */
+function affiliationIndex(seed: readonly string[] = []) {
+  const list = [...seed];
+  const indexOf = new Map(list.map((text, index) => [text, index]));
+  return {
+    list,
+    /** Indices of one contributor's `AffiliationInfo` texts, in order. */
+    of(infos: XmlAuthor['AffiliationInfo']): number[] {
+      const indices: number[] = [];
+      for (const info of ensureArray(infos)) {
+        const text = getText(info?.Affiliation);
+        if (!text) continue;
+        let index = indexOf.get(text);
+        if (index === undefined) {
+          index = list.length;
+          list.push(text);
+          indexOf.set(text, index);
+        }
+        indices.push(index);
+      }
+      return indices;
+    },
+  };
+}
+
+/** The first ORCID among a contributor's `Identifier` elements (`Source="ORCID"`). */
+function extractOrcid(identifiers: XmlAuthor['Identifier']): string | undefined {
+  for (const id of ensureArray(identifiers)) {
+    if (getAttribute(id, 'Source') === 'ORCID') {
+      const value = getText(id);
+      if (value) return value;
+    }
+  }
+  return;
+}
+
+/**
  * Extracts and formats author information from XML, deduplicating affiliations.
  * Affiliations are collected into a single array; each author references them by index.
  * This avoids repeating identical institutional strings per-author (common in multi-center papers).
@@ -67,42 +107,12 @@ export interface ExtractedAuthors {
 export function extractAuthors(authorListXml?: XmlAuthorList): ExtractedAuthors {
   if (!authorListXml) return { authors: [], affiliations: [] };
 
-  const affiliationMap = new Map<string, number>();
-  const affiliationList: string[] = [];
-
-  function getAffiliationIndex(text: string): number {
-    const existing = affiliationMap.get(text);
-    if (existing !== undefined) return existing;
-    const idx = affiliationList.length;
-    affiliationList.push(text);
-    affiliationMap.set(text, idx);
-    return idx;
-  }
-
+  const affiliations = affiliationIndex();
   const xmlAuthors = ensureArray(authorListXml.Author);
   const authors = xmlAuthors.map((auth: XmlAuthor): ParsedArticleAuthor => {
-    // Collect all affiliations for this author, deduplicated at article level.
     // A collective author carries its own `AffiliationInfo` too. (#212)
-    const authorAffiliationInfos = ensureArray(auth.AffiliationInfo);
-    const indices: number[] = [];
-    for (const info of authorAffiliationInfos) {
-      const text = getText(info?.Affiliation);
-      if (text) indices.push(getAffiliationIndex(text));
-    }
-
-    // Extract ORCID from Identifier elements with Source="ORCID"
-    let orcid: string | undefined;
-    const identifiers = ensureArray(auth.Identifier) as XmlIdentifier[];
-    for (const id of identifiers) {
-      if (getAttribute(id, 'Source') === 'ORCID') {
-        const val = getText(id);
-        if (val) {
-          orcid = val;
-          break;
-        }
-      }
-    }
-
+    const indices = affiliations.of(auth.AffiliationInfo);
+    const orcid = extractOrcid(auth.Identifier);
     const collectiveName = getText(auth.CollectiveName);
     return {
       ...(collectiveName
@@ -117,7 +127,41 @@ export function extractAuthors(authorListXml?: XmlAuthorList): ExtractedAuthors 
     };
   });
 
-  return { authors, affiliations: affiliationList };
+  return { authors, affiliations: affiliations.list };
+}
+
+/**
+ * Extracts the members of a collective author from every `InvestigatorList`,
+ * flattened in upstream order and uncapped. Investigator affiliations join the
+ * article's deduplicated list after the authors' entries, so an author's indices
+ * never shift. A name part the record lacks is omitted; `Suffix` is not read,
+ * as for authors. (#216)
+ * @param investigatorListsXml - The record's `InvestigatorList` elements.
+ * @param authorAffiliations - The authors' affiliations, from {@link extractAuthors}.
+ * @returns The investigators, and the affiliation list extended with theirs.
+ */
+function extractInvestigators(
+  investigatorListsXml: XmlMedlineCitation['InvestigatorList'],
+  authorAffiliations: readonly string[],
+): { affiliations: string[]; investigators: ParsedInvestigator[] } {
+  const affiliations = affiliationIndex(authorAffiliations);
+  const investigators = ensureArray(investigatorListsXml)
+    .flatMap((list) => ensureArray(list.Investigator))
+    .map((inv): ParsedInvestigator => {
+      const lastName = getOptionalText(inv.LastName);
+      const firstName = getOptionalText(inv.ForeName);
+      const initials = getOptionalText(inv.Initials);
+      const indices = affiliations.of(inv.AffiliationInfo);
+      const orcid = extractOrcid(inv.Identifier);
+      return {
+        ...(lastName && { lastName }),
+        ...(firstName && { firstName }),
+        ...(initials && { initials }),
+        ...(indices.length > 0 && { affiliationIndices: indices }),
+        ...(orcid && { orcid }),
+      };
+    });
+  return { investigators, affiliations: affiliations.list };
 }
 
 /**
@@ -483,14 +527,17 @@ export function parseFullArticle(
 ): ParsedArticle {
   const medlineCitation = xmlArticle.MedlineCitation;
   const article = medlineCitation?.Article;
-  const { includeMesh = true, includeGrants = false } = options;
+  const { includeMesh = true, includeGrants = false, includeInvestigators = false } = options;
 
   const abstractText = extractAbstractText(article?.Abstract);
   const journalInfo = extractJournalInfo(article?.Journal, article);
   const pubmedDataArticleIdList = xmlArticle.PubmedData?.ArticleIdList;
   const doi = extractDoi(article, pubmedDataArticleIdList);
   const pmcId = extractPmcId(article, pubmedDataArticleIdList);
-  const { authors, affiliations } = extractAuthors(article?.AuthorList);
+  const { authors, affiliations: authorAffiliations } = extractAuthors(article?.AuthorList);
+  const { investigators, affiliations } = includeInvestigators
+    ? extractInvestigators(medlineCitation?.InvestigatorList, authorAffiliations)
+    : { investigators: [], affiliations: authorAffiliations };
 
   const publicationTypes = extractPublicationTypes(article?.PublicationTypeList);
   const commentsCorrections = extractCommentsCorrections(medlineCitation?.CommentsCorrectionsList);
@@ -506,6 +553,7 @@ export function parseFullArticle(
     ...(abstractText !== undefined && { abstractText }),
     ...(affiliations.length > 0 && { affiliations }),
     authors,
+    ...(investigators.length > 0 && { investigators }),
     ...(journalInfo !== undefined && { journalInfo }),
     ...(publicationTypes.length > 0 && { publicationTypes }),
     ...(commentsCorrections.length > 0 && { commentsCorrections }),

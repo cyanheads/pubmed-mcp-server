@@ -1,5 +1,5 @@
 {
-  "why": "Regression fixture for #185 and #196. Table 5's header cells split by <break/> keep each line as \\n in structuredContent and render as ` · ` in content[], each colspan=2 header repeated across both columns it covers; the Table 5 footer's two <p>s are two footnote lines. Affiliations sit inside <contrib-group> with <institution-id> ROR and GRID ids, which must not reach the text. The abstract holds direct <p>s beside a \"Supplementary Information\" <sec>; the paragraphs are read first, in source order, rather than dropped (#204).",
+  "why": "Regression fixture for #185 and #196. Table 5's header cells split by <break/> keep each line as \\n in structuredContent and render as ` · ` in content[], each colspan=2 header repeated across both columns it covers; the Table 5 footer's two <p>s are two footnote lines. Affiliations sit inside <contrib-group> with <institution-id> ROR and GRID ids, which must not reach the text. The abstract holds direct <p>s beside a \"Supplementary Information\" <sec>; the paragraphs are read first, in source order, rather than dropped (#204). Its back matter follows the body (#206), the Declarations <notes> carrying its nested Competing interests <notes> as a subsection.",
   "title": "Creatine homeostasis and the kidney: comparison between kidney transplant recipients and healthy controls",
   "abstractStartsWith": "Creatine is a natural nitrogenous organic acid",
   "authors": 13,
@@ -15,7 +15,12 @@
     "Results",
     "Mediation analyses",
     "Discussion",
-    "Electronic supplementary material"
+    "Electronic supplementary material",
+    "Footnotes",
+    "Acknowledgements",
+    "Data availability",
+    "Declarations",
+    "Competing interests"
   ],
   "cells": [
     {
@@ -43,5 +48,5 @@
     "Footnotes: Analyses are adjusted for age, sex, weight, height and time since transplantation (for KTR) · Abbreviations: GAA: Guanidinoacetate; GFR: Glomerular filtration rate",
     "- 1 Department of Internal Medicine, University Medical Center Groningen, University of Groningen, Groningen, 9713 GZ The Netherlands"
   ],
-  "notContains": ["2095", "ror.org", "grid.4830"]
+  "notContains": ["2095", "ror.org", "grid.4830", "Competing interests The authors"]
 }

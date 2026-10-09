@@ -22,6 +22,11 @@ import {
   parseArticleSetXml,
   STATPEARLS_CHAPTER_XML,
 } from '../../../services/ncbi/parsing/_book-fixtures.js';
+import {
+  ERRATUM_NOTE_ARTICLE_XML,
+  RETRACTED_ARTICLE_XML,
+  RETRACTION_NOTICE_XML,
+} from '../../../services/ncbi/parsing/_comments-corrections-fixtures.js';
 
 const CITATION_STYLES = ['apa', 'mla', 'bibtex', 'ris', 'vancouver'] as const;
 
@@ -79,7 +84,7 @@ describe('formatCitationsTool', () => {
       .join('\n');
     for (const style of CITATION_STYLES) expect(text).toContain(`"${style}"`);
     // The union collapse hid the accepted values behind a bare "Invalid input".
-    expect(text).not.toMatch(/Invalid input at format/);
+    expect(text).not.toMatch(/format: Invalid input/);
     expect(text).toContain('Invalid option: expected one of');
   });
 
@@ -168,9 +173,11 @@ describe('formatCitationsTool', () => {
     expect(bare.structuredContent).toEqual(wrapped.structuredContent);
     expect(bare.content).toEqual(wrapped.content);
     expect(
-      (bare.structuredContent as { citations?: { citations?: Record<string, string> }[] })
-        ?.citations?.[0]?.citations,
-    ).toHaveProperty('mla');
+      Object.keys(
+        (bare.structuredContent as { citations?: { citations?: Record<string, string> }[] })
+          ?.citations?.[0]?.citations ?? {},
+      ),
+    ).toEqual(['mla']);
     expect(
       textBlocks(bare.content as ContentBlock[])
         .map((b) => b.text)
@@ -248,11 +255,26 @@ describe('formatCitationsTool', () => {
     });
     const result = await formatCitationsTool.handler(input, ctx);
 
-    expect(result.citations).toHaveLength(1);
-    expect(result.citations[0]?.pmid).toBe('12345');
-    expect(result.citations[0]?.citations).toHaveProperty('apa');
-    expect(result.citations[0]?.citations).toHaveProperty('bibtex');
-    expect(result.citations[0]?.citations.apa).toContain('Smith');
+    // Exactly the requested styles, each the full citation of the fetched record
+    expect(result.citations).toEqual([
+      {
+        pmid: '12345',
+        title: 'Test Article',
+        citations: {
+          apa: 'Smith, J. (2024). Test Article. *Nature*, *600*.',
+          bibtex: [
+            '@article{pmid12345,',
+            '  author  = {{Smith}, J},',
+            '  title   = {{Test Article}},',
+            '  journal = {Nature},',
+            '  year    = {2024},',
+            '  volume  = {600},',
+            '  pmid    = {12345}',
+            '}',
+          ].join('\n'),
+        },
+      },
+    ]);
     expect(result.totalSubmitted).toBe(1);
     expect(result.totalFormatted).toBe(1);
     // notice is absent when at least one citation was produced (issue #59)
@@ -369,6 +391,78 @@ describe('formatCitationsTool', () => {
     expect(citations.ris).not.toContain('EP  -');
   });
 
+  it('cites pagination that repeats the article number as one in APA and MLA, on both surfaces (#217)', async () => {
+    // The same record as a publisher that also deposits the article number as
+    // pagination: MedlinePgn and the pii locator hold one value.
+    mockEFetch.mockResolvedValue({
+      PubmedArticleSet: {
+        PubmedArticle: [
+          {
+            MedlineCitation: {
+              PMID: { '#text': '39060015' },
+              Article: {
+                ArticleTitle: { '#text': 'Benralizumab for allergic asthma.' },
+                AuthorList: {
+                  Author: [
+                    {
+                      LastName: { '#text': 'Sehmi' },
+                      ForeName: { '#text': 'Roma' },
+                      Initials: { '#text': 'R' },
+                    },
+                  ],
+                },
+                Journal: {
+                  Title: { '#text': 'The European respiratory journal' },
+                  ISOAbbreviation: { '#text': 'Eur Respir J' },
+                  JournalIssue: {
+                    Volume: { '#text': '64' },
+                    Issue: { '#text': '3' },
+                    PubDate: { Year: { '#text': '2024' }, Month: { '#text': 'Sep' } },
+                  },
+                },
+                Pagination: { MedlinePgn: { '#text': '2400512' } },
+                ELocationID: [
+                  { '#text': '2400512', '@_EIdType': 'pii', '@_ValidYN': 'Y' },
+                  { '#text': '10.1183/13993003.00512-2024', '@_EIdType': 'doi', '@_ValidYN': 'Y' },
+                ],
+                PublicationTypeList: { PublicationType: { '#text': 'Journal Article' } },
+              },
+            },
+          },
+        ],
+      },
+    });
+
+    const result = await runToolContract(formatCitationsTool, {
+      pmids: ['39060015'],
+      format: [...CITATION_STYLES],
+    });
+    const citations =
+      (result.structuredContent as { citations: { citations: Record<string, string> }[] })
+        .citations[0]?.citations ?? {};
+
+    expect(citations.apa).toContain(
+      '*The European Respiratory Journal*, *64*(3), Article 2400512. https://doi.org/',
+    );
+    expect(citations.mla).toContain(
+      '*The European Respiratory Journal*, vol. 64, no. 3, 2024, art. 2400512. https://doi.org/',
+    );
+    // Vancouver, BibTeX, and RIS print it once, as the pagination NLM gives
+    expect(citations.vancouver).toContain(
+      'Eur Respir J. 2024;64(3):2400512. doi: 10.1183/13993003.00512-2024',
+    );
+    expect(citations.vancouver).not.toContain('pii:');
+    expect(citations.bibtex).toMatch(/pages\s+= \{2400512\}/);
+    expect(citations.bibtex).not.toMatch(/eid\s+=/);
+    expect(citations.ris).toContain('SP  - 2400512');
+    expect(citations.ris).not.toContain('C7  -');
+
+    const rendered = textBlocks(result.content as ContentBlock[])
+      .map((b) => b.text)
+      .join('\n');
+    for (const style of CITATION_STYLES) expect(rendered, style).toContain(citations[style]);
+  });
+
   it('reports unavailable PMIDs for partial batches', async () => {
     mockEFetch.mockResolvedValue({
       PubmedArticleSet: {
@@ -477,7 +571,7 @@ describe('formatCitationsTool', () => {
     expect(blocks[0]?.text).toContain('PubMed Citations');
     expect(blocks[0]?.text).toContain('**Formatted:** 1/2');
     expect(blocks[0]?.text).toContain('**Unavailable PMIDs:** 99999');
-    expect(blocks[0]?.text).toContain('APA');
+    expect(blocks[0]?.text).toContain('## PMID 12345\n**Test**\n\n### APA\nSmith (2024). Test.');
   });
 
   it('renders the empty state; the recovery notice is enrichment, not format output', () => {
@@ -725,5 +819,189 @@ describe('formatCitationsTool Bookshelf records (issue #114)', () => {
     const notice = getEnrichment(ctx).notice ?? '';
     expect(notice).toContain('pubmed_search_articles');
     expect(notice).not.toMatch(/invalid, unpublished, or withdrawn/i);
+  });
+});
+
+describe('formatCitationsTool retraction and erratum notices (issue #215)', () => {
+  beforeEach(() => {
+    mockEFetch.mockReset();
+  });
+
+  /**
+   * Real records through the production parser: 9500320 (two retractions, an
+   * expression of concern, 26 comments), 23300797 (an erratum with a Note and no
+   * PMID), and 20137807 (a retraction notice, linked only by `RetractionOf`).
+   */
+  const citeNoticeRecords = () => {
+    mockEFetch.mockResolvedValue({
+      PubmedArticleSet: parseArticleSetXml(
+        articleSetXml(RETRACTED_ARTICLE_XML, ERRATUM_NOTE_ARTICLE_XML, RETRACTION_NOTICE_XML),
+      ),
+    });
+    return runToolContract(formatCitationsTool, {
+      pmids: ['9500320', '23300797', '20137807'],
+      format: [...CITATION_STYLES],
+    });
+  };
+
+  type Entry = { pmid: string; citations: Record<string, string>; notices?: unknown[] };
+
+  /** The `## PMID` section of content[] for one record, up to its first style heading. */
+  const head = (text: string, pmid: string) => {
+    const start = text.indexOf(`## PMID ${pmid}\n`);
+    return text.slice(start, text.indexOf('### APA', start));
+  };
+
+  it('carries the qualifying notices, in NCBI order, on structuredContent', async () => {
+    const result = await citeNoticeRecords();
+
+    expect(result.isError).toBeFalsy();
+    const entries = (result.structuredContent as { citations: Entry[] }).citations;
+    const byPmid = Object.fromEntries(entries.map((entry) => [entry.pmid, entry]));
+    expect(byPmid['9500320']?.notices).toEqual([
+      {
+        refType: 'RetractionIn',
+        refSource: 'Lancet. 2004 Mar 6;363(9411):750. doi: 10.1016/S0140-6736(04)15715-2.',
+        pmid: '15016483',
+      },
+      {
+        refType: 'RetractionIn',
+        refSource: 'Lancet. 2010 Feb 6;375(9713):445. doi: 10.1016/S0140-6736(10)60175-4.',
+        pmid: '20137807',
+      },
+      {
+        refType: 'ExpressionOfConcernIn',
+        refSource:
+          'Eur J Gastroenterol Hepatol. 2011 Nov;23(11):1082. doi: 10.1097/MEG.0b013e328349d184.',
+        pmid: '21971344',
+      },
+    ]);
+    expect(byPmid['23300797']?.notices).toEqual([
+      {
+        refType: 'ErratumIn',
+        refSource:
+          'PLoS One. 2013;8(6). doi:10.1371/annotation/df743c15-c50e-4d00-a24d-510e15f9a73b',
+        note: 'Fu\u{3b2}er, Fabian [corrected to Fu\u{df}er, Fabian]',
+      },
+    ]);
+    expect(byPmid['20137807']).not.toHaveProperty('notices');
+    // The declared output schema keeps the field rather than stripping it
+    expect(formatCitationsTool.output.parse(result.structuredContent)).toEqual(
+      result.structuredContent,
+    );
+  });
+
+  it('renders the notices before the first style heading, warning first on a retraction', async () => {
+    const result = await citeNoticeRecords();
+    const text = textBlocks(result.content as ContentBlock[])
+      .map((b) => b.text)
+      .join('\n');
+
+    expect(head(text, '9500320')).toBe(
+      [
+        '## PMID 9500320',
+        '**Ileal-lymphoid-nodular hyperplasia, non-specific colitis, and pervasive developmental disorder in children.**',
+        // A blank line, or Markdown folds the warning into the title's paragraph
+        '',
+        '**Retracted:** NCBI links a retraction notice to this article.',
+        '- **RetractionIn:** Lancet. 2004 Mar 6;363(9411):750. doi: 10.1016/S0140-6736(04)15715-2. — PMID 15016483',
+        '- **RetractionIn:** Lancet. 2010 Feb 6;375(9713):445. doi: 10.1016/S0140-6736(10)60175-4. — PMID 20137807',
+        '- **ExpressionOfConcernIn:** Eur J Gastroenterol Hepatol. 2011 Nov;23(11):1082. doi: 10.1097/MEG.0b013e328349d184. — PMID 21971344',
+        '',
+        '',
+      ].join('\n'),
+    );
+    // An erratum takes no warning; its Note shows here and in no citation string
+    expect(head(text, '23300797')).toBe(
+      [
+        '## PMID 23300797',
+        '**Different patterns of white matter degeneration using multiple diffusion indices and volumetric data in mild cognitive impairment and Alzheimer patients.**',
+        '',
+        '**Notices:**',
+        '- **ErratumIn:** PLoS One. 2013;8(6). doi:10.1371/annotation/df743c15-c50e-4d00-a24d-510e15f9a73b — Note: Fu\u{3b2}er, Fabian \\[corrected to Fu\u{df}er, Fabian\\]',
+        '',
+        '',
+      ].join('\n'),
+    );
+    // A record that is itself a notice keeps the section it had
+    expect(head(text, '20137807')).toBe(
+      '## PMID 20137807\n**Retraction--Ileal-lymphoid-nodular hyperplasia, non-specific colitis, and pervasive developmental disorder in children.**\n\n',
+    );
+
+    const entries = (result.structuredContent as { citations: Entry[] }).citations;
+    for (const entry of entries) {
+      for (const style of CITATION_STYLES) {
+        expect(text, `${entry.pmid} ${style}`).toContain(entry.citations[style]);
+        expect(entry.citations[style], `${entry.pmid} ${style}`).not.toContain('corrected to');
+      }
+    }
+    const wakefield = entries.find((entry) => entry.pmid === '9500320')?.citations ?? {};
+    expect(wakefield.vancouver).toContain(
+      'doi: 10.1016/s0140-6736(97)11096-0. Retraction in: Lancet. 2004 Mar 6;363(9411):750.',
+    );
+    expect(wakefield.apa).toContain(
+      '(Retraction published Lancet. 2004 Mar 6;363(9411):750. doi: 10.1016/S0140-6736(04)15715-2; Lancet. 2010',
+    );
+  });
+
+  it('warns on a retracted-and-republished article, and not on an expression of concern', () => {
+    const render = (refType: string) =>
+      textBlocks(
+        formatCitationsTool.format!({
+          totalSubmitted: 1,
+          totalFormatted: 1,
+          citations: [
+            {
+              pmid: '1',
+              title: 'T',
+              citations: { apa: 'A.' },
+              notices: [{ refType, refSource: 'J Test. 2025;1:2.', pmid: '2' }],
+            },
+          ],
+        } as never),
+      )[0]?.text ?? '';
+
+    expect(render('RetractedandRepublishedIn')).toContain(
+      '**Retracted:** NCBI links a retraction notice to this article.\n- **RetractedandRepublishedIn:** J Test. 2025;1:2. — PMID 2\n',
+    );
+    expect(render('CorrectedandRepublishedIn')).toContain(
+      '**Notices:**\n- **CorrectedandRepublishedIn:** J Test. 2025;1:2. — PMID 2\n',
+    );
+    const concern = render('ExpressionOfConcernIn');
+    expect(concern).toContain('**Notices:**\n- **ExpressionOfConcernIn:** J Test. 2025;1:2.');
+    expect(concern).not.toContain('Retracted');
+  });
+
+  it('escapes Markdown in an upstream notice', () => {
+    const text =
+      textBlocks(
+        formatCitationsTool.format!({
+          totalSubmitted: 1,
+          totalFormatted: 1,
+          citations: [
+            {
+              pmid: '1',
+              citations: { apa: 'A.' },
+              notices: [
+                { refType: 'ErratumIn', refSource: 'J *Bold* Res. 2020;1:2.', note: 'see [1]' },
+              ],
+            },
+          ],
+        }),
+      )[0]?.text ?? '';
+    expect(text).toContain('- **ErratumIn:** J \\*Bold\\* Res. 2020;1:2. — Note: see \\[1\\]');
+  });
+
+  it('renders a record with no notices exactly as before', () => {
+    const text = textBlocks(
+      formatCitationsTool.format!({
+        totalSubmitted: 1,
+        totalFormatted: 1,
+        citations: [{ pmid: '1', title: 'T', citations: { apa: 'A.', vancouver: 'V.' } }],
+      }),
+    )[0]?.text;
+    expect(text).toBe(
+      '# PubMed Citations\n**Formatted:** 1/1\n\n## PMID 1\n**T**\n\n### APA\nA.\n\n### VANCOUVER\nV.',
+    );
   });
 });

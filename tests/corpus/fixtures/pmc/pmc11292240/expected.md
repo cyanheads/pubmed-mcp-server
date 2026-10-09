@@ -157,6 +157,19 @@ Hayat Hamzeh: Writing – review & editing, Writing – original draft, Project 
 #### Declaration of competing interest
 The authors declare that they have no known competing financial interests or personal relationships that could have appeared to influence the work reported in this paper.
 
+#### Appendix A Supplementary data
+The following is the Supplementary data to this article.
+
+[Supplementary]
+
+#### Acknowledgements
+This doctoral research is supported by a Graduate Teaching Assistant studentship from Edge Hill University, UK. The funders had no role in study design, data collection and analysis, decision to publish, or preparation of the manuscript.
+
+We would like to thank Barbara Crossly and Fran Hasson for contributing to this study as patient representatives. Thanks to Heather Barrington and Sara Brooks, from the COMET initiative and the COMET People and Patient Participation, Involvement and Engagement (PoPPIE) working group, for sharing their presentation slides used to prepare for the consensus meeting. We would like to thank all participants for their valuable contribution in this study.
+
+#### Footnotes
+Appendix A Supplementary data to this article can be found online at https://doi.org/10.1016/j.heliyon.2024.e34101.
+
 #### Tables (3)
 
 ##### Table 1 — Characteristics of patient participants.

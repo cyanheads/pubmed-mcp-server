@@ -1,0 +1,31 @@
+{
+  "why": "Regression fixture for #219: Wiley (Quantitative Biology) commentary whose 20 pretty-printed <mixed-citation>s close every <string-name> on a line of its own before the `,` or `.` that follows it, and put a line break between `</collab>` and its `.`. That formatting whitespace is dropped, so the names read `Li X, Shi J, Li LM.` and the consortium `The UniProt Consortium.`, while the spacing the citation text itself carries is kept. Its nine inline formulas are MathML alone and read in the TeX-style linear form, the entropy sums keeping their limits and subscripts (#207). Its acknowledgements and data statement follow the body as back-matter sections (#206).",
+  "title": "Commentary to “The human intelligence evolved from proximal cis‐regulatory saltations”",
+  "authors": 1,
+  "affiliations": 2,
+  "references": 20,
+  "sectionTitles": [
+    "HISTORICAL COMMENTS",
+    "The fundamental questions: “Where do we come from? What are we? Where are we going?”",
+    "METHODOLOGICAL COMMENTS",
+    "Selection of cis‐elements",
+    "HUMAN INTELLIGENCE",
+    "Modular intelligence",
+    "AUTHOR CONTRIBUTIONS",
+    "CONFLICT OF INTEREST STATEMENT",
+    "ACKNOWLEDGEMENTS",
+    "DATA AVAILABLE STATEMENT"
+  ],
+  "contains": [
+    "- [1 qub292-bib-0001] Li X, Shi J, Li LM. The human intelligence evolved from proximal cis‐regulatory saltations. Quant Biol.",
+    "- [8 qub292-bib-0008] Doughty BR, Hinks MM, Schaepe JM, Marinov GK, Thurm AR, Rios‐Martinez C, et al. Single‐molecule",
+    "- [11 qub292-bib-0011] The UniProt Consortium. UniProt: a worldwide hub of protein knowledge. Nucleic Acids Res.",
+    "The entropy of such a probability distribution is therefore −∑_{k=1}^{8}0.125×log_{2}(0.125)=3 bits."
+  ],
+  "notContains": ["Li X ,", "Li LM .", "Consortium .", "Rios‐Martinez C ,", "∑k=18"],
+  "structuredContains": [
+    "Li X, Shi J, Li LM. The human intelligence evolved from proximal cis‐regulatory saltations. Quant Biol.",
+    "The UniProt Consortium. UniProt: a worldwide hub of protein knowledge. Nucleic Acids Res.",
+    "Its entropy is −0.5×log_{2}(0.5)−2×0.25×log_{2}(0.25)=1.5 bits."
+  ]
+}

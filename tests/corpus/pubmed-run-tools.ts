@@ -40,9 +40,9 @@ export async function loadPubmedTools(): Promise<PubmedTools> {
   return { fetchArticles: fetchArticlesTool, formatCitations: formatCitationsTool };
 }
 
-/** The `pubmed_fetch_articles` input the corpus uses: MeSH and grants included. */
+/** The `pubmed_fetch_articles` input the corpus uses: MeSH, grants and investigators included. */
 export function fetchArticlesInput(pmid: string) {
-  return { pmids: [pmid], includeMesh: true, includeGrants: true };
+  return { pmids: [pmid], includeMesh: true, includeGrants: true, includeInvestigators: true };
 }
 
 /** The `pubmed_format_citations` input the corpus uses: every style. */

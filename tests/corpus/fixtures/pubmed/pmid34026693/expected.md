@@ -1,4 +1,4 @@
-<!-- pubmed_fetch_articles {"pmids":["34026693"],"includeMesh":true,"includeGrants":true} -->
+<!-- pubmed_fetch_articles {"pmids":["34026693"],"includeMesh":true,"includeGrants":true,"includeInvestigators":true} -->
 ## PubMed Articles
 **Articles Returned:** 1
 
@@ -45,10 +45,10 @@ Kawasaki disease (KD), an acute febrile childhood illness and systemic vasculiti
 **MicroRNA-223 Regulates the Development of Cardiovascular Lesions in LCWE-Induced Murine Kawasaki Disease Vasculitis by Repressing the NLRP3 Inflammasome.**
 
 ### APA
-Maruyama, D., Kocatürk, B., Lee, Y., Abe, M., Lane, M., Moreira, D., Chen, S., Fishbein, M. C., Porritt, R. A., Noval Rivas, M., & Arditi, M. (2021). MicroRNA-223 Regulates the Development of Cardiovascular Lesions in LCWE-Induced Murine Kawasaki Disease Vasculitis by Repressing the NLRP3 Inflammasome. *Frontiers in pediatrics*, *9*, 662953. https://doi.org/10.3389/fped.2021.662953
+Maruyama, D., Kocatürk, B., Lee, Y., Abe, M., Lane, M., Moreira, D., Chen, S., Fishbein, M. C., Porritt, R. A., Noval Rivas, M., & Arditi, M. (2021). MicroRNA-223 Regulates the Development of Cardiovascular Lesions in LCWE-Induced Murine Kawasaki Disease Vasculitis by Repressing the NLRP3 Inflammasome. *Frontiers in Pediatrics*, *9*, Article 662953. https://doi.org/10.3389/fped.2021.662953
 
 ### MLA
-Maruyama, Daisuke, et al. "MicroRNA-223 Regulates the Development of Cardiovascular Lesions in LCWE-Induced Murine Kawasaki Disease Vasculitis by Repressing the NLRP3 Inflammasome." *Frontiers in pediatrics*, vol. 9, 2021, p. 662953. https://doi.org/10.3389/fped.2021.662953.
+Maruyama, Daisuke, et al. "MicroRNA-223 Regulates the Development of Cardiovascular Lesions in LCWE-Induced Murine Kawasaki Disease Vasculitis by Repressing the NLRP3 Inflammasome." *Frontiers in Pediatrics*, vol. 9, 2021, art. 662953. https://doi.org/10.3389/fped.2021.662953.
 
 ### BIBTEX
 ```bibtex

@@ -29,10 +29,10 @@
   "citations": {
     "apa": [
       "Heiner-Fokkema, M. R., & Bakker, S. J. L. (2024).",
-      "*56*(1), 42.",
+      "*Amino Acids*, *56*(1), Article 42.",
       "https://doi.org/10.1007/s00726-024-03401-w"
     ],
-    "mla": ["Post, Adrian, et al.", "vol. 56, no. 1, 2024"],
+    "mla": ["Post, Adrian, et al.", "*Amino Acids*, vol. 56, no. 1, 2024, art. 42."],
     "bibtex": [
       "{Heiner-Fokkema}, M Rebecca",
       "{Bakker}, Stephan J L",

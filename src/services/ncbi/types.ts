@@ -73,6 +73,8 @@ export interface NcbiCallOptions {
  */
 export interface ParseFullArticleOptions {
   includeGrants?: boolean;
+  /** Read `MedlineCitation/InvestigatorList` into `investigators`. (#216) */
+  includeInvestigators?: boolean;
   includeMesh?: boolean;
 }
 
@@ -109,6 +111,18 @@ export interface XmlAuthor {
   Identifier?: XmlIdentifier[] | XmlIdentifier; // For ORCID etc.
   Initials?: XmlTextElement;
   LastName?: XmlTextElement;
+}
+
+/**
+ * One member of a collective author, from `InvestigatorList`. The DTD gives an
+ * investigator an author's person fields but no `CollectiveName`:
+ * `(LastName, ForeName?, Initials?, Suffix?, Identifier*, AffiliationInfo*)`. (#216)
+ */
+export type XmlInvestigator = Omit<XmlAuthor, 'CollectiveName'>;
+
+/** `MedlineCitation/InvestigatorList` — repeatable, one or more `Investigator` each. */
+export interface XmlInvestigatorList {
+  Investigator?: XmlInvestigator[] | XmlInvestigator;
 }
 
 export interface XmlAuthorList {
@@ -264,6 +278,7 @@ export interface XmlMedlineCitation {
   DateCreated?: XmlArticleDate;
   DateRevised?: XmlArticleDate;
   GeneralNote?: (XmlTextElement & { '@_Owner'?: string })[];
+  InvestigatorList?: XmlInvestigatorList[] | XmlInvestigatorList;
   KeywordList?: XmlKeywordList[] | XmlKeywordList;
   MeshHeadingList?: XmlMeshHeadingList;
   PMID: XmlPMID;
@@ -369,6 +384,21 @@ export interface XmlPubmedArticleSet {
 export interface ParsedArticleAuthor {
   affiliationIndices?: number[];
   collectiveName?: string;
+  firstName?: string;
+  initials?: string;
+  lastName?: string;
+  orcid?: string;
+}
+
+/**
+ * A member of a collective author, from `InvestigatorList`. Not an author: kept
+ * apart from {@link ParsedArticleAuthor}, and no citation style lists one. A name
+ * part the record lacks is omitted, never `""`. `affiliationIndices` point into
+ * the article's `affiliations`, where investigator affiliations follow the
+ * authors' own. (#216)
+ */
+export interface ParsedInvestigator {
+  affiliationIndices?: number[];
   firstName?: string;
   initials?: string;
   lastName?: string;
@@ -513,6 +543,12 @@ export interface ParsedArticle {
   commentsCorrections?: ParsedCommentsCorrection[];
   doi?: string;
   grantList?: ParsedGrant[];
+  /**
+   * Every `InvestigatorList` entry, lists flattened in upstream order, uncapped.
+   * Set only when requested and the record carries at least one; journal
+   * articles only, as a Bookshelf record's list is never read. (#216)
+   */
+  investigators?: ParsedInvestigator[];
   /**
    * Absent on `book-chapter` and `book` records — a Bookshelf record has no
    * journal, and the book title is never promoted into one.
@@ -795,6 +831,13 @@ export interface ParsedPmcArticle {
   /** Figures and supplementary material, in document order. Absent when the article carries none. */
   assets?: ParsedPmcAsset[];
   authors?: ParsedPmcAuthor[];
+  /**
+   * Back-matter sections — every `<back>` child but `<ref-list>`, in source
+   * order. Kept apart from `sections` so a record with back matter and no body
+   * still reads as bodyless; the tool appends them after the body. Absent when
+   * `<back>` carries none. (#206)
+   */
+  backSections?: ParsedPmcSection[];
   doi?: string;
   journal?: ParsedPmcJournal;
   keywords?: string[];
@@ -845,7 +888,7 @@ export interface ParsedPmcAsset {
   /** Display label, e.g. `Fig. 1`. */
   label?: string;
   /**
-   * Title of the innermost enclosing `<sec>` wherever it sits — body, back
+   * Title of the innermost enclosing section wherever it sits — body, back
    * matter, or appendix. Absent for a `<floats-group>` deposit, which sits in no
    * section at all.
    */
@@ -920,7 +963,7 @@ export interface ParsedPmcTable {
   /** Cell text by grid column, spans expanded. Empty when unextractable. */
   rows: string[][];
   /**
-   * Title of the innermost enclosing `<sec>` wherever it sits — body, back
+   * Title of the innermost enclosing section wherever it sits — body, back
    * matter, or appendix. Absent only for a table inside no section at all.
    */
   sectionTitle?: string;

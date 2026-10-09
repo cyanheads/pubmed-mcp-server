@@ -1,0 +1,25 @@
+{
+  "id": "pmc12806063",
+  "title": "Commentary to “The human intelligence evolved from proximal cis‐regulatory saltations”",
+  "identifiers": {
+    "pmcid": "PMC12806063",
+    "pmid": "41675504",
+    "doi": "10.1002/qub2.92"
+  },
+  "url": "https://eutils.ncbi.nlm.nih.gov/entrez/eutils/efetch.fcgi?db=pmc&id=12806063&retmode=xml",
+  "retrieved": "2026-10-09",
+  "license": {
+    "id": "CC-BY-4.0",
+    "url": "https://creativecommons.org/licenses/by/4.0/"
+  },
+  "attribution": "Li LM. Commentary to “The human intelligence evolved from proximal cis‐regulatory saltations”. Quantitative Biology. 2025;13(2):e92. doi:10.1002/qub2.92",
+  "features": [
+    "mixed-citation",
+    "nested-sections",
+    "back-sections",
+    "keywords",
+    "inline-math",
+    "mathml"
+  ],
+  "regression": "cyanheads/pubmed-mcp-server#219"
+}

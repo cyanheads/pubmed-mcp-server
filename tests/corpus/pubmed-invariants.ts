@@ -33,6 +33,13 @@ export interface PubmedCorpusArticle {
   commentsCorrections?: { note?: string; pmid?: string; refSource: string; refType: string }[];
   doi?: string;
   grantList?: { acronym?: string; agency?: string; country?: string; grantId?: string }[];
+  investigators?: {
+    affiliationIndices?: number[];
+    firstName?: string;
+    initials?: string;
+    lastName?: string;
+    orcid?: string;
+  }[];
   journalInfo?: {
     elocationId?: string;
     elocationIdType?: string;
@@ -134,6 +141,9 @@ function sourceParts(source: string) {
       (e) => attr(e.attrs, 'ValidYN') !== 'N',
     ),
     authorList: inner(article, 'AuthorList'),
+    investigators: elements(citation, 'InvestigatorList')
+      .flatMap((list) => elements(list.inner, 'Investigator'))
+      .filter((e) => attr(e.attrs, 'ValidYN') !== 'N'),
     headings: elements(inner(citation, 'MeshHeadingList'), 'MeshHeading'),
     grants: elements(inner(article, 'GrantList'), 'Grant'),
     keywords: texts(inner(citation, 'KeywordList'), 'Keyword'),
@@ -196,7 +206,8 @@ function divergence(haystacks: readonly string[], needle: string): string {
 
 /** Source texts that must reach both surfaces of `pubmed_fetch_articles`, labelled. */
 function conservedTexts(source: string): { field: string; value: string }[] {
-  const { article, authors, authorList, grants, headings, keywords, notices } = sourceParts(source);
+  const { article, authors, authorList, investigators, grants, headings, keywords, notices } =
+    sourceParts(source);
   const journal = inner(article, 'Journal');
   const out: { field: string; value: string }[] = [];
   const add = (field: string, values: string[]) => {
@@ -215,6 +226,12 @@ function conservedTexts(source: string): { field: string; value: string }[] {
     }
   }
   add('affiliation', texts(authorList, 'Affiliation'));
+  for (const investigator of investigators) {
+    for (const tag of ['LastName', 'ForeName', 'Initials']) {
+      add('investigator', texts(investigator.inner, tag));
+    }
+    add('affiliation', texts(investigator.inner, 'Affiliation'));
+  }
   for (const tag of ['Title', 'ISOAbbreviation', 'ISSN', 'Volume', 'Issue']) {
     add(`journal ${tag}`, texts(journal, tag));
   }
@@ -260,7 +277,7 @@ function sourceIds(source: string) {
 
 /**
  * Field-by-field agreement with the source: the title and each abstract section read the
- * same; every author's name parts, ORCID and affiliations; the journal fields, verbatim
+ * same; every author's and investigator's name parts, ORCID and affiliations; the journal fields, verbatim
  * (a volume, page or locator coerced to a number loses its leading zeros); each article
  * date; each MeSH heading with its qualifiers and major-topic flags — a heading is major
  * when PubMed stars the heading, its descriptor or any qualifier, as PubMed's `[majr]`
@@ -324,6 +341,20 @@ function fieldProblems(source: string, article: PubmedCorpusArticle): string[] {
         `author ${i} (${name}) has ${wanted.length} affiliation(s) in the source, ${returned.length} returned, ${differing} differing`,
       );
     }
+  }
+
+  for (const [i, { inner: xml }] of parts.investigators.entries()) {
+    const got = article.investigators?.[i];
+    differs(`investigator ${i} lastName`, textOf(xml, 'LastName'), got?.lastName);
+    differs(`investigator ${i} firstName`, textOf(xml, 'ForeName'), got?.firstName);
+    differs(`investigator ${i} initials`, textOf(xml, 'Initials'), got?.initials);
+    const orcid = elements(xml, 'Identifier').find((e) => attr(e.attrs, 'Source') === 'ORCID');
+    differs(`investigator ${i} orcid`, orcid && plain(orcid.inner), got?.orcid);
+    differs(
+      `investigator ${i} affiliations`,
+      texts(xml, 'Affiliation'),
+      (got?.affiliationIndices ?? []).map((k) => plain(article.affiliations?.[k] ?? '')),
+    );
   }
 
   const journal = inner(parts.article, 'Journal');
@@ -413,16 +444,21 @@ function fieldProblems(source: string, article: PubmedCorpusArticle): string[] {
 /**
  * What the per-field checks cannot see: entries the output holds beyond the source's,
  * affiliations lost in the deduplicated list, and `content[]` listing a different
- * number of authors, notices, MeSH terms or grants than `structuredContent` returns.
+ * number of authors, investigators, notices, MeSH terms or grants than
+ * `structuredContent` returns.
  */
 function countProblems(source: string, article: PubmedCorpusArticle, text: string): string[] {
   const problems: string[] = [];
   const parts = sourceParts(source);
   const counts: [string, number, number][] = [
     ['authors', parts.authors.length, article.authors?.length ?? 0],
+    ['investigators', parts.investigators.length, article.investigators?.length ?? 0],
     [
       'distinct affiliations',
-      new Set(texts(parts.authorList, 'Affiliation')).size,
+      new Set([
+        ...texts(parts.authorList, 'Affiliation'),
+        ...parts.investigators.flatMap((e) => texts(e.inner, 'Affiliation')),
+      ]).size,
       article.affiliations?.length ?? 0,
     ],
     ['MeSH headings', parts.headings.length, article.meshTerms?.length ?? 0],
@@ -446,6 +482,11 @@ function countProblems(source: string, article: PubmedCorpusArticle, text: strin
       'authors',
       Number(/^\*\*Authors \((\d+)\):\*\*$/m.exec(text)?.[1] ?? 0),
       article.authors?.length ?? 0,
+    ],
+    [
+      'investigators',
+      Number(/^\*\*Investigators \((\d+)\):\*\*$/m.exec(text)?.[1] ?? 0),
+      article.investigators?.length ?? 0,
     ],
     [
       'notices',

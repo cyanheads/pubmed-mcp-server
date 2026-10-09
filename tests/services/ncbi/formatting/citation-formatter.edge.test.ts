@@ -10,7 +10,6 @@ import { describe, expect, it } from 'vitest';
 import {
   formatApa,
   formatBibtex,
-  formatCitation,
   formatCitations,
   formatMla,
   formatRis,
@@ -98,10 +97,8 @@ describe('formatApa — author edge cases', () => {
       ...baseArticle,
       authors: [{ lastName: 'OnlyLast' }],
     };
-    const citation = formatApa(article);
-    expect(citation).toContain('OnlyLast');
-    // No trailing comma-space before year
-    expect(citation).not.toMatch(/OnlyLast,\s+,/);
+    // The bare surname is the whole author element: no dangling comma before the year
+    expect(formatApa(article)).toMatch(/^OnlyLast\. \(2024\)\. Test Article\./);
   });
 
   it('moves the title into the author position when a record has no authors (#139)', () => {
@@ -111,7 +108,7 @@ describe('formatApa — author edge cases', () => {
     const citation = formatApa(article);
 
     expect(citation).toBe(
-      'Test Article. (2024). *Test Journal*, *10*(2), 100-110. https://doi.org/10.1000/test',
+      'Test Article. (2024). *Test Journal*, *10*(2), 100\u{2013}110. https://doi.org/10.1000/test',
     );
     expect(citation).not.toMatch(/^\(2024\)\./);
   });
@@ -163,9 +160,10 @@ describe('formatApa — title edge cases', () => {
 
   it('handles article with no title', () => {
     const { title: _title, ...article } = baseArticle;
-    const citation = formatApa(article);
-    // Still valid — just no title segment
-    expect(citation).toContain('(2024).');
+    // No title segment at all — the year runs straight into the journal
+    expect(formatApa(article)).toBe(
+      'Smith, J. (2024). *Test Journal*, *10*(2), 100\u{2013}110. https://doi.org/10.1000/test',
+    );
   });
 });
 
@@ -224,58 +222,21 @@ describe('formatApa — date fallback to articleDates', () => {
   });
 });
 
-// ─── formatCitation dispatcher ───────────────────────────────────────────────
-
-describe('formatCitation', () => {
-  it.each(['apa', 'mla', 'bibtex', 'ris', 'vancouver'] as const)(
-    'returns a non-empty string for style=%s',
-    (style) => {
-      const result = formatCitation(baseArticle, style);
-      expect(typeof result).toBe('string');
-      expect(result.length).toBeGreaterThan(0);
-    },
-  );
-
-  it('apa result contains journal name and year', () => {
-    expect(formatCitation(baseArticle, 'apa')).toContain('Test Journal');
-  });
-
-  it('mla result contains title in quotes', () => {
-    expect(formatCitation(baseArticle, 'mla')).toContain('"Test Article."');
-  });
-
-  it('bibtex result starts with @article{', () => {
-    expect(formatCitation(baseArticle, 'bibtex')).toMatch(/^@article\{/);
-  });
-
-  it('ris result starts with TY  - JOUR', () => {
-    expect(formatCitation(baseArticle, 'ris')).toMatch(/^TY {2}- JOUR/);
-  });
-});
-
 // ─── formatCitations dispatcher ──────────────────────────────────────────────
 
 describe('formatCitations', () => {
-  it('returns a record with one key per requested style', () => {
-    const result = formatCitations(baseArticle, ['apa', 'bibtex']);
-    expect(Object.keys(result).sort()).toEqual(['apa', 'bibtex'].sort());
-  });
-
   it('returns an empty record for an empty styles array', () => {
     expect(formatCitations(baseArticle, [])).toEqual({});
   });
 
-  it('returns all five styles when all are requested', () => {
-    const result = formatCitations(baseArticle, ['apa', 'mla', 'bibtex', 'ris', 'vancouver']);
-    expect(Object.keys(result)).toHaveLength(5);
-  });
-
-  it('each style value matches direct formatCitation output', () => {
-    const styles = ['apa', 'mla', 'bibtex', 'ris', 'vancouver'] as const;
-    const multi = formatCitations(baseArticle, [...styles]);
-    for (const style of styles) {
-      expect(multi[style]).toBe(formatCitation(baseArticle, style));
-    }
+  it('keys each requested style to that style formatter output', () => {
+    expect(formatCitations(baseArticle, ['apa', 'mla', 'bibtex', 'ris', 'vancouver'])).toEqual({
+      apa: formatApa(baseArticle),
+      mla: formatMla(baseArticle),
+      bibtex: formatBibtex(baseArticle),
+      ris: formatRis(baseArticle),
+      vancouver: formatVancouver(baseArticle),
+    });
   });
 });
 
@@ -309,10 +270,10 @@ describe('formatBibtex — special-character escaping', () => {
     expect(citation).toContain('\\textasciicircum{}');
   });
 
-  it('does not double-escape already-escaped sequences', () => {
-    const citation = formatBibtex({ ...baseArticle, title: 'Normal Title' });
-    // Should not contain escaped-backslash artifacts on clean titles
-    expect(citation).not.toContain('\\\\');
+  it('escapes each special character exactly once', () => {
+    const citation = formatBibtex({ ...baseArticle, title: 'A & B_c' });
+    expect(citation).toMatch(/^ {2}title += \{\{A \\& B\\_c\}\},$/m);
+    expect(citation).not.toContain('\\textbackslash{}');
   });
 });
 
@@ -397,6 +358,138 @@ describe('formatRis — splitPages expansion', () => {
   });
 });
 
+// ─── APA: page range forms (#217) ────────────────────────────────────────────
+
+describe('formatApa — page range forms (#217)', () => {
+  const apaPages = (pages: string) =>
+    /\*10\*\(2\), (.+)\. https:/.exec(
+      formatApa({ ...baseArticle, journalInfo: { ...baseArticle.journalInfo!, pages } }),
+    )?.[1];
+
+  it.each([
+    ['737-8', '737\u{2013}738'],
+    ['e60-e65', 'e60\u{2013}e65'],
+    ['e60-5', 'e60\u{2013}e65'],
+    ['100\u{2014}120', '100\u{2013}120'],
+    ['45\u{2013}52', '45\u{2013}52'],
+    ['42', '42'],
+    // A supplement range carries the start's prefix to an end NLM wrote bare
+    ['S56-73', 'S56\u{2013}S73'],
+    ['S5-15', 'S5\u{2013}S15'],
+    ['S87-109', 'S87\u{2013}S109'],
+    ['1255.e1-5', '1255.e1\u{2013}1255.e5'],
+  ])('writes %s as %s', (pages, apa) => {
+    expect(apaPages(pages)).toBe(apa);
+  });
+
+  it('writes each range of a list in full, keeping the rest of its text', () => {
+    expect(apaPages('123-5, 130-2')).toBe('123\u{2013}125, 130\u{2013}132');
+    expect(apaPages('61-6, 70-4, 76 passim')).toBe('61\u{2013}66, 70\u{2013}74, 76 passim');
+    expect(apaPages('1407-8; author reply 1409-10')).toBe(
+      '1407\u{2013}1408; author reply 1409\u{2013}1410',
+    );
+  });
+
+  it('expands only a digit end: a Roman-numeral range is written as NLM gives it', () => {
+    expect(apaPages('xii-xv')).toBe('xii\u{2013}xv');
+  });
+
+  it('leaves MLA on the page text NLM gives', () => {
+    const article = {
+      ...baseArticle,
+      journalInfo: { ...baseArticle.journalInfo!, pages: '737-8' },
+    };
+    expect(formatMla(article)).toContain('pp. 737-8.');
+  });
+});
+
+// ─── APA and MLA: journal title case (#217) ──────────────────────────────────
+
+describe('formatApa and formatMla — journal title case edge cases (#217)', () => {
+  const journalOf = (citation: string) => /\*(.+)\*/.exec(citation)?.[1];
+  const cased = (title: string) => {
+    const article: ParsedArticle = {
+      recordType: 'journal-article',
+      pmid: '1',
+      journalInfo: { title },
+    };
+    return [journalOf(formatApa(article)), journalOf(formatMla(article))];
+  };
+
+  it.each([
+    // A word carrying a digit is left as written
+    ['Journal of 3d printing', 'Journal of 3d Printing'],
+    // An apostrophe stays inside the word, straight or curly
+    ["Journal of women's health (2002)", "Journal of Women's Health (2002)"],
+    ['Journal of women\u{2019}s health', 'Journal of Women\u{2019}s Health'],
+    // Lowercase is Unicode lowercase
+    ['Revista m\u{e9}dica de Chile', 'Revista M\u{e9}dica de Chile'],
+    // A parallel title after " = " opens on a capital, even on a minor word
+    [
+      'Zhonghua er ke za zhi = Chinese journal of pediatrics',
+      'Zhonghua Er Ke Za Zhi = Chinese Journal of Pediatrics',
+    ],
+    ['Journal = a review', 'Journal = A Review'],
+    // A colon or semicolon set against the word opens a subtitle as well
+    ['CA: a cancer journal for clinicians', 'CA: A Cancer Journal for Clinicians'],
+    [
+      'Drug metabolism and disposition: the biological fate of chemicals',
+      'Drug Metabolism and Disposition: The Biological Fate of Chemicals',
+    ],
+    ['Isis; an international review', 'Isis; An International Review'],
+    ['Child: care, health and development', 'Child: Care, Health and Development'],
+    // Punctuation around a word does not hide it
+    ['BMJ (Clinical research ed.)', 'BMJ (Clinical Research Ed.)'],
+    ['JMIR mHealth and uHealth', 'JMIR mHealth and uHealth'],
+    // A French or Italian elision keeps its particle lowercase and capitalizes the word
+    ["Journal francais d'ophtalmologie", "Journal Francais d'Ophtalmologie"],
+    [
+      "Neuropsychiatrie de l'enfance et de l'adolescence",
+      "Neuropsychiatrie de l'Enfance et de l'Adolescence",
+    ],
+    [
+      "Archivio italiano delle malattie dell'apparato digerente",
+      "Archivio Italiano delle Malattie dell'Apparato Digerente",
+    ],
+    ["l'annee psychologique", "L'Annee Psychologique"],
+    // The particles of the other languages NLM catalogs stay lowercase
+    ['Akusherstvo i ginekologiia', 'Akusherstvo i Ginekologiia'],
+    ['Roczniki Akademii Medycznej w Bialymstoku', 'Roczniki Akademii Medycznej w Bialymstoku'],
+    [
+      'Tidsskrift for den Norske laegeforening : tidsskrift for praktisk medicin, ny raekke',
+      'Tidsskrift for den Norske Laegeforening : Tidsskrift for Praktisk Medicin, Ny Raekke',
+    ],
+    ['Beitrage zur gerichtlichen Medizin', 'Beitrage zur Gerichtlichen Medizin'],
+    ['Turk hijiyen ve deneysel biyoloji dergisi', 'Turk Hijiyen ve Deneysel Biyoloji Dergisi'],
+    ['Brain and nerve = Shinkei kenkyu no shinpo', 'Brain and Nerve = Shinkei Kenkyu no Shinpo'],
+    [
+      'South African medical journal = Suid-Afrikaanse tydskrif vir geneeskunde',
+      'South African Medical Journal = Suid-Afrikaanse Tydskrif vir Geneeskunde',
+    ],
+    // ...but never a romanized Chinese syllable, nor a place name's own word
+    ['Zhongguo fei ai za zhi', 'Zhongguo Fei Ai Za Zhi'],
+    ['African review (Dar es Salaam, Tanzania)', 'African Review (Dar es Salaam, Tanzania)'],
+    // A brand NLM writes in lowercase keeps it
+    ['npj quantum materials', 'npj Quantum Materials'],
+    ['i-Perception', 'i-Perception'],
+    ['e-SPEN journal', 'e-SPEN Journal'],
+  ])('%s → %s', (nlm, titleCase) => {
+    expect(cased(nlm)).toEqual([titleCase, titleCase]);
+  });
+
+  it('leaves a book title as the record gives it', () => {
+    const book: ParsedArticle = {
+      recordType: 'book',
+      pmid: '1',
+      title: 'Clinical methods',
+      authors: [{ lastName: 'Walker', firstName: 'H Kenneth', initials: 'HK' }],
+      book: { title: 'Clinical methods', publisher: 'Butterworths' },
+    };
+    expect(formatApa(book)).toContain('*Clinical methods*.');
+    expect(formatMla(book)).toContain('*Clinical methods*,');
+  });
+});
+
 // ─── RIS: collapseWhitespace in abstract ─────────────────────────────────────
 
 describe('formatRis — collapseWhitespace', () => {
@@ -418,18 +511,15 @@ describe('formatRis — collapseWhitespace', () => {
     expect(ris).toContain('AB  - First sentence. Second sentence.');
   });
 
-  it('does not include double blank lines inside the RIS body', () => {
+  it('keeps a paragraphed abstract on one AB line, every line a tag', () => {
     const article: ParsedArticle = {
       ...baseArticle,
       abstractText: 'Para1.\n\nPara2.\n\nPara3.',
     };
-    const ris = formatRis(article);
-    const lines = ris.split('\n');
-    for (let i = 0; i < lines.length - 1; i++) {
-      // Two consecutive blank lines would break strict RIS parsers
-      const bothBlank = lines[i]?.trim() === '' && lines[i + 1]?.trim() === '';
-      expect(bothBlank).toBe(false);
-    }
+    const lines = formatRis(article).split('\n');
+    // A blank or untagged line would end or corrupt the record in strict RIS parsers
+    expect(lines.every((line) => /^[A-Z][A-Z0-9] {2}- /.test(line))).toBe(true);
+    expect(lines).toContain('AB  - Para1. Para2. Para3.');
   });
 });
 
@@ -451,9 +541,10 @@ describe('citation formatters — injection in metadata', () => {
       ...baseArticle,
       title: 'A Study of A--B Interactions',
     };
-    const ris = formatRis(article);
-    // Record must still end cleanly with ER
-    expect(ris).toMatch(/ER {2}- $/);
+    const lines = formatRis(article).split('\n');
+    expect(lines).toContain('TI  - A Study of A--B Interactions');
+    expect(lines.every((line) => /^[A-Z][A-Z0-9] {2}- /.test(line))).toBe(true);
+    expect(lines.at(-1)).toBe('ER  - ');
   });
 
   it('APA: HTML tags in title appear verbatim (no sanitization — no HTML context)', () => {
@@ -533,10 +624,8 @@ describe('formatters — sparse article (only pmid)', () => {
     expect(citation).toBe('');
   });
 
-  it('formatBibtex returns valid entry with minimal fields', () => {
-    const bibtex = formatBibtex(sparse);
-    expect(bibtex).toContain('@article{pmid9999,');
-    expect(bibtex).toContain('pmid');
+  it('formatBibtex returns an entry carrying only the pmid field', () => {
+    expect(formatBibtex(sparse)).toBe('@article{pmid9999,\n  pmid = {9999}\n}');
   });
 
   it('formatRis returns valid record that ends with ER', () => {
@@ -545,7 +634,7 @@ describe('formatters — sparse article (only pmid)', () => {
     expect(ris).toContain('TY  - JOUR');
   });
 
-  it('formatVancouver returns a string for a pmid-only article', () => {
-    expect(typeof formatVancouver(sparse)).toBe('string');
+  it('formatVancouver returns an empty string for a pmid-only article', () => {
+    expect(formatVancouver(sparse)).toBe('');
   });
 });

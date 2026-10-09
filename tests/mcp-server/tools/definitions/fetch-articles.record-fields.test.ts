@@ -1,9 +1,9 @@
 /**
- * @fileoverview `pubmed_fetch_articles` and `pubmed_format_citations` on three record
+ * @fileoverview `pubmed_fetch_articles` and `pubmed_format_citations` on four record
  * fields, through the contract boundary on both surfaces: a collective author's own
- * affiliation (#212), journal fields the record does not carry (#213), and a grant with
- * no `GrantID` (#214). The EFetch body runs through the production response handler and
- * article parser; only the NCBI service call is replaced.
+ * affiliation (#212) and its investigators (#216), journal fields the record does not
+ * carry (#213), and a grant with no `GrantID` (#214). The EFetch body runs through the
+ * production response handler and article parser; only the NCBI service call is replaced.
  * @module tests/mcp-server/tools/definitions/fetch-articles.record-fields.test
  */
 
@@ -54,6 +54,7 @@ interface ArticleOut {
   affiliations?: string[];
   authors: Record<string, unknown>[];
   grantList?: Record<string, unknown>[];
+  investigators?: Record<string, unknown>[];
   journalInfo?: Record<string, unknown>;
 }
 
@@ -61,8 +62,12 @@ function stage(...records: string[]) {
   mockEFetch.mockResolvedValue({ PubmedArticleSet: parseArticleSetXml(articleSetXml(...records)) });
 }
 
-async function fetchArticles(pmid: string) {
-  const result = await runToolContract(fetchArticlesTool, { pmids: [pmid], includeGrants: true });
+async function fetchArticles(pmid: string, extra: Record<string, unknown> = {}) {
+  const result = await runToolContract(fetchArticlesTool, {
+    pmids: [pmid],
+    includeGrants: true,
+    ...extra,
+  });
   expect(result.isError).toBeFalsy();
   const [article] = (result.structuredContent as { articles: ArticleOut[] }).articles;
   if (!article) throw new Error('no article returned');
@@ -116,6 +121,42 @@ describe("a collective author's own affiliation (#212)", () => {
     expect(article.authors[2]).toStrictEqual({ collectiveName: 'Steering Committee' });
     expect(text).toContain('- Sharib Ali (S) [aff 0]\n');
     expect(text).toContain('- Steering Committee (collective)\n');
+  });
+});
+
+describe("a collective author's investigators (#216)", () => {
+  /** {@link NO_ISSUE} with one investigator who shares the collective's affiliation. */
+  const WITH_INVESTIGATOR = NO_ISSUE.replace(
+    '</Article>',
+    '</Article><InvestigatorList><Investigator ValidYN="Y"><LastName>Allan</LastName><ForeName>Philip</ForeName><Initials>P</Initials><AffiliationInfo><Affiliation>Translational Gastroenterology Unit, Oxford.</Affiliation></AffiliationInfo></Investigator></InvestigatorList>',
+  );
+
+  it("points the investigator at the collective's affiliation without renumbering it", async () => {
+    stage(WITH_INVESTIGATOR);
+    const { article, text } = await fetchArticles('31844417', { includeInvestigators: true });
+    expect(article.affiliations).toEqual([
+      'Big Data Institute, Oxford.',
+      'Translational Gastroenterology Unit, Oxford.',
+    ]);
+    expect(article.authors[1]).toStrictEqual({
+      collectiveName: 'TGU Investigators',
+      affiliationIndices: [1],
+    });
+    expect(article.investigators).toStrictEqual([
+      { lastName: 'Allan', firstName: 'Philip', initials: 'P', affiliationIndices: [1] },
+    ]);
+    expect(text).toContain(
+      '- Steering Committee (collective)\n\n**Investigators (1):**\n- Philip Allan (P) [aff 1]\n\n**Affiliations:**\n',
+    );
+  });
+
+  it('never lists an investigator in a citation', async () => {
+    stage(WITH_INVESTIGATOR);
+    const { citations } = await cite('31844417');
+    expect(citations.vancouver).toBe(
+      'Ali S, TGU Investigators, Steering Committee. A Pilot Study. Cell Mol Biol Lett. 2019;24. doi: 10.1/x.31844417',
+    );
+    expect(citations.ris).not.toContain('Allan');
   });
 });
 

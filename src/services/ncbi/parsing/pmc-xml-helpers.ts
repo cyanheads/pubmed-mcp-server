@@ -112,6 +112,159 @@ function texMathExpression(raw: string): string {
   return TEX_DOCUMENT_BODY.exec(raw)?.[1] ?? raw;
 }
 
+/** An element's tag without its namespace prefix: `math` for `mml:math`. */
+const localName = (tag: string): string => tag.slice(tag.indexOf(':') + 1);
+
+/**
+ * True for a MathML `<math>` element, matched by local name whatever its
+ * namespace prefix — `<mml:math>` in PMC deposits, `<math>` elsewhere. (#207)
+ */
+export function isMathTag(tag: string): boolean {
+  return localName(tag) === 'math';
+}
+
+/** MathML token elements, which contribute their text as deposited. */
+const MATH_TOKEN_TAGS: ReadonlySet<string> = new Set(['mi', 'mn', 'mo', 'mtext', 'ms']);
+
+/**
+ * A MathML `<math>` element in a TeX-style linear form — the notation a
+ * formula deposited as `<tex-math>` already reads in — so a formula keeps the
+ * structure that carries its meaning instead of reading as the run of its
+ * leaves (`∑j=1Nlij`, a matrix's numeric cells fused into `−4.401.20`). (#207)
+ *
+ * | MathML | Linear form |
+ * |:--|:--|
+ * | `mi`, `mn`, `mo`, `mtext`, `ms` | their text as deposited (`−` stays U+2212) |
+ * | `msub`, `munder` / `msup`, `mover` | base`_{…}` / base`^{…}` |
+ * | `msubsup`, `munderover`, `mmultiscripts` | base`_{…}^{…}`, per script pair; `mmultiscripts` prescripts as `{}_{…}^{…}` before the base |
+ * | `mfrac` / `msqrt` / `mroot` | `\frac{…}{…}` / `\sqrt{…}` / `\sqrt[index]{…}` |
+ * | `mfenced` | `open`, the children split by `separators`, `close` (defaults `(`, `,`, `)`) |
+ * | `mtable` | cells split by ` & `, rows by ` \\ ` |
+ * | `mspace` / `mphantom` | one space / nothing |
+ * | anything else | its children in order |
+ *
+ * An empty script slot is left out (`x^{2}`, not `x_{}^{2}`). Whitespace-only
+ * text between elements contributes nothing; any other text reads verbatim.
+ * Elements match by local name, whatever their prefix. Pieces are written to
+ * one buffer rather than returned and concatenated level by level, so the cost
+ * stays linear in the size of the formula however deeply it nests.
+ */
+export function linearMath(math: JatsNode): string {
+  const out: string[] = [];
+  const emit = (text: string): void => {
+    if (text) out.push(text);
+  };
+  /** Element children only: text between MathML arguments is never one of them. */
+  const argsOf = (node: JatsNode): JatsNodeList =>
+    childrenOf(node).filter((child) => !isTextNode(child));
+  /** Write `pieces` after `open`, or nothing at all when they write nothing. */
+  const unlessEmpty = (open: string, pieces: () => void, close = ''): void => {
+    const start = out.length;
+    out.push(open);
+    pieces();
+    if (out.length === start + 1) out.length = start;
+    else emit(close);
+  };
+  const script = (mark: '_' | '^', node: JatsNode | undefined): void =>
+    unlessEmpty(`${mark}{`, () => write(node), '}');
+  /** Script pairs — subscript, then superscript — in document order. */
+  const scriptPairs = (scripts: JatsNodeList): void => {
+    for (let i = 0; i < scripts.length; i += 2) {
+      script('_', scripts[i]);
+      script('^', scripts[i + 1]);
+    }
+  };
+  const write = (node: JatsNode | undefined): void => {
+    if (!node) return;
+    if (isTextNode(node)) {
+      const text = textOf(node);
+      if (VISIBLE_CHAR.test(text)) emit(text);
+      return;
+    }
+    const name = localName(tagNameOf(node) ?? '');
+    if (MATH_TOKEN_TAGS.has(name)) {
+      for (const child of childrenOf(node)) {
+        if (isTextNode(child)) emit(textOf(child));
+        else write(child);
+      }
+      return;
+    }
+    const args = argsOf(node);
+    switch (name) {
+      case 'msub':
+      case 'munder':
+        write(args[0]);
+        script('_', args[1]);
+        return;
+      case 'msup':
+      case 'mover':
+        write(args[0]);
+        script('^', args[1]);
+        return;
+      case 'msubsup':
+      case 'munderover':
+        write(args[0]);
+        script('_', args[1]);
+        script('^', args[2]);
+        return;
+      case 'mmultiscripts': {
+        const split = args.findIndex((arg) => localName(tagNameOf(arg) ?? '') === 'mprescripts');
+        if (split !== -1) unlessEmpty('{}', () => scriptPairs(args.slice(split + 1)));
+        write(args[0]);
+        scriptPairs(args.slice(1, split === -1 ? undefined : split));
+        return;
+      }
+      case 'mfrac':
+        emit('\\frac{');
+        write(args[0]);
+        emit('}{');
+        write(args[1]);
+        emit('}');
+        return;
+      case 'msqrt':
+        emit('\\sqrt{');
+        for (const arg of args) write(arg);
+        emit('}');
+        return;
+      case 'mroot':
+        emit('\\sqrt[');
+        write(args[1]);
+        emit(']{');
+        write(args[0]);
+        emit('}');
+        return;
+      case 'mfenced': {
+        const separators = [...(attrOf(node, 'separators') ?? ',').replace(/\s/g, '')];
+        emit(attrOf(node, 'open') ?? '(');
+        for (const [i, arg] of args.entries()) {
+          if (i > 0) emit(separators[Math.min(i - 1, separators.length - 1)] ?? '');
+          write(arg);
+        }
+        emit(attrOf(node, 'close') ?? ')');
+        return;
+      }
+      case 'mtable':
+        for (const [r, row] of args.entries()) {
+          if (r > 0) emit(' \\\\ ');
+          for (const [c, cell] of argsOf(row).entries()) {
+            if (c > 0) emit(' & ');
+            write(cell);
+          }
+        }
+        return;
+      case 'mspace':
+        emit(' ');
+        return;
+      case 'mphantom':
+        return;
+      default:
+        for (const child of childrenOf(node)) write(child);
+    }
+  };
+  write(math);
+  return out.join('');
+}
+
 /**
  * The single child of an `<alternatives>` whose text stands for the whole
  * element.
@@ -315,12 +468,13 @@ export class TextAssembler {
  * Drive `sink` through a node or sibling list in document order. `excluded`
  * skips a whole subtree by tag name; omitting it reads everything else.
  *
- * Three JATS elements do not contribute the plain concatenation of their
- * subtree: a `<tex-math>` contributes only its LaTeX document body, an
- * `<alternatives>` exactly one child, and an {@link IDENTIFIER_TAGS} element
- * nothing. The rules live here, beside the boundary rules {@link TextAssembler}
- * applies, so every consumer inherits them — table cells, footnotes, titles,
- * affiliations, references. (#135, #185, #208)
+ * Four JATS elements do not contribute the plain concatenation of their
+ * subtree: a `<tex-math>` contributes only its LaTeX document body, a MathML
+ * `<math>` its {@link linearMath} form, an `<alternatives>` exactly one child,
+ * and an {@link IDENTIFIER_TAGS} element nothing. The rules live here, beside
+ * the boundary rules {@link TextAssembler} applies, so every consumer inherits
+ * them — table cells, footnotes, titles, affiliations, references. (#135, #185,
+ * #207, #208)
  */
 function readInto(
   input: JatsNode | JatsNodeList,
@@ -336,6 +490,10 @@ function readInto(
     if (IDENTIFIER_TAGS.has(tag) || excluded?.has(tag)) continue;
     if (tag === TEX_MATH_TAG) {
       sink.text(texMathExpression(readText(childrenOf(node))));
+      continue;
+    }
+    if (isMathTag(tag)) {
+      sink.text(linearMath(node));
       continue;
     }
     if (tag === ALTERNATIVES_TAG) {
