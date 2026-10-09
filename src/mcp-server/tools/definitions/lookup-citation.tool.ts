@@ -62,12 +62,14 @@ const YEAR_RE = /^[ \t]*\d{4}[ \t]*$/;
 
 /**
  * A safe integer sent for a string field, read as its decimal string — the
- * framework's own repair rule (a safe integer other than `-0`), applied here
- * because that repair cannot reach a lone citation object: it re-reads the
- * failing path `citations.0.year` against the raw arguments, where `citations`
- * is still the object this schema wraps. Converting before validation gives the
- * object and array forms the same citation. Anything else passes through to be
- * rejected as before. (#198)
+ * framework's own repair rule (a safe integer other than `-0`). That repair
+ * reaches a lone citation object and this schema's preprocess output alike, and
+ * hands the handler the same value. What it cannot do is hold a repaired value
+ * to the field's own check: when the digits then fail it, the call is rejected
+ * with the original `expected string, received number`, so an integer year
+ * that is not four digits would be told to resend it as a string. Converting
+ * before validation reports the four-digit rule instead. Anything else passes
+ * through to be rejected as before. (#187, #198)
  */
 const integerAsString = (value: unknown): unknown =>
   typeof value === 'number' && Number.isSafeInteger(value) && !Object.is(value, -0)

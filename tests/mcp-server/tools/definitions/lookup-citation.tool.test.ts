@@ -230,8 +230,13 @@ describe('lookupCitationTool', () => {
 
   it('skips author verification when authorName is not provided', async () => {
     mockECitMatch.mockResolvedValue([{ key: '1', matched: true, pmid: '111', status: 'matched' }]);
+    // A full roster, so a missing authorName is the only thing keeping a warning off
     mockExtractBriefSummaries.mockResolvedValue([
-      { pmid: '111', authors: 'Gerstein HC, Colhoun HM' },
+      {
+        pmid: '111',
+        authors: 'Gerstein HC, Colhoun HM',
+        authorNames: ['Gerstein HC', 'Colhoun HM'],
+      },
     ]);
 
     const ctx = createMockContext({ errors: lookupCitationTool.errors });
@@ -1043,6 +1048,9 @@ describe('a single citation object and the `citation` alias (issue #156)', () =>
 
     expect(result.isError).toBe(true);
     expect(textOf(result)).toContain('Unrecognized key: "citation"');
+    expect(textOf(result)).toContain(
+      'Recovery: citation is an alias of citations; send one of them, not both.',
+    );
     expect(mockECitMatch).not.toHaveBeenCalled();
   });
 
@@ -1685,5 +1693,261 @@ describe('an integer field in either `citations` shape (issue #198)', () => {
         undefined,
       ]);
     });
+  });
+});
+
+/**
+ * An integer reaches the handler as its decimal string wherever a citation can
+ * sit — a lone object the schema wraps into an array, any element up to the
+ * 25-citation cap, either side of the `citation` alias, beside a blank field —
+ * and both surfaces read exactly as the same call with the digits spelled out.
+ * Whatever is rejected stays rejected under the same path. (#198)
+ */
+describe('integer fields in every citation position (#198)', () => {
+  const PNAS = {
+    journal: 'proc natl acad sci u s a',
+    year: '1991',
+    volume: '88',
+    firstPage: '3248',
+    authorName: 'mann bj',
+  };
+  /** One citation with an integer in every field, zero and a negative among them. */
+  const ALL_INTEGERS = {
+    journal: 1234,
+    year: 1991,
+    volume: -5,
+    firstPage: 0,
+    authorName: 5,
+    key: 7,
+  };
+
+  const callRaw = (args: Record<string, unknown>) =>
+    runToolContract(lookupCitationTool, args as never);
+
+  const textOf = (result: Awaited<ReturnType<typeof runToolContract>>) =>
+    textBlocks(result.content as ContentBlock[])
+      .map((b) => b.text)
+      .join('\n');
+
+  /** The same value with every number spelled as its digits. */
+  const spelled = (value: unknown): unknown => {
+    if (typeof value === 'number') return String(value);
+    if (Array.isArray(value)) return value.map(spelled);
+    if (typeof value === 'object' && value !== null) {
+      return Object.fromEntries(Object.entries(value).map(([k, v]) => [k, spelled(v)]));
+    }
+    return value;
+  };
+
+  /** 25 citations — the cap — with integers in the first, a middle, and the last. */
+  const atCap = Array.from(
+    { length: 25 },
+    (_, i): Record<string, unknown> => ({
+      journal: 'J',
+      year: '2000',
+      key: `k${i}`,
+    }),
+  );
+  atCap[0] = { ...ALL_INTEGERS, key: 100 };
+  atCap[12] = { journal: 'J', year: 2012, firstPage: 0, key: 112 };
+  atCap[24] = { journal: 9, year: 2024, volume: Number.MAX_SAFE_INTEGER, key: 124 };
+
+  beforeEach(() => {
+    mockECitMatch.mockReset();
+    mockESummary.mockReset();
+    mockExtractBriefSummaries.mockReset();
+    mockESummary.mockResolvedValue({});
+    mockExtractBriefSummaries.mockResolvedValue([]);
+    mockECitMatch.mockImplementation(async (citations: { key: string }[]) =>
+      citations.map((c, i) => ({
+        key: c.key,
+        matched: true,
+        pmid: String(3_000_000 + i),
+        status: 'matched',
+      })),
+    );
+  });
+
+  it('hands the handler every field of an all-integer lone object as its digits', async () => {
+    const result = await callRaw({ citations: ALL_INTEGERS });
+
+    expect(result.isError).toBeFalsy();
+    expect(mockECitMatch.mock.calls[0]?.[0]).toEqual([
+      { journal: '1234', year: '1991', volume: '-5', firstPage: '0', authorName: '5', key: '7' },
+    ]);
+    expect(result.structuredContent).toMatchObject({
+      results: [{ key: '7', pmid: '3000000', status: 'matched' }],
+    });
+    expect(textOf(result)).toContain('### 1 · 7');
+  });
+
+  it.each<[string, Record<string, unknown>]>([
+    ['an all-integer lone object', { citations: ALL_INTEGERS }],
+    ['an all-integer lone object under the `citation` alias', { citation: ALL_INTEGERS }],
+    ['25 citations with integers in the first, middle, and last', { citations: atCap }],
+    [
+      'an array under the `citation` alias with integers in its second element',
+      { citation: [PNAS, { ...PNAS, year: 1991, volume: 88 }] },
+    ],
+    [
+      'integers beside exactly-empty fields',
+      { citations: { journal: '', year: 1991, volume: 88, firstPage: '', authorName: '' } },
+    ],
+    [
+      'integers spread across elements of a three-citation array',
+      {
+        citations: [
+          { journal: 'Nature', year: 2020, key: 1 },
+          PNAS,
+          { journal: 'Lancet', year: '2021', volume: 397, firstPage: -1, key: 3 },
+        ],
+      },
+    ],
+  ])('reads %s exactly as the same call with the digits spelled out', async (_label, args) => {
+    const withIntegers = await callRaw(structuredClone(args));
+    const handedIntegers = mockECitMatch.mock.calls[0]?.[0];
+    mockECitMatch.mockClear();
+    const withDigits = await callRaw(spelled(args) as Record<string, unknown>);
+
+    expect(withIntegers.isError).toBeFalsy();
+    expect(handedIntegers).toEqual(mockECitMatch.mock.calls[0]?.[0]);
+    expect(withIntegers).toEqual(withDigits);
+    for (const citation of handedIntegers as Record<string, unknown>[]) {
+      for (const value of Object.values(citation)) {
+        expect(['string', 'undefined']).toContain(typeof value);
+      }
+    }
+  });
+
+  it('keeps the last element of a capped array at its own digits', async () => {
+    await callRaw({ citations: atCap });
+
+    const handed = mockECitMatch.mock.calls[0]?.[0] as Record<string, unknown>[];
+    expect(handed).toHaveLength(25);
+    expect(handed[12]).toMatchObject({ year: '2012', firstPage: '0', key: '112' });
+    expect(handed[24]).toMatchObject({ journal: '9', volume: '9007199254740991', key: '124' });
+  });
+
+  it.each<[string, Record<string, unknown>, string]>([
+    [
+      'a fractional volume in a lone object',
+      { citations: { ...PNAS, volume: 0.5 } },
+      'citations.0.volume: Invalid input: expected string, received number',
+    ],
+    [
+      'a negative fractional key deep in an array',
+      { citations: [PNAS, PNAS, { ...PNAS, key: -1.5 }] },
+      'citations.2.key: Invalid input: expected string, received number',
+    ],
+    [
+      'a negative zero under the `citation` alias',
+      { citation: { ...PNAS, firstPage: -0 } },
+      'citations.0.firstPage: Invalid input: expected string, received number',
+    ],
+    [
+      'an unsafe integer as a journal',
+      { citations: [{ ...PNAS, journal: 2 ** 53 }] },
+      'citations.0.journal: Invalid input: expected string, received number',
+    ],
+  ])('rejects %s under its own path', async (_label, args, line) => {
+    const result = await callRaw(args);
+
+    expect(result.isError).toBe(true);
+    expect(result.structuredContent).toMatchObject({
+      error: { code: JsonRpcErrorCode.InvalidParams },
+    });
+    expect(textOf(result)).toContain(line);
+    expect(mockECitMatch).not.toHaveBeenCalled();
+  });
+
+  it.each<[string, Record<string, unknown>, string, string]>([
+    [
+      'an integer year beside a piped journal',
+      { citations: [PNAS, { journal: 'a|b', year: 1991, volume: 7 }] },
+      'citations.1.journal: Cannot contain a pipe',
+      'citations.1.year',
+    ],
+    [
+      'integers in a citation with no journal or year',
+      { citations: { volume: 88, firstPage: 3248 } },
+      'citations.0: Each citation must include at least a journal or year',
+      'citations.0.volume',
+    ],
+    [
+      '26 citations with integer years',
+      { citations: Array.from({ length: 26 }, (_, i) => ({ journal: 'J', year: 2000 + i })) },
+      'citations: Invalid input: expected a citation object or an array of 1–25 citation objects',
+      'expected string',
+    ],
+  ])('rejects %s for its other fault alone', async (_label, args, reported, unreported) => {
+    const result = await callRaw(args);
+
+    expect(result.isError).toBe(true);
+    const text = textOf(result);
+    expect(text).toContain(reported);
+    expect(text).not.toContain(unreported);
+    expect(mockECitMatch).not.toHaveBeenCalled();
+  });
+
+  /**
+   * The framework's own repair would hand these on as `expected string, received
+   * number`: it rejects a repaired value that fails the field's check with the
+   * original type error. The tool's own conversion keeps the four-digit rule.
+   */
+  it.each<[string, Record<string, unknown>, string[]]>([
+    ['zero in a lone object', { citations: { ...PNAS, year: 0 } }, ['citations.0.year']],
+    [
+      'a five-digit year deep in an array',
+      { citations: [PNAS, PNAS, { ...PNAS, year: 19911 }] },
+      ['citations.2.year'],
+    ],
+    [
+      'a negative year under the `citation` alias',
+      { citation: [PNAS, { ...PNAS, year: -5 }] },
+      ['citations.1.year'],
+    ],
+    [
+      'the largest safe integer as a year',
+      { citations: [{ ...PNAS, year: Number.MAX_SAFE_INTEGER }] },
+      ['citations.0.year'],
+    ],
+    [
+      'a two-digit year with no journal',
+      { citations: { year: 88, volume: '12' } },
+      ['citations.0.year', 'citations.0: Each citation must include'],
+    ],
+  ])('holds %s to the four-digit rule', async (_label, args, paths) => {
+    const result = await callRaw(args);
+
+    expect(result.isError).toBe(true);
+    const text = textOf(result);
+    expect(text).toContain(`${paths[0]}: Must be a four-digit year, e.g. "1991".`);
+    for (const path of paths.slice(1)) expect(text).toContain(path);
+    expect(text).not.toContain('expected string, received number');
+    expect(mockECitMatch).not.toHaveBeenCalled();
+  });
+
+  it('advertises every citation field, `key` included, as an optional plain string', () => {
+    const emitted = toJSONSchema(lookupCitationTool.input as never, {
+      target: 'draft-7',
+      io: 'input',
+    }) as unknown as {
+      properties: { citations: { items: Record<string, unknown> } };
+    };
+    const { items } = emitted.properties.citations;
+
+    expect(items).not.toHaveProperty('required');
+    expect(items).not.toHaveProperty('additionalProperties');
+    expect((items.properties as Record<string, unknown>).key).toEqual({
+      description:
+        'Arbitrary label to track this citation in results. Auto-assigned if omitted. Echoed back unchanged and never sent to NCBI, so any character is accepted here.',
+      type: 'string',
+    });
+    for (const field of ['journal', 'year', 'volume', 'firstPage', 'authorName']) {
+      expect((items.properties as Record<string, Record<string, unknown>>)[field]).toMatchObject({
+        type: 'string',
+        pattern: expect.any(String),
+      });
+    }
   });
 });

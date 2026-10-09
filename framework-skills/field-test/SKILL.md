@@ -4,7 +4,7 @@ description: >
   Exercise tools, resources, and prompts against a live HTTP server via MCP JSON-RPC over curl. Starts the server, surfaces the catalog, runs real and adversarial inputs, measures every call (bytes, token estimate, wall-clock) and weighs the catalog, renders app tools' views in a headless MCP Apps host, and produces a tight report with concrete findings and numbered follow-up options. Use after adding or modifying definitions, or when the user asks to test, try out, or verify their MCP surface.
 metadata:
   author: cyanheads
-  version: "2.19"
+  version: "2.21"
   audience: external
   type: debug
 ---
@@ -371,7 +371,7 @@ mcp_call <url> <sid> prompts/list   | jq '.result.prompts[]   | {name, descripti
 mcp_catalog_size <url> <sid> <protocol>
 ```
 
-**Weigh the catalog.** `mcp_catalog_size` prints the `tools/list` bytes — the context every client loads per session before a single call — and each tool's entry, largest first, split into description / `inputSchema` / `outputSchema`. Record the total alongside the `instructions=` bytes from Step 2; together they are the per-session tax. The split says where a heavy tool's weight lives: an `outputSchema` narrating every field of a 60-field record is the common surprise, an over-long description the obvious one. Hand the outliers to `tool-defs-analysis` (its length-outliers pass) rather than trimming blind.
+**Weigh the catalog.** `mcp_catalog_size` prints the `tools/list` bytes — the context every client loads per session before a single call — and each tool's entry, largest first, split into description / `inputSchema` / `outputSchema`. Record the total alongside the `instructions=` bytes from Step 2; together they are the per-session tax. The split says where a heavy tool's weight lives: an `outputSchema` narrating every field of a 60-field record is the common surprise, an over-long description the obvious one. Hand the outliers to `tool-defs-analysis` rather than trimming blind. Its length-outliers pass weighs the output and enrichment field prose as well as the tool description.
 
 Present a compact catalog to the user: each definition's name + 1-line description. Flag vague or missing descriptions as you go — those feed into the report. Use this to build the test plan.
 
@@ -402,8 +402,9 @@ Treat any hit as a `ux` finding in the report. The authoring rule lives under *T
 |:------------------------------------------------|:-------------|
 | `include` / `fields` / `expand` / `view` / `projection` parameter | Field selection: non-default value renders requested fields |
 | Array return with `query` / `filter` inputs | Empty result: does response explain *why* (echo criteria, suggest broadening)? |
-| Identifier, code, or enum-ish input (an ID format, a classification code, a unit, a place name, a list the docs say may be comma-joined) | Value-variant tolerance: re-send the happy-path call with each obvious variant of that value — lowercase, the bare leaf of a hierarchical code, a common domain alias, a delimiter-joined list where an array is accepted, the spelled-out form of an abbreviated name. Pass is either outcome: the call succeeds, or it fails with an error naming the expected shape. A miss or a bare validation failure on a variant that maps one-to-one onto a valid value is a `ux` finding. Probe **values** — variants of the argument *key* name, and a JSON-stringified array or object or an integer sent for a string as a value, are handled by the framework, not the server. |
+| Identifier, code, or enum-ish input (an ID format, a classification code, a unit, a place name, a list the docs say may be comma-joined) | Value-variant tolerance: re-send the happy-path call with each obvious variant of that value — lowercase, the bare leaf of a hierarchical code, a common domain alias, a delimiter-joined list where an array is accepted, the spelled-out form of an abbreviated name. Pass is either outcome: the call succeeds, or it fails with an error naming the expected shape. A miss or a bare validation failure on a variant that maps one-to-one onto a valid value is a `ux` finding. Probe **values** — variants of the argument *key* name, and as a value a JSON-stringified array or object, an integer sent for a string, a number or boolean sent as a string, a lone string (no comma or line break) sent for a list, or `null` sent for an optional field, are handled by the framework, not the server. |
 | Batch / bulk input (arrays of IDs, multi-item ops) | Partial success: mix valid + invalid items |
+| Bounded numeric or batch input (`max*`, `limit`, an ID array with `.max()`) | Over-the-max: send one past the bound. An output-only ceiling should act as no limit. A workload cap on a read, or on an operation whose contract allows partial completion, should return what fits and name the rest; a bare rejection there is a `ux` finding. A write, destructive, or otherwise atomic batch should reject before doing anything, naming the cap; one that processes the items that fit is a `bug`. |
 | `annotations.readOnlyHint: true` | Confirm no mutation happened |
 | `annotations.idempotentHint: true` | Call twice with same input — safe? |
 | Hits external API / live upstream | One call that exercises upstream; note rate-limit / timeout / transient-failure behavior |
