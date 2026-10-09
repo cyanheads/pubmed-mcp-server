@@ -202,8 +202,9 @@ describe('findRelatedTool', () => {
     const input = findRelatedTool.input.parse({ pmid: '12345', maxResults: 10, offset: 10 });
     await findRelatedTool.handler(input, ctx);
 
-    expect(getEnrichment(ctx).notice).toContain('Offset 10 exceeds totalCount');
-    expect(getEnrichment(ctx).notice).toContain('3');
+    expect(getEnrichment(ctx).notice).toBe(
+      'Offset 10 exceeds totalCount (3). Reset offset to 0 or reduce it below 3 to page through results.',
+    );
   });
 
   it('echoes offset in the output schema', async () => {
@@ -352,7 +353,10 @@ describe('findRelatedTool', () => {
     expect(result.articles).toEqual([]);
     expect(getEnrichment(ctx).source).toBe('openalex');
     expect(result.totalCount).toBe(0);
-    expect(getEnrichment(ctx).notice).not.toContain('All providers failed');
+    // An empty set is an answer: the caller is told OpenAlex served it.
+    expect(getEnrichment(ctx).notice).toBe(
+      'NCBI eLink unavailable — related articles served by OpenAlex (related_works — OpenAlex similarity, not PubMed’s neighbor algorithm).',
+    );
     // No PMIDs to enrich — the eSummary round-trip is skipped entirely.
     expect(mockESummary).not.toHaveBeenCalled();
   });
@@ -373,7 +377,9 @@ describe('findRelatedTool', () => {
 
     expect(result.articles).toEqual([]);
     expect(getEnrichment(ctx).source).toBe('openalex');
-    expect(getEnrichment(ctx).notice).not.toContain('All providers failed');
+    expect(getEnrichment(ctx).notice).toBe(
+      'NCBI eLink unavailable — related articles served by OpenAlex (cites: filter).',
+    );
   });
 
   it('all eligible providers fail: throws all_providers_failed with the attempt chain (issue #103)', async () => {
@@ -411,6 +417,55 @@ describe('findRelatedTool', () => {
     expect(data.recovery?.hint).toContain('Retry');
     // No provider's health is asserted — only the outcomes actually observed.
     expect(data.recovery?.hint).not.toContain('remain available');
+  });
+
+  it('all_providers_failed: an NCBI network failure quoting its request URL names only the host', async () => {
+    const { NcbiApiClient } = await import('@/services/ncbi/api-client.js');
+    const client = new NcbiApiClient({
+      toolIdentifier: 'test-tool',
+      apiKey: 'sk-ncbi-secret',
+      adminEmail: 'ops@example.org',
+      timeoutMs: 5000,
+    });
+    const url =
+      'https://eutils.ncbi.nlm.nih.gov/entrez/eutils/elink.fcgi?tool=test-tool&email=ops%40example.org&api_key=sk-ncbi-secret';
+    const fetchSpy = vi.spyOn(globalThis, 'fetch').mockRejectedValue(
+      Object.assign(new TypeError(`Malformed_HTTP_Response fetching "${url}"`), {
+        code: 'Malformed_HTTP_Response',
+        path: url,
+      }),
+    );
+    // The real client's rejection, as the service's eLink surfaces it.
+    mockELink.mockImplementation(() => client.makeRequest('elink', { db: 'pubmed' }));
+    mockEpmcCitations.mockRejectedValue(
+      new McpError(JsonRpcErrorCode.ServiceUnavailable, 'EPMC down', {
+        reason: 'europepmc_unreachable',
+      }),
+    );
+    mockOaCitedBy.mockRejectedValue(
+      new McpError(JsonRpcErrorCode.ServiceUnavailable, 'OA down', {
+        reason: 'openalex_unreachable',
+      }),
+    );
+
+    try {
+      const ctx = createMockContext({ errors: findRelatedTool.errors });
+      const input = findRelatedTool.input.parse({ pmid: '12345', relationship: 'cited_by' });
+      const error = await rejection(input, ctx);
+
+      expect(failureData(error).attempted[0]).toEqual({
+        provider: 'ncbi',
+        reason: 'ncbi_unreachable',
+        message:
+          'NCBI request failed: Malformed_HTTP_Response fetching "https://eutils.ncbi.nlm.nih.gov/…?…"',
+      });
+      const wire = JSON.stringify(error.data);
+      for (const fragment of ['?tool=', 'sk-ncbi-secret', 'ops%40example.org']) {
+        expect(wire).not.toContain(fragment);
+      }
+    } finally {
+      fetchSpy.mockRestore();
+    }
   });
 
   it('all_providers_failed omits a provider excluded by epmcSupports (issue #103)', async () => {
@@ -845,9 +900,9 @@ describe('findRelatedTool', () => {
       const input = findRelatedTool.input.parse({ pmid: '12345', relationship: 'cited_by' });
       const result = await findRelatedTool.handler(input, ctx);
 
-      const notice = String(getEnrichment(ctx).notice);
-      expect(notice).toContain('6');
-      expect(notice).toContain('no PubMed PMID');
+      expect(getEnrichment(ctx).notice).toContain(
+        'Europe PMC served 8 upstream rows for this request, 6 with no PubMed PMID',
+      );
       expect(result.totalCount).toBe(2);
     });
 
@@ -1765,24 +1820,17 @@ describe('findRelatedTool', () => {
         ],
       }),
     );
-    expect(blocks[0]?.text).toContain('Related Articles');
-    expect(blocks[0]?.text).toContain('12345');
-    expect(blocks[0]?.text).toContain('Related Article');
-    expect(blocks[0]?.text).toContain('*Smith J*');
-    expect(blocks[0]?.text).toContain('Nature, 2024');
-  });
-
-  it('formats output with no articles', () => {
-    const blocks = textBlocks(
-      findRelatedTool.format!({
-        sourcePmid: '12345',
-        relationship: 'cited_by',
-        offset: 0,
-        totalCount: 0,
-        articles: [],
-      }),
+    expect(blocks[0]?.text).toBe(
+      [
+        '# Related Articles for PMID 12345',
+        '**Relationship:** similar',
+        '**Returned:** 1 of 1 | **Offset:** 0',
+        '- **[PMID 111](https://pubmed.ncbi.nlm.nih.gov/111/)**',
+        '  Related Article',
+        '  *Smith J*',
+        '  Nature, 2024',
+      ].join('\n'),
     );
-    expect(blocks[0]?.text).toContain('No related articles');
   });
 
   describe('invalid source PMID detection (issue #22)', () => {

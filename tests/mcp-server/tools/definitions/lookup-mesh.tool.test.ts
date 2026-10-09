@@ -693,14 +693,19 @@ describe('lookupMeshTool', () => {
         ],
       }),
     );
-    expect(blocks[0]?.text).toContain('MeSH Lookup');
-    expect(blocks[0]?.text).toContain('Neoplasms');
-    expect(blocks[0]?.text).toContain('C04');
-    expect(blocks[0]?.text).toContain('D009369');
-    expect(blocks[0]?.text).toContain('Entrez UID');
-    expect(blocks[0]?.text).toContain('68009369');
-    expect(blocks[0]?.text).toContain('at offset **10**');
-    expect(blocks[0]?.text).toContain('`offset: 20`');
+    expect(blocks[0]?.text).toBe(
+      [
+        '# MeSH Lookup: "Neoplasms"',
+        'Found **1** result(s) at offset **10**.',
+        'More available — call again with `offset: 20`.',
+        '',
+        '## Neoplasms',
+        '- **MeSH ID:** D009369',
+        '- **Entrez UID:** 68009369',
+        '- **Tree Numbers:** C04',
+        '- **Scope Note:** New abnormal growth of tissue.',
+      ].join('\n'),
+    );
   });
 
   it('renders empty results; the recovery notice is enrichment, not format output', () => {

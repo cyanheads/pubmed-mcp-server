@@ -614,7 +614,8 @@ describe('NcbiResponseHandler', () => {
           WarningList: { QuotedPhraseNotFound: 'some phrase' },
         },
       });
-      expect(messages.some((m) => m.includes('Warning'))).toBe(true);
+      // The warning's own text, not just the label the handler puts in front of it.
+      expect(messages).toEqual(['Warning: some phrase']);
     });
 
     it('returns unknown error message for empty structure', () => {

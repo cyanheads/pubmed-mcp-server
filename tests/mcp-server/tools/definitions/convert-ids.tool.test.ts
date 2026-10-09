@@ -162,7 +162,12 @@ describe('convertIdsTool', () => {
     const input = convertIdsTool.input.parse({ ids: ['111', '222', '333'], idType: 'pmid' });
     const result = await convertIdsTool.handler(input, ctx);
 
-    expect(result.records).toHaveLength(3);
+    // Each element carries its own answer, not a neighbour's
+    expect(result.records).toEqual([
+      { requestedId: '111', pmid: '111', pmcid: 'PMC1' },
+      { requestedId: '222', pmid: '222', pmcid: 'PMC2' },
+      { requestedId: '333', pmid: '333', pmcid: 'PMC3' },
+    ]);
     expect(result.totalConverted).toBe(3);
   });
 
@@ -234,7 +239,7 @@ describe('convertIdsTool', () => {
       }),
     );
 
-    expect(blocks[0]?.text).toContain('- |');
+    expect(blocks[0]?.text).toContain('| PMC3531190 | 23193287 | PMC3531190 | - | - |');
   });
 
   describe('per-element identifier validation (issue #120)', () => {
@@ -313,7 +318,8 @@ describe('convertIdsTool', () => {
 
         expect(mockIdConvert).toHaveBeenCalledWith([id], idType, expect.anything());
         expect(result.totalSubmitted).toBe(1);
-        expect(result.records).toHaveLength(1);
+        // The converter's echo of the element is matched back to it
+        expect(result.totalConverted).toBe(1);
       },
     );
 

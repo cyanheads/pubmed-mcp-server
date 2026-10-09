@@ -116,16 +116,21 @@ describe('pubmedEuropepmcSearchTool', () => {
 
   it('flattens EPMC `Y`/`N` flags into booleans (isOpenAccess, hasFullTextXml)', async () => {
     mockSearch.mockResolvedValue({
-      hits: [{ id: '2', source: 'PPR', title: 'preprint', isOpenAccess: 'Y', inPMC: 'N' }],
-      hitCount: 1,
+      hits: [
+        { id: '2', source: 'PPR', title: 'preprint', isOpenAccess: 'Y', inPMC: 'N' },
+        { id: 'PMC5', source: 'PMC', title: 'deposit', isOpenAccess: 'N', inPMC: 'Y' },
+      ],
+      hitCount: 2,
       cursorMark: '*',
       query: 'foo',
     });
     const ctx = createMockContext({ errors: pubmedEuropepmcSearchTool.errors });
     const input = pubmedEuropepmcSearchTool.input.parse({ query: 'preprint' });
     const result = await pubmedEuropepmcSearchTool.handler(input, ctx);
-    expect(result.hits[0]?.isOpenAccess).toBe(true);
-    expect(result.hits[0]?.hasFullTextXml).toBe(false);
+    expect(result.hits.map((h) => [h.isOpenAccess, h.hasFullTextXml])).toEqual([
+      [true, false],
+      [false, true],
+    ]);
   });
 
   it('truncates long abstracts and emits a notice when no hits returned', async () => {
@@ -521,8 +526,13 @@ describe('pubmedEuropepmcSearchTool', () => {
       const text = blocks[0]?.text ?? '';
       expect(text).toContain('Europe PMC Search Results');
       expect(text).toContain('next page');
-      expect(text).toContain('Title');
+      expect(text).toContain('#### Title');
       expect(text).toContain('Smith J, Jones K');
+      expect(text).toContain('**Journal:** Nature');
+      expect(text).toContain('**Published:** 2024-03-15');
+      expect(text).toContain('**Year:** 2024');
+      expect(text).toContain('Full-text XML in EPMC:** yes');
+      expect(text).toContain('**URL:** https://europepmc.org/article/MED/42');
       expect(text).toContain('PMID:** 42');
       expect(text).toContain('PMCID:** PMC9');
       expect(text).toContain('DOI:** 10.1/x');

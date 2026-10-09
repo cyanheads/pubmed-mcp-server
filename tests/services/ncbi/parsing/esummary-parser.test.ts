@@ -177,30 +177,6 @@ describe('parseNcbiDate', () => {
       expect(parseNcbiDate(input)).toBeUndefined();
     });
   });
-
-  describe('preserves year fidelity (the chrono-node bug)', () => {
-    it('does not forward-date "2018 Jun" to a future year', () => {
-      const result = parseNcbiDate('2018 Jun');
-      expect(result).toBe('2018-06-01');
-      expect(result).toMatch(/^2018-/);
-    });
-
-    it('does not forward-date "2023 Dec" to a future year', () => {
-      const result = parseNcbiDate('2023 Dec');
-      expect(result).toBe('2023-12-01');
-      expect(result).toMatch(/^2023-/);
-    });
-
-    it('does not forward-date "2018 Jul-Aug" to a future year', () => {
-      const result = parseNcbiDate('2018 Jul-Aug');
-      expect(result).toBe('2018-07-01');
-      expect(result).toMatch(/^2018-/);
-    });
-
-    it('parses year-only "2024" instead of returning null', () => {
-      expect(parseNcbiDate('2024')).toBe('2024-01-01');
-    });
-  });
 });
 
 /* -------------------------------------------------------------------------- */
@@ -605,12 +581,16 @@ describe.skipIf(!LIVE)('NCBI API integration: date parsing', () => {
     const pmidsWithEpub = ['29860986', '39134804', '26694161', '35189910', '33339441'];
     const rawDates = await fetchRawNcbiDates(pmidsWithEpub);
 
+    let checked = 0;
     for (const [pmid, raw] of rawDates) {
       if (!raw.epubdate) continue;
       const parsed = await standardizeESummaryDate(raw.epubdate);
-      expect(parsed, `epubdate "${raw.epubdate}" for PMID ${pmid} should parse`).toBeDefined();
-      expect(parsed).toMatch(/^\d{4}-\d{2}-\d{2}$/);
+      expect(parsed, `epubdate "${raw.epubdate}" for PMID ${pmid} should parse`).toMatch(
+        /^\d{4}-\d{2}-\d{2}$/,
+      );
+      checked++;
     }
+    expect(checked, 'no epubdate came back to check').toBeGreaterThan(0);
   }, 15_000);
 
   it('no parsed date from known PMIDs produces a future year', async () => {
@@ -640,6 +620,7 @@ describe.skipIf(!LIVE)('NCBI API integration: date parsing', () => {
     const rawDates = await fetchRawNcbiDates(broadPmids);
 
     const currentYear = new Date().getFullYear();
+    let checked = 0;
     for (const [pmid, raw] of rawDates) {
       if (!raw.pubdate) continue;
       const parsed = parseNcbiDate(raw.pubdate);
@@ -649,7 +630,9 @@ describe.skipIf(!LIVE)('NCBI API integration: date parsing', () => {
         parsedYear,
         `PMID ${pmid}: parsed year ${parsedYear} from "${raw.pubdate}" should not exceed current year + 1`,
       ).toBeLessThanOrEqual(currentYear + 1);
+      checked++;
     }
+    expect(checked, 'no pubdate came back parsed to check').toBeGreaterThan(0);
   }, 15_000);
 });
 

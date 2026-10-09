@@ -6,7 +6,7 @@
 import type { ContentBlock } from '@cyanheads/mcp-ts-core';
 import { JsonRpcErrorCode, serviceUnavailable } from '@cyanheads/mcp-ts-core/errors';
 import { createMockContext, runToolContract } from '@cyanheads/mcp-ts-core/testing';
-import { describe, expect, it, vi } from 'vitest';
+import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
 
 import { textBlocks } from '../../../_helpers.js';
 
@@ -88,26 +88,53 @@ describe('spellCheckTool', () => {
     expect(result.hasSuggestion).toBe(false);
   });
 
-  it.each(['33306283', '007', '1e5'])(
-    'passes output validation for the numeric-looking query %s on both surfaces (#108)',
-    async (query) => {
-      // The reported symptom was an output-validation failure after a
-      // successful upstream round-trip: the XML parser handed eSpell a number
-      // and the string output schema rejected it. Parse the handler's return
-      // through the declared schema so the tool surface is covered too, not
-      // only the service.
-      mockESpell.mockResolvedValue({ original: query, corrected: query, hasSuggestion: false });
-      const ctx = createMockContext({ errors: spellCheckTool.errors });
-      const result = await spellCheckTool.handler(spellCheckTool.input.parse({ query }), ctx);
+  describe('numeric-looking queries through the real ESpell parse (#108)', () => {
+    // The reported symptom was an output-validation failure after a successful
+    // upstream round-trip: the coercing XML parser turned ESpell's echoed
+    // `<Query>` into a number (`007` → 7, `1e5` → 100000) and the string output
+    // schema rejected it. Route the tool through the real `eSpell` — request,
+    // XML parse, result mapping — behind a stubbed fetch replying as NCBI does.
+    let fetchSpy: ReturnType<typeof vi.spyOn> | undefined;
 
-      expect(spellCheckTool.output.parse(result)).toEqual({
-        original: query,
-        corrected: query,
-        hasSuggestion: false,
+    beforeAll(async () => {
+      const actual = await vi.importActual<typeof import('@/services/ncbi/ncbi-service.js')>(
+        '@/services/ncbi/ncbi-service.js',
+      );
+      fetchSpy = vi.spyOn(globalThis, 'fetch').mockImplementation((input) => {
+        const url = new URL(String(input));
+        if (!url.pathname.endsWith('/espell.fcgi')) {
+          throw new Error(`unexpected request ${url.pathname}`);
+        }
+        const term = url.searchParams.get('term') ?? '';
+        const body = `<?xml version="1.0" encoding="UTF-8" ?>\n<!DOCTYPE eSpellResult PUBLIC "-//NLM//DTD esearch 20060628//EN" "https://eutils.ncbi.nlm.nih.gov/eutils/dtd/20060628/espell.dtd">\n<eSpellResult>\n\t<Database>pubmed</Database>\n\t<Query>${term}</Query>\n\t<CorrectedQuery>${term}</CorrectedQuery>\n\t<SpelledQuery/>\n</eSpellResult>\n`;
+        return Promise.resolve(new Response(body, { status: 200 }));
       });
-      expect(textBlocks(spellCheckTool.format!(result))[0]?.text).toContain(`"${query}"`);
-    },
-  );
+      actual.initNcbiService();
+      const service = actual.getNcbiService();
+      mockESpell.mockImplementation((params, options) => service.eSpell(params, options));
+    });
+
+    afterAll(() => {
+      fetchSpy?.mockRestore();
+      mockESpell.mockReset();
+    });
+
+    it.each(['33306283', '007', '1e5'])(
+      'returns %s verbatim and passes output validation on both surfaces',
+      async (query) => {
+        const ctx = createMockContext({ errors: spellCheckTool.errors });
+        const result = await spellCheckTool.handler(spellCheckTool.input.parse({ query }), ctx);
+
+        expect(spellCheckTool.output.parse(result)).toEqual({
+          original: query,
+          corrected: query,
+          hasSuggestion: false,
+        });
+        expect(textBlocks(spellCheckTool.format!(result))[0]?.text).toContain(`"${query}"`);
+        expect(fetchSpy).toHaveBeenCalled();
+      },
+    );
+  });
 
   describe('blank query rejection (issue #133)', () => {
     // `min(2)` counts the spaces, so a whitespace-only query used to reach

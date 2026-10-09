@@ -65,10 +65,9 @@ describe('searchArticlesTool', () => {
       expect(result.success).toBe(true);
     });
 
-    it('rejects an offset above the ceiling before it reaches NCBI', async () => {
+    it('rejects an offset above the ceiling before it reaches NCBI', () => {
       const result = searchArticlesTool.input.safeParse({ query: 'cancer', offset: 9999 });
       expect(result.success).toBe(false);
-      expect(mockESearch).not.toHaveBeenCalled();
     });
 
     it('documents the ceiling in the offset description', () => {
@@ -285,9 +284,9 @@ describe('searchArticlesTool', () => {
       });
       await searchArticlesTool.handler(input, ctx);
 
-      const calledTerm = mockESearch.mock.calls.at(-1)?.[0]?.term as string;
-      expect(calledTerm).toContain('2020/01/01[pdat]');
-      expect(calledTerm).toContain('2024/12/31[pdat]');
+      expect(mockESearch.mock.calls.at(-1)?.[0]?.term).toBe(
+        'cancer AND (2020/01/01[pdat] : 2024/12/31[pdat])',
+      );
     });
 
     describe('accepted ranges keep their normalized clause (issue #177)', () => {
@@ -465,9 +464,9 @@ describe('searchArticlesTool', () => {
       });
       await searchArticlesTool.handler(input, ctx);
 
-      const calledTerm = mockESearch.mock.calls.at(-1)?.[0]?.term as string;
-      expect(calledTerm).toContain('2020/01/01[pdat]');
-      expect(calledTerm).toContain('2024/12/31[pdat]');
+      expect(mockESearch.mock.calls.at(-1)?.[0]?.term).toBe(
+        'cancer AND (2020/01/01[pdat] : 2024/12/31[pdat])',
+      );
     });
   });
 
@@ -491,7 +490,7 @@ describe('searchArticlesTool', () => {
     expect(enrichment.effectiveQuery).toBe('cancer');
     expect(enrichment.appliedFilters).toEqual({});
     expect(result.summaries).toEqual([]);
-    expect(result.searchUrl).toContain('cancer');
+    expect(result.searchUrl).toBe('https://pubmed.ncbi.nlm.nih.gov/?term=cancer');
   });
 
   it('builds filtered queries and enriches summaries through WebEnv history', async () => {
@@ -542,19 +541,17 @@ describe('searchArticlesTool', () => {
       expect.objectContaining({ signal: expect.any(AbortSignal) }),
     );
 
-    const calledTerm = mockESearch.mock.calls[0]?.[0]?.term as string;
-    expect(calledTerm).toContain('2020/01/01[mdat]');
-    expect(calledTerm).toContain('2024/12/31[mdat]');
-    expect(calledTerm).toContain(
-      '"Review"[Publication Type] OR "Clinical Trial"[Publication Type]',
-    );
-    expect(calledTerm).toContain('Smith J[Author]');
-    expect(calledTerm).toContain('"Nature"[Journal]');
-    expect(calledTerm).toContain('"Asthma"[MeSH Terms] AND "Inflammation"[MeSH Terms]');
-    expect(calledTerm).toContain('english[Language]');
-    expect(calledTerm).toContain('hasabstract[text word]');
-    expect(calledTerm).toContain('free full text[filter]');
-    expect(calledTerm).toContain('humans[MeSH Terms]');
+    const expectedTerm =
+      'asthma AND (2020/01/01[mdat] : 2024/12/31[mdat])' +
+      ' AND ("Review"[Publication Type] OR "Clinical Trial"[Publication Type])' +
+      ' AND Smith J[Author] AND "Nature"[Journal]' +
+      ' AND ("Asthma"[MeSH Terms] AND "Inflammation"[MeSH Terms])' +
+      ' AND english[Language] AND hasabstract[text word] AND free full text[filter]' +
+      ' AND humans[MeSH Terms]';
+    expect(mockESearch.mock.calls[0]?.[0]?.term).toBe(expectedTerm);
+    const url = new URL(result.searchUrl);
+    expect(url.origin + url.pathname).toBe('https://pubmed.ncbi.nlm.nih.gov/');
+    expect(url.searchParams.get('term')).toBe(expectedTerm);
 
     expect(mockESummary).toHaveBeenCalledWith(
       {
@@ -582,7 +579,7 @@ describe('searchArticlesTool', () => {
       },
     ]);
     const enrichment = getEnrichment(ctx);
-    expect(enrichment.effectiveQuery).toContain('2020/01/01[mdat]');
+    expect(enrichment.effectiveQuery).toBe(expectedTerm);
     expect(enrichment.appliedFilters).toEqual({
       dateRange: {
         minDate: '2020/01/01',
@@ -751,7 +748,7 @@ describe('searchArticlesTool', () => {
       const input = searchArticlesTool.input.parse({ query: '  covid  ' });
       const result = await searchArticlesTool.handler(input, ctx);
 
-      expect(mockESearch.mock.calls[0]?.[0]?.term).toContain('covid');
+      expect(mockESearch.mock.calls[0]?.[0]?.term).toBe('  covid  ');
       expect(result.pmids).toEqual(['1']);
     });
 
@@ -1412,8 +1409,16 @@ describe('searchArticlesTool', () => {
         totalCount: 2,
       }),
     );
-    expect(blocks[0]?.text).toContain('PubMed Search Results');
-    expect(blocks[0]?.text).toContain('cancer');
+    expect(blocks[0]?.text).toBe(
+      [
+        '## PubMed Search Results',
+        '**Query:** cancer',
+        '**Returned:** 2 of 2 | **Offset:** 0',
+        '**Search URL:** https://pubmed.ncbi.nlm.nih.gov/?term=cancer',
+        '',
+        '**PMIDs:** 111, 222',
+      ].join('\n'),
+    );
   });
 
   describe('count-split note (issue #44)', () => {

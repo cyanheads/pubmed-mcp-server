@@ -1,8 +1,9 @@
 /**
  * @fileoverview Property-based fuzz coverage for all 9 PubMed tools. Generates
  * valid inputs from each tool's Zod schema plus adversarial-shape inputs, then
- * asserts the standard `FuzzReport` invariants — no crashes on Phase 1 valid
- * runs, no stack-trace / path leaks in error messages, no prototype pollution.
+ * asserts the standard `FuzzReport` invariants — no crashes or hangs on any
+ * input the schema accepts, no stack-trace / path leaks in what a client sees of
+ * an error, no prototype pollution — and that every phase reached the handler.
  *
  * Mocks `NcbiService` with permissive defaults that return minimal valid shapes
  * so every tool's handler runs through to completion. `UnpaywallService` is
@@ -11,7 +12,7 @@
  * validates the output schema.
  *
  * Seed pinned at 42 for reproducibility. Per-tool runs use `numRuns: 50` and
- * `numAdversarial: 30`; the whole suite is sized to fit comfortably under the
+ * `numAdversarial: 100`; the whole suite is sized to fit comfortably under the
  * issue's 30-second runtime budget.
  *
  * @module tests/mcp-server/tools/definitions/tools.fuzz.test
@@ -58,10 +59,21 @@ beforeEach(() => {
   mockNcbi = createMockNcbiService();
 });
 
+/**
+ * No crash, hang, leak or pollution — and every phase actually drove the
+ * handler. A phase whose every input the schema rejected would report clean
+ * while asserting nothing about the tool.
+ */
 function assertClean(report: Awaited<ReturnType<typeof fuzzToolStrict>>): void {
   expect(report.crashes, JSON.stringify(report.crashes, null, 2)).toHaveLength(0);
   expect(report.leaks, JSON.stringify(report.leaks, null, 2)).toHaveLength(0);
   expect(report.prototypePollution).toBe(false);
+  expect(
+    report.valid.completed,
+    'no generated input ran the handler to valid output',
+  ).toBeGreaterThan(0);
+  expect(report.adversarial.handled, 'no adversarial input reached the handler').toBeGreaterThan(0);
+  expect(report.abortedHandled, 'the aborted-signal probe never reached the handler').toBe(true);
 }
 
 /**

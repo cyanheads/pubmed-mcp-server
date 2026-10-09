@@ -24,11 +24,13 @@ describe('createNcbiRequestQueue', () => {
     expect(result).toBe('done');
   });
 
-  it('dispatches multiple tasks in FIFO order', async () => {
-    const queue = createQueue(0);
+  it('dispatches waiting tasks in FIFO order', async () => {
+    // One slot, so every task after the first waits in the queue and the order
+    // the queue releases them in is the order they start.
+    const queue = createQueue(0, 1);
     const dispatched: number[] = [];
 
-    const tasks = [1, 2, 3].map((n) =>
+    const tasks = [1, 2, 3, 4].map((n) =>
       queue.run(async () => {
         dispatched.push(n);
         return n;
@@ -36,8 +38,8 @@ describe('createNcbiRequestQueue', () => {
     );
 
     const results = await Promise.all(tasks);
-    expect(results).toEqual([1, 2, 3]);
-    expect(dispatched).toEqual([1, 2, 3]);
+    expect(results).toEqual([1, 2, 3, 4]);
+    expect(dispatched).toEqual([1, 2, 3, 4]);
   });
 
   it('runs tasks concurrently up to maxConcurrent', async () => {
@@ -192,26 +194,26 @@ describe('createNcbiRequestQueue', () => {
   }, 2000);
 
   it('respects min-start-gap between consecutive starts with concurrency > 1', async () => {
-    const queue = createQueue(50, 3);
-    const startTimes: number[] = [];
-    const begin = Date.now();
+    vi.useFakeTimers({ now: 10_000 });
+    try {
+      const queue = createQueue(50, 3);
+      const startTimes: number[] = [];
 
-    const tasks = [0, 1, 2].map((i) =>
-      queue.run(async () => {
-        startTimes.push(Date.now() - begin);
-        return i;
-      }),
-    );
+      const tasks = [0, 1, 2].map((i) =>
+        queue.run(async () => {
+          startTimes.push(Date.now() - 10_000);
+          return i;
+        }),
+      );
+      await vi.runAllTimersAsync();
 
-    await Promise.all(tasks);
-
-    // Starts should land near 0, 50, 100 with generous CI tolerance.
-    expect(startTimes[0]).toBeLessThan(30);
-    expect(startTimes[1] as number).toBeGreaterThanOrEqual(40);
-    expect(startTimes[1] as number).toBeLessThan(110);
-    expect(startTimes[2] as number).toBeGreaterThanOrEqual(90);
-    expect(startTimes[2] as number).toBeLessThan(180);
-  }, 2000);
+      expect(await Promise.all(tasks)).toEqual([0, 1, 2]);
+      // Three free slots, yet each start waits out the gap after the one before.
+      expect(startTimes).toEqual([0, 50, 100]);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
 
   it('frees the slot when a task rejects', async () => {
     const queue = createQueue(0, 1);

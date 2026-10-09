@@ -123,18 +123,20 @@ const converterRequests = (): URL[] =>
   fetchSpy.mock.calls.map((args: unknown[]) => new URL(String(args[0])));
 
 describe('pubmed_convert_ids answers every submitted element (issue #165)', () => {
-  it.each<[IdType, string[]]>([
-    ['pmid', ['1', '23193287', '00000001', '23193287']],
-    ['pmcid', ['3531190', 'pmc3531190', 'PMC3531190', '999']],
-    ['doi', ['10.1093/nar/gks1195', '10.9999/none', '10.1093/NAR/GKS1195']],
+  it.each<[IdType, string[], boolean[]]>([
+    ['pmid', ['1', '23193287', '00000001', '23193287'], [false, true, false, true]],
+    ['pmcid', ['3531190', 'pmc3531190', 'PMC3531190', '999'], [true, true, true, false]],
+    ['doi', ['10.1093/nar/gks1195', '10.9999/none', '10.1093/NAR/GKS1195'], [true, false, true]],
   ])(
     'returns one %s record per element, in order, under the caller’s spelling',
-    async (idType, ids) => {
+    async (idType, ids, converted) => {
       const { result, text } = await convert(ids, idType);
 
       expect(result.records.map((r) => r.requestedId)).toEqual(ids);
+      // Each element carries its own answer: the GenBank article where it names it, a miss elsewhere
+      expect(result.records.map((r) => r.pmcid === GENBANK.pmcid && !r.errmsg)).toEqual(converted);
       expect(result.totalSubmitted).toBe(ids.length);
-      expect(result.totalConverted).toBe(result.records.filter((r) => !r.errmsg).length);
+      expect(result.totalConverted).toBe(converted.filter(Boolean).length);
       expect(requestedColumn(text)).toEqual(ids);
     },
   );
@@ -184,6 +186,35 @@ describe('pubmed_convert_ids answers every submitted element (issue #165)', () =
     expect(result.records.map((r) => r.requestedId)).toEqual(['10.1093/nar/gks1195', DROPPED_DOI]);
     expect(result.records[1]?.errmsg).toMatch(/no record/i);
     expect(result).toMatchObject({ totalConverted: 1, totalSubmitted: 2 });
+  });
+});
+
+/**
+ * The envelope's `data` reaches the client verbatim, so it names the converter's
+ * host, never the request URL whose query carries the operator's email.
+ * (mcp-ts-core 0.13.12)
+ */
+describe('pubmed_convert_ids error envelope from the ID Converter', () => {
+  it('carries the host and no URL when the converter answers a non-2xx', async () => {
+    fetchSpy.mockImplementationOnce(async (input: string | URL | Request) => {
+      const response = new Response('Not Found', { status: 404 });
+      Object.defineProperty(response, 'url', { value: String(input) });
+      return response;
+    });
+
+    const result = await runToolContract(convertIdsTool, { ids: ['23193287'], idType: 'pmid' });
+
+    expect(result.isError).toBe(true);
+    const { error } = result.structuredContent as {
+      error: { code: number; data: Record<string, unknown> };
+    };
+    expect(error.data).not.toHaveProperty('url');
+    expect(JSON.stringify(result)).not.toContain('://');
+    expect(error).toMatchObject({
+      code: JsonRpcErrorCode.NotFound,
+      data: { host: 'pmc.ncbi.nlm.nih.gov', status: 404 },
+    });
+    expect(converterRequests()).toHaveLength(1);
   });
 });
 
