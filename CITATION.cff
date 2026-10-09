@@ -1,7 +1,7 @@
 cff-version: 1.2.0
 message: "If you use this software, please cite it as below."
 title: pubmed-mcp-server
-abstract: "Model Context Protocol (MCP) server for NCBI E-utilities, providing PubMed article search, full-text retrieval via PubMed Central and Unpaywall, citation formatting (APA, MLA, BibTeX, RIS), MeSH vocabulary lookup, and related-article discovery."
+abstract: "Model Context Protocol (MCP) server for NCBI E-utilities, providing PubMed article search, full-text retrieval via PubMed Central, Europe PMC, and Unpaywall, citation formatting (APA, MLA, BibTeX, RIS, Vancouver), MeSH vocabulary lookup, and related-article discovery."
 type: software
 authors:
   - family-names: Hand
