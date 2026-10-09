@@ -1,6 +1,6 @@
 # pubmed-mcp-server - Directory Structure
 
-Generated on: 2026-10-04 11:22:36
+Generated on: 2026-10-09 17:17:56
 
 ```text
 pubmed-mcp-server/
@@ -211,7 +211,8 @@ pubmed-mcp-server/
 │   │   ├── unpaywall/
 │   │   │   ├── types.ts
 │   │   │   └── unpaywall-service.ts
-│   │   └── error-contracts.ts
+│   │   ├── error-contracts.ts
+│   │   └── fetch-redaction.ts
 │   └── index.ts
 ├── tests/
 │   ├── config/
@@ -254,7 +255,12 @@ pubmed-mcp-server/
 │   │   │   │   │   ├── expected.md
 │   │   │   │   │   ├── meta.json
 │   │   │   │   │   └── source.xml
-│   │   │   │   └── pmc11609225/
+│   │   │   │   ├── pmc11609225/
+│   │   │   │   │   ├── expect.json
+│   │   │   │   │   ├── expected.md
+│   │   │   │   │   ├── meta.json
+│   │   │   │   │   └── source.xml
+│   │   │   │   └── pmc12806063/
 │   │   │   │       ├── expect.json
 │   │   │   │       ├── expected.md
 │   │   │   │       ├── meta.json
@@ -358,6 +364,7 @@ pubmed-mcp-server/
 │   │   │   ├── parsing/
 │   │   │   │   ├── _book-fixtures.ts
 │   │   │   │   ├── _comments-corrections-fixtures.ts
+│   │   │   │   ├── _investigator-fixtures.ts
 │   │   │   │   ├── article-parser.test.ts
 │   │   │   │   ├── esummary-parser.test.ts
 │   │   │   │   ├── pmc-article-parser.test.ts

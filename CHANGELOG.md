@@ -2,6 +2,10 @@
 
 All notable changes to this project. Each entry links to its full per-version file in [changelog/](changelog/).
 
+## [2.10.21](changelog/2.10.x/2.10.21.md) — 2026-10-09 · 🛡️ Security
+
+pubmed_fetch_fulltext returns PMC back matter and keeps MathML structure, takes singular id keys, and fetches the first 10 of up to 50 identifiers; pubmed_format_citations notes retractions and errata; upstream fetch errors and logs name only the host.
+
 ## [2.10.20](changelog/2.10.x/2.10.20.md) — 2026-10-04
 
 Text-fidelity fixes across full-text JATS, PubMed record, and Europe PMC parsing, with Bookshelf chapters dated by their own dates and pubmed_fetch_fulltext taking pmcids, pmids, and dois in one call.
