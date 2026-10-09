@@ -688,7 +688,8 @@ export function initNcbiService(): void {
       operation: 'NcbiInit',
       additionalContext: {
         toolIdentifier: config.toolIdentifier,
-        hasApiKey: !!config.apiKey,
+        // A log key containing `apiKey` (e.g. `hasApiKey`) is redacted to `[REDACTED]`.
+        ncbiKeyConfigured: !!config.apiKey,
         requestDelayMs: config.requestDelayMs,
         maxConcurrent: config.maxConcurrent,
         totalDeadlineMs: config.totalDeadlineMs,

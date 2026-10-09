@@ -62,6 +62,13 @@ function httpErrorRejection(
   });
 }
 
+/** The error a 503 ends as when no retries are configured. */
+const UNREACHABLE_AFTER_ONE_503 = {
+  code: JsonRpcErrorCode.ServiceUnavailable,
+  message: expect.stringMatching(/Status: 503 \(failed after 1 attempt\)$/),
+  data: { reason: 'europepmc_unreachable', attempts: 1 },
+};
+
 function makeService(opts: { maxRetries?: number; minStartGapMs?: number } = {}) {
   const client = new EuropePmcApiClient({ timeoutMs: 20000 });
   const queue = createEuropePmcRequestQueue(opts.minStartGapMs ?? 0);
@@ -149,12 +156,8 @@ describe('EuropePmcService.search', () => {
     const service = makeService();
     await service.search({ query: 'cancer', sources: ['MED', 'PMC', 'PPR'] });
 
-    const url = mockFetchWithTimeout.mock.calls[0]?.[0] as string;
-    const decoded = decodeURIComponent(url);
-    expect(decoded).toContain('(cancer)');
-    expect(decoded).toContain('SRC:"MED"');
-    expect(decoded).toContain('SRC:"PMC"');
-    expect(decoded).toContain('SRC:"PPR"');
+    const sent = new URL(String(mockFetchWithTimeout.mock.calls[0]?.[0])).searchParams.get('query');
+    expect(sent).toBe('(cancer) AND (SRC:"MED" OR SRC:"PMC" OR SRC:"PPR")');
   });
 
   it('returns the query Europe PMC echoes back as the effective query', async () => {
@@ -300,7 +303,7 @@ describe('EuropePmcService.search', () => {
       httpErrorRejection(503, JsonRpcErrorCode.ServiceUnavailable, 'down'),
     );
     const service = makeService();
-    await expect(service.search({ query: 'foo' })).rejects.toThrow(/503/);
+    await expect(service.search({ query: 'foo' })).rejects.toMatchObject(UNREACHABLE_AFTER_ONE_503);
   });
 
   it('throws ServiceUnavailable with europepmc_unreachable on network failure', async () => {
@@ -1386,7 +1389,7 @@ describe('EuropePmcService.fullTextXml', () => {
       httpErrorRejection(503, JsonRpcErrorCode.ServiceUnavailable, 'down'),
     );
     const service = makeService();
-    await expect(service.fullTextXml('X', 'PMC')).rejects.toThrow(/503/);
+    await expect(service.fullTextXml('X', 'PMC')).rejects.toMatchObject(UNREACHABLE_AFTER_ONE_503);
   });
 
   it('never gives a search 404 the fullTextXML `not-available` treatment', async () => {
@@ -1424,8 +1427,11 @@ describe('EuropePmcService.parseFullTextXml', () => {
   <body><sec><title>Intro</title><p>Body</p></sec></body>
 </article>`;
     const node = service.parseFullTextXml(xml);
-    expect(node).toBeDefined();
-    expect(node && 'article' in node).toBe(true);
+    if (!node) throw new Error('expected an <article> node');
+    expect(parsePmcArticle(node)).toMatchObject({
+      title: 'Hi',
+      sections: [{ title: 'Intro', text: 'Body' }],
+    });
   });
 
   it('returns undefined when the body has no <article>', () => {
@@ -1636,7 +1642,9 @@ describe('EuropePmcService.citations', () => {
       httpErrorRejection(503, JsonRpcErrorCode.ServiceUnavailable, 'down'),
     );
     const service = makeService();
-    await expect(service.citations('12345', 10, 1)).rejects.toThrow(/503/);
+    await expect(service.citations('12345', 10, 1)).rejects.toMatchObject(
+      UNREACHABLE_AFTER_ONE_503,
+    );
   });
 });
 
@@ -1708,12 +1716,46 @@ describe('EuropePmcService.references', () => {
   it('uses the correct /MED/{pmid}/references URL', async () => {
     mockFetchWithTimeout.mockResolvedValue(jsonResponse({ hitCount: 0, referenceList: {} }));
     const service = makeService();
-    await service.references('31295471', 10, 1);
-    const url = mockFetchWithTimeout.mock.calls[0]?.[0] as string;
-    expect(url).toContain('/MED/31295471/references');
-    expect(url).toContain('pageSize=10');
-    expect(url).toContain('page=1');
-    expect(url).toContain('format=json');
+    await service.references('31295471', 10, 2);
+    const url = new URL(String(mockFetchWithTimeout.mock.calls[0]?.[0]));
+    expect(url.pathname).toMatch(/\/MED\/31295471\/references$/);
+    expect(Object.fromEntries(url.searchParams)).toEqual({
+      page: '2',
+      pageSize: '10',
+      format: 'json',
+    });
+  });
+});
+
+/**
+ * A body that fails mid-stream with a rejection quoting the request URL whole, as Bun
+ * 1.4 writes some of them, reaches the caller naming only the host: a search URL
+ * carries the caller's query and the operator's contact email.
+ */
+describe('a body read failure keeps the request URL out of its message', () => {
+  beforeEach(() => mockFetchWithTimeout.mockReset());
+
+  const client = () => new EuropePmcApiClient({ email: 'ops@example.org', timeoutMs: 20000 });
+
+  it.each([
+    ['search', () => client().search({ query: 'asthma' })],
+    ['fullTextXml', () => client().fullTextXml('PMC1')],
+    ['citations', () => client().citations('31295471', 10, 1)],
+  ])('%s', async (_label, call) => {
+    const url =
+      'https://www.ebi.ac.uk/europepmc/webservices/rest/search?query=asthma&email=ops%40example.org';
+    const rejection = Object.assign(new TypeError(`InvalidHTTPResponse fetching "${url}"`), {
+      code: 'InvalidHTTPResponse',
+      path: url,
+    });
+    const body = new ReadableStream({ start: (controller) => controller.error(rejection) });
+    mockFetchWithTimeout.mockResolvedValue(new Response(body, { status: 200 }));
+
+    const err = await call().catch((e: unknown) => e);
+
+    // The same rejection, its classification unchanged; only its text is redacted.
+    expect(err).toBe(rejection);
+    expect((err as Error).message).toBe('InvalidHTTPResponse fetching "https://www.ebi.ac.uk/…?…"');
   });
 });
 

@@ -8,6 +8,8 @@
 import { JsonRpcErrorCode, McpError, serviceUnavailable } from '@cyanheads/mcp-ts-core/errors';
 import { fetchWithTimeout, logger, requestContextService } from '@cyanheads/mcp-ts-core/utils';
 
+import { readBody } from '@/services/fetch-redaction.js';
+
 import {
   OPENALEX_API_BASE,
   OPENALEX_MAX_PAGE_SIZE,
@@ -77,7 +79,7 @@ export class OpenAlexApiClient {
       );
     }
 
-    const text = await response.text();
+    const text = await readBody(response.text());
     try {
       return JSON.parse(text) as OpenAlexWork;
     } catch (error: unknown) {
@@ -167,7 +169,7 @@ export class OpenAlexApiClient {
       );
     }
 
-    const text = await response.text();
+    const text = await readBody(response.text());
     let parsed: OpenAlexWorksResponse;
     try {
       parsed = JSON.parse(text) as OpenAlexWorksResponse;
@@ -222,7 +224,7 @@ export class OpenAlexApiClient {
       );
     }
 
-    const text = await response.text();
+    const text = await readBody(response.text());
     let parsed: OpenAlexWorksResponse;
     try {
       parsed = JSON.parse(text) as OpenAlexWorksResponse;

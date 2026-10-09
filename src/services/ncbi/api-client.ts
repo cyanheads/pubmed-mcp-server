@@ -8,10 +8,27 @@
 import { McpError, serviceUnavailable } from '@cyanheads/mcp-ts-core/errors';
 import { httpErrorFromResponse, logger, requestContextService } from '@cyanheads/mcp-ts-core/utils';
 
+import { redactRejection } from '@/services/fetch-redaction.js';
+
 import { NCBI_EUTILS_BASE_URL, type NcbiRequestOptions, type NcbiRequestParams } from './types.js';
 
 /** Maximum encoded query-string length before automatically switching to POST. */
 const POST_THRESHOLD = 2000;
+
+/**
+ * Wraps a non-`McpError` fetch rejection — header or body phase — as `ncbi_unreachable`.
+ * The request URL carries `api_key` and the operator's `email`, and a runtime can quote
+ * it in the rejection text, so that text is redacted before it becomes the message.
+ */
+function unreachable(error: unknown, data: Record<string, unknown>): McpError {
+  const cause = redactRejection(error);
+  const msg = cause instanceof Error ? cause.message : String(cause);
+  return serviceUnavailable(
+    `NCBI request failed: ${msg}`,
+    { reason: 'ncbi_unreachable', ...data },
+    { cause },
+  );
+}
 
 export interface NcbiApiClientConfig {
   adminEmail?: string;
@@ -40,7 +57,7 @@ export class NcbiApiClient {
 
     try {
       logger.debug(
-        `NCBI HTTP request: ${usePost ? 'POST' : 'GET'} ${url}`,
+        `NCBI HTTP request: ${usePost ? 'POST' : 'GET'} ${endpoint}`,
         requestContextService.createRequestContext({
           operation: 'NcbiHttpRequest',
           additionalContext: { endpoint },
@@ -67,13 +84,7 @@ export class NcbiApiClient {
       return await response.text();
     } catch (error: unknown) {
       if (error instanceof McpError) throw error;
-
-      const msg = error instanceof Error ? error.message : String(error);
-      throw serviceUnavailable(
-        `NCBI request failed: ${msg}`,
-        { reason: 'ncbi_unreachable', endpoint },
-        { cause: error },
-      );
+      throw unreachable(error, { endpoint });
     }
   }
 
@@ -82,6 +93,9 @@ export class NcbiApiClient {
    * Uses plain fetch (not fetchWithTimeout) so we can capture response bodies on
    * error status codes — fetchWithTimeout throws before the body can be read.
    * Injects tool and email params but not api_key (eutils-specific).
+   *
+   * Records and error data name the URL's host and the caller's own params,
+   * never the request URL, whose query carries the operator's email.
    */
   async makeExternalRequest(
     url: string,
@@ -98,15 +112,16 @@ export class NcbiApiClient {
 
     const qs = new URLSearchParams(finalParams).toString();
     const fullUrl = qs ? `${url}?${qs}` : url;
+    const host = URL.parse(url)?.host;
 
     const signal = this.buildTimeoutSignal(externalSignal);
 
     try {
       logger.debug(
-        `NCBI external request: GET ${fullUrl}`,
+        'NCBI external request: GET',
         requestContextService.createRequestContext({
           operation: 'NcbiExternalRequest',
-          additionalContext: { url },
+          additionalContext: { host, params },
         }),
       );
       const response = await fetch(fullUrl, { signal });
@@ -117,19 +132,14 @@ export class NcbiApiClient {
         throw await httpErrorFromResponse(response, {
           service: 'NCBI',
           captureBody: false,
-          data: { url, body: body.substring(0, 500) },
+          data: { host, body: body.substring(0, 500) },
         });
       }
 
       return body;
     } catch (error: unknown) {
       if (error instanceof McpError) throw error;
-      const msg = error instanceof Error ? error.message : String(error);
-      throw serviceUnavailable(
-        `NCBI request failed: ${msg}`,
-        { reason: 'ncbi_unreachable', url },
-        { cause: error },
-      );
+      throw unreachable(error, { host });
     }
   }
 

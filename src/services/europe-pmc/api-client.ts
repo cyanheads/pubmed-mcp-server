@@ -12,6 +12,8 @@
 import { JsonRpcErrorCode, McpError, serviceUnavailable } from '@cyanheads/mcp-ts-core/errors';
 import { fetchWithTimeout, logger, requestContextService } from '@cyanheads/mcp-ts-core/utils';
 
+import { readBody } from '@/services/fetch-redaction.js';
+
 import { EUROPEPMC_API_BASE, type EuropePmcSearchParams } from './types.js';
 
 const USER_AGENT = 'pubmed-mcp-server (+https://github.com/cyanheads/pubmed-mcp-server)';
@@ -98,7 +100,7 @@ export class EuropePmcApiClient {
       );
     }
 
-    return response.text();
+    return readBody(response.text());
   }
 
   /**
@@ -143,7 +145,7 @@ export class EuropePmcApiClient {
       );
     }
 
-    const xml = await response.text();
+    const xml = await readBody(response.text());
     if (!xml.trim()) {
       logger.debug(
         'Europe PMC returned an empty fullTextXML body.',
@@ -205,7 +207,7 @@ export class EuropePmcApiClient {
       );
     }
 
-    return response.text();
+    return readBody(response.text());
   }
 
   private buildSearchUrl(params: EuropePmcSearchParams): string {

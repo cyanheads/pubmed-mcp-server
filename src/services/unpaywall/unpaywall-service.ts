@@ -18,6 +18,7 @@ import {
 } from '@cyanheads/mcp-ts-core/utils';
 
 import { getServerConfig } from '@/config/server-config.js';
+import { readBody } from '@/services/fetch-redaction.js';
 import {
   UNPAYWALL_API_BASE,
   type UnpaywallContent,
@@ -85,7 +86,7 @@ export class UnpaywallService {
       );
     }
 
-    const data = (await response.json()) as UnpaywallResponse;
+    const data = (await readBody(response.json())) as UnpaywallResponse;
     if (!data.is_oa) return { kind: 'no-oa', reason: 'No open-access copy indexed' };
 
     const location = data.best_oa_location ?? data.oa_locations?.[0];
@@ -99,7 +100,8 @@ export class UnpaywallService {
           doi: normalized,
           hostType: location.host_type ?? null,
           license: location.license ?? null,
-          version: location.version ?? null,
+          // The logger writes a caller's `version` key as `data_version`.
+          oaVersion: location.version ?? null,
         },
       }),
     );
@@ -141,7 +143,7 @@ export class UnpaywallService {
           'Unpaywall PDF URL served non-PDF bytes; falling back to HTML URL',
           requestContextService.createRequestContext({
             operation: 'UnpaywallPdfNotPdf',
-            additionalContext: { url: pdfUrl, fetchedUrl: content.fetchedUrl },
+            additionalContext: { host: hostOf(pdfUrl), fetchedHost: hostOf(content.fetchedUrl) },
           }),
         );
       } catch (pdfErr: unknown) {
@@ -150,7 +152,7 @@ export class UnpaywallService {
           requestContextService.createRequestContext({
             operation: 'UnpaywallPdfFallback',
             additionalContext: {
-              url: pdfUrl,
+              host: hostOf(pdfUrl),
               error: pdfErr instanceof Error ? pdfErr.message : String(pdfErr),
             },
           }),
@@ -182,15 +184,19 @@ export class UnpaywallService {
    * `application/octet-stream`, and an HTML interstitial is sometimes served as
    * `application/pdf`. Bytes opening with `%PDF-` are a PDF whatever the header
    * says; everything else is treated as text. (#104)
+   *
+   * Records and error data name the URL's host, never the URL: a publisher's
+   * PDF link can carry an access token in its path or query.
    */
   private async fetchAs(
     url: string,
     expected: 'pdf' | 'auto',
     signal?: AbortSignal,
   ): Promise<UnpaywallContent> {
+    const host = hostOf(url);
     const ctx = requestContextService.createRequestContext({
       operation: 'UnpaywallFetch',
-      additionalContext: { url, expected },
+      additionalContext: { expected, host },
     });
 
     const accept =
@@ -209,7 +215,7 @@ export class UnpaywallService {
       const msg = error instanceof Error ? error.message : String(error);
       throw serviceUnavailable(
         `Unpaywall content fetch failed: ${msg}`,
-        { reason: 'unpaywall_unreachable', url },
+        { reason: 'unpaywall_unreachable', host },
         { cause: error },
       );
     }
@@ -217,19 +223,24 @@ export class UnpaywallService {
     if (!response.ok) {
       throw await httpErrorFromResponse(response, {
         service: 'Unpaywall content fetch',
-        data: { url },
+        data: { host },
       });
     }
 
     const fetchedUrl = response.url || url;
     // Read the body once — a Response body can only be consumed once, and the
     // bytes are what the classification reads.
-    const bytes = new Uint8Array(await response.arrayBuffer());
+    const bytes = new Uint8Array(await readBody(response.arrayBuffer()));
 
     if (hasPdfMagic(bytes)) return { kind: 'pdf', fetchedUrl, body: bytes };
 
     return { kind: 'html', fetchedUrl, body: new TextDecoder().decode(bytes) };
   }
+}
+
+/** The host a URL names, for log and error labels — `undefined` when it does not parse. */
+function hostOf(url: string): string | undefined {
+  return URL.parse(url)?.host;
 }
 
 /** True for a string carrying more than whitespace — Unpaywall sends `null` for a field it has no value for. */

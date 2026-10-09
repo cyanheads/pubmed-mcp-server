@@ -4,7 +4,8 @@
  */
 
 import { JsonRpcErrorCode, McpError } from '@cyanheads/mcp-ts-core/errors';
-import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import type { RequestContext } from '@cyanheads/mcp-ts-core/utils';
+import { afterEach, beforeEach, describe, expect, it, type MockInstance, vi } from 'vitest';
 
 const mockFetchWithTimeout = vi.fn();
 
@@ -19,6 +20,7 @@ vi.mock('@cyanheads/mcp-ts-core/utils', async () => {
 const { UnpaywallService, initUnpaywallService, getUnpaywallService } = await import(
   '@/services/unpaywall/unpaywall-service.js'
 );
+const { logger } = await import('@cyanheads/mcp-ts-core/utils');
 
 function jsonResponse(body: unknown, init: ResponseInit = {}) {
   return new Response(JSON.stringify(body), {
@@ -109,15 +111,19 @@ describe('UnpaywallService.resolve', () => {
   });
 
   it('accepts DOI inputs with scheme or doi.org prefix', async () => {
-    mockFetchWithTimeout.mockResolvedValue(jsonResponse({ is_oa: false }));
+    mockFetchWithTimeout.mockImplementation(() => Promise.resolve(jsonResponse({ is_oa: false })));
     const service = new UnpaywallService('oa@example.com', 20000);
 
-    await service.resolve('https://doi.org/10.1000/example');
-    expect(mockFetchWithTimeout).toHaveBeenCalledWith(
-      expect.stringContaining('10.1000%2Fexample'),
-      expect.any(Number),
-      expect.any(Object),
-      expect.any(Object),
+    const inputs = [
+      'doi:10.1000/example',
+      'DOI:10.1000/example',
+      'https://doi.org/10.1000/example',
+      'http://dx.doi.org/10.1000/example',
+    ];
+    for (const input of inputs) await service.resolve(input);
+
+    expect(mockFetchWithTimeout.mock.calls.map((call) => call[0])).toEqual(
+      inputs.map(() => 'https://api.unpaywall.org/v2/10.1000%2Fexample?email=oa%40example.com'),
     );
   });
 
@@ -165,14 +171,21 @@ describe('UnpaywallService.resolve', () => {
     );
     const service = new UnpaywallService('oa@example.com', 20000);
 
-    await expect(service.resolve('10.1000/example')).rejects.toThrow(/Status: 503/);
+    await expect(service.resolve('10.1000/example')).rejects.toMatchObject({
+      code: JsonRpcErrorCode.ServiceUnavailable,
+      message: expect.stringContaining('Status: 503'),
+      data: { reason: 'unpaywall_unreachable' },
+    });
   });
 
   it('throws ServiceUnavailable on network errors', async () => {
     mockFetchWithTimeout.mockRejectedValue(new Error('connect ETIMEDOUT'));
     const service = new UnpaywallService('oa@example.com', 20000);
 
-    await expect(service.resolve('10.1000/example')).rejects.toThrow(/connect ETIMEDOUT/);
+    await expect(service.resolve('10.1000/example')).rejects.toMatchObject({
+      code: JsonRpcErrorCode.ServiceUnavailable,
+      message: expect.stringContaining('connect ETIMEDOUT'),
+    });
   });
 
   it('network error on resolve stamps reason unpaywall_unreachable', async () => {
@@ -252,12 +265,11 @@ describe('UnpaywallService.fetchContent', () => {
     mockFetchWithTimeout.mockRejectedValue(new Error('connect ECONNRESET'));
     const service = new UnpaywallService('oa@example.com', 20000);
 
-    await expect(service.fetchContent({ url: 'https://example.org/paper' })).rejects.toMatchObject({
-      data: {
-        reason: 'unpaywall_unreachable',
-        url: 'https://example.org/paper',
-      },
+    const error = await service.fetchContent({ url: 'https://example.org/paper' }).catch((e) => e);
+    expect(error).toMatchObject({
+      data: { reason: 'unpaywall_unreachable', host: 'example.org' },
     });
+    expect(error.data).not.toHaveProperty('url');
   });
 
   describe('classification by received bytes (issue #104)', () => {
@@ -336,7 +348,7 @@ describe('UnpaywallService.fetchContent', () => {
       // A genuinely corrupt PDF must still reach the PDF parser so the
       // downstream failure reads as a PDF parse failure, not an HTML miss.
       mockFetchWithTimeout.mockResolvedValueOnce(
-        bytesResponse(pdfBytes('  truncated'), 'application/pdf'),
+        bytesResponse(pdfBytes('\x00\x01 truncated'), 'application/pdf'),
       );
 
       const service = new UnpaywallService('oa@example.com', 20000);
@@ -438,6 +450,255 @@ describe('UnpaywallService.fetchContent', () => {
       expect(content.kind).toBe('html');
       expect(content.body).toContain('landing');
     });
+  });
+});
+
+/**
+ * A request URL can carry a token in its path or query (signed PDF links, the
+ * operator's `email` on the lookup), so records and error data name the host,
+ * the DOI, or the location slot instead. The request itself still goes to the
+ * full URL. (mcp-ts-core 0.13.12, 0.13.13)
+ */
+describe('URLs stay out of log records and error data', () => {
+  const PDF_URL = 'https://cdn.publisher.example/sk-token/paper.pdf?sig=secret';
+  const LANDING_URL = 'https://www.publisher.example/article/x?access=secret';
+  const HTML = '<html><body>Subscribe to read this article</body></html>';
+
+  let debugSpy: MockInstance<typeof logger.debug>;
+
+  beforeEach(() => {
+    mockFetchWithTimeout.mockReset();
+    debugSpy = vi.spyOn(logger, 'debug');
+  });
+
+  afterEach(() => {
+    debugSpy.mockRestore();
+  });
+
+  /** The line each `logger.debug` call writes: message, operation, and the context's `extra` fields flattened. */
+  const recordsOf = (operation: string) =>
+    debugSpy.mock.calls
+      .map(([msg, context]) => {
+        const ctx = context as RequestContext | undefined;
+        return { msg, operation: ctx?.operation, ...ctx?.extra };
+      })
+      .filter((record) => record.operation === operation);
+
+  /** The context each fetch ran under — the framework writes its fields on every record for that call. */
+  const fetchContexts = () =>
+    mockFetchWithTimeout.mock.calls.map((call) => {
+      const ctx = call[2] as RequestContext;
+      return { operation: ctx.operation, ...ctx.extra };
+    });
+
+  const expectNoUrl = (value: unknown) => {
+    const text = JSON.stringify(value);
+    for (const fragment of ['://', 'sk-token', 'secret', 'oa@example.com', 'oa%40example.com']) {
+      expect(text).not.toContain(fragment);
+    }
+  };
+
+  const htmlAt = (url?: string) => {
+    const response = new Response(HTML, { status: 200, headers: { 'content-type': 'text/html' } });
+    if (url) Object.defineProperty(response, 'url', { value: url });
+    return response;
+  };
+
+  it('names the hosts when the PDF slot redirects to HTML, while requesting the full URLs', async () => {
+    mockFetchWithTimeout
+      .mockResolvedValueOnce(htmlAt('https://login.publisher.example/sso?next=secret'))
+      .mockResolvedValueOnce(htmlAt(LANDING_URL));
+
+    const service = new UnpaywallService('oa@example.com', 20000);
+    const content = await service.fetchContent({ url: LANDING_URL, url_for_pdf: PDF_URL });
+
+    expect(content).toMatchObject({ kind: 'html', fetchedUrl: LANDING_URL });
+    expect(mockFetchWithTimeout.mock.calls.map((call) => call[0])).toEqual([PDF_URL, LANDING_URL]);
+
+    const [notPdf, ...rest] = recordsOf('UnpaywallPdfNotPdf');
+    expect(rest).toEqual([]);
+    expectNoUrl(notPdf);
+    expectNoUrl(fetchContexts());
+    expect(notPdf).toMatchObject({
+      host: 'cdn.publisher.example',
+      fetchedHost: 'login.publisher.example',
+    });
+    expect(fetchContexts()).toEqual([
+      { operation: 'UnpaywallFetch', expected: 'pdf', host: 'cdn.publisher.example' },
+      { operation: 'UnpaywallFetch', expected: 'auto', host: 'www.publisher.example' },
+    ]);
+  });
+
+  it('names the host and the error when the PDF fetch fails before the landing-page fetch', async () => {
+    const forbidden = new Response('denied', { status: 403 });
+    Object.defineProperty(forbidden, 'url', { value: PDF_URL });
+    mockFetchWithTimeout
+      .mockResolvedValueOnce(forbidden)
+      .mockResolvedValueOnce(htmlAt(LANDING_URL));
+
+    const service = new UnpaywallService('oa@example.com', 20000);
+    await service.fetchContent({ url: LANDING_URL, url_for_pdf: PDF_URL });
+
+    const [fallback, ...rest] = recordsOf('UnpaywallPdfFallback');
+    expect(rest).toEqual([]);
+    expectNoUrl(fallback);
+    expect(fallback).toMatchObject({
+      host: 'cdn.publisher.example',
+      error: expect.stringContaining('HTTP 403'),
+    });
+  });
+
+  it('keeps the URL out of a network failure’s error data', async () => {
+    mockFetchWithTimeout.mockRejectedValueOnce(new Error('connect ECONNRESET'));
+
+    const error = await new UnpaywallService('oa@example.com', 20000)
+      .fetchContent({ url: LANDING_URL })
+      .catch((e: unknown) => e);
+
+    expect(error).toBeInstanceOf(McpError);
+    expectNoUrl((error as McpError).data);
+    expect((error as McpError).data).toMatchObject({
+      reason: 'unpaywall_unreachable',
+      host: 'www.publisher.example',
+    });
+  });
+
+  it('keeps the URL out of a non-2xx error’s data, even when the response carries it', async () => {
+    // `httpErrorFromResponse` adds `data.url` only under `includeUrl: true`.
+    const forbidden = new Response('denied', { status: 403 });
+    Object.defineProperty(forbidden, 'url', { value: LANDING_URL });
+    mockFetchWithTimeout.mockResolvedValueOnce(forbidden);
+
+    const error = await new UnpaywallService('oa@example.com', 20000)
+      .fetchContent({ url: LANDING_URL })
+      .catch((e: unknown) => e);
+
+    expect(error).toBeInstanceOf(McpError);
+    expect((error as McpError).data).not.toHaveProperty('url');
+    expectNoUrl((error as McpError).data);
+    expect(error).toMatchObject({
+      code: JsonRpcErrorCode.Forbidden,
+      data: { status: 403, body: 'denied', host: 'www.publisher.example' },
+    });
+  });
+
+  it('names the DOI, never the lookup URL or the operator email, on the resolve call', async () => {
+    mockFetchWithTimeout.mockResolvedValueOnce(
+      jsonResponse({
+        is_oa: true,
+        best_oa_location: { url: LANDING_URL, host_type: 'publisher', version: 'publishedVersion' },
+      }),
+    );
+
+    await new UnpaywallService('oa@example.com', 20000).resolve('10.1000/x');
+
+    expect(mockFetchWithTimeout.mock.calls[0]?.[0]).toContain('email=oa%40example.com');
+    expect(fetchContexts()).toEqual([{ operation: 'UnpaywallResolve', doi: '10.1000/x' }]);
+    expectNoUrl(fetchContexts());
+    const resolved = recordsOf('UnpaywallResolved');
+    expect(resolved).toEqual([expect.objectContaining({ doi: '10.1000/x' })]);
+    expectNoUrl(resolved);
+  });
+
+  /** The logger writes a caller's `version` key as `data_version`. (mcp-ts-core 0.13.13) */
+  it('logs the OA location version under oaVersion, a key the logger keeps as written', async () => {
+    mockFetchWithTimeout.mockResolvedValueOnce(
+      jsonResponse({
+        is_oa: true,
+        best_oa_location: {
+          url: LANDING_URL,
+          host_type: 'repository',
+          license: 'cc-by',
+          version: 'acceptedVersion',
+        },
+      }),
+    );
+
+    await new UnpaywallService('oa@example.com', 20000).resolve('10.1000/x');
+
+    const [resolved, ...rest] = recordsOf('UnpaywallResolved');
+    expect(rest).toEqual([]);
+    expect(resolved).toEqual({
+      msg: 'Unpaywall resolved DOI',
+      operation: 'UnpaywallResolved',
+      doi: '10.1000/x',
+      hostType: 'repository',
+      license: 'cc-by',
+      oaVersion: 'acceptedVersion',
+    });
+  });
+
+  it('logs a missing OA version as null under oaVersion', async () => {
+    mockFetchWithTimeout.mockResolvedValueOnce(
+      jsonResponse({ is_oa: true, oa_locations: [{ url: LANDING_URL }] }),
+    );
+
+    await new UnpaywallService('oa@example.com', 20000).resolve('10.1000/x');
+
+    expect(recordsOf('UnpaywallResolved')).toEqual([
+      expect.objectContaining({ hostType: null, license: null, oaVersion: null }),
+    ]);
+    expect(recordsOf('UnpaywallResolved')[0]).not.toHaveProperty('version');
+  });
+
+  /** No path token, query, or operator email from the request URLs above. */
+  const expectNoUrlQuery = (value: unknown) => {
+    const text = JSON.stringify(value);
+    for (const fragment of ['sk-token', 'secret', 'oa@example.com', 'oa%40example.com']) {
+      expect(text).not.toContain(fragment);
+    }
+  };
+
+  /**
+   * A 200 whose body fails mid-stream with a rejection quoting the request URL whole,
+   * as Bun 1.4 writes some of them.
+   */
+  const bodyFailingWith = (url: string) => {
+    const rejection = Object.assign(
+      new TypeError(
+        `InvalidHTTPResponse fetching "${url}". For more information, pass \`verbose: true\` in the second argument to fetch()`,
+      ),
+      { code: 'InvalidHTTPResponse', path: url },
+    );
+    const body = new ReadableStream({ start: (controller) => controller.error(rejection) });
+    return { rejection, response: new Response(body, { status: 200 }) };
+  };
+
+  it('a lookup whose body fails names only the host in the rejection', async () => {
+    const { rejection, response } = bodyFailingWith(
+      'https://api.unpaywall.org/v2/10.1000%2Fx?email=oa%40example.com',
+    );
+    mockFetchWithTimeout.mockResolvedValueOnce(response);
+
+    const error = await new UnpaywallService('oa@example.com', 20000)
+      .resolve('10.1000/x')
+      .catch((e: unknown) => e);
+
+    // The same rejection, its classification unchanged; only its text is redacted.
+    expect(error).toBe(rejection);
+    expect(error).toMatchObject({ code: 'InvalidHTTPResponse' });
+    expect((error as Error).message).toContain('"https://api.unpaywall.org/…?…"');
+    expectNoUrlQuery((error as Error).message);
+  });
+
+  it('a content fetch whose body fails names only the host, in the fallback record and the error', async () => {
+    mockFetchWithTimeout
+      .mockResolvedValueOnce(bodyFailingWith(PDF_URL).response)
+      .mockResolvedValueOnce(bodyFailingWith(LANDING_URL).response);
+
+    const error = await new UnpaywallService('oa@example.com', 20000)
+      .fetchContent({ url: LANDING_URL, url_for_pdf: PDF_URL })
+      .catch((e: unknown) => e);
+
+    expect(recordsOf('UnpaywallPdfFallback')).toEqual([
+      expect.objectContaining({
+        host: 'cdn.publisher.example',
+        error: expect.stringContaining('"https://cdn.publisher.example/…?…"'),
+      }),
+    ]);
+    expectNoUrlQuery(recordsOf('UnpaywallPdfFallback'));
+    expect((error as Error).message).toContain('"https://www.publisher.example/…?…"');
+    expectNoUrlQuery((error as Error).message);
   });
 });
 

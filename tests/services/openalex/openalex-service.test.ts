@@ -177,11 +177,11 @@ describe('OpenAlexService.similar', () => {
     const service = makeService();
     const result = await service.similar('31295471', 10);
 
-    expect(result.pmids).toContain('77777');
-    // The batch-resolve URL should use the bare ID, not the full URL
-    const batchUrl = mockFetchWithTimeout.mock.calls[1]?.[0] as string;
-    expect(batchUrl).toContain('W999');
-    expect(batchUrl).not.toContain('https://openalex.org/W999');
+    expect(result.pmids).toEqual(['77777']);
+    // The batch-resolve filter carries the bare ID. Read decoded: the raw URL is
+    // percent-encoded, so a full-URL ID would never appear in it literally.
+    const batchUrl = new URL(mockFetchWithTimeout.mock.calls[1]?.[0] as string);
+    expect(batchUrl.searchParams.get('filter')).toBe('openalex:W999');
   });
 });
 
@@ -673,6 +673,39 @@ describe('openalex_invalid_response contract alignment', () => {
   });
 });
 
+/**
+ * A body that fails mid-stream with a rejection quoting the request URL whole, as Bun
+ * 1.4 writes some of them, reaches the caller naming only the host: the query carries
+ * the operator's polite-pool email.
+ */
+describe('a body read failure keeps the request URL out of its message', () => {
+  beforeEach(() => mockFetchWithTimeout.mockReset());
+
+  const client = () => new OpenAlexApiClient({ email: 'ops@example.org', timeoutMs: 20000 });
+
+  it.each([
+    ['getWorkByPmid', () => client().getWorkByPmid('31295471')],
+    ['getCitedBy', () => client().getCitedBy('W1234', 5, 1)],
+    ['resolveOaIdsToPmids', () => client().resolveOaIdsToPmids(['W500'])],
+  ])('%s', async (_label, call) => {
+    const url = 'https://api.openalex.org/works?filter=cites%3AW1234&mailto=ops%40example.org';
+    const rejection = Object.assign(new TypeError(`InvalidHTTPResponse fetching "${url}"`), {
+      code: 'InvalidHTTPResponse',
+      path: url,
+    });
+    const body = new ReadableStream({ start: (controller) => controller.error(rejection) });
+    mockFetchWithTimeout.mockResolvedValue(new Response(body, { status: 200 }));
+
+    const err = await call().catch((e: unknown) => e);
+
+    // The same rejection, its classification unchanged; only its text is redacted.
+    expect(err).toBe(rejection);
+    expect((err as Error).message).toBe(
+      'InvalidHTTPResponse fetching "https://api.openalex.org/…?…"',
+    );
+  });
+});
+
 describe('initOpenAlexService / getOpenAlexService', () => {
   afterEach(() => {
     vi.unstubAllEnvs();
@@ -685,14 +718,15 @@ describe('initOpenAlexService / getOpenAlexService', () => {
     expect(mod.getOpenAlexService()).toBeInstanceOf(mod.OpenAlexService);
   });
 
-  it('getOpenAlexServiceOptional returns undefined before init', async () => {
-    await import('@/services/openalex/openalex-service.js');
-    // Reset internal state via module reset
+  it('getOpenAlexServiceOptional returns undefined before init, then the initialized service', async () => {
+    // A fresh module instance, so no earlier test's init is visible.
     vi.resetModules();
     const freshMod = await import('@/services/openalex/openalex-service.js');
-    // Before init, it may return the previous value due to module caching.
-    // After init it must return a service instance.
+
+    expect(freshMod.getOpenAlexServiceOptional()).toBeUndefined();
+    expect(() => freshMod.getOpenAlexService()).toThrow(/not initialized/);
+
     freshMod.initOpenAlexService();
-    expect(freshMod.getOpenAlexServiceOptional()).toBeInstanceOf(freshMod.OpenAlexService);
+    expect(freshMod.getOpenAlexServiceOptional()).toBe(freshMod.getOpenAlexService());
   });
 });
