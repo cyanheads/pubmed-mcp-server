@@ -2,6 +2,10 @@
 
 All notable changes to this project. Each entry links to its full per-version file in [changelog/](changelog/).
 
+## [2.10.22](changelog/2.10.x/2.10.22.md) — 2026-10-12
+
+Author name suffixes carry through records, citations, and full text; citation formatting, full-text cleanup, in-place spell-check corrections, and Europe PMC sort errors are fixed.
+
 ## [2.10.21](changelog/2.10.x/2.10.21.md) — 2026-10-09 · 🛡️ Security
 
 pubmed_fetch_fulltext returns PMC back matter and keeps MathML structure, takes singular id keys, and fetches the first 10 of up to 50 identifiers; pubmed_format_citations notes retractions and errata; upstream fetch errors and logs name only the host.

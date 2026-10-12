@@ -1,6 +1,6 @@
 # pubmed-mcp-server - Directory Structure
 
-Generated on: 2026-10-09 17:17:56
+Generated on: 2026-10-12 17:55:48
 
 ```text
 pubmed-mcp-server/
@@ -168,6 +168,7 @@ pubmed-mcp-server/
 │   │       └── definitions/
 │   │           ├── _budget.ts
 │   │           ├── _concepts.ts
+│   │           ├── _notices.ts
 │   │           ├── _schemas.ts
 │   │           ├── _text.ts
 │   │           ├── _visible-text.ts
@@ -324,6 +325,7 @@ pubmed-mcp-server/
 │   │       └── definitions/
 │   │           ├── _budget.test.ts
 │   │           ├── _fuzz-helpers.ts
+│   │           ├── _mesh-esummary-fixtures.ts
 │   │           ├── _schemas.test.ts
 │   │           ├── _text.test.ts
 │   │           ├── _visible-text.test.ts
@@ -365,12 +367,15 @@ pubmed-mcp-server/
 │   │   │   │   ├── _book-fixtures.ts
 │   │   │   │   ├── _comments-corrections-fixtures.ts
 │   │   │   │   ├── _investigator-fixtures.ts
+│   │   │   │   ├── _pagination-fixtures.ts
+│   │   │   │   ├── _suffix-fixtures.ts
 │   │   │   │   ├── article-parser.test.ts
 │   │   │   │   ├── esummary-parser.test.ts
 │   │   │   │   ├── pmc-article-parser.test.ts
 │   │   │   │   ├── pmc-xml-helpers.test.ts
 │   │   │   │   ├── text-helpers.test.ts
 │   │   │   │   └── xml-helpers.test.ts
+│   │   │   ├── _espell-fixtures.ts
 │   │   │   ├── api-client.test.ts
 │   │   │   ├── ecitmatch-truncation.test.ts
 │   │   │   ├── efetch-timeout-retry.test.ts
