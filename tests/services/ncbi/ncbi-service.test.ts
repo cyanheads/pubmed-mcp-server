@@ -13,9 +13,14 @@ import {
 } from '@cyanheads/mcp-ts-core/utils';
 import { afterEach, beforeEach, describe, expect, it, type MockInstance, vi } from 'vitest';
 import type { NcbiApiClient } from '@/services/ncbi/api-client.js';
-import { NcbiService } from '@/services/ncbi/ncbi-service.js';
+import {
+  NcbiService,
+  rebuildSpelledQuery,
+  type SpelledSegment,
+} from '@/services/ncbi/ncbi-service.js';
 import { createNcbiRequestQueue } from '@/services/ncbi/request-queue.js';
 import { NcbiResponseHandler } from '@/services/ncbi/response-handler.js';
+import { capturedEspell, ESPELL_TERMS, espellBody } from './_espell-fixtures.js';
 
 vi.mock('@cyanheads/mcp-ts-core/utils', async (importOriginal) => {
   const actual = await importOriginal<typeof import('@cyanheads/mcp-ts-core/utils')>();
@@ -194,61 +199,151 @@ describe('NcbiService', () => {
   });
 
   describe('eSpell', () => {
-    it('returns correction when available', async () => {
-      const { service, mockApiClient, mockResponseHandler } = createMockService();
-      (mockApiClient.makeRequest as ReturnType<typeof vi.fn>).mockResolvedValue('<xml/>');
-      (mockResponseHandler.parseAndHandleResponse as ReturnType<typeof vi.fn>).mockReturnValue({
-        eSpellResult: {
-          Query: 'astma',
-          CorrectedQuery: 'asthma',
-        },
-      });
-
-      const result = await service.eSpell({ db: 'pubmed', term: 'astma' });
-      expect(result.original).toBe('astma');
-      expect(result.corrected).toBe('asthma');
-      expect(result.hasSuggestion).toBe(true);
-    });
-
-    it('returns original when no correction', async () => {
-      const { service, mockApiClient, mockResponseHandler } = createMockService();
-      (mockApiClient.makeRequest as ReturnType<typeof vi.fn>).mockResolvedValue('<xml/>');
-      (mockResponseHandler.parseAndHandleResponse as ReturnType<typeof vi.fn>).mockReturnValue({
-        eSpellResult: {
-          Query: 'cancer',
-          CorrectedQuery: '',
-        },
-      });
-
-      const result = await service.eSpell({ db: 'pubmed', term: 'cancer' });
-      expect(result.corrected).toBe('cancer');
-      expect(result.hasSuggestion).toBe(false);
-    });
-
-    it('asks the response handler for the verbatim parser (#108)', async () => {
-      const { service, mockApiClient, mockResponseHandler } = createMockService();
-      (mockApiClient.makeRequest as ReturnType<typeof vi.fn>).mockResolvedValue('<xml/>');
-      (mockResponseHandler.parseAndHandleResponse as ReturnType<typeof vi.fn>).mockReturnValue({
-        eSpellResult: { Query: '33306283', CorrectedQuery: '' },
-      });
-
-      await service.eSpell({ db: 'pubmed', term: '33306283' });
-
-      expect(mockResponseHandler.parseAndHandleResponse).toHaveBeenCalledWith(
-        '<xml/>',
-        'espell',
-        expect.objectContaining({ retmode: 'xml', useVerbatimParser: true }),
+    /** A service whose ESpell request answers `body`, parsed by the real response handler. */
+    function espellService(body: string) {
+      const mockApiClient = {
+        makeRequest: vi.fn().mockResolvedValue(body),
+      } as unknown as NcbiApiClient;
+      const service = new NcbiService(
+        mockApiClient,
+        idleQueue(),
+        new NcbiResponseHandler(),
+        0,
+        TEST_DEADLINE_MS,
       );
+      return { service, mockApiClient };
+    }
+
+    /** An ESpell body for `query` whose `<SpelledQuery>` holds `segments`, in ESpell's shape. */
+    function spelled(query: string, segments: string): string {
+      return espellBody(
+        `<eSpellResult>\n\t<Database>pubmed</Database>\n\t<Query>${query}</Query>\n\t<CorrectedQuery>ignored</CorrectedQuery>\n\t<SpelledQuery>${segments}</SpelledQuery>\n\t<ERROR/>\n</eSpellResult>\n`,
+      );
+    }
+
+    async function spell(body: string, term: string) {
+      return espellService(body).service.eSpell({ db: 'pubmed', term });
+    }
+
+    describe('rebuilds the correction from <SpelledQuery> against the caller’s text (#241)', () => {
+      // Measured against live ESpell (2026-10-12); each row replays the captured answer.
+      const CAPTURED: [term: string, corrected: string, hasSuggestion: boolean][] = [
+        ['BRCA1 tamoxifen resistence', 'BRCA1 tamoxifen resistance', true],
+        [
+          'breast cancer[MeSH] AND tamoxifen resistence',
+          'breast cancer[MeSH] AND tamoxifen resistance',
+          true,
+        ],
+        ['(lung OR brest) cancr', '(lung OR breast) cancer', true],
+        ['heart  attack   treatmnt', 'heart  attack   treatment', true],
+        ['diabetis mellitus type 2', 'diabetes mellitus type 2', true],
+        ['myocardial infarcton NOT stemi', 'myocardial infarction NOT stemi', true],
+        ['H1N1 vacine 2009 pandemc', 'H1N1 vaccine 2009 pandemc', true],
+        ['alzhiemer diseese treatmnt outcomse', 'alzheimer disease treatment outcomes', true],
+        ['HbA1c', 'HbA1c', false],
+        ['IL6', 'IL6', false],
+        ['Tamoxifen', 'Tamoxifen', false],
+        ['breast cancer[mesh]', 'breast cancer[mesh]', false],
+        ['1918 influenza pandemc', '1918 influenza pandemc', false],
+        ['COVID-19 vaccin efficacy', 'COVID-19 vaccin efficacy', false],
+        ['PCR assay sensitivty', 'PCR assay sensitivty', false],
+        ['Sjögren syndrom', 'Sjögren syndrom', false],
+        ['007', '007', false],
+        ['1e5', '1e5', false],
+        ['33306283', '33306283', false],
+        // Non-goals: all-uppercase typos stay as written, and a replacement that
+        // passes the rules ships as ESpell wrote it.
+        ['ALZHIEMER DISEESE', 'ALZHIEMER DISEESE', false],
+        ['raloxifen breast cancr', 'tamoxifen breast cancer', true],
+      ];
+
+      it.each(CAPTURED)('%j → %j', async (term, corrected, hasSuggestion) => {
+        expect(await spell(capturedEspell(term), term)).toEqual({
+          original: term,
+          corrected,
+          hasSuggestion,
+        });
+      });
+
+      it('covers every captured response', () => {
+        expect(CAPTURED.map(([term]) => term).toSorted()).toEqual(ESPELL_TERMS.toSorted());
+      });
+
+      it('keeps a caller span that differs from the replacement only in case', async () => {
+        const body = spelled(
+          'Tamoxifen breast cancr',
+          '<Original></Original><Replaced>tamoxifen</Replaced><Original> breast </Original><Replaced>cancer</Replaced>',
+        );
+        expect(await spell(body, 'Tamoxifen breast cancr')).toEqual({
+          original: 'Tamoxifen breast cancr',
+          corrected: 'Tamoxifen breast cancer',
+          hasSuggestion: true,
+        });
+      });
+
+      it('stops at an empty replacement and keeps the rest as written', async () => {
+        const body = spelled(
+          'tumr cancr',
+          '<Original></Original><Replaced></Replaced><Original> </Original><Replaced>cancer</Replaced>',
+        );
+        expect(await spell(body, 'tumr cancr')).toEqual({
+          original: 'tumr cancr',
+          corrected: 'tumr cancr',
+          hasSuggestion: false,
+        });
+      });
+
+      it('stops at a replacement more than two edits from its span, keeping earlier fixes', async () => {
+        const body = spelled(
+          'cancr zzzzzz tumr',
+          '<Original></Original><Replaced>cancer</Replaced><Original> </Original><Replaced>tumor</Replaced><Original> </Original><Replaced>tumor</Replaced>',
+        );
+        expect(await spell(body, 'cancr zzzzzz tumr')).toEqual({
+          original: 'cancr zzzzzz tumr',
+          corrected: 'cancer zzzzzz tumr',
+          hasSuggestion: true,
+        });
+      });
+
+      it('stops when two replacements arrive with no caller text between them', async () => {
+        const body = spelled(
+          'cancr tumr',
+          '<Original></Original><Replaced>cancer</Replaced><Replaced>tumor</Replaced>',
+        );
+        expect(await spell(body, 'cancr tumr')).toEqual({
+          original: 'cancr tumr',
+          corrected: 'cancr tumr',
+          hasSuggestion: false,
+        });
+      });
+
+      it('stops when an <Original> is not the caller’s text', async () => {
+        const body = spelled(
+          'cancr tumr',
+          '<Original></Original><Replaced>cancer</Replaced><Original> and </Original><Replaced>tumor</Replaced>',
+        );
+        expect(await spell(body, 'cancr tumr')).toEqual({
+          original: 'cancr tumr',
+          corrected: 'cancr tumr',
+          hasSuggestion: false,
+        });
+      });
+
+      it('reads entity-escaped text and ignores whitespace between segments', async () => {
+        const body = spelled(
+          'tumor &amp; cancr',
+          '\n\t\t<Original>tumor &amp; </Original>\n\t\t<Replaced>cancer</Replaced>\n\t',
+        );
+        expect(await spell(body, 'tumor & cancr')).toEqual({
+          original: 'tumor & cancr',
+          corrected: 'tumor & cancer',
+          hasSuggestion: true,
+        });
+      });
     });
 
     it('returns an all-numeric term as a string on both fields (#108)', async () => {
-      const { service, mockApiClient, mockResponseHandler } = createMockService();
-      (mockApiClient.makeRequest as ReturnType<typeof vi.fn>).mockResolvedValue('<xml/>');
-      (mockResponseHandler.parseAndHandleResponse as ReturnType<typeof vi.fn>).mockReturnValue({
-        eSpellResult: { Query: '33306283', CorrectedQuery: '' },
-      });
-
-      const result = await service.eSpell({ db: 'pubmed', term: '33306283' });
+      const result = await spell(capturedEspell('33306283'), '33306283');
       expect(result).toEqual({
         original: '33306283',
         corrected: '33306283',
@@ -262,38 +357,99 @@ describe('NcbiService', () => {
       ['007', 'leading zero'],
       ['1e5', 'exponential literal'],
     ])('round-trips %s (%s) byte-identically (#108)', async (term) => {
-      const { service, mockApiClient, mockResponseHandler } = createMockService();
-      (mockApiClient.makeRequest as ReturnType<typeof vi.fn>).mockResolvedValue('<xml/>');
-      (mockResponseHandler.parseAndHandleResponse as ReturnType<typeof vi.fn>).mockReturnValue({
-        eSpellResult: { Query: term, CorrectedQuery: '' },
-      });
-
-      const result = await service.eSpell({ db: 'pubmed', term });
+      const result = await spell(capturedEspell(term), term);
       expect(result.original).toBe(term);
       expect(result.corrected).toBe(term);
       expect(result.hasSuggestion).toBe(false);
     });
 
     it('still reports a genuine misspelling as a suggestion (#108 regression)', async () => {
-      const { service, mockApiClient, mockResponseHandler } = createMockService();
-      (mockApiClient.makeRequest as ReturnType<typeof vi.fn>).mockResolvedValue('<xml/>');
-      (mockResponseHandler.parseAndHandleResponse as ReturnType<typeof vi.fn>).mockReturnValue({
-        eSpellResult: { Query: 'cancr', CorrectedQuery: 'cancer' },
-      });
-
-      const result = await service.eSpell({ db: 'pubmed', term: 'cancr' });
+      const body = spelled('cancr', '<Original></Original><Replaced>cancer</Replaced>');
+      const result = await spell(body, 'cancr');
       expect(result).toEqual({ original: 'cancr', corrected: 'cancer', hasSuggestion: true });
     });
 
     it('falls back to the requested term when ESpell omits <Query>', async () => {
-      const { service, mockApiClient, mockResponseHandler } = createMockService();
-      (mockApiClient.makeRequest as ReturnType<typeof vi.fn>).mockResolvedValue('<xml/>');
-      (mockResponseHandler.parseAndHandleResponse as ReturnType<typeof vi.fn>).mockReturnValue({
-        eSpellResult: {},
-      });
-
-      const result = await service.eSpell({ db: 'pubmed', term: '007' });
+      const body = espellBody(
+        '<eSpellResult>\n\t<Database>pubmed</Database>\n\t<SpelledQuery/>\n\t<ERROR/>\n</eSpellResult>\n',
+      );
+      const result = await spell(body, '007');
       expect(result).toEqual({ original: '007', corrected: '007', hasSuggestion: false });
+    });
+
+    it('surfaces the message of a non-empty ESpell <ERROR>', async () => {
+      const body = espellBody(
+        '<eSpellResult>\n\t<Database>pubmed</Database>\n\t<Query>cancr</Query>\n\t<CorrectedQuery/>\n\t<SpelledQuery/>\n\t<ERROR>Backend spell service unavailable</ERROR>\n</eSpellResult>\n',
+      );
+      await expect(spell(body, 'cancr')).rejects.toMatchObject({
+        message: expect.stringContaining('Backend spell service unavailable'),
+      });
+    });
+  });
+
+  describe('rebuildSpelledQuery — linear time on adversarial input (#241)', () => {
+    /** CPU time of `run`, in ms — this thread's user + system time, not wall clock. */
+    const cpuMs = (run: () => void): number => {
+      const start = process.threadCpuUsage();
+      run();
+      const { user, system } = process.threadCpuUsage(start);
+      return (user + system) / 1000;
+    };
+
+    /** Fastest of five measurements of five calls each — the least noisy reading of the work. */
+    const fastestMs = ([query, segments]: [string, SpelledSegment[]]): number => {
+      rebuildSpelledQuery(query, segments);
+      return Math.min(
+        ...Array.from({ length: 5 }, () =>
+          cpuMs(() => {
+            for (let i = 0; i < 5; i++) rebuildSpelledQuery(query, segments);
+          }),
+        ),
+      );
+    };
+
+    const original = (text: string): SpelledSegment => ({ kind: 'Original', text });
+    const replaced = (text: string): SpelledSegment => ({ kind: 'Replaced', text });
+
+    it.each<[string, (n: number) => [string, SpelledSegment[]]]>([
+      [
+        'one applied replacement per word',
+        (n) => {
+          const words = Math.floor(n / 6);
+          return [
+            'cancr '.repeat(words),
+            Array.from({ length: words }, (_, i) => [
+              original(i === 0 ? '' : ' '),
+              replaced('cancer'),
+            ]).flat(),
+          ];
+        },
+      ],
+      [
+        'a span and a replacement of near-equal length, three edits apart',
+        (n) => {
+          const half = 'a'.repeat(Math.floor(n / 2) - 2);
+          return [`x${half}y${half}z`, [original(''), replaced(`q${half}r${half}s`)]];
+        },
+      ],
+      [
+        'an <Original> that is never found',
+        (n) => ['a'.repeat(n), [original(''), replaced('b'), original('ab')]],
+      ],
+      [
+        'an <Original> that matches the text all but its last character',
+        (n) => ['a'.repeat(n), [original(''), replaced('b'), original(`${'a'.repeat(n / 2)}b`)]],
+      ],
+      [
+        'a span of uppercase letters and digits',
+        (n) => [`${'AB1'.repeat(Math.floor(n / 3))}`, [original(''), replaced('ab')]],
+      ],
+    ])('scales linearly from 5k to 320k characters: %s', (_label, build) => {
+      const t5k = fastestMs(build(5_000));
+      const t320k = fastestMs(build(320_000));
+      // Linear work grows 64× across the span; quadratic grows 4096×.
+      expect(t320k / Math.max(t5k, 0.05)).toBeLessThan(256);
+      expect(t320k).toBeLessThan(400);
     });
   });
 

@@ -1200,7 +1200,8 @@ describe('extractPmcAssets', () => {
       {
         assetType: 'figure',
         id: 'F1',
-        label: 'Figure 1.',
+        // The delimiter the deposit prints after the label is dropped (#240).
+        label: 'Figure 1',
         caption: 'Apparent resistivity by interval.',
         sectionTitle: 'Results',
         href: 'g001.jpg',
@@ -1279,7 +1280,7 @@ describe('extractPmcAssets', () => {
       {
         assetType: 'figure',
         id: 'F1',
-        label: 'Figure 1.',
+        label: 'Figure 1',
         caption: 'In an untitled subsection.',
         sectionTitle: 'Results',
         href: 'g001.jpg',
@@ -1287,7 +1288,7 @@ describe('extractPmcAssets', () => {
       {
         assetType: 'figure',
         id: 'F2',
-        label: 'Figure 2.',
+        label: 'Figure 2',
         caption: 'In floats-group.',
         href: 'g002.jpg',
       },
@@ -3585,6 +3586,49 @@ describe('MathML-only formulas in prose (#207)', () => {
   });
 });
 
+describe('line breaks before closing punctuation in prose (#225)', () => {
+  const MML = 'xmlns:mml="http://www.w3.org/1998/Math/MathML"';
+  /** A MathML formula with no `<tex-math>`, as PMC11609225 deposits every one. */
+  const formula = (inner: string) =>
+    `<inline-formula><mml:math ${MML}>${inner}</mml:math></inline-formula>`;
+  const lessThanZero = formula('<mml:mi>L</mml:mi><mml:mo>&lt;</mml:mo><mml:mn>0</mml:mn>');
+  const indices = formula(
+    '<mml:mi>j</mml:mi><mml:mo>=</mml:mo><mml:mn>1</mml:mn><mml:mo>,</mml:mo><mml:mn>2</mml:mn>',
+  );
+
+  it('reads PMC11609225 paragraphs with no space before the punctuation that follows a formula', () => {
+    const article = parsePmcArticle(
+      jatsArticle(
+        articleXml(
+          `<abstract><p>Both hold for ${indices}\n<italic toggle="yes">,</italic> so it converges.</p></abstract>`,
+          '<sec><title>S</title>' +
+            `<p><italic toggle="yes">Which also hold the</italic>\n${lessThanZero}\n<italic toggle="yes">.</italic></p>` +
+            `<p>It maps (bounded sets of <bold>N</bold>\n<italic toggle="yes">)</italic> into <list list-type="bullet"><list-item><p>sets ${indices}\n<italic>;</italic></p></list-item></list></p>` +
+            `<fig id="F1"><label>Figure 1</label><caption><title>Error for ${lessThanZero}\n<italic>.</italic></title></caption><graphic xlink:href="f1.jpg"/></fig>` +
+            '</sec>',
+        ),
+      ),
+    );
+    expect(article.abstract).toBe('Both hold for j=1,2, so it converges.');
+    expect(article.sections[0]?.text).toBe(
+      'Which also hold the L<0.\n\nIt maps (bounded sets of N) into\n\n- sets j=1,2;\n\n[Figure: Figure 1]',
+    );
+    expect(article.assets?.[0]?.caption).toBe('Error for L<0.');
+  });
+
+  it('keeps a space-only gap, a gap before "(", and a line break before a word', () => {
+    const article = parsePmcArticle(
+      jatsArticle(
+        articleXml(
+          '',
+          `<sec><title>S</title><p>Hold ${lessThanZero} . Then ${lessThanZero}\n(see) and ${lessThanZero}\nmore.</p></sec>`,
+        ),
+      ),
+    );
+    expect(article.sections[0]?.text).toBe('Hold L<0 . Then L<0 (see) and L<0 more.');
+  });
+});
+
 describe('reference fields that run together (#209)', () => {
   /** The `references[]` of an article whose `<back>` holds `refs`. */
   const referencesOf = (refs: string) =>
@@ -3842,7 +3886,7 @@ describe('back matter as sections (#206)', () => {
     }
   });
 
-  it('reads a back-matter element inside a body <sec> as that section’s text, as before', () => {
+  it('reads a back-matter element inside a body <sec> as that section’s text, a <fn-group> one paragraph per <fn> (#229)', () => {
     const parsed = parseArticle({
       body:
         '<sec><title>Methods</title><p>Text.</p>' +
@@ -3850,7 +3894,7 @@ describe('back matter as sections (#206)', () => {
         '<fn-group><title>Group</title><fn><p>One.</p></fn><fn><p>Two.</p></fn></fn-group></sec>',
     });
     expect(parsed.sections).toEqual([
-      { title: 'Methods', text: 'Text.\n\nNote Body note.\n\nGroup One. Two.' },
+      { title: 'Methods', text: 'Text.\n\nNote Body note.\n\nGroup\n\nOne.\n\nTwo.' },
     ]);
     expect(parsed.tables?.map((tb) => tb.sectionTitle)).toEqual(['Methods']);
   });
@@ -4075,6 +4119,226 @@ describe('back matter as sections (#206)', () => {
   });
 });
 
+describe('footnotes the section walk reads in body text (#229)', () => {
+  /** Parse an `<article>` whose `<body>` (and optional `<back>`) carry the given XML. */
+  const parseArticle = (body: string, back?: string) =>
+    parsePmcArticle(
+      jatsArticle(
+        '<article><front><article-meta><article-id pub-id-type="pmcid">PMC1</article-id></article-meta></front>' +
+          `<body>${body}</body>${back === undefined ? '' : `<back>${back}</back>`}</article>`,
+      ),
+    );
+
+  /** PMC11542918's six author-contribution footnotes, as deposited. */
+  const CONTRIBUTIONS = [
+    'Conceptualization, Data curation, Formal analysis, Validation, Investigation, Visualization, Methodology, Writing – original draft.',
+    'Data curation, Formal analysis, Validation, Investigation, Visualization, Writing – review and editing.',
+    'Resources, Formal analysis, Methodology.',
+    'Resources, Formal analysis, Investigation, Methodology.',
+    'Conceptualization, Data curation, Formal analysis, Supervision, Investigation, Writing – original draft, Writing – review and editing.',
+    'Conceptualization, Supervision, Funding acquisition, Writing – original draft, Writing – review and editing.',
+  ];
+  const contributionFns = CONTRIBUTIONS.map(
+    (text, i) => `<fn id="con${i + 1}"><p>${text}</p></fn>`,
+  ).join('');
+
+  it('reads each <fn> of a Europe PMC body <fn-group> as the PMC tier reads it from <back> (PMC11542918)', () => {
+    // Europe PMC moves back matter into <body> as <sec sec-type="fn-group"><fn-group>…;
+    // the PMC tier carries the same footnotes in <back>.
+    const epmc = parseArticle(
+      '<sec id="s5"><title>Additional information</title>' +
+        '<sec id="fn-group1" sec-type="fn-group"><title>Competing interests</title><fn-group><fn id="conf1"><p>No competing interests declared.</p></fn></fn-group></sec>' +
+        `<sec id="fn-group2" sec-type="fn-group"><title>Author contributions</title><fn-group>${contributionFns}</fn-group></sec></sec>`,
+    );
+    const pmc = parseArticle(
+      '<sec><title>Results</title><p>Body text.</p></sec>',
+      '<sec sec-type="additional-information"><title>Additional information</title>' +
+        '<fn-group content-type="competing-interest"><title>Competing interests</title><fn id="conf1"><p>No competing interests declared.</p></fn></fn-group>' +
+        `<fn-group content-type="author-contribution"><title>Author contributions</title>${contributionFns}</fn-group></sec>`,
+    );
+
+    const expected = {
+      title: 'Additional information',
+      text: '',
+      subsections: [
+        { title: 'Competing interests', text: 'No competing interests declared.' },
+        { title: 'Author contributions', text: CONTRIBUTIONS.join('\n\n') },
+      ],
+    };
+    expect(epmc.sections).toEqual([expected]);
+    expect(pmc.backSections).toEqual([expected]);
+  });
+
+  it('reads each <p> of a body <fn> as a paragraph of its own (PMC11176230)', () => {
+    const parsed = parseArticle(
+      '<sec><title>Methods</title><p>Text.</p></sec>' +
+        '<sec id="fn-group1" sec-type="fn-group" disp-level="1"><title>Footnotes</title><fn-group><fn id="fn2">' +
+        '<p><bold>Publisher’s Note</bold></p><p>Springer Nature remains neutral with regard to jurisdictional claims in published maps and institutional affiliations.</p>' +
+        '</fn></fn-group></sec>',
+    );
+    expect(parsed.sections).toEqual([
+      { title: 'Methods', text: 'Text.' },
+      {
+        title: 'Footnotes',
+        text: 'Publisher’s Note\n\nSpringer Nature remains neutral with regard to jurisdictional claims in published maps and institutional affiliations.',
+      },
+    ]);
+  });
+
+  it('keeps a body <fn>’s label leading its first paragraph (PMC12696417)', () => {
+    const parsed = parseArticle(
+      '<sec id="efs29780-ntgp-1342" sec-type="fn-group" disp-level="1"><title>Notes</title><fn-group>' +
+        '<fn id="efs29780-note-1003"><label>\n<sup>1</sup>\n</label><p>Regulation (EC) No 1831/2003 of the European Parliament and of the council of 22 September 2003 on the additives for use in animal nutrition. OJ L 268, 18.10.2003, p. 29.</p></fn>' +
+        '<fn id="efs29780-note-1004"><label>\n<sup>2</sup>\n</label><p>Imerys Talc Europe, 2 place Edouard Bouillères ‐ BP 33662, 31,036 (31100) Toulouse, France.</p><p>A second paragraph.</p></fn>' +
+        '</fn-group></sec>',
+    );
+    expect(parsed.sections).toEqual([
+      {
+        title: 'Notes',
+        text:
+          '1 Regulation (EC) No 1831/2003 of the European Parliament and of the council of 22 September 2003 on the additives for use in animal nutrition. OJ L 268, 18.10.2003, p. 29.\n\n' +
+          '2 Imerys Talc Europe, 2 place Edouard Bouillères ‐ BP 33662, 31,036 (31100) Toulouse, France.\n\n' +
+          'A second paragraph.',
+      },
+    ]);
+  });
+
+  it('reads a <fn> standing in a body <sec> outside any <fn-group> the same way', () => {
+    const parsed = parseArticle(
+      '<sec><title>S</title><p>Before.</p><fn><label>a</label><p>First.</p><p>Second.</p></fn><p>After.</p></sec>',
+    );
+    expect(parsed.sections).toEqual([
+      { title: 'S', text: 'Before.\n\na First.\n\nSecond.\n\nAfter.' },
+    ]);
+  });
+
+  it('reads a <fn-group> sitting directly in <body> one paragraph per <fn>, in an untitled section', () => {
+    const parsed = parseArticle(
+      '<p>Lead.</p><fn-group><fn><p>A.</p></fn><fn><p>B.</p><p>B2.</p></fn></fn-group>' +
+        '<sec><title>Methods</title><p>Text.</p></sec>',
+    );
+    expect(parsed.sections).toEqual([
+      { text: 'Lead.\n\nA.\n\nB.\n\nB2.' },
+      { title: 'Methods', text: 'Text.' },
+    ]);
+  });
+
+  it('splits the footnotes of a <fn-group> inside a <boxed-text>, in body and back matter alike', () => {
+    const box = (prefix: string) =>
+      `<boxed-text><fn-group><fn><p>${prefix}-A.</p></fn><fn><p>${prefix}-B.</p></fn></fn-group></boxed-text>`;
+    const parsed = parseArticle(
+      `<sec><title>Body box</title>${box('BF')}</sec>`,
+      `<sec><title>Back box</title>${box('BBF')}</sec>`,
+    );
+    expect(parsed.sections).toEqual([
+      { title: 'Body box', text: '[Box]\n\nBF-A.\n\nBF-B.\n\n[End of box]' },
+    ]);
+    expect(parsed.backSections).toEqual([
+      { title: 'Back box', text: '[Box]\n\nBBF-A.\n\nBBF-B.\n\n[End of box]' },
+    ]);
+  });
+
+  it('splits the footnotes of a <fn-group> in a <sec> a <boxed-text> flattens, at every depth', () => {
+    const parsed = parseArticle(
+      '<sec><title>S</title><boxed-text><caption><title>Panel</title></caption>' +
+        '<sec><title>Outer</title><fn-group><fn><p>O-A.</p></fn><fn><p>O-B.</p></fn></fn-group>' +
+        '<sec><title>Inner</title><fn><p>I-A.</p><p>I-B.</p></fn></sec></sec></boxed-text></sec>',
+    );
+    expect(parsed.sections).toEqual([
+      {
+        title: 'S',
+        text: '[Box: Panel]\n\nOuter\nO-A.\n\nO-B.\n\nInner\nI-A.\n\nI-B.\n\n[End of box]',
+      },
+    ]);
+  });
+
+  it('leaves an inline <fn> inside a <p> reading inside its sentence', () => {
+    // Characterization: only a <fn> outside a <p> is a footnote block.
+    const parsed = parseArticle(
+      '<sec><title>S</title><p>Dose was fixed<fn><p>Per protocol.</p></fn> for all arms.</p></sec>',
+    );
+    expect(parsed.sections).toEqual([
+      { title: 'S', text: 'Dose was fixed Per protocol. for all arms.' },
+    ]);
+  });
+});
+
+describe('trailing delimiters on table and asset labels (#240)', () => {
+  const parse = (body: string, back = '') =>
+    parsePmcArticle(
+      jatsArticle(
+        '<article><front><article-meta><article-id pub-id-type="pmcid">PMC1</article-id></article-meta></front>' +
+          `<body>${body}</body>${back && `<back>${back}</back>`}</article>`,
+      ),
+    );
+  const tableWrap = (label: string) =>
+    `<table-wrap id="T"><label>${label}</label><table><tbody><tr><td>x</td></tr></tbody></table></table-wrap>`;
+  const figure = (label: string) =>
+    `<fig id="F"><label>${label}</label><caption><p>Cap.</p></caption><graphic xlink:href="f.jpg"/></fig>`;
+
+  it.each([
+    // Delimiter shapes measured over 1,048 deposited labels.
+    ['Table 1 |', 'Table 1'],
+    ['Table 2.', 'Table 2'],
+    ['Figure 1:', 'Figure 1'],
+    ['Fig. 1.', 'Fig. 1'],
+    ['Figure.', 'Figure'],
+    ['Document S1. Figures S1–S8.', 'Document S1. Figures S1–S8'],
+    // Only one delimiter goes, and an internal one stays.
+    ['Table 2..', 'Table 2.'],
+    ['Fig. 1', 'Fig. 1'],
+    ['TABLE 1', 'TABLE 1'],
+  ])('reads a table and a figure labelled %j as %j, in the prose marker too', (printed, read) => {
+    const parsed = parse(
+      `<sec><title>S</title><p>Prose.</p>${figure(printed)}${tableWrap(printed)}</sec>`,
+    );
+    expect(parsed.tables?.map((tb) => tb.label)).toEqual([read]);
+    expect(parsed.assets?.map((a) => a.label)).toEqual([read]);
+    expect(parsed.sections).toEqual([{ title: 'S', text: `Prose.\n\n[Figure: ${read}]` }]);
+  });
+
+  it('strips the delimiter from a label the deposit hangs on the asset’s pointer', () => {
+    const parsed = parse(
+      '<sec><title>S</title><supplementary-material id="S1"><media xlink:href="s1.pdf"><label>Supplementary file 1.</label></media></supplementary-material></sec>',
+    );
+    expect(parsed.assets).toEqual([
+      {
+        assetType: 'supplementary-material',
+        id: 'S1',
+        label: 'Supplementary file 1',
+        sectionTitle: 'S',
+        href: 's1.pdf',
+      },
+    ]);
+    expect(parsed.sections?.[0]?.text).toBe('[Supplementary: Supplementary file 1]');
+  });
+
+  it('drops a label that is nothing but a delimiter rather than reporting an empty one', () => {
+    const parsed = parse(`<sec><title>S</title>${figure(' | ')}${tableWrap('.')}</sec>`);
+    expect(parsed.assets?.[0]).not.toHaveProperty('label');
+    expect(parsed.tables?.[0]).not.toHaveProperty('label');
+    expect(parsed.sections?.[0]?.text).toBe('[Figure]');
+  });
+
+  it('keeps a bare-number supplement label as deposited (PMC13419574)', () => {
+    const parsed = parse(
+      '<sec><title>S</title><supplementary-material id="SD1"><label>1</label><media xlink:href="NIHPPRS-supplement-1.pdf"/></supplementary-material></sec>',
+    );
+    expect(parsed.assets?.map((a) => a.label)).toEqual(['1']);
+    expect(parsed.sections?.[0]?.text).toBe('[Supplementary: 1]');
+  });
+
+  it('leaves reference labels as printed (#209)', () => {
+    const parsed = parse(
+      '<sec><title>S</title><p>Text.</p></sec>',
+      '<ref-list><ref id="R1"><label>1.</label><mixed-citation>Alpha A. A study. 2020.</mixed-citation></ref></ref-list>',
+    );
+    expect(parsed.references).toEqual([
+      { id: 'R1', label: '1.', citation: 'Alpha A. A study. 2020.' },
+    ]);
+  });
+});
+
 /** CPU time of `run`, in ms — this thread's user + system time, not wall clock. */
 const cpuMs = (run: () => void): number => {
   const start = process.threadCpuUsage();
@@ -4190,7 +4454,7 @@ describe('reference rendering runs in linear time (#209)', () => {
   );
 });
 
-describe('reference, abstract and formula rendering run in linear time (#207, #218, #219)', () => {
+describe('reference, abstract, formula and prose rendering run in linear time (#207, #218, #219, #225)', () => {
   /** `unit` repeated until its serialized form spans about `chars` characters. */
   const repeat = (unit: JatsNode[], unitChars: number, chars: number): JatsNode[] =>
     Array.from({ length: Math.ceil(chars / unitChars) }, () => unit).flat();
@@ -4239,19 +4503,21 @@ describe('reference, abstract and formula rendering run in linear time (#207, #2
   };
 
   /**
-   * Parse an article whose one body section holds `formula` twice: in a
+   * Parse an article whose one body section holds `content` twice: in a
    * paragraph, read by the prose walk, and in a table cell, read by the shared
    * text reader.
    */
-  const formula = (math: JatsNode) => {
-    const inline = el('inline-formula', [el('mml:math', [math])]);
-    const table = el('table-wrap', [el('table', [el('tbody', [el('tr', [el('td', [inline])])])])]);
-    const article = el('article', [el('body', [el('sec', [el('p', [inline]), table])])]);
+  const prose = (content: JatsNode[]) => {
+    const table = el('table-wrap', [el('table', [el('tbody', [el('tr', [el('td', content)])])])]);
+    const article = el('article', [el('body', [el('sec', [el('p', content), table])])]);
     return whole(article, () => {
       const { sections, tables } = parsePmcArticle(article);
       return `${sections[0]?.text ?? ''}${tables?.[0]?.rows.flat().join('') ?? ''}`;
     });
   };
+
+  /** {@link prose} holding `math` as an inline formula. */
+  const formula = (math: JatsNode) => prose([el('inline-formula', [el('mml:math', [math])])]);
 
   /** `wrap` applied `levels` times around `innermost`. */
   const nest = (levels: number, wrap: (inner: JatsNode) => JatsNode, innermost: JatsNode) =>
@@ -4345,6 +4611,45 @@ describe('reference, abstract and formula rendering run in linear time (#207, #2
         ),
       WIDE,
     ],
+    // #225 `<inline-formula>…</inline-formula>\n<italic>.</italic>`: a line break dropped after every formula.
+    [
+      'formulas each followed by a line break and a period',
+      (chars: number) =>
+        prose(
+          repeat(
+            [el('inline-formula', [el('mml:math', [mi])]), t('\n'), el('italic', [t('.')])],
+            70,
+            chars,
+          ),
+        ),
+      WIDE,
+    ],
+    // #225 `<italic>A</italic>\n   …<italic>.</italic>`: one long run dropped before the period.
+    [
+      'one long run with a line break before a period',
+      (chars: number) =>
+        prose([el('italic', [t('A')]), t(`\n${' '.repeat(chars)}`), el('italic', [t('.')])]),
+      WIDE,
+    ],
+    // #225 `<italic>A\n   …</italic>.`: one long run inside the element.
+    [
+      'one long run with a line break inside the element',
+      (chars: number) => prose([el('italic', [t(`A\n${' '.repeat(chars)}`)]), t('.')]),
+      WIDE,
+    ],
+    // #225 `<italic>A</italic>\n<b/>\n<b/>….`: a gap of many pieces dropped at once.
+    [
+      'a gap of many whitespace nodes before a period',
+      (chars: number) =>
+        prose([el('italic', [t('A')]), ...repeat([t('\n'), el('b', [])], 6, chars), t('.')]),
+      WIDE,
+    ],
+    // #225 `<italic>A</italic>\n   …x`: a long run scanned that ends in no punctuation.
+    [
+      'one long run with a line break before ordinary text',
+      (chars: number) => prose([el('italic', [t('A')]), t(`\n${' '.repeat(chars)}x`)]),
+      WIDE,
+    ],
     // #207 One <mfenced> whose separators attribute names a separator per child.
     [
       'a fenced list with a separator per child',
@@ -4364,4 +4669,53 @@ describe('reference, abstract and formula rendering run in linear time (#207, #2
     },
     30_000,
   );
+});
+
+// ─── Author name suffixes (#226) ────────────────────────────────────────────
+
+describe('JATS <suffix> on a name (#226)', () => {
+  /** PMC13052355's fourth author, as the deposit writes the `<contrib>`. */
+  const HABECK_CONTRIB =
+    '<contrib contrib-type="author"><name name-style="western"><surname>Habeck</surname>' +
+    '<given-names initials="EW">Edward W.</given-names><suffix>IV</suffix></name>' +
+    '<xref rid="A1" ref-type="aff">1</xref></contrib>';
+
+  it('keeps an author suffix verbatim through parsePmcArticle (PMC13052355)', () => {
+    const parsed = parsePmcArticle(
+      jatsArticle(
+        articleXml(
+          `<contrib-group><contrib contrib-type="author"><name name-style="western"><surname>Boyle</surname><given-names initials="MJ">Mark J.</given-names></name></contrib>${HABECK_CONTRIB}</contrib-group>`,
+        ),
+      ),
+    );
+    expect(parsed.authors).toStrictEqual([
+      { lastName: 'Boyle', givenNames: 'Mark J.' },
+      { lastName: 'Habeck', givenNames: 'Edward W.', suffix: 'IV' },
+    ]);
+  });
+
+  it('omits an empty <suffix> rather than writing ""', () => {
+    const group = el('contrib-group', [
+      el('contrib', [el('name', [el('surname', [t('Solo')]), el('suffix', [])])]),
+    ]);
+    expect(extractJatsAuthors(group)).toStrictEqual([{ lastName: 'Solo' }]);
+  });
+
+  it('keeps the suffix of a name in an element-citation reference', () => {
+    // PMC10799778's CR92, reduced to its element-citation with two authors.
+    const parsed = parsePmcArticle(
+      jatsArticle(
+        articleXml('').replace(
+          '</body>',
+          '</body><back><ref-list><ref id="CR92"><element-citation publication-type="journal"><person-group person-group-type="author">' +
+            '<name name-style="western"><surname>Appel</surname><given-names>LJ</given-names></name>' +
+            '<name name-style="western"><surname>Miller</surname><given-names>ER</given-names><suffix>III</suffix></name>' +
+            '</person-group><source>Ann Intern Med</source><year>2020</year></element-citation></ref></ref-list></back>',
+        ),
+      ),
+    );
+    expect(parsed.references).toStrictEqual([
+      { id: 'CR92', citation: 'Appel LJ, Miller ER III Ann Intern Med 2020' },
+    ]);
+  });
 });

@@ -1005,3 +1005,55 @@ describe('formatCitationsTool retraction and erratum notices (issue #215)', () =
     );
   });
 });
+
+describe('formatCitationsTool record text holding a line break (issue #233)', () => {
+  beforeEach(() => {
+    mockEFetch.mockReset();
+  });
+
+  const TITLE = 'Paramedic analgesia comparing ketamine and morphine in trauma.';
+
+  it('writes the title line and every citation on one line; structuredContent keeps the title', async () => {
+    mockEFetch.mockResolvedValue({
+      PubmedArticleSet: parseArticleSetXml(
+        articleSetXml(JOURNAL_ARTICLE_XML.replace(`${TITLE} A synopsis`, `${TITLE}\n\nA synopsis`)),
+      ),
+    });
+
+    const result = await runToolContract(formatCitationsTool, {
+      pmids: ['42474064'],
+      format: [...CITATION_STYLES],
+    });
+    const [entry] = (
+      result.structuredContent as {
+        citations: { title: string; citations: Record<string, string> }[];
+      }
+    ).citations;
+    expect(entry?.title).toBe(`${TITLE}\n\nA synopsis of the PACKMaN double-blind RCT.`);
+    const oneLine = `${TITLE} A synopsis of the PACKMaN double-blind RCT.`;
+    for (const style of ['apa', 'mla', 'vancouver'] as const) {
+      expect(entry?.citations[style], style).toContain(oneLine);
+      expect(entry?.citations[style], style).not.toContain('\n');
+    }
+    expect(entry?.citations.ris).toContain(`\nTI  - ${oneLine}\n`);
+    expect(entry?.citations.bibtex).toContain(`{${oneLine.replace(/\.$/, '')}}`);
+
+    const text = textBlocks(result.content as ContentBlock[])
+      .map((b) => b.text)
+      .join('\n');
+    expect(text).toContain(`## PMID 42474064\n**${oneLine}**\n\n### APA\n`);
+  });
+
+  it('escapes Markdown in the title line', () => {
+    const text = textBlocks(
+      formatCitationsTool.format!({
+        totalSubmitted: 1,
+        totalFormatted: 1,
+        citations: [{ pmid: '1', title: '[Effect of *drug* on\nrisk].', citations: { apa: 'A.' } }],
+      }),
+    )[0]?.text;
+    expect(text).toBe(
+      '# PubMed Citations\n**Formatted:** 1/1\n\n## PMID 1\n**\\[Effect of \\*drug\\* on risk\\].**\n\n### APA\nA.',
+    );
+  });
+});

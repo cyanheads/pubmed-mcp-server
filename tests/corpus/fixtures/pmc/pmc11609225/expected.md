@@ -69,9 +69,9 @@ Lemma 2.1 [30] Inequality hold for the matrices L, M, N
 
 (L & M \\ M^{T} & N)<0.
 
-Which also hold the (N−M^{T}L^{−1}M)<0 and L<0 .
+Which also hold the (N−M^{T}L^{−1}M)<0 and L<0.
 
-Lemma 2.2 [29] Given matrices L∈R^{n×n} and M∈R^{r×r} with eigenvalues ζ_{1},ζ_{2},…,ζ_{n} and ψ_{1},ψ_{2},…,ψ_{r} respectively, the eigenvalues of their Kronecker product L⊗M can be expressed as ζ_{i}ψ_{j} for i=1,2,…,n and j=1,2,…,r .
+Lemma 2.2 [29] Given matrices L∈R^{n×n} and M∈R^{r×r} with eigenvalues ζ_{1},ζ_{2},…,ζ_{n} and ψ_{1},ψ_{2},…,ψ_{r} respectively, the eigenvalues of their Kronecker product L⊗M can be expressed as ζ_{i}ψ_{j} for i=1,2,…,n and j=1,2,…,r.
 
 Lemma 2.3 [28] Suppose that u[k]∈R^{n} and z_{i}[k]∈R^{n} (where z_{i}[k] represents the state of agents) are discrete functions. Then the following relationship holds:
 
@@ -81,7 +81,7 @@ where ∇_{T}^{α} is the discrete-time fractional difference operator. We now c
 
 ∇_{T}^{α}z_{i}[k]=f(k,z_{k}) k≥k_{0},
 
-where 0<α≤1 , z_{k}[ξ]=z_{i}[k+ξ] for ξ∈{−r,…,0} , and f maps R× (bounded sets of N ) into bounded sets of R^{n} , satisfying f(k,0)=0 .
+where 0<α≤1, z_{k}[ξ]=z_{i}[k+ξ] for ξ∈{−r,…,0}, and f maps R× (bounded sets of N) into bounded sets of R^{n}, satisfying f(k,0)=0.
 
 Definition 2.1 [32] A function f:R^{r}×R→R^{r} is said to be QUAD(Δ,η) if there exists a positive constant η and a diagonal matrix Δ∈R^{r×r} such that:
 

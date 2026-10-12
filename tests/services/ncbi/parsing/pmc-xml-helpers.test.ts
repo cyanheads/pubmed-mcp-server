@@ -821,6 +821,8 @@ describe('text readers run in linear time (#185, #197)', () => {
     ['citation markers alternating with empty ones', [el('xref', [t('1')]), el('xref', [])], 21],
     // ` <x/>`: whitespace-only text the line reader collapses.
     ['whitespace between empty elements', [t(' '), el('x', [])], 5],
+    // `<x>a\n</x>\n.`: a line-broken gap before punctuation, dropped after every element. (#225)
+    ['line breaks before punctuation after elements', [el('x', [t('a\n')]), t('\n'), t('.')], 11],
   ])('reads %s in linear CPU time', (_label, unit, unitChars) => {
     const at = (chars: number) => el('td', repeat(unit as JatsNode[], unitChars as number, chars));
     const small = at(5_000);
@@ -1057,5 +1059,182 @@ describe('MathML-only formulas in a TeX-style linear form (#207)', () => {
     expect(rawTextContent(el('mml:math', [scripts]))).toBe(
       `${'a^{'.repeat(depth)}b${'}'.repeat(depth)}`,
     );
+  });
+});
+
+describe('MathML <semantics> reads one rendering (#230)', () => {
+  const MML = 'xmlns:mml="http://www.w3.org/1998/Math/MathML"';
+  /** The text a `<mml:math>` holding `inner` contributes, read with the source spacing intact. */
+  const math = (inner: string): string =>
+    rawTextContent(jats(`<mml:math ${MML}>${inner}</mml:math>`));
+  const semantics = (...children: string[]) =>
+    `<mml:semantics>\n  ${children.join('\n  ')}\n</mml:semantics>`;
+  const square = '<mml:msup><mml:mi>x</mml:mi><mml:mn>2</mml:mn></mml:msup>';
+  const contentSquare =
+    '<mml:apply><mml:power/><mml:ci>x</mml:ci><mml:cn type="integer">2</mml:cn></mml:apply>';
+  const tex = (body: string) =>
+    `<mml:annotation encoding="application/x-tex">${body}</mml:annotation>`;
+  const annotationXml = (encoding: string, body: string) =>
+    `<mml:annotation-xml encoding="${encoding}">${body}</mml:annotation-xml>`;
+
+  it('reads the expression and leaves its TeX annotation out', () => {
+    expect(math(semantics(square, tex('x^2')))).toBe('x^{2}');
+  });
+
+  it('reads a presentation expression and leaves a Content MathML annotation out', () => {
+    expect(math(semantics(square, annotationXml('MathML-Content', contentSquare)))).toBe('x^{2}');
+  });
+
+  it.each(['MathML-Presentation', 'application/mathml-presentation+xml'])(
+    'reads the presentation <annotation-xml> (%s) in place of a Content MathML expression',
+    (encoding) => {
+      expect(math(semantics(contentSquare, tex('x^2'), annotationXml(encoding, square)))).toBe(
+        'x^{2}',
+      );
+    },
+  );
+
+  it('reads a Content MathML expression with no presentation annotation as its leaves, as before', () => {
+    expect(math(semantics(contentSquare, tex('x^2')))).toBe('x2');
+    expect(math(contentSquare)).toBe('x2');
+  });
+
+  it('reads a <semantics> nested in an <mrow> or filling a script slot once', () => {
+    expect(
+      math(
+        `<mml:mrow><mml:mi>y</mml:mi><mml:mo>=</mml:mo>${semantics(
+          '<mml:mfrac><mml:mn>1</mml:mn><mml:mi>n</mml:mi></mml:mfrac>',
+          tex('\\frac{1}{n}'),
+        )}</mml:mrow>`,
+      ),
+    ).toBe('y=\\frac{1}{n}');
+    expect(
+      math(`<mml:msup><mml:mi>e</mml:mi>${semantics('<mml:mi>x</mml:mi>', tex('x'))}</mml:msup>`),
+    ).toBe('e^{x}');
+  });
+
+  it('reads a <semantics> nested inside the presentation annotation it chose, still once', () => {
+    const inner = semantics(square, tex('x^2'));
+    expect(
+      math(
+        semantics(
+          contentSquare,
+          annotationXml(
+            'MathML-Presentation',
+            `<mml:mrow>${inner}<mml:mo>+</mml:mo>${inner}</mml:mrow>`,
+          ),
+        ),
+      ),
+    ).toBe('x^{2}+x^{2}');
+  });
+
+  it('never reads annotation text, whatever its encoding', () => {
+    const mtef =
+      '<mml:annotation encoding="MathType-MTEF">MathType@MTEF@5@5@+=feaagKart1ev2</mml:annotation>';
+    expect(math(semantics(square, mtef))).toBe('x^{2}');
+    expect(math(semantics(square, annotationXml('MathML-Content', '<mml:ci>junk</mml:ci>')))).toBe(
+      'x^{2}',
+    );
+    // A <semantics> carrying only annotations, or nothing at all, contributes nothing.
+    expect(math(semantics(mtef, tex('x^2')))).toBe('');
+    expect(math('<mml:semantics/>')).toBe('');
+  });
+
+  it('applies wherever the formula is read: prose, a table cell, and an unprefixed <math>', () => {
+    const formula = `<mml:math ${MML}>${semantics(square, tex('x^2'))}</mml:math>`;
+    expect(textContent(jats(`<p>Let <inline-formula>${formula}</inline-formula> grow.</p>`))).toBe(
+      'Let x^{2} grow.',
+    );
+    expect(lineTextContent(jats(`<td>${formula}<break/>next</td>`))).toBe('x^{2}\nnext');
+    expect(
+      rawTextContent(
+        jats(
+          '<math><semantics><msup><mi>x</mi><mn>2</mn></msup><annotation encoding="application/x-tex">x^2</annotation></semantics></math>',
+        ),
+      ),
+    ).toBe('x^{2}');
+  });
+});
+
+describe('line breaks between an element and closing punctuation (#225)', () => {
+  const MML = 'xmlns:mml="http://www.w3.org/1998/Math/MathML"';
+  /** PMC11609225's `L<0`, deposited as MathML alone. */
+  const lessThanZero = `<mml:math ${MML}><mml:mi>L</mml:mi><mml:mo>&lt;</mml:mo><mml:mn>0</mml:mn></mml:math>`;
+
+  it('drops the line break before a period that opens the next element (PMC11609225)', () => {
+    const p = jats(
+      `<p>Which also hold the <inline-formula>${lessThanZero}</inline-formula>\n<italic toggle="yes">.</italic></p>`,
+    );
+    expect(textContent(p)).toBe('Which also hold the L<0.');
+    expect(rawTextContent(p)).toBe('Which also hold the L<0.');
+    expect(lineTextContent(p)).toBe('Which also hold the L<0.');
+  });
+
+  it.each(['.', ',', ';', ':', ')', ']'])(
+    'drops a line break and its indentation before %s in the text after an element',
+    (mark) => {
+      const p = jats(`<p>see <xref rid="R1">1</xref>\n      ${mark} next</p>`);
+      expect(rawTextContent(p)).toBe(`see 1${mark} next`);
+      expect(textContent(p)).toBe(`see 1${mark} next`);
+    },
+  );
+
+  it('drops a line break inside the element, and one split across several text nodes', () => {
+    expect(rawTextContent(jats('<p><italic>word\n  </italic>. Next</p>'))).toBe('word. Next');
+    // `</bold>\n<italic>)</italic>`, the gap closing PMC11609225's `(bounded sets of N )`.
+    expect(
+      rawTextContent(
+        jats('<p>(bounded sets of <bold>N</bold>\n<italic toggle="yes">)</italic></p>'),
+      ),
+    ).toBe('(bounded sets of N)');
+    expect(
+      textContent(
+        el('p', [el('italic', [t('x ')]), t('\n'), el('b', []), t('  '), el('i', [t(', y')])]),
+      ),
+    ).toBe('x, y');
+  });
+
+  it('applies to a formula sitting directly in the text, and in a table cell line', () => {
+    expect(textContent(jats(`<p>so ${lessThanZero}\n.</p>`))).toBe('so L<0.');
+    expect(
+      textContent(
+        jats('<p>so <tex-math>\\begin{document}$x$\\end{document}</tex-math>\n, then</p>'),
+      ),
+    ).toBe('so $x$, then');
+    expect(
+      lineTextContent(
+        jats(`<td>a <inline-formula>${lessThanZero}</inline-formula>\n;<break/>b</td>`),
+      ),
+    ).toBe('a L<0;\nb');
+  });
+
+  it('keeps whitespace with no line break, inside or after the element', () => {
+    expect(rawTextContent(jats('<p><italic>x</italic> . y</p>'))).toBe('x . y');
+    expect(rawTextContent(jats('<p><italic>x </italic>. y</p>'))).toBe('x . y');
+    expect(rawTextContent(jats('<p><italic>x</italic>\t<italic>.</italic></p>'))).toBe('x\t.');
+  });
+
+  it('keeps a line break before an opening parenthesis or a word', () => {
+    expect(textContent(jats('<p><italic>x</italic>\n(y)</p>'))).toBe('x (y)');
+    expect(textContent(jats('<p><italic>x</italic>\nword.</p>'))).toBe('x word.');
+    expect(textContent(jats('<p><italic>x</italic>\n<italic>word</italic>.</p>'))).toBe('x word.');
+  });
+
+  it('keeps a line break between a word and punctuation, with no element before it', () => {
+    expect(rawTextContent(jats('<p>word\n<italic>.</italic></p>'))).toBe('word\n.');
+    expect(rawTextContent(jats('<p>word\n.</p>'))).toBe('word\n.');
+  });
+
+  it('leaves a line boundary before punctuation as it was', () => {
+    const cell = jats('<td>x<break/>\n. y</td>');
+    expect(lineTextContent(cell)).toBe('x\n. y');
+    expect(textContent(cell)).toBe('x . y');
+    expect(textContent(jats('<sec><p>x</p>\n<p>. y</p></sec>'))).toBe('x . y');
+    expect(textContent(jats('<fn><label>*</label>\n<p>, y</p></fn>'))).toBe('* , y');
+  });
+
+  it('adds and removes nothing at the edges of what it reads', () => {
+    expect(rawTextContent(jats('<p><x/>\n. a</p>'))).toBe('\n. a');
+    expect(rawTextContent(jats('<p><italic>x</italic>\n</p>'))).toBe('x\n');
   });
 });

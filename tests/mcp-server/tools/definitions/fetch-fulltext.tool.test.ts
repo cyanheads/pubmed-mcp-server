@@ -3556,6 +3556,51 @@ describe('fetchFulltextTool', () => {
       expect(text).toContain('[1] Reference one');
     });
 
+    it('zero-pads a one-digit numeric month and day on the Published line, for PMC and Europe PMC alike (#242)', () => {
+      const dates = [
+        { year: '2026', month: '7', day: '22' },
+        { year: '2011', month: '12', day: '1' },
+        { year: '2024', month: '3' },
+        { year: '2024' },
+        { year: '2024', month: 'Jul', day: '4' },
+        { year: '2024', month: '01', day: '02' },
+      ];
+      const articles = dates.flatMap((publicationDate, i) => [
+        {
+          source: 'pmc' as const,
+          viaSource: 'pmc' as const,
+          pmcId: `PMC${i + 1}`,
+          title: `PMC article ${i + 1}`,
+          publicationDate,
+          sections: [],
+        },
+        {
+          source: 'pmc' as const,
+          viaSource: 'europepmc' as const,
+          pmcId: `PMC${i + 101}`,
+          epmcId: `PMC${i + 101}`,
+          epmcSource: 'PMC',
+          title: `EPMC article ${i + 1}`,
+          publicationDate,
+          sections: [],
+        },
+      ]);
+      const result = { articles, totalReturned: articles.length };
+      const snapshot = JSON.stringify(result);
+
+      const text = textBlocks(fetchFulltextTool.format!(result))[0]?.text ?? '';
+
+      const published = text.split('\n').filter((line) => line.startsWith('**Published:**'));
+      expect(published).toEqual(
+        ['2026-07-22', '2011-12-01', '2024-03', '2024', '2024-Jul-04', '2024-01-02'].flatMap(
+          (date) => [`**Published:** ${date}`, `**Published:** ${date}`],
+        ),
+      );
+      // The structured parts stay as JATS gave them.
+      expect(JSON.stringify(result)).toBe(snapshot);
+      expect(result.articles[0]?.publicationDate).toEqual({ year: '2026', month: '7', day: '22' });
+    });
+
     it('lists affiliations as bullets so a deposited label is not numbered twice (#196)', () => {
       const text =
         textBlocks(
@@ -4178,8 +4223,8 @@ describe('fetchFulltextTool whole-response budget (issue #100)', () => {
       nextDeferredCharacters: sizes[1],
     });
     expect(result.unavailable).toBeUndefined();
-    expect(getEnrichment(ctx).notice).toContain(
-      '1 resolved article(s) were deferred whole: 2. Re-call pubmed_fetch_fulltext with those ids under `pmids`',
+    expect(getEnrichment(ctx).notice).toBe(
+      `Response character budget reached: ${sizes[0]} of ${sizes[0]} characters returned. 1 resolved article(s) were deferred whole: 2. To continue, re-call pubmed_fetch_fulltext with those ids under \`pmids\` and maxResponseCharacters ≥ ${sizes[1]}, the size of the next deferred article. To return the next deferred article in this response instead, repeat this call with maxResponseCharacters ≥ ${(sizes[0] ?? 0) + (sizes[1] ?? 0)}.`,
     );
   });
 
@@ -4269,10 +4314,8 @@ describe('fetchFulltextTool whole-response budget (issue #100)', () => {
         pmids: ['2'],
         nextDeferredCharacters: sizes[0],
       });
-      const notice = getEnrichment(ctx).notice ?? '';
-      expect(notice).toContain('deferred whole: PMC1, 2.');
-      expect(notice).toContain(
-        'Re-call pubmed_fetch_fulltext with each id under its own field (`pmcids`: PMC1; `pmids`: 2) to retrieve them',
+      expect(getEnrichment(ctx).notice).toBe(
+        `The first article alone exceeds the requested maxResponseCharacters of 1, so none were returned. 2 resolved article(s) were deferred whole: PMC1, 2. Re-call pubmed_fetch_fulltext with each id under its own field (\`pmcids\`: PMC1; \`pmids\`: 2) and maxResponseCharacters ≥ ${sizes[0]}, the size of that first article.`,
       );
       const text = textBlocks(fetchFulltextTool.format!(result))[0]?.text ?? '';
       expect(text).toContain(
@@ -4459,6 +4502,78 @@ describe('fetchFulltextTool whole-response budget (issue #100)', () => {
     expect(text).toContain('pmcid');
     expect(text).toContain('PMC2');
     expect(text).not.toContain('B'.repeat(200));
+  });
+
+  describe('the deferral notice names each ceiling with its call (#236)', () => {
+    const SMALL_THEN_LARGE: StagedArticle[] = [
+      { pmcId: 'PMC1', sections: [{ title: 'Intro', text: 'A'.repeat(40) }] },
+      { pmcId: 'PMC2', sections: [{ title: 'Intro', text: 'B'.repeat(400) }] },
+    ];
+    const LARGE_THEN_SMALL: StagedArticle[] = [
+      { pmcId: 'PMC1', sections: [{ title: 'Intro', text: 'A'.repeat(400) }] },
+      { pmcId: 'PMC2', sections: [{ title: 'Intro', text: 'B'.repeat(40) }] },
+    ];
+    const pmcids = ['PMC1', 'PMC2'];
+
+    async function deferUnder(staged: StagedArticle[], ceilingOf: (sizes: number[]) => number) {
+      stagePmc(staged);
+      const sizes = sizesOf((await run({ pmcids })).result);
+      const ceiling = ceilingOf(sizes);
+      stagePmc(staged);
+      const { result, ctx } = await run({ pmcids, maxResponseCharacters: ceiling });
+      return { sizes, ceiling, result, notice: getEnrichment(ctx).notice ?? '' };
+    }
+
+    it('names the continuation ceiling and the repeat ceiling when the next article exceeds the current one', async () => {
+      const { sizes, ceiling, notice, result } = await deferUnder(
+        SMALL_THEN_LARGE,
+        (s) => (s[0] ?? 0) + 1,
+      );
+      const [returned = 0, next = 0] = sizes;
+      expect(next).toBeGreaterThan(ceiling);
+
+      expect(notice).toBe(
+        `Response character budget reached: ${returned} of ${ceiling} characters returned. 1 resolved article(s) were deferred whole: PMC2. To continue, re-call pubmed_fetch_fulltext with those ids under \`pmcids\` and maxResponseCharacters ≥ ${next}, the size of the next deferred article. To return the next deferred article in this response instead, repeat this call with maxResponseCharacters ≥ ${returned + next}.`,
+      );
+      const text = textBlocks(fetchFulltextTool.format!(result))[0]?.text ?? '';
+      expect(text).toContain(
+        `\n**Deferred by the response budget:** 1 article(s) — ${returned} of ${ceiling} budgeted characters returned; next deferred article ${next} characters\n`,
+      );
+    });
+
+    it('says the deferred ids can be re-called at the current ceiling when the next article fits it', async () => {
+      const { sizes, ceiling, notice } = await deferUnder(
+        LARGE_THEN_SMALL,
+        (s) => (s[0] ?? 0) + (s[1] ?? 0) - 1,
+      );
+      const [returned = 0, next = 0] = sizes;
+      expect(next).toBeLessThan(ceiling);
+
+      expect(notice).toBe(
+        `Response character budget reached: ${returned} of ${ceiling} characters returned. 1 resolved article(s) were deferred whole: PMC2. To continue, re-call pubmed_fetch_fulltext with those ids under \`pmcids\` at the current maxResponseCharacters of ${ceiling}, which already fits the next deferred article (${next} characters). To return the next deferred article in this response instead, repeat this call with maxResponseCharacters ≥ ${returned + next}.`,
+      );
+    });
+
+    it('returns every article when the call is repeated at the repeat ceiling, and defers one under it', async () => {
+      const { sizes } = await deferUnder(SMALL_THEN_LARGE, (s) => (s[0] ?? 0) + 1);
+      const repeatCeiling = (sizes[0] ?? 0) + (sizes[1] ?? 0);
+
+      const atCeiling = await deferUnder(SMALL_THEN_LARGE, () => repeatCeiling);
+      expect(atCeiling.result.totalReturned).toBe(2);
+      expect(atCeiling.result.deferred).toBeUndefined();
+
+      const under = await deferUnder(SMALL_THEN_LARGE, () => repeatCeiling - 1);
+      expect(under.result.deferred?.ids).toEqual(['PMC2']);
+    });
+
+    it('advertises both ceilings on `nextDeferredCharacters`', () => {
+      const description =
+        fetchFulltextTool.output.shape.deferred.unwrap().shape.nextDeferredCharacters.description ??
+        '';
+      expect(description).toBe(
+        'Serialized size of the next deferred article — the first entry in `ids`, where the response stopped — and the continuation ceiling: re-calling with the deferred ids needs `maxResponseCharacters` ≥ this to return anything, and a smaller article further down `ids` cannot be reached until this one fits. Repeating this same call needs `maxResponseCharacters` ≥ `returnedCharacters` + this to return this article as well.',
+      );
+    });
   });
 
   it('rejects a zero, negative, or fractional maxResponseCharacters', () => {
@@ -6333,6 +6448,85 @@ describe('fetchFulltextTool JATS assets (issue #130)', () => {
     expect(text).not.toContain('CCCC');
   });
 
+  describe('a bare-number asset label (#240)', () => {
+    /** NIH-manuscript supplements carry a bare number for a label (PMC13419574). */
+    const NUMBERED_SUPPLEMENT: ReadAsset = {
+      assetType: 'supplementary-material',
+      id: 'SD1',
+      label: '1',
+      caption: 'Supplementary tables',
+      sectionTitle: 'RESULTS',
+      href: 'NIHPPRS-supplement-1.pdf',
+    };
+    const NUMBERED_FIGURE: ReadAsset = { assetType: 'figure', label: '2', sectionTitle: 'RESULTS' };
+
+    it('names the asset by its type in the asset heading, and keeps `label` as deposited', async () => {
+      stageArticle({
+        sections: [{ title: 'RESULTS', text: 'Results body.\n\n[Supplementary: 1]' }],
+        assets: [NUMBERED_SUPPLEMENT, NUMBERED_FIGURE, { ...FIGURE_IN_SECTION, label: 'S1' }],
+      });
+
+      const call = await runToolContract(fetchFulltextTool, { pmcids: ['PMC11726426'] });
+
+      expect(readAssets(call)?.map((a) => a.label)).toEqual(['1', '2', 'S1']);
+      expect(readSections(call)?.[0]?.text).toBe('Results body.\n\n[Supplementary: 1]');
+      const text = rendered(call);
+      expect(text).toContain('\n##### Supplementary material 1 — Supplementary tables\n');
+      expect(text).toContain('\n##### Figure 2\n');
+      // Only a label that is all digits takes the type; any other stays as deposited.
+      expect(text).toContain(
+        '\n##### S1 — Comparison of apparent resistivity and phase data from the four intervals\n',
+      );
+    });
+
+    it('names a dropped asset by its type in omittedAssetNames and both notices', async () => {
+      stageArticle({
+        sections: [{ title: 'RESULTS', text: 'M'.repeat(20) }],
+        assets: [
+          { assetType: 'figure', label: 'Fig. 1', sectionTitle: 'RESULTS' },
+          { ...NUMBERED_SUPPLEMENT, caption: 'C'.repeat(200) },
+          NUMBERED_FIGURE,
+        ],
+      });
+
+      // 20 section + 6 label leaves 4 — under the supplement's 1 + 200.
+      const call = await runToolContract(fetchFulltextTool, {
+        pmcids: ['PMC11726426'],
+        maxCharacters: 30,
+      });
+      const structured = call.structuredContent as {
+        notice?: string;
+        truncation?: { articles: { omittedAssetNames?: string[] }[] };
+      };
+
+      expect(structured.truncation?.articles[0]?.omittedAssetNames).toEqual([
+        'Supplementary material 1',
+        'Figure 2',
+      ]);
+      expect(structured.notice).toContain(
+        'rather than returned with a shortened caption: Supplementary material 1, Figure 2. See',
+      );
+      expect(rendered(call)).toContain(
+        ', 2 asset(s) dropped whole: Supplementary material 1, Figure 2',
+      );
+    });
+
+    it('strips its `[Supplementary: 1]` marker under includeAssets: false', async () => {
+      stageArticle({
+        sections: [{ title: 'RESULTS', text: 'Results body.\n\n[Supplementary: 1]' }],
+        assets: [NUMBERED_SUPPLEMENT],
+      });
+
+      const call = await runToolContract(fetchFulltextTool, {
+        pmcids: ['PMC11726426'],
+        includeAssets: false,
+      });
+
+      expect(readSections(call)).toEqual([{ title: 'RESULTS', text: 'Results body.' }]);
+      expect(rendered(call)).not.toContain('[Supplementary');
+    });
+  });
+
   it('admits an asset that exactly meets the remaining budget', async () => {
     const exact = { assetType: 'figure' as const, label: 'Fig. 1', caption: 'C'.repeat(14) };
     stageArticle({ sections: [{ title: 'METHODS', text: 'M'.repeat(30) }], assets: [exact] });
@@ -7599,7 +7793,7 @@ describe('fetchFulltextTool back matter (issue #206)', () => {
 
   /** Reader-side view of the one returned article. */
   interface ReadArticle {
-    assets?: { id?: string; sectionTitle?: string }[];
+    assets?: { id?: string; label?: string; sectionTitle?: string }[];
     sections: DeepSection[];
     tables?: { label?: string; sectionTitle?: string }[];
   }
@@ -7918,13 +8112,96 @@ describe('fetchFulltextTool back matter (issue #206)', () => {
 
       const article = result.articles[0];
       if (article?.source !== 'pmc') throw new Error('expected a pmc article');
+      // The label's trailing delimiter is dropped in the marker and `label` alike (#240).
       expect(article.sections).toEqual([
-        { title: 'Additional files', text: '[Supplementary: Supplementary file 1.]' },
+        { title: 'Additional files', text: '[Supplementary: Supplementary file 1]' },
       ]);
       expect(article.assets?.map((a) => [a.label, a.sectionTitle])).toEqual([
-        ['Supplementary file 1.', 'Additional files'],
+        ['Supplementary file 1', 'Additional files'],
       ]);
       expect(getEnrichment(ctx).notice).toBeUndefined();
+    });
+
+    describe('labels printed with a trailing delimiter (#240)', () => {
+      /** PMC13419574's shape, reduced: ` |` labels and a bare-number NIH supplement. */
+      const PIPE_LABELS =
+        '<article><front><article-meta><article-id pub-id-type="pmcid">PMC13419574</article-id></article-meta></front>' +
+        '<body><sec><title>Methods</title><p>Cohort.</p>' +
+        '<supplementary-material id="SD1"><label>1</label><media xlink:href="NIHPPRS-supplement-1.pdf"/></supplementary-material>' +
+        '<fig id="F1"><label>Figure 1 |</label><caption><p>Study flow.</p></caption><graphic xlink:href="f1.jpg"/></fig>' +
+        '<table-wrap id="T1"><label>Table 1 |</label><caption><p>Demographic and clinical characteristics</p></caption>' +
+        '<table><tbody><tr><td>Age</td><td>54</td></tr></tbody></table></table-wrap></sec></body></article>';
+
+      /** PMC3531151's shape, reduced: two `Table N.` tables after a short body. */
+      const PERIOD_LABELS =
+        '<article><front><article-meta><article-id pub-id-type="pmcid">PMC3531151</article-id></article-meta></front>' +
+        '<body><sec><title>Introduction</title><p>Databases.</p>' +
+        '<table-wrap id="T1"><label>Table 1.</label><caption><p>New online databases</p></caption><table><tbody><tr><td>a</td></tr></tbody></table></table-wrap>' +
+        '<table-wrap id="T2"><label>Table 2.</label><table><tbody><tr><td>b</td></tr></tbody></table></table-wrap></sec></body></article>';
+
+      it('names tables and assets without the delimiter on every surface', async () => {
+        servePmc(PIPE_LABELS);
+        const call = await runToolContract(fetchFulltextTool, { pmcids: ['PMC13419574'] });
+
+        const article = articleOf(call);
+        expect(article.tables?.map((tb) => tb.label)).toEqual(['Table 1']);
+        expect(article.assets?.map((a) => a.label)).toEqual(['1', 'Figure 1']);
+        expect(article.sections).toEqual([
+          { title: 'Methods', text: 'Cohort.\n\n[Supplementary: 1]\n\n[Figure: Figure 1]' },
+        ]);
+        const text = rendered(call);
+        expect(text).toContain('\n##### Table 1 — Demographic and clinical characteristics\n');
+        expect(text).toContain('\n##### Supplementary material 1\n');
+        expect(text).toContain('\n##### Figure 1 — Study flow.\n');
+        expect(text).not.toMatch(/(Table|Figure) 1 \|/);
+      });
+
+      it('removes every marker under includeAssets: false', async () => {
+        servePmc(PIPE_LABELS);
+        const call = await runToolContract(fetchFulltextTool, {
+          pmcids: ['PMC13419574'],
+          includeAssets: false,
+        });
+
+        expect(articleOf(call).sections).toEqual([{ title: 'Methods', text: 'Cohort.' }]);
+        expect(rendered(call)).not.toMatch(/\[(Figure|Supplementary)/);
+      });
+
+      it('names a dropped bare-number supplement by its type while `label` stays as deposited', async () => {
+        servePmc(PIPE_LABELS);
+        const call = await runToolContract(fetchFulltextTool, {
+          pmcids: ['PMC13419574'],
+          includeTables: false,
+          maxCharacters: 10,
+        });
+        const structured = call.structuredContent as {
+          truncation?: { articles: { omittedAssetNames?: string[] }[] };
+        };
+
+        expect(structured.truncation?.articles[0]?.omittedAssetNames).toEqual([
+          'Supplementary material 1',
+          'Figure 1',
+        ]);
+        expect(rendered(call)).toContain('dropped whole: Supplementary material 1, Figure 1');
+      });
+
+      it('names dropped tables without the delimiter, the notice closing on one period', async () => {
+        servePmc(PERIOD_LABELS);
+        const call = await runToolContract(fetchFulltextTool, {
+          pmcids: ['PMC3531151'],
+          maxCharacters: 12,
+        });
+        const structured = call.structuredContent as {
+          notice?: string;
+          truncation?: { articles: { omittedTableNames?: string[] }[] };
+        };
+
+        expect(structured.truncation?.articles[0]?.omittedTableNames).toEqual([
+          'Table 1',
+          'Table 2',
+        ]);
+        expect(structured.notice).toContain('cut mid-row: Table 1, Table 2. See');
+      });
     });
 
     /** A record carrying front matter and back matter, with no `<body>`. */
@@ -8028,5 +8305,100 @@ describe('fetchFulltextTool back matter (issue #206)', () => {
         ]);
       });
     });
+  });
+});
+
+describe('fetchFulltextTool author name suffixes (issue #226)', () => {
+  beforeEach(() => {
+    mockEFetch.mockReset();
+    mockIdConvert.mockReset();
+    mockParsePmcArticle.mockReset();
+    mockGetUnpaywallService.mockReset();
+    mockGetEpmcService.mockReset();
+    mockEpmcSearch.mockReset();
+    mockEpmcFullTextXml.mockReset();
+    mockEpmcParseFullTextXml.mockReset();
+    mockGetUnpaywallService.mockReturnValue(undefined);
+    mockGetEpmcService.mockReturnValue(undefined);
+    mockParsePmcArticle.mockImplementation(realParsePmcArticle);
+  });
+
+  /** PMC13052355's front matter, reduced to two of its seven authors, and one body section. */
+  const JATS =
+    '<article article-type="review-article"><front><article-meta>' +
+    '<article-id pub-id-type="pmcid">PMC13052355</article-id>' +
+    '<title-group><article-title>Ancient DNA and Human Physiology</article-title></title-group>' +
+    '<contrib-group><contrib contrib-type="author"><name name-style="western"><surname>Demers</surname>' +
+    '<given-names initials="PV">Paige V.</given-names></name></contrib>' +
+    '<contrib contrib-type="author"><name name-style="western"><surname>Habeck</surname>' +
+    '<given-names initials="EW">Edward W.</given-names><suffix>IV</suffix></name>' +
+    '<xref rid="A1" ref-type="aff">1</xref></contrib></contrib-group>' +
+    '</article-meta></front><body><sec><title>Introduction</title><p>Ancient genomes.</p></sec></body></article>';
+
+  /** The `<article>` node the ordered parser makes of `xml`. */
+  function articleNode(xml: string) {
+    const nodes = new XMLParser(ORDERED_XML_PARSER_OPTIONS).parse(xml) as Record<string, unknown>[];
+    const node = nodes.find((n) => 'article' in n);
+    if (!node) throw new Error('fixture has no <article>');
+    return node;
+  }
+
+  /** Both surfaces of one call: the one article's authors, and the rendered text. */
+  async function call(input: Record<string, unknown>) {
+    const result = await runToolContract(fetchFulltextTool, input);
+    expect(result.isError).toBeFalsy();
+    const structured = result.structuredContent as {
+      articles: { authors?: Record<string, unknown>[]; viaSource?: string }[];
+    };
+    return {
+      article: structured.articles[0],
+      text: textBlocks(result.content as ContentBlock[])
+        .map((block) => block.text)
+        .join('\n'),
+    };
+  }
+
+  const AUTHORS_BLOCK = '**Authors (2):**\n- Paige V. Demers\n- Edward W. Habeck IV\n';
+
+  it('carries a JATS <suffix> on both surfaces on the PMC tier (PMC13052355)', async () => {
+    mockEFetch.mockResolvedValue([{ 'pmc-articleset': [articleNode(JATS)] }]);
+    const { article, text } = await call({ pmcids: ['PMC13052355'] });
+
+    expect(article?.authors).toStrictEqual([
+      { lastName: 'Demers', givenNames: 'Paige V.' },
+      { lastName: 'Habeck', givenNames: 'Edward W.', suffix: 'IV' },
+    ]);
+    expect(text).toContain(AUTHORS_BLOCK);
+  });
+
+  it('carries it the same way on the Europe PMC tier', async () => {
+    mockGetEpmcService.mockReturnValue({
+      search: mockEpmcSearch,
+      fullTextXml: mockEpmcFullTextXml,
+      parseFullTextXml: mockEpmcParseFullTextXml,
+    });
+    mockIdConvert.mockResolvedValue([{ 'requested-id': '41790057', pmid: '41790057' }]);
+    mockEFetchBy({ pubmedDois: {} });
+    mockEpmcSearch.mockResolvedValue({
+      hits: [{ id: '41790057', source: 'MED', pmid: '41790057', pmcid: 'PMC13052355' }],
+      hitCount: 1,
+      cursorMark: '*',
+    });
+    mockEpmcFullTextXml.mockResolvedValue({
+      kind: 'found',
+      xml: JATS,
+      epmcId: 'PMC13052355',
+      source: 'MED',
+    });
+    mockEpmcParseFullTextXml.mockReturnValue(articleNode(JATS));
+    const { article, text } = await call({ pmids: ['41790057'] });
+
+    expect(article?.viaSource).toBe('europepmc');
+    expect(article?.authors?.[1]).toStrictEqual({
+      lastName: 'Habeck',
+      givenNames: 'Edward W.',
+      suffix: 'IV',
+    });
+    expect(text).toContain(AUTHORS_BLOCK);
   });
 });

@@ -244,23 +244,6 @@ function terminate(text: string): string {
 }
 
 /**
- * Split a pages string like "45-67" into start and end components.
- * Handles en-dashes, em-dashes, and hyphens. Expands PubMed's truncated-end
- * convention (e.g., "737-8" → { start: "737", end: "738" }, "1639-41" →
- * "1639"/"1641") so downstream RIS/BibTeX consumers see absolute page numbers.
- */
-function splitPages(pages?: string): { start?: string; end?: string } {
-  if (!pages) return {};
-  const parts = pages.split(/[-\u2013\u2014]/).map((p) => p.trim());
-  let [start, end] = parts;
-  if (start && end && end.length < start.length) {
-    end = start.slice(0, start.length - end.length) + end;
-  }
-  if (start && end) return { start, end };
-  return start ? { start } : {};
-}
-
-/**
  * The electronic article locator that Vancouver, BibTeX, and RIS print in place
  * of a page range, or undefined.
  *
@@ -281,15 +264,33 @@ function articleLocator(journal?: ParsedJournalInfo): string | undefined {
  * `662953`, Springer `42`). A page that matches no locator stays a page, though
  * some are article numbers the record cannot identify (an Elsevier `105471`
  * beside an `S…` pii looks exactly like a Lancet page `2413`). (#217)
+ *
+ * A dashless `MedlinePgn` also matches the locator with its hyphens removed:
+ * American Society for Microbiology journals deposit `e0364621` beside pii
+ * `e03646-21`. The locator's form is the one cited, as the publisher numbers
+ * the article. Pagination holding a dash is a range and never matches. (#231)
  */
 function articleNumber(journal?: ParsedJournalInfo): string | undefined {
-  if (!journal?.elocationId) return;
-  return !journal.pages || journal.pages === journal.elocationId ? journal.elocationId : undefined;
+  const locator = journal?.elocationId;
+  if (!locator) return;
+  const { pages } = journal;
+  if (!pages || pages === locator) return locator;
+  return !PAGE_DASH.test(pages) && pages === locator.replaceAll('-', '') ? locator : undefined;
 }
 
-/** One range inside NLM's pagination: a start, a dash, an end. */
-const PAGE_RANGE =
-  /([^\s,;\u{2013}\u{2014}-]+)\s*[-\u{2013}\u{2014}]\s*([^\s,;\u{2013}\u{2014}-]+)/gu;
+/** A dash NLM's pagination puts between the ends of a range. */
+const PAGE_DASH = /[-\u{2013}\u{2014}]/u;
+
+/**
+ * One page or range inside NLM's pagination: a start, then optionally a dash
+ * and an end. An item starts only after a separator, so a long run without a
+ * dash is read once rather than retried from each of its characters.
+ */
+const PAGE_ITEM =
+  /(?<![^\s,;\u{2013}\u{2014}-])([^\s,;\u{2013}\u{2014}-]+)(?:\s*[-\u{2013}\u{2014}]\s*([^\s,;\u{2013}\u{2014}-]+))?/gu;
+
+/** The digits a page ends on, matched from the start of their run only. */
+const TRAILING_DIGITS = /(?<!\d)\d+$/;
 
 /**
  * The end of a range as NLM's elision means it. An end made of digits is
@@ -298,24 +299,51 @@ const PAGE_RANGE =
  * whole (`878.e8`, `e65`, `xv`).
  */
 function fullPageEnd(start: string, end: string): string {
-  const startParts = /^(.*?)(\d+)$/.exec(start);
-  if (!startParts || !/^\d+$/.test(end)) return end;
-  const [, prefix = '', digits = ''] = startParts;
-  const elided = end.length < digits.length;
-  return `${prefix}${elided ? digits.slice(0, digits.length - end.length) : ''}${end}`;
+  const digits = /^\d+$/.test(end) ? TRAILING_DIGITS.exec(start) : null;
+  if (!digits) return end;
+  const [run] = digits;
+  const elided = end.length < run.length;
+  return `${start.slice(0, digits.index)}${elided ? run.slice(0, run.length - end.length) : ''}${end}`;
 }
 
 /**
- * APA 7 pagination: each range written in full with an en dash (`637-41` →
- * `637–641`, `S5-15` → `S5–S15`), the rest of NLM's text as given — a list's
- * separators and labels too (`1407-8; author reply 1409-10` → `1407–1408;
- * author reply 1409–1410`).
+ * NLM's pagination with each range written in full (`637-41` → `637-641`,
+ * `S5-15` → `S5-S15`), joined by `dash` or by NLM's own when none is given; the
+ * rest of NLM's text stays as given — a list's separators and labels too
+ * (`1407-8; author reply 1409-10` → `1407-1408; author reply 1409-1410`). APA
+ * joins with an en dash (`637–641`); BibTeX keeps NLM's. (#217, #228)
  */
-function formatPagesApa(pages: string): string {
-  return pages.replace(
-    PAGE_RANGE,
-    (_, start: string, end: string) => `${start}\u{2013}${fullPageEnd(start, end)}`,
+function expandPageRanges(pages: string, dash?: string): string {
+  return pages.replace(PAGE_ITEM, (item, start: string, end: string | undefined) => {
+    if (end === undefined) return item;
+    const join = dash ?? item.slice(start.length, item.length - end.length);
+    return `${start}${join}${fullPageEnd(start, end)}`;
+  });
+}
+
+/** A token that can be a page: it carries a digit or is a Roman numeral, unlike a label (`author reply`). */
+const PAGE_TOKEN = /\d|^[ivxlcdm]+$/i;
+
+/**
+ * The first and last page of NLM's pagination, for RIS `SP` and `EP`: the start
+ * of the first page or range, and the end of the last range written in full or
+ * the last listed page (`1308, 1310-4` → `1308`/`1314`, `xii-xv` → `xii`/`xv`,
+ * `S5-15` → `S5`/`S15`). A single page or article number has no end, and a
+ * label in a list (`author reply`) is not a page. NCBI's own `StartPage` and
+ * `EndPage` agree on every shape. (#228)
+ */
+function splitPages(pages: string): { start: string | undefined; end: string | undefined } {
+  const items = [...pages.matchAll(PAGE_ITEM)];
+  const [, start] = items[0] ?? [];
+  const pageItems = items.filter(
+    ([, first = '', last]) => last !== undefined || PAGE_TOKEN.test(first),
   );
+  const final = pageItems.at(-1);
+  if (!final || (pageItems.length === 1 && final[2] === undefined)) {
+    return { start, end: undefined };
+  }
+  const [, first = '', last] = final;
+  return { start, end: last === undefined ? first : fullPageEnd(first, last) };
 }
 
 /**
@@ -406,6 +434,65 @@ function titleCaseJournal(title: string, minorWords: ReadonlySet<string>): strin
     .join('');
 }
 
+/** NLM's year qualifier: `Journal of women's health (2002)`. */
+const YEAR_QUALIFIER = /^\d{4}$/;
+
+/** An edition or format qualifier: `(Clinical research ed.)`, `(Landmark edition)`, `(Print)`. */
+const EDITION_QUALIFIER = /(?:\bed\.|\bedition)$|(?:^|: )(?:Online|Print)$/i;
+
+/** An abbreviation naming an edition: `Med Clin (Engl Ed)`, `Angew Chem Int Ed Engl`. */
+const EDITION_ABBREVIATION = /\b(?:Ed|Edn|Edition)\b/i;
+
+/**
+ * A place qualifier, `Place, Region` with an optional year: `London, England`,
+ * `New York, N.Y.`, `Chicago, Ill. : 1978`. Neither part holds a parenthesis,
+ * semicolon, or digit, and the region absorbs any space before the year's
+ * colon, so no two parts compete for a character and a near-miss fails in
+ * linear time.
+ */
+const PLACE_QUALIFIER = /^[^,():;\d]+,[^():;\d]+(?::\s*\d{4})?$/;
+
+/**
+ * The parenthetical a title ends on, a nested one read as one unit
+ * (`Bulletin (Hospital for Joint Diseases (New York, N.Y.))`), with the text
+ * before it; undefined when the title does not end on a balanced one.
+ */
+function trailingParenthetical(title: string): { base: string; inner: string } | undefined {
+  if (!title.endsWith(')')) return;
+  let depth = 0;
+  for (let i = title.length - 1; i >= 0; i--) {
+    if (title[i] === ')') depth++;
+    else if (title[i] === '(' && --depth === 0) {
+      return { base: title.slice(0, i).trimEnd(), inner: title.slice(i + 1, -1) };
+    }
+  }
+  return;
+}
+
+/**
+ * The journal name APA and MLA cite: NLM's title less the place, year, or
+ * edition NLM appends to tell same-named journals apart (`Lancet (London,
+ * England)` → `Lancet`, `Journal of women's health (2002)`, `BMJ (Clinical
+ * research ed.)`). The journal prints no such text. An edition stays when the
+ * ISO abbreviation names it too, as it is then a journal of its own (`Medicina
+ * clinica (English ed.)`, `Med Clin (Engl Ed)`). Any other parenthetical names
+ * the journal and stays: an issuing body (`Proceedings (Baylor University.
+ * Medical Center)`), a subject, a one-word place. Over NLM's journal list the
+ * rule is wrong on 18 of the 2,005 titles NLM's catalog settles — a place-shaped
+ * issuing body (`Collegian (Royal College of Nursing, Australia)`) is dropped,
+ * and a place with no region (`Medical record (New York : 1934)`) is kept. (#227)
+ */
+function citedJournalName(title: string, isoAbbreviation?: string): string {
+  const group = trailingParenthetical(title);
+  if (!group?.base) return title;
+  const { base, inner } = group;
+  if (YEAR_QUALIFIER.test(inner)) return base;
+  if (EDITION_QUALIFIER.test(inner)) {
+    return EDITION_ABBREVIATION.test(isoAbbreviation ?? '') ? title : base;
+  }
+  return PLACE_QUALIFIER.test(inner) ? base : title;
+}
+
 /**
  * Author keywords, then MeSH descriptor names, each term once: a term equal to
  * an earlier one ignoring case is dropped, so the author's spelling and position
@@ -426,9 +513,11 @@ function mergedKeywords(article: ParsedArticle): string[] {
 }
 
 /**
- * Collapse internal whitespace (including embedded newlines from structured
- * abstracts) to single spaces. Strict RIS parsers treat blank lines as record
- * terminators, so abstract text must be flattened before emission.
+ * Collapse each whitespace run to one space and trim the ends. The parser trims
+ * only a field's ends, so a line break inside a title, name, or keyword — or
+ * between a structured abstract's paragraphs — would otherwise reach a
+ * citation: an untagged RIS line, or a blank one that strict parsers read as
+ * the end of the record. Every style writes record text through this. (#233)
  */
 function collapseWhitespace(text: string): string {
   return text.replace(/\s+/g, ' ').trim();
@@ -486,8 +575,26 @@ function escapeBibtex(text: string): string {
 // Author formatters
 // ---------------------------------------------------------------------------
 
+/*
+ * A generational suffix (`Jr`, `2nd`) renders verbatim as NCBI writes it, as
+ * NCBI's own citation export prints it. It qualifies a surname, so a name with
+ * no surname renders without it. Inverted name forms set it off with a comma
+ * (`Frenck, R. W., Jr`); natural-order and NLM forms append it after a space
+ * (`R. W. Frenck Jr`, `Frenck RW Jr`). (#226)
+ */
+
+/** `, Jr` for an inverted name form; `''` without a suffix or a surname. */
+function invertedSuffix(author: ParsedArticleAuthor): string {
+  return author.lastName && author.suffix ? `, ${author.suffix}` : '';
+}
+
+/** ` Jr` for a natural-order or NLM name form; `''` without a suffix or a surname. */
+function trailingSuffix(author: ParsedArticleAuthor): string {
+  return author.lastName && author.suffix ? ` ${author.suffix}` : '';
+}
+
 /**
- * Format a single author in APA style: `Last, F. M.`
+ * Format a single author in APA style: `Last, F. M.`, or `Last, F. M., Jr`.
  * Collective/group authors return the group name directly.
  */
 function formatAuthorApa(author: ParsedArticleAuthor): string {
@@ -501,14 +608,14 @@ function formatAuthorApa(author: ParsedArticleAuthor): string {
       .filter(Boolean)
       .map((part) => `${part[0]}.`)
       .join(' ');
-  if (!initials) return last;
+  if (!initials) return `${last}${invertedSuffix(author)}`;
   // Extract only letter characters (Unicode-aware: preserve Á, Ö, É, etc.),
   // format each as "X." separated by spaces.
   const formatted = Array.from(initials.replace(/[^\p{L}]/gu, ''))
     .map((c) => `${c}.`)
     .join(' ');
   if (!last) return formatted;
-  return `${last}, ${formatted}`;
+  return `${last}, ${formatted}${invertedSuffix(author)}`;
 }
 
 /**
@@ -534,17 +641,16 @@ function formatAuthorsApa(authors: ParsedArticleAuthor[]): string {
 
 /**
  * Format a single author in MLA style.
- * First listed author: `Last, First Middle.`
- * Subsequent authors: `First Middle Last`
+ * First listed author: `Last, First Middle`, or `Last, First Middle, Jr`.
+ * Subsequent authors: `First Middle Last`, or `First Middle Last Jr`.
  */
 function formatAuthorMla(author: ParsedArticleAuthor, isFirst: boolean): string {
   if (author.collectiveName) return author.collectiveName;
   const last = author.lastName ?? '';
   const first = author.firstName ?? '';
-  if (!last && !first) return '';
-  if (!first) return last;
   if (!last) return first;
-  return isFirst ? `${last}, ${first}` : `${first} ${last}`;
+  if (isFirst) return `${first ? `${last}, ${first}` : last}${invertedSuffix(author)}`;
+  return `${first ? `${first} ${last}` : last}${trailingSuffix(author)}`;
 }
 
 /**
@@ -567,16 +673,17 @@ function formatAuthorsMla(authors: ParsedArticleAuthor[]): string {
 }
 
 /**
- * Format a single author in BibTeX style: `{Last}, {First}`
+ * Format a single author in BibTeX style: `{Last}, First`, or the three-part
+ * `{Last}, Jr, First` when the name carries a suffix — the comma after `Jr`
+ * stays even with no first name, so the suffix is never read as one.
  */
 function formatAuthorBibtex(author: ParsedArticleAuthor): string {
   if (author.collectiveName) return `{${escapeBibtex(author.collectiveName)}}`;
   const last = author.lastName ? escapeBibtex(author.lastName) : '';
   const first = author.firstName ? escapeBibtex(author.firstName) : '';
-  if (!last && !first) return '';
-  if (!first) return `{${last}}`;
   if (!last) return first;
-  return `{${last}}, ${first}`;
+  if (author.suffix) return `{${last}}, ${escapeBibtex(author.suffix)},${first && ` ${first}`}`;
+  return first ? `{${last}}, ${first}` : `{${last}}`;
 }
 
 // ---------------------------------------------------------------------------
@@ -585,7 +692,8 @@ function formatAuthorBibtex(author: ParsedArticleAuthor): string {
 
 /**
  * Format an editor in APA's "In E. E. Editor (Ed.)," position: initials first,
- * surname last — the inverse of the author position.
+ * surname last — the inverse of the author position — and a suffix after the
+ * surname (`M. P. Adam Jr`).
  */
 function formatEditorApa(editor: ParsedBookEditor): string {
   if (editor.collectiveName) return editor.collectiveName;
@@ -601,7 +709,7 @@ function formatEditorApa(editor: ParsedBookEditor): string {
         .map((c) => `${c}.`)
         .join(' ')
     : '';
-  return [initials, editor.lastName].filter(Boolean).join(' ');
+  return [initials, editor.lastName].filter(Boolean).join(' ') + trailingSuffix(editor);
 }
 
 /** APA editor list: comma-separated, `& ` before the last name. */
@@ -670,7 +778,7 @@ function formatApaBook(article: BookRecord): string {
   const url = bookAccessUrl(article);
   if (url) parts.push(url);
 
-  return parts.join(' ');
+  return collapseWhitespace(parts.join(' '));
 }
 
 /**
@@ -719,7 +827,8 @@ export function formatApa(article: ParsedArticle): string {
   // Journal, volume, issue, pages
   const journal = article.journalInfo;
   if (journal?.title) {
-    let journalPart = `*${titleCaseJournal(journal.title, APA_MINOR_WORDS)}*`;
+    const name = citedJournalName(journal.title, journal.isoAbbreviation);
+    let journalPart = `*${titleCaseJournal(name, APA_MINOR_WORDS)}*`;
     if (journal.volume) {
       journalPart += `, *${journal.volume}*`;
       if (journal.issue) {
@@ -731,7 +840,7 @@ export function formatApa(article: ParsedArticle): string {
     if (number) {
       journalPart += `, Article ${number}`;
     } else if (journal.pages) {
-      journalPart += `, ${formatPagesApa(journal.pages)}`;
+      journalPart += `, ${expandPageRanges(journal.pages, '\u{2013}')}`;
     }
     journalPart += '.';
     parts.push(journalPart);
@@ -752,22 +861,16 @@ export function formatApa(article: ParsedArticle): string {
     parts.push(`(Retraction published ${retractions.join('; ')})`);
   }
 
-  return parts.join(' ');
+  return collapseWhitespace(parts.join(' '));
 }
 
 // ---------------------------------------------------------------------------
 // MLA 9th Edition
 // ---------------------------------------------------------------------------
 
-/** MLA renders editors first-name-first after `edited by`. */
+/** MLA renders editors first-name-first after `edited by`, as it does a non-first author. */
 function formatEditorsMla(editors: ParsedBookEditor[]): string {
-  const names = editors
-    .map((editor) =>
-      editor.collectiveName
-        ? editor.collectiveName
-        : [editor.firstName, editor.lastName].filter(Boolean).join(' '),
-    )
-    .filter(Boolean);
+  const names = editors.map((editor) => formatAuthorMla(editor, false)).filter(Boolean);
   if (names.length === 0) return '';
   if (names.length === 1) return names[0] ?? '';
   if (names.length === 2) return `${names[0]} and ${names[1]}`;
@@ -806,7 +909,7 @@ function formatMlaBook(article: BookRecord): string {
   if (date !== 'n.d.') detailParts.push(date);
   if (detailParts.length) parts.push(terminate(detailParts.join(', ')));
 
-  return parts.join(' ');
+  return collapseWhitespace(parts.join(' '));
 }
 
 /**
@@ -840,7 +943,8 @@ export function formatMla(article: ParsedArticle): string {
   const journal = article.journalInfo;
   if (journal?.title) {
     const detailParts: string[] = [];
-    detailParts.push(`*${titleCaseJournal(journal.title, MLA_MINOR_WORDS)}*`);
+    const name = citedJournalName(journal.title, journal.isoAbbreviation);
+    detailParts.push(`*${titleCaseJournal(name, MLA_MINOR_WORDS)}*`);
 
     if (journal.volume) {
       detailParts.push(`vol. ${journal.volume}`);
@@ -873,7 +977,7 @@ export function formatMla(article: ParsedArticle): string {
     parts.push(`https://doi.org/${article.doi}.`);
   }
 
-  return parts.join(' ');
+  return collapseWhitespace(parts.join(' '));
 }
 
 // ---------------------------------------------------------------------------
@@ -953,11 +1057,12 @@ export function formatBibtex(article: ParsedArticle): string {
     fields.push(['number', escapeBibtex(journal.issue)]);
   }
 
-  // Pages — or, with no pagination, biblatex's `eid` for the article number.
-  // Classic BibTeX has no article-number field and overloading `pages` is
-  // imprecise; `eid` is broadly supported (acmart included).
+  // Pages, each range written in full (#228) — or, with no pagination,
+  // biblatex's `eid` for the article number. Classic BibTeX has no
+  // article-number field and overloading `pages` is imprecise; `eid` is broadly
+  // supported (acmart included).
   if (journal?.pages) {
-    fields.push(['pages', escapeBibtex(journal.pages)]);
+    fields.push(['pages', escapeBibtex(expandPageRanges(journal.pages))]);
   } else if (!book) {
     const locator = articleLocator(journal);
     if (locator) fields.push(['eid', escapeBibtex(locator)]);
@@ -1002,9 +1107,11 @@ export function formatBibtex(article: ParsedArticle): string {
     fields.push(['keywords', keywords.map((k) => `{${escapeBibtex(k)}}`).join(', ')]);
   }
 
-  // Build entry
+  // Build entry — each value on its own line, whitespace runs collapsed (#233)
   const maxKeyLen = Math.max(...fields.map(([k]) => k.length));
-  const fieldLines = fields.map(([k, v]) => `  ${k.padEnd(maxKeyLen)} = {${v}}`).join(',\n');
+  const fieldLines = fields
+    .map(([k, v]) => `  ${k.padEnd(maxKeyLen)} = {${collapseWhitespace(v)}}`)
+    .join(',\n');
 
   return `@${entryType}{${key},\n${fieldLines}\n}`;
 }
@@ -1012,6 +1119,19 @@ export function formatBibtex(article: ParsedArticle): string {
 // ---------------------------------------------------------------------------
 // RIS
 // ---------------------------------------------------------------------------
+
+/**
+ * An `AU` or `A2` value: `Lastname, Firstname`, or `Lastname, Firstname, Suffix`.
+ * Positional, so a suffixed name with no first name keeps the empty slot
+ * (`Frenck, , Jr`) rather than reading the suffix as a first name.
+ */
+function formatNameRis(person: ParsedArticleAuthor): string {
+  if (person.collectiveName) return person.collectiveName;
+  const last = person.lastName ?? '';
+  const first = person.firstName ?? '';
+  if (last && person.suffix) return `${last}, ${first}, ${person.suffix}`;
+  return first ? `${last}, ${first}` : last;
+}
 
 /**
  * Format a PubMed article as a RIS record.
@@ -1022,8 +1142,11 @@ export function formatBibtex(article: ParsedArticle): string {
 export function formatRis(article: ParsedArticle): string {
   const lines: string[] = [];
 
+  // Every value on its own tag line: a line break inside one would leave an
+  // untagged line, or a blank one that ends the record for strict parsers (#233)
   const tag = (code: string, value: string | undefined): void => {
-    if (value) lines.push(`${code}  - ${value}`);
+    const text = value && collapseWhitespace(value);
+    if (text) lines.push(`${code}  - ${text}`);
   };
 
   const book = isBookRecord(article) ? article.book : undefined;
@@ -1036,19 +1159,7 @@ export function formatRis(article: ParsedArticle): string {
   lines.push(`TY  - ${refType}`);
 
   // Authors — one AU tag per author
-  if (article.authors?.length) {
-    for (const author of article.authors) {
-      if (author.collectiveName) {
-        tag('AU', author.collectiveName);
-      } else {
-        const last = author.lastName ?? '';
-        const first = author.firstName ?? '';
-        if (last || first) {
-          tag('AU', first ? `${last}, ${first}` : last);
-        }
-      }
-    }
-  }
+  for (const author of article.authors ?? []) tag('AU', formatNameRis(author));
 
   // Title
   tag('TI', article.title);
@@ -1064,12 +1175,7 @@ export function formatRis(article: ParsedArticle): string {
   }
   if (book) {
     if (article.recordType === 'book-chapter') tag('BT', book.title);
-    for (const editor of book.editors ?? []) {
-      const last = editor.lastName ?? '';
-      const first = editor.firstName ?? '';
-      if (editor.collectiveName) tag('A2', editor.collectiveName);
-      else if (last || first) tag('A2', first ? `${last}, ${first}` : last);
-    }
+    for (const editor of book.editors ?? []) tag('A2', formatNameRis(editor));
     tag('PB', book.publisher);
     tag('CY', book.publisherLocation);
     tag('ET', book.edition);
@@ -1088,7 +1194,7 @@ export function formatRis(article: ParsedArticle): string {
   tag('VL', journal?.volume);
   tag('IS', journal?.issue);
 
-  // Pages — split into start/end, expanding PubMed's truncated-end convention.
+  // Pages — the first page and the last, written in full ({@link splitPages}).
   // With no pagination, the article number goes on `C7` (the attested RIS
   // convention for Article Number), never on SP/EP, which hold absolute pages.
   if (journal?.pages) {
@@ -1129,11 +1235,8 @@ export function formatRis(article: ParsedArticle): string {
     tag('KW', kw);
   }
 
-  // Abstract — collapse internal whitespace so blank lines don't break strict
-  // RIS parsers that terminate records at blank lines
-  if (article.abstractText) {
-    tag('AB', collapseWhitespace(article.abstractText));
-  }
+  // Abstract — a structured abstract's paragraphs flatten onto the one line
+  tag('AB', article.abstractText);
 
   // End of record (trailing space per RIS spec)
   lines.push('ER  - ');
@@ -1147,8 +1250,8 @@ export function formatRis(article: ParsedArticle): string {
 
 /**
  * Format a single author in Vancouver style: `Surname AB` — surname, a space,
- * then initials with no periods or internal spaces. Collective/group authors
- * return their name directly.
+ * then initials with no periods or internal spaces, then any suffix after a
+ * space (`Frenck RW Jr`). Collective/group authors return their name directly.
  */
 function formatAuthorVancouver(author: ParsedArticleAuthor): string {
   if (author.collectiveName) return author.collectiveName;
@@ -1168,8 +1271,7 @@ function formatAuthorVancouver(author: ParsedArticleAuthor): string {
         .toUpperCase()
     : '';
   if (!last) return initials;
-  if (!initials) return last;
-  return `${last} ${initials}`;
+  return `${initials ? `${last} ${initials}` : last}${trailingSuffix(author)}`;
 }
 
 /**
@@ -1229,7 +1331,7 @@ function formatVancouverBook(article: BookRecord): string {
   const url = bookshelfUrl(book);
   if (url) segments.push(`Available from: ${url}`);
 
-  return segments.join(' ');
+  return collapseWhitespace(segments.join(' '));
 }
 
 /**
@@ -1315,7 +1417,7 @@ export function formatVancouver(article: ParsedArticle): string {
   }
   segments.push(...notes);
 
-  return segments.join(' ');
+  return collapseWhitespace(segments.join(' '));
 }
 
 // ---------------------------------------------------------------------------

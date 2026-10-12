@@ -27,7 +27,7 @@
 
 **Journal:** Journal of Clinical Medicine, **12**(16), 5180, ISSN 2077-0383
 **Type:** research-article
-**Published:** 2023-8-09
+**Published:** 2023-08-09
 **PMCID:** PMC10455816
 **PMID:** 37629222
 **DOI:** 10.3390/jcm12165180

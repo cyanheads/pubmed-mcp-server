@@ -38,6 +38,14 @@ import {
   SINGLETON_LIST_XML,
   TGU,
 } from '../../../services/ncbi/parsing/_investigator-fixtures.js';
+import {
+  NO_PAGINATION_XML,
+  NONE_PAGINATION_XML,
+} from '../../../services/ncbi/parsing/_pagination-fixtures.js';
+import {
+  AAP_INVESTIGATORS_XML,
+  FRENCK_JR_XML,
+} from '../../../services/ncbi/parsing/_suffix-fixtures.js';
 
 const mockEFetch = vi.fn();
 vi.mock('@/services/ncbi/ncbi-service.js', () => ({
@@ -966,6 +974,84 @@ describe('fetchArticlesTool whole-response budget (issue #99)', () => {
     expect(text).not.toContain('B'.repeat(40));
   });
 
+  describe('the deferral notice names each ceiling with its call (#236)', () => {
+    /** Stage `specs`, measure them unbudgeted, then run under `ceilingOf(sizes)`. */
+    async function deferUnder(
+      specs: { pmid: string; abstract: string }[],
+      ceilingOf: (sizes: number[]) => number,
+    ) {
+      stageArticles(specs);
+      const sizes = sizesOf((await run(specs.map((s) => s.pmid))).result);
+      const ceiling = ceilingOf(sizes);
+      stageArticles(specs);
+      const { result, ctx } = await run(
+        specs.map((s) => s.pmid),
+        { maxResponseCharacters: ceiling },
+      );
+      return { sizes, ceiling, result, notice: getEnrichment(ctx).notice ?? '' };
+    }
+    const SMALL_THEN_LARGE = [
+      { pmid: '111', abstract: 'A'.repeat(40) },
+      { pmid: '222', abstract: 'B'.repeat(400) },
+    ];
+    const LARGE_THEN_SMALL = [
+      { pmid: '111', abstract: 'A'.repeat(400) },
+      { pmid: '222', abstract: 'B'.repeat(40) },
+    ];
+
+    it('names the continuation ceiling and the repeat ceiling when the next article exceeds the current one', async () => {
+      const { sizes, ceiling, notice } = await deferUnder(SMALL_THEN_LARGE, (s) => (s[0] ?? 0) + 1);
+      const [returned = 0, next = 0] = sizes;
+      expect(next).toBeGreaterThan(ceiling);
+
+      expect(notice).toBe(
+        `Response character budget reached: ${returned} of ${ceiling} characters returned. 1 resolved article(s) were deferred whole: 222. To continue, re-call pubmed_fetch_articles with those PMIDs and maxResponseCharacters ≥ ${next}, the size of the next deferred article. To return the next deferred article in this response instead, repeat this call with maxResponseCharacters ≥ ${returned + next}.`,
+      );
+    });
+
+    it('says the deferred PMIDs can be re-called at the current ceiling when the next article fits it', async () => {
+      const { sizes, ceiling, notice } = await deferUnder(
+        LARGE_THEN_SMALL,
+        (s) => (s[0] ?? 0) + (s[1] ?? 0) - 1,
+      );
+      const [returned = 0, next = 0] = sizes;
+      expect(next).toBeLessThan(ceiling);
+
+      expect(notice).toBe(
+        `Response character budget reached: ${returned} of ${ceiling} characters returned. 1 resolved article(s) were deferred whole: 222. To continue, re-call pubmed_fetch_articles with those PMIDs at the current maxResponseCharacters of ${ceiling}, which already fits the next deferred article (${next} characters). To return the next deferred article in this response instead, repeat this call with maxResponseCharacters ≥ ${returned + next}.`,
+      );
+    });
+
+    it('names the one ceiling when the first article alone exceeds the current one', async () => {
+      const { sizes, ceiling, notice } = await deferUnder(LARGE_THEN_SMALL, (s) => s[1] ?? 0);
+
+      expect(notice).toBe(
+        `The first article alone exceeds the requested maxResponseCharacters of ${ceiling}, so none were returned. 2 resolved article(s) were deferred whole: 111, 222. Re-call pubmed_fetch_articles with those PMIDs and maxResponseCharacters ≥ ${sizes[0]}, the size of that first article.`,
+      );
+    });
+
+    it('returns every article when the call is repeated at the repeat ceiling, and defers one under it', async () => {
+      const { sizes } = await deferUnder(SMALL_THEN_LARGE, (s) => (s[0] ?? 0) + 1);
+      const repeatCeiling = (sizes[0] ?? 0) + (sizes[1] ?? 0);
+
+      const atCeiling = await deferUnder(SMALL_THEN_LARGE, () => repeatCeiling);
+      expect(atCeiling.result.totalReturned).toBe(2);
+      expect(atCeiling.result.deferred).toBeUndefined();
+
+      const under = await deferUnder(SMALL_THEN_LARGE, () => repeatCeiling - 1);
+      expect(under.result.deferred?.ids).toEqual(['222']);
+    });
+
+    it('advertises both ceilings on `nextDeferredCharacters`', () => {
+      const description =
+        fetchArticlesTool.output.shape.deferred.unwrap().shape.nextDeferredCharacters.description ??
+        '';
+      expect(description).toBe(
+        'Serialized size of the next deferred article — the first entry in `ids`, where the response stopped — and the continuation ceiling: re-calling with the deferred PMIDs needs `maxResponseCharacters` ≥ this to return anything, and a smaller article further down `ids` cannot be reached until this one fits. Repeating this same call needs `maxResponseCharacters` ≥ `returnedCharacters` + this to return this article as well.',
+      );
+    });
+  });
+
   it('never lists a record with no PMID as deferrable, and counts what it lists', async () => {
     // A record NCBI returned without a parseable PMID is already reported in
     // `unavailablePmids`; it is not something a caller can re-request, so it
@@ -1559,6 +1645,152 @@ describe('fetchArticlesTool comments and corrections (issue #178)', () => {
     expect(entry.refSource).toBe('J *Hostile* 2020;1:1.\n#### Injected');
   });
 
+  describe('notice banner under the title (#237)', () => {
+    /** A corpus record's EFetch body, as captured. */
+    const corpusSource = (pmid: string) =>
+      readFileSync(
+        new URL(`../../../corpus/fixtures/pubmed/pmid${pmid}/source.xml`, import.meta.url),
+        'utf8',
+      );
+    function stageBody(xml: string) {
+      mockEFetch.mockResolvedValue({ PubmedArticleSet: parseArticleSetXml(xml) });
+    }
+
+    /** The lines from a record's `###` heading up to, not including, its first `**Authors` line. */
+    const headOf = (text: string) => {
+      const lines = text.split('\n');
+      const start = lines.findIndex((line) => line.startsWith('### '));
+      const end = lines.findIndex((line, i) => i > start && line.startsWith('**Authors ('));
+      return lines.slice(start, end);
+    };
+
+    /** Render one journal article carrying `commentsCorrections` through format(). */
+    const render = (
+      commentsCorrections: { refType: string; refSource: string; pmid?: string; note?: string }[],
+    ) =>
+      textBlocks(
+        fetchArticlesTool.format!({
+          articles: [
+            {
+              recordType: 'journal-article' as const,
+              pmid: '1',
+              title: 'T',
+              authors: [{ lastName: 'Doe', initials: 'J' }],
+              commentsCorrections,
+            },
+          ],
+          totalReturned: 1,
+        }),
+      )[0]?.text ?? '';
+
+    it('opens PMID 9500320 with the Retracted block before Authors; the 29-entry list is unchanged', async () => {
+      stageSet(RETRACTED_ARTICLE_XML);
+
+      const { structured, text } = await call(['9500320']);
+
+      expect(headOf(text)).toEqual([
+        '### Ileal-lymphoid-nodular hyperplasia, non-specific colitis, and pervasive developmental disorder in children.',
+        '',
+        '**Retracted:** NCBI links a retraction notice to this article.',
+        '- **RetractionIn:** Lancet. 2004 Mar 6;363(9411):750. doi: 10.1016/S0140-6736(04)15715-2. — PMID 15016483',
+        '- **RetractionIn:** Lancet. 2010 Feb 6;375(9713):445. doi: 10.1016/S0140-6736(10)60175-4. — PMID 20137807',
+        '- **ExpressionOfConcernIn:** Eur J Gastroenterol Hepatol. 2011 Nov;23(11):1082. doi: 10.1097/MEG.0b013e328349d184. — PMID 21971344',
+        '',
+      ]);
+      // Each notice appears in both blocks; the full list keeps NCBI's 29 entries in order.
+      const section = sectionOf(text);
+      expect(section.split('\n')[0]).toBe('#### Comments and Corrections (29)');
+      expect(entryLines(section)).toHaveLength(29);
+      expect(text.match(/PMID 15016483/g)).toHaveLength(2);
+      expect(structured.articles[0]?.commentsCorrections).toHaveLength(29);
+    });
+
+    it('opens PMID 39624286 (ErratumIn only) with Notices and its one entry, no Retracted line', async () => {
+      stageBody(corpusSource('39624286'));
+
+      const { text } = await call(['39624286']);
+
+      expect(headOf(text)).toEqual([
+        '### Securing consensus in fractional-order multi-agent systems: Algebraic approaches against Byzantine attacks.',
+        '',
+        '**Notices:**',
+        '- **ErratumIn:** Heliyon. 2025 Jun 30;11(12):e43572. doi: 10.1016/j.heliyon.2025.e43572. — PMID 41216527',
+        '',
+      ]);
+      expect(text).not.toContain('Retracted');
+    });
+
+    it('opens PMID 31844417 (one RetractionIn) with the Retracted block', async () => {
+      stageBody(corpusSource('31844417'));
+
+      const { text } = await call(['31844417']);
+
+      expect(headOf(text)).toEqual([
+        '### MicroRNA-582-3p negatively regulates cell proliferation and cell cycle progression in acute myeloid leukemia by targeting cyclin B2.',
+        '',
+        '**Retracted:** NCBI links a retraction notice to this article.',
+        '- **RetractionIn:** Cell Mol Biol Lett. 2025 Apr 18;30(1):51. doi: 10.1186/s11658-025-00729-3. — PMID 40251503',
+        '',
+      ]);
+    });
+
+    it('adds nothing for a record whose links qualify nothing: 20137807 (RetractionOf) and 34116029 (CommentIn)', async () => {
+      stageSet(RETRACTION_NOTICE_XML);
+      const notice = (await call(['20137807'])).text;
+      stageBody(corpusSource('34116029'));
+      const comment = (await call(['34116029'])).text;
+
+      for (const text of [notice, comment]) {
+        expect(text).not.toContain('**Retracted:**');
+        expect(text).not.toContain('**Notices:**');
+        // The heading is followed by the block it led into before, as it was.
+        const lines = text.split('\n');
+        const heading = lines.findIndex((line) => line.startsWith('### '));
+        expect(lines[heading + 1]).toBe('');
+        expect(lines[heading + 2]).toMatch(/^\*\*(Authors \(\d+\)|Journal):\*\*/);
+      }
+      expect(sectionOf(notice).split('\n')[0]).toBe('#### Comments and Corrections (1)');
+      expect(sectionOf(comment).split('\n')[0]).toBe('#### Comments and Corrections (1)');
+    });
+
+    it('selects only the qualifying types, in NCBI order, warning on a retracted-and-republished article', () => {
+      const text = render([
+        { refType: 'CommentIn', refSource: 'J C. 2020;1:1.', pmid: '10' },
+        { refType: 'ErratumIn', refSource: 'J E. 2021;1:2.' },
+        { refType: 'UpdateIn', refSource: 'J U. 2022;1:3.', pmid: '11' },
+        { refType: 'RetractedandRepublishedIn', refSource: 'J R. 2023;1:4.', pmid: '12' },
+        { refType: 'ErratumFor', refSource: 'J F. 2019;1:5.', pmid: '13' },
+      ]);
+
+      expect(headOf(text)).toEqual([
+        '### T',
+        '',
+        '**Retracted:** NCBI links a retraction notice to this article.',
+        '- **ErratumIn:** J E. 2021;1:2.',
+        '- **RetractedandRepublishedIn:** J R. 2023;1:4. — PMID 12',
+        '',
+      ]);
+    });
+
+    it('takes Notices, not Retracted, for an expression of concern or a correction and republication', () => {
+      for (const refType of ['ExpressionOfConcernIn', 'CorrectedandRepublishedIn']) {
+        expect(
+          headOf(render([{ refType, refSource: 'J T. 2025;1:2.', pmid: '2' }])),
+          refType,
+        ).toEqual(['### T', '', '**Notices:**', `- **${refType}:** J T. 2025;1:2. — PMID 2`, '']);
+      }
+    });
+
+    it('escapes Markdown in a banner entry exactly as the full list does', () => {
+      const text = render([
+        { refType: 'ErratumIn', refSource: 'J *Bold* Res. 2020;1:2.', note: 'see [1]' },
+      ]);
+      const line = '- **ErratumIn:** J \\*Bold\\* Res. 2020;1:2. — Note: see \\[1\\]';
+      expect(headOf(text)).toEqual(['### T', '', '**Notices:**', line, '']);
+      expect(entryLines(sectionOf(text))).toEqual([line]);
+    });
+  });
+
   describe('under maxResponseCharacters', () => {
     const sizeOf = (article: ArticleOut) => JSON.stringify(article).length;
 
@@ -1822,5 +2054,129 @@ describe('fetchArticlesTool investigators (issue #216)', () => {
       expect(kept.deferred?.returnedCharacters).toBe(fullSize);
       expect(kept.deferred?.ids).toEqual(['42474064']);
     });
+  });
+});
+
+describe("fetchArticlesTool NCBI's literal None page value (issue #248)", () => {
+  beforeEach(() => {
+    mockEFetch.mockReset();
+  });
+
+  async function call(xml: string) {
+    mockEFetch.mockResolvedValue({ PubmedArticleSet: parseArticleSetXml(articleSetXml(xml)) });
+    const result = await runToolContract(fetchArticlesTool, { pmids: ['42845821'] });
+    expect(result.isError).toBeFalsy();
+    const structured = result.structuredContent as {
+      articles: { journalInfo?: Record<string, unknown> }[];
+    };
+    return { structured, text: textBlocks(result.content as never)[0]?.text ?? '' };
+  }
+
+  it('reports no pages for PMID 42845821 on either surface, as for a record with no pagination', async () => {
+    const none = await call(NONE_PAGINATION_XML);
+    const bare = await call(NO_PAGINATION_XML);
+
+    expect(none.structured.articles[0]?.journalInfo).not.toHaveProperty('pages');
+    expect(none.structured).toEqual(bare.structured);
+    expect(none.text).toBe(bare.text);
+    expect(none.text).toContain(
+      '\n**Journal:** The Lancet. Primary care, (Lancet Prim Care), 2026 Sep, **2**(9), eISSN 3050-5143\n',
+    );
+    expect(none.text).not.toContain('None');
+  });
+});
+
+describe('fetchArticlesTool author name suffixes (issue #226)', () => {
+  beforeEach(() => {
+    mockEFetch.mockReset();
+  });
+
+  interface NamedOut {
+    firstName?: string;
+    lastName?: string;
+    suffix?: string;
+  }
+
+  /** Call through the contract boundary: output validation, format(), both surfaces. */
+  async function call(xml: string, pmid: string, extra: Record<string, unknown> = {}) {
+    mockEFetch.mockResolvedValue({ PubmedArticleSet: parseArticleSetXml(articleSetXml(xml)) });
+    const result = await runToolContract(fetchArticlesTool, { pmids: [pmid], ...extra });
+    expect(result.isError).toBeFalsy();
+    const structured = result.structuredContent as {
+      articles: {
+        authors?: NamedOut[];
+        book?: { editors?: NamedOut[] };
+        investigators?: NamedOut[];
+      }[];
+    };
+    return {
+      article: structured.articles[0],
+      text: textBlocks(result.content as never)[0]?.text ?? '',
+    };
+  }
+
+  it('carries an author suffix on both surfaces and leaves unsuffixed authors as they were (PMID 34525284)', async () => {
+    const { article, text } = await call(FRENCK_JR_XML, '34525284');
+
+    expect(article?.authors).toStrictEqual([
+      {
+        lastName: 'Frenck',
+        firstName: 'Robert W',
+        initials: 'RW',
+        suffix: 'Jr',
+        affiliationIndices: [0],
+      },
+      { lastName: 'Dormitzer', firstName: 'Philip R', initials: 'PR', affiliationIndices: [1] },
+      { lastName: 'Gurtman', firstName: 'Alejandra', initials: 'A', affiliationIndices: [1] },
+    ]);
+    expect(text).toContain(
+      '**Authors (3):**\n- Robert W Frenck Jr (RW) [aff 0]\n- Philip R Dormitzer (PR) [aff 1]\n- Alejandra Gurtman (A) [aff 1]\n',
+    );
+  });
+
+  it('carries both suffixed investigators on both surfaces (PMID 19117881)', async () => {
+    const { article, text } = await call(AAP_INVESTIGATORS_XML, '19117881', {
+      includeInvestigators: true,
+    });
+
+    const suffixed = article?.investigators?.filter((inv) => 'suffix' in inv);
+    expect(suffixed).toStrictEqual([
+      { lastName: 'Bocchini', firstName: 'Joseph A', initials: 'JA', suffix: 'Jr' },
+      { lastName: 'Frenck', firstName: 'Robert W', initials: 'RW', suffix: 'Jr' },
+    ]);
+    expect(text).toContain(
+      '**Investigators (13):**\n- Joseph A Bocchini Jr (JA)\n- John S Bradley (JS)\n',
+    );
+    expect(text).toContain(
+      '\n- Margaret C Fisher (MC)\n- Robert W Frenck Jr (RW)\n- Mary P Glode (MP)\n',
+    );
+  });
+
+  it('carries a book editor suffix on both surfaces', async () => {
+    const chapter = GENEREVIEWS_CHAPTER_XML.replace(
+      '<LastName>Adam</LastName><ForeName>Margaret P</ForeName><Initials>MP</Initials>',
+      '<LastName>Adam</LastName><ForeName>Margaret P</ForeName><Initials>MP</Initials><Suffix>3rd</Suffix>',
+    );
+    const { article, text } = await call(chapter, '20301425');
+
+    expect(article?.book?.editors?.[0]).toStrictEqual({
+      lastName: 'Adam',
+      firstName: 'Margaret P',
+      initials: 'MP',
+      suffix: '3rd',
+    });
+    expect(text).toContain('**Editors (5):**\n- Margaret P Adam 3rd (MP)\n- Sarah Bick (S)\n');
+  });
+
+  it('keeps the suffix when NCBI gives initials but no ForeName', async () => {
+    const initialsOnly = FRENCK_JR_XML.replace('<ForeName>Robert W</ForeName>', '');
+    const { article, text } = await call(initialsOnly, '34525284');
+
+    expect(article?.authors?.[0]).toMatchObject({
+      lastName: 'Frenck',
+      initials: 'RW',
+      suffix: 'Jr',
+    });
+    expect(text).toContain('**Authors (3):**\n- Frenck Jr (RW) [aff 0]\n');
   });
 });

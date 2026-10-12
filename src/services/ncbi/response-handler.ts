@@ -31,7 +31,7 @@ import {
   ORDERED_XML_PARSER_OPTIONS,
   XML_PROCESS_ENTITIES_OPTIONS,
 } from './parsing/ordered-xml-parser-options.js';
-import { decodeHtmlEntities } from './parsing/text-helpers.js';
+import { decodeHtmlEntities, stripInvisibleFormatChars } from './parsing/text-helpers.js';
 import type { NcbiRequestOptions } from './types.js';
 
 /**
@@ -103,10 +103,11 @@ const NCBI_ARRAY_JPATHS = new Set([
  * ESummary version-1 `<Item>` elements, at any nesting depth.
  *
  * A `DocSum` item of `Type="List"` or `Type="Structure"` holds further `<Item>`
- * children, and `lookup-mesh` walks three levels of them to reach a tree number.
- * The nesting is open-ended, so one anchored pattern covers it where a fixed
- * list of paths would silently cap the depth. Anchored at the root for the same
- * reason the set is: a suffix match would catch an unrelated `Item` elsewhere.
+ * children — the version-1 fallback in `esummary-parser` reads an `AuthorList`
+ * and `ArticleIds` this way. The nesting is open-ended, so one anchored pattern
+ * covers it where a fixed list of paths would silently cap the depth. Anchored
+ * at the root for the same reason the set is: a suffix match would catch an
+ * unrelated `Item` elsewhere.
  * (#138)
  */
 const ESUMMARY_ITEM_JPATH = /^eSummaryResult\.DocSum(?:\.Item)+$/;
@@ -120,6 +121,10 @@ const ERROR_PATHS = [
   'eSearchResult.ERROR',
   'eSummaryResult.ERROR',
   'eFetchResult.ERROR',
+  // ESpell is parsed on the ordered path, which reaches this list only for a
+  // non-empty `<ERROR>`. The empty `<ERROR/>` it sends with every answer would
+  // read as an error on the flat path. (#241)
+  'eSpellResult.ERROR',
   'PubmedArticleSet.ErrorList.CannotRetrievePMID',
   'ERROR',
 ];
@@ -528,7 +533,7 @@ const VERBATIM_TEXT_JPATHS = new Set([
  * `007` → `7`, `0x1A` → `26` (#178). The processor's contract does the work:
  * returning `undefined` leaves the raw text alone, while returning the value
  * unchanged for every other tag keeps the existing coercion exactly as it was.
- * The flat parsers keep the default `jPath: true`, so the path arrives as a string.
+ * The flat parser keeps the default `jPath: true`, so the path arrives as a string.
  */
 const preserveVerbatimText = (
   tagName: string,
@@ -549,35 +554,21 @@ export class NcbiResponseHandler {
    * uses, so the two JATS paths cannot drift apart. (#69, #127)
    */
   private readonly orderedXmlParser: FastXmlParser;
-  /**
-   * Flat, named-key parser with `parseTagValue: false`. Same shape as
-   * `xmlParser` — `response.eSpellResult.Query` still resolves — but tag text
-   * arrives verbatim. Used where a response echoes an arbitrary caller-supplied
-   * token: ESpell's `<Query>` is the only such field today, and coercion there
-   * destroys the text before application code runs (`007` → `7`, `1e5` →
-   * `100000`), which no read-site `String()` can undo. `orderedXmlParser` is
-   * not a substitute — it also sets `preserveOrder`, returning a node array
-   * rather than the property access the ESpell read depends on. (#108)
-   */
-  private readonly verbatimXmlParser: FastXmlParser;
 
   constructor() {
-    // The two flat, named-key parsers differ only in `parseTagValue`.
-    const flatOptions = {
+    this.xmlParser = new FastXmlParser({
       ignoreAttributes: false,
       attributeNamePrefix: '@_',
       processEntities: XML_PROCESS_ENTITIES_OPTIONS,
       htmlEntities: true,
+      parseTagValue: true,
       isArray: (_name, jpath) => {
         // `jPathOrMatcher` is a string unless `jPath: false` is set, which it is not.
         const path = jpath as string;
         return NCBI_ARRAY_JPATHS.has(path) || ESUMMARY_ITEM_JPATH.test(path);
       },
       tagValueProcessor: preserveVerbatimText,
-    } satisfies X2jOptions;
-
-    this.xmlParser = new FastXmlParser({ ...flatOptions, parseTagValue: true });
-    this.verbatimXmlParser = new FastXmlParser({ ...flatOptions, parseTagValue: false });
+    } satisfies X2jOptions);
     this.orderedXmlParser = new FastXmlParser(ORDERED_XML_PARSER_OPTIONS);
   }
 
@@ -733,17 +724,13 @@ export class NcbiResponseHandler {
         this.throwNcbiError(errorParsed, endpoint);
       }
 
-      // Ordered wins when both are set: it is the JATS mixed-content path, and
-      // it already parses tag values verbatim.
-      const parser = useOrdered
-        ? this.orderedXmlParser
-        : options?.useVerbatimParser
-          ? this.verbatimXmlParser
-          : this.xmlParser;
-      // Pre-flatten inline markup (scripts, emphasis, MathML) on the regular
-      // parser path. The ordered parser walks mixed content correctly via
-      // preserveOrder; the regular parser does not.
-      const xmlForParse = useOrdered ? responseText : flattenInlineMarkup(responseText);
+      const parser = useOrdered ? this.orderedXmlParser : this.xmlParser;
+      // Invisible characters a deposit carries inside words go before either
+      // parser sees them (#224). Then pre-flatten inline markup (scripts,
+      // emphasis, MathML) on the regular parser path. The ordered parser walks
+      // mixed content correctly via preserveOrder; the regular parser does not.
+      const visibleXml = stripInvisibleFormatChars(responseText);
+      const xmlForParse = useOrdered ? visibleXml : flattenInlineMarkup(visibleXml);
       let parsedXml: unknown;
       try {
         parsedXml = parser.parse(xmlForParse);

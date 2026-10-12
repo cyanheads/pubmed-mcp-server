@@ -1,8 +1,8 @@
 /**
- * @fileoverview PubMed spell-check tool. Uses NCBI's ESpell service to correct
- * every misspelled token of a PubMed search query in one call — the recovery
- * step after a zero-hit or thin `pubmed_search_articles` result. `term` is
- * accepted as an alias for `query`.
+ * @fileoverview PubMed spell-check tool. Applies NCBI ESpell's corrections to a
+ * PubMed search query in place, keeping its field tags, operators, spacing, and
+ * gene symbols — the recovery step after a zero-hit or thin
+ * `pubmed_search_articles` result. `term` is accepted as an alias for `query`.
  * @module src/mcp-server/tools/definitions/spell-check.tool
  */
 
@@ -14,7 +14,7 @@ import { hasVisibleText } from './_visible-text.js';
 
 export const spellCheckTool = tool('pubmed_spell_check', {
   description:
-    'Spell-check a PubMed search query against NCBI ESpell and get the corrected query back. Use after a zero-hit or thin `pubmed_search_articles` result, or when a drug, gene, disease, or author name may be misspelled — every misspelled token is corrected in one call (`alzhiemer diseese treatmnt outcomse` → `alzheimer disease treatment outcomes`), and `hasSuggestion` is false when NCBI has no change to offer. Re-run the search with `corrected`.',
+    'Spell-check a PubMed search query against NCBI ESpell and get the corrected query back. Use after a zero-hit or thin `pubmed_search_articles` result, or when a drug, gene, disease, or author name may be misspelled. Corrections are applied in place, so field tags, operators, spacing, and gene symbols stay as written (`alzhiemer diseese treatmnt outcomse` → `alzheimer disease treatment outcomes`). Words in all capitals, with digits or non-ASCII letters, or differing only in case are never changed, words after a number or symbol ESpell skips are left as written, and `hasSuggestion` is false when no correction was applied. Re-run the search with `corrected`.',
   annotations: { readOnlyHint: true, openWorldHint: true },
   _meta: conceptMeta([SCHEMA_SEARCH_ACTION]),
   sourceUrl:
@@ -37,8 +37,14 @@ export const spellCheckTool = tool('pubmed_spell_check', {
 
   output: z.object({
     original: z.string().describe('Original query'),
-    corrected: z.string().describe('Corrected query (same as original if no suggestion)'),
-    hasSuggestion: z.boolean().describe('Whether NCBI suggested a correction'),
+    corrected: z
+      .string()
+      .describe(
+        "The query with ESpell's accepted corrections applied in place; field tags, operators, spacing, and words in capitals or with digits are kept as written. Same as `original` when `hasSuggestion` is false.",
+      ),
+    hasSuggestion: z
+      .boolean()
+      .describe('Whether at least one correction was applied to `corrected`'),
   }),
 
   async handler(input, ctx) {
@@ -74,7 +80,7 @@ export const spellCheckTool = tool('pubmed_spell_check', {
     return [
       {
         type: 'text',
-        text: `No suggestion — query "${result.original}" appears correct as written.`,
+        text: `No correction applied — query "${result.original}" is returned as written.`,
       },
     ];
   },

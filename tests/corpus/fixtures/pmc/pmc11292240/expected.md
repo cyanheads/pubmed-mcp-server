@@ -31,7 +31,7 @@
 
 **Journal:** Heliyon, **10**(14), e34101, ISSN 2405-8440
 **Type:** research-article
-**Published:** 2024-7-05
+**Published:** 2024-07-05
 **PMCID:** PMC11292240
 **PMID:** 39092259
 **DOI:** 10.1016/j.heliyon.2024.e34101

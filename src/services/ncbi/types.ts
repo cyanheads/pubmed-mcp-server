@@ -39,24 +39,17 @@ export interface NcbiRequestOptions {
    */
   signal?: AbortSignal;
   /**
-   * Parse XML in `preserveOrder: true` mode (returns `JatsNodeList`). Required
-   * for JATS mixed-content responses (PMC full-text) where inline element order
-   * must be preserved in the output. Leave false for all other E-utilities.
+   * Parse XML in `preserveOrder: true` mode (returns `JatsNodeList`), with tag
+   * values kept as text and whitespace untrimmed. Required for JATS
+   * mixed-content responses (PMC full-text), where inline element order must
+   * be preserved, and for ESpell, whose `<SpelledQuery>` segments are read in
+   * document order with their spacing and whose echoed `<Query>` must not be
+   * coerced to a number (`007`, `1e5`). Leave false for all other E-utilities.
+   * (#108, #241)
    */
   useOrderedParser?: boolean;
   /** Force HTTP POST (for large payloads). */
   usePost?: boolean;
-  /**
-   * Parse XML with `parseTagValue: false` while keeping the flat, named-key
-   * object shape (`response.eSpellResult.Query`). Required wherever a response
-   * echoes an arbitrary caller-supplied token that must survive verbatim: the
-   * coercing default turns `007` into `7` and `1e5` into `100000` before any
-   * application code runs, so a read-site `String()` cannot recover the text.
-   * Distinct from `useOrderedParser`, which also sets `preserveOrder` and hands
-   * back a document-ordered node array. Ignored when `useOrderedParser` is set.
-   * (#108)
-   */
-  useVerbatimParser?: boolean;
 }
 
 /**
@@ -111,6 +104,8 @@ export interface XmlAuthor {
   Identifier?: XmlIdentifier[] | XmlIdentifier; // For ORCID etc.
   Initials?: XmlTextElement;
   LastName?: XmlTextElement;
+  /** Generational suffix as NCBI writes it — `Jr`, `2nd`, `3rd`, `4th` — never normalized. */
+  Suffix?: XmlTextElement;
 }
 
 /**
@@ -388,6 +383,8 @@ export interface ParsedArticleAuthor {
   initials?: string;
   lastName?: string;
   orcid?: string;
+  /** Generational suffix verbatim from NCBI `Suffix` (`Jr`, `2nd`). Absent when NCBI gives none. (#226) */
+  suffix?: string;
 }
 
 /**
@@ -403,6 +400,7 @@ export interface ParsedInvestigator {
   initials?: string;
   lastName?: string;
   orcid?: string;
+  suffix?: string;
 }
 
 export interface ParsedArticleDate {
@@ -486,6 +484,7 @@ export interface ParsedBookEditor {
   firstName?: string;
   initials?: string;
   lastName?: string;
+  suffix?: string;
 }
 
 /**
@@ -787,25 +786,17 @@ export interface ESearchResult {
 
 // ─── ESpell Types ───────────────────────────────────────────────────────────
 
-/** Normalized ESpell result. */
-export interface ESpellResult {
-  corrected: string;
-  hasSuggestion: boolean;
-  original: string;
-}
-
 /**
- * Raw parsed XML container for eSpellResult. `Query` and `CorrectedQuery` are
- * strings at runtime as well as in this declaration: the ESpell request opts
- * into `useVerbatimParser`, so the coercing default parser never sees the
- * echoed term. (#108)
+ * Normalized ESpell result. The response is read with the ordered parser (a
+ * `JatsNodeList`), so no raw container type is declared for it.
  */
-export interface ESpellResponseContainer {
-  eSpellResult: {
-    Query?: string;
-    CorrectedQuery?: string;
-    SpelledQuery?: unknown;
-  };
+export interface ESpellResult {
+  /** The caller's query with ESpell's accepted replacements applied; `original` when none was. */
+  corrected: string;
+  /** Whether at least one replacement was applied. */
+  hasSuggestion: boolean;
+  /** The query as ESpell echoed it. */
+  original: string;
 }
 
 // ─── EFetch Types ───────────────────────────────────────────────────────────
@@ -885,7 +876,10 @@ export interface ParsedPmcAsset {
   href?: string;
   /** The `id` attribute, when the deposit carries one. */
   id?: string;
-  /** Display label, e.g. `Fig. 1`. */
+  /**
+   * Display label, e.g. `Fig. 1`, without the one trailing ` |`, `.` or `:` some
+   * deposits print after it (`Figure 1.` reads `Figure 1`).
+   */
   label?: string;
   /**
    * Title of the innermost enclosing section wherever it sits — body, back
@@ -900,6 +894,8 @@ export interface ParsedPmcAuthor {
   collectiveName?: string;
   givenNames?: string;
   lastName?: string;
+  /** JATS `<name>/<suffix>` verbatim (`IV`, `Jr`). Absent when the deposit gives none. (#226) */
+  suffix?: string;
 }
 
 /** Parsed PMC journal info. */
@@ -958,7 +954,10 @@ export interface ParsedPmcTable {
   headerRowCount: number;
   /** The `id` attribute, when the deposit carries one. */
   id?: string;
-  /** Display label, e.g. `TABLE 1`. */
+  /**
+   * Display label, e.g. `TABLE 1`, without the one trailing ` |`, `.` or `:`
+   * some deposits print after it (`Table 1.` reads `Table 1`).
+   */
   label?: string;
   /** Cell text by grid column, spans expanded. Empty when unextractable. */
   rows: string[][];

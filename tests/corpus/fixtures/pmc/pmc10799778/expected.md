@@ -25,7 +25,7 @@
 
 **Journal:** Applied Microbiology and Biotechnology, **108**, 156, ISSN 0175-7598
 **Type:** review-article
-**Published:** 2024-1-20
+**Published:** 2024-01-20
 **PMCID:** PMC10799778
 **PMID:** 38244075
 **DOI:** 10.1007/s00253-024-13007-7

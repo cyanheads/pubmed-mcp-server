@@ -26,6 +26,15 @@ import {
 
 import { getServerConfig } from '@/config/server-config.js';
 import { NcbiApiClient } from './api-client.js';
+import {
+  childrenOf,
+  findOne,
+  isTextNode,
+  type JatsNode,
+  type JatsNodeList,
+  tagNameOf,
+  textOf,
+} from './parsing/pmc-xml-helpers.js';
 import { createNcbiRequestQueue } from './request-queue.js';
 import {
   emptyEFetchResultFor,
@@ -39,7 +48,6 @@ import {
   type ESearchResponseContainer,
   type ESearchResult,
   type ESearchWarningList,
-  type ESpellResponseContainer,
   type ESpellResult,
   type ESummaryResponseContainer,
   type ESummaryResult,
@@ -149,6 +157,108 @@ function parseECitMatchRows(text: string): ECitMatchResult[] {
         ...(rawOutcome && { detail: rawOutcome }),
       };
     });
+}
+
+/** One `<SpelledQuery>` child: the caller's own text, or ESpell's replacement for a span of it. */
+export interface SpelledSegment {
+  kind: 'Original' | 'Replaced';
+  text: string;
+}
+
+/**
+ * Whether `a` is within `k` single-character edits of `b`. At the first
+ * mismatch any edit script must substitute, delete, or insert there, so three
+ * branches per edit cover it: at most 13 linear scans for `k = 2`.
+ */
+function withinEdits(a: string, b: string, k: number): boolean {
+  if (Math.abs(a.length - b.length) > k) return false;
+  let i = 0;
+  while (i < a.length && i < b.length && a[i] === b[i]) i++;
+  if (i === a.length && i === b.length) return true;
+  if (k === 0) return false;
+  const restA = a.slice(i);
+  const restB = b.slice(i);
+  return (
+    withinEdits(restA.slice(1), restB.slice(1), k - 1) ||
+    withinEdits(restA.slice(1), restB, k - 1) ||
+    withinEdits(restA, restB.slice(1), k - 1)
+  );
+}
+
+/**
+ * What to do with ESpell's replacement for one span of the caller's text: apply
+ * it, keep the span as written, or stop replacing. A span with no ASCII letter
+ * means ESpell dropped a token (`1918`, `19`, `β`), and every later replacement
+ * lands one span early — as it does past a split acronym (`PCR` → `pc r`), which
+ * the edit-distance bound catches on the next span.
+ */
+function judgeReplacement(span: string, replacement: string): 'apply' | 'keep' | 'stop' {
+  if (!/[A-Za-z]/.test(span) || replacement === '') return 'stop';
+  if (/[\d\u0080-￿]/.test(span)) return 'keep';
+  if (span.toLowerCase() === replacement.toLowerCase()) return 'keep';
+  if (!/[a-z]/.test(span) && (span.match(/[A-Z]/g)?.length ?? 0) >= 2) return 'keep';
+  return withinEdits(span.toLowerCase(), replacement.toLowerCase(), 2) ? 'apply' : 'stop';
+}
+
+/**
+ * Rebuild ESpell's suggestion over the caller's own text. `<CorrectedQuery>`
+ * lowercases the query and drops digits, field tags, and operator casing, so it
+ * cannot be re-run as written. `<SpelledQuery>` interleaves the caller's text
+ * verbatim (`Original`) with replacements (`Replaced`); the caller's text between
+ * two `Original`s is the span the `Replaced` between them stands for. Spans that
+ * hold a digit or non-ASCII character, are all uppercase, or differ only in case
+ * keep their text; the first span that can't be placed or judged ends the
+ * rebuild, and the caller's text runs unchanged from there. Linear in the query
+ * and the segments. (#241)
+ *
+ * @internal exported for direct unit tests
+ */
+export function rebuildSpelledQuery(
+  query: string,
+  segments: readonly SpelledSegment[],
+): { corrected: string; hasSuggestion: boolean } {
+  let corrected = '';
+  let cursor = 0;
+  let hasSuggestion = false;
+  let pending: string | undefined;
+  const finish = () => ({ corrected: corrected + query.slice(cursor), hasSuggestion });
+
+  /** Settle the pending replacement against `query[cursor, end)`; false stops the rebuild. */
+  const settle = (end: number): boolean => {
+    if (pending === undefined) return true;
+    const span = query.slice(cursor, end);
+    const verdict = judgeReplacement(span, pending);
+    if (verdict === 'stop') return false;
+    corrected += verdict === 'apply' ? pending : span;
+    hasSuggestion ||= verdict === 'apply';
+    cursor = end;
+    pending = undefined;
+    return true;
+  };
+
+  for (const segment of segments) {
+    if (segment.kind === 'Replaced') {
+      if (pending !== undefined) return finish();
+      pending = segment.text;
+      continue;
+    }
+    const at =
+      pending === undefined
+        ? query.startsWith(segment.text, cursor)
+          ? cursor
+          : -1
+        : query.indexOf(segment.text, cursor);
+    if (at < 0 || !settle(at)) return finish();
+    corrected += segment.text;
+    cursor += segment.text.length;
+  }
+  settle(query.length);
+  return finish();
+}
+
+/** The text of an ordered-parser element: its text children joined, whitespace kept. */
+function nodeText(node: JatsNode | undefined): string | undefined {
+  return node && childrenOf(node).filter(isTextNode).map(textOf).join('');
 }
 
 /**
@@ -371,36 +481,37 @@ export class NcbiService {
   }
 
   async eSpell(params: NcbiRequestParams, options?: NcbiCallOptions): Promise<ESpellResult> {
-    const response = await this.performRequest<ESpellResponseContainer>('espell', params, {
+    // The ordered parser keeps `<SpelledQuery>`'s segments in document order with
+    // their whitespace, and keeps every value text: ESpell echoes the caller's
+    // term in `<Query>`, and a coercing parse turns `007` / `1e5` / `33306283`
+    // into numbers before this method runs. (#108, #241)
+    const response = await this.performRequest<JatsNodeList>('espell', params, {
       retmode: 'xml',
-      // ESpell echoes the caller's term back in <Query>. The coercing default
-      // parser would turn an all-numeric one into a number — and `007` / `1e5`
-      // into different text entirely — before this method runs. (#108)
-      useVerbatimParser: true,
+      useOrderedParser: true,
       ...(options?.signal && { signal: options.signal }),
     });
 
-    const spellResult = response.eSpellResult;
-    const original = spellResult.Query ?? (params.term as string) ?? '';
-    const corrected = spellResult.CorrectedQuery ?? '';
+    const spellResult = findOne(response, 'eSpellResult');
+    const original = nodeText(findOne(spellResult, 'Query')) ?? String(params.term ?? '');
+    const segments = childrenOf(findOne(spellResult, 'SpelledQuery') ?? {}).flatMap(
+      (node): SpelledSegment[] => {
+        const kind = tagNameOf(node);
+        return kind === 'Original' || kind === 'Replaced'
+          ? [{ kind, text: nodeText(node) ?? '' }]
+          : [];
+      },
+    );
+    const { corrected, hasSuggestion } = rebuildSpelledQuery(original, segments);
 
     logger.debug(
       'ESpell result parsed.',
       requestContextService.createRequestContext({
         operation: 'NcbiESpell',
-        additionalContext: {
-          original,
-          corrected,
-          hasSuggestion: corrected.length > 0 && corrected !== original,
-        },
+        additionalContext: { original, corrected, hasSuggestion },
       }),
     );
 
-    return {
-      original,
-      corrected: corrected || original,
-      hasSuggestion: corrected.length > 0 && corrected !== original,
-    };
+    return { original, corrected, hasSuggestion };
   }
 
   eInfo(params: NcbiRequestParams, options?: NcbiCallOptions): Promise<unknown> {

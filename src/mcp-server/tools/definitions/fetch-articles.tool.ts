@@ -11,13 +11,14 @@ import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
 import { NCBI_SERVICE_ERRORS } from '@/services/error-contracts.js';
 import { getNcbiService } from '@/services/ncbi/ncbi-service.js';
 import { parseArticleSet } from '@/services/ncbi/parsing/article-parser.js';
-import { fitWholeItems } from './_budget.js';
+import { buildDeferralNotice, fitWholeItems } from './_budget.js';
 import {
   conceptMeta,
   EDAM_DATA_RETRIEVAL,
   EDAM_PUBMED_ID,
   SCHEMA_SCHOLARLY_ARTICLE,
 } from './_concepts.js';
+import { noticeLines, noticeLinks } from './_notices.js';
 import { normalizePmid, pmidStringSchema } from './_schemas.js';
 import { escapeMarkdownInline } from './_text.js';
 
@@ -26,6 +27,12 @@ const AuthorSchema = z
     lastName: z.string().optional().describe('Last name'),
     firstName: z.string().optional().describe('First/given name'),
     initials: z.string().optional().describe('Author initials'),
+    suffix: z
+      .string()
+      .optional()
+      .describe(
+        'Generational name suffix verbatim from NCBI `Suffix` (e.g. "Jr", "2nd", "3rd"), never normalized. Absent when NCBI gives none.',
+      ),
     collectiveName: z
       .string()
       .optional()
@@ -45,6 +52,12 @@ const InvestigatorSchema = z
     lastName: z.string().optional().describe('Last name'),
     firstName: z.string().optional().describe('First/given name'),
     initials: z.string().optional().describe('Initials'),
+    suffix: z
+      .string()
+      .optional()
+      .describe(
+        'Generational name suffix verbatim from NCBI `Suffix` (e.g. "Jr", "2nd"). Absent when NCBI gives none.',
+      ),
     affiliationIndices: z
       .array(z.number())
       .optional()
@@ -110,6 +123,12 @@ const BookEditorSchema = z
       .optional()
       .describe(
         'Editor initials with no separators (e.g. "MP"). Absent when NCBI supplies none, or on a group editor.',
+      ),
+    suffix: z
+      .string()
+      .optional()
+      .describe(
+        'Editor generational name suffix verbatim from NCBI `Suffix` (e.g. "Jr"). Absent when NCBI supplies none, or on a group editor.',
       ),
     collectiveName: z
       .string()
@@ -356,7 +375,7 @@ const DeferredSchema = z
     nextDeferredCharacters: z
       .number()
       .describe(
-        'Serialized size of the next deferred article — the first entry in `ids`, where the response stopped. Raise `maxResponseCharacters` to at least this to make progress; a smaller article further down `ids` cannot be reached until this one fits.',
+        'Serialized size of the next deferred article — the first entry in `ids`, where the response stopped — and the continuation ceiling: re-calling with the deferred PMIDs needs `maxResponseCharacters` ≥ this to return anything, and a smaller article further down `ids` cannot be reached until this one fits. Repeating this same call needs `maxResponseCharacters` ≥ `returnedCharacters` + this to return this article as well.',
       ),
   })
   .describe(
@@ -515,7 +534,13 @@ export const fetchArticlesTool = tool('pubmed_fetch_articles', {
     }
     if (deferred) {
       ctx.enrich({ truncated: true });
-      ctx.enrich.notice(buildDeferralNotice(deferred));
+      ctx.enrich.notice(
+        buildDeferralNotice(deferred, {
+          noun: 'article',
+          ids: deferred.ids.join(', '),
+          recall: 'pubmed_fetch_articles with those PMIDs',
+        }),
+      );
     }
     return {
       articles: returned,
@@ -541,6 +566,12 @@ export const fetchArticlesTool = tool('pubmed_fetch_articles', {
       // Render-time only — `structuredContent.articles[].title` keeps the
       // plain-text value the NCBI parser produced. (#102)
       lines.push(`\n### ${escapeMarkdownInline(a.title ?? a.pmid ?? 'Unknown')}`);
+
+      // A retraction or correction qualifies everything below it, so it leads,
+      // ahead of name lists that grow with the record. The full list further
+      // down keeps NCBI's order and repeats these entries. (#237)
+      const notices = noticeLinks(a.commentsCorrections);
+      if (notices.length > 0) lines.push('', ...noticeLines(notices));
 
       if (a.authors?.length) {
         lines.push(`\n**Authors (${a.authors.length}):**`);
@@ -697,25 +728,12 @@ export const fetchArticlesTool = tool('pubmed_fetch_articles', {
   },
 });
 
-/**
- * Compose the recovery notice for a response the whole-response budget bounded.
- * Names what was spent, which PMIDs are still retrievable, and the ceiling the
- * next call has to clear — so a caller reading only `content[]` can resume
- * without inspecting `deferred`. (#99)
- */
-function buildDeferralNotice(deferred: z.infer<typeof DeferredSchema>): string {
-  const spent =
-    deferred.returnedCharacters === 0
-      ? `The first article alone exceeds the requested maxResponseCharacters of ${deferred.maxResponseCharacters}, so none were returned.`
-      : `Response character budget reached: ${deferred.returnedCharacters} of ${deferred.maxResponseCharacters} characters returned.`;
-  return `${spent} ${deferred.deferredCount} resolved article(s) were deferred whole: ${deferred.ids.join(', ')}. Re-call pubmed_fetch_articles with those PMIDs to retrieve them, or raise maxResponseCharacters to at least ${deferred.nextDeferredCharacters} — the size of the next deferred article.`;
-}
-
 type FormattedAuthor = {
   collectiveName?: string | undefined;
   lastName?: string | undefined;
   firstName?: string | undefined;
   initials?: string | undefined;
+  suffix?: string | undefined;
   affiliationIndices?: number[] | undefined;
   orcid?: string | undefined;
 };
@@ -727,6 +745,7 @@ function formatAuthor(au: FormattedAuthor): string {
   const name = [au.firstName, au.lastName].filter(Boolean).join(' ');
   if (name) parts.push(name);
   else if (au.initials) parts.push(au.initials);
+  if (au.suffix) parts.push(au.suffix);
   if (au.initials && name) parts.push(`(${au.initials})`);
 
   if (au.affiliationIndices?.length) {

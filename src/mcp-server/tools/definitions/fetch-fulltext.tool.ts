@@ -75,7 +75,7 @@ import {
   getUnpaywallService,
   type UnpaywallService,
 } from '@/services/unpaywall/unpaywall-service.js';
-import { fitWholeItems } from './_budget.js';
+import { buildDeferralNotice, fitWholeItems } from './_budget.js';
 import { conceptMeta, EDAM_DATA_RETRIEVAL, SCHEMA_SCHOLARLY_ARTICLE } from './_concepts.js';
 import { doiStringSchema, normalizePmid, pmcidStringSchema, pmidStringSchema } from './_schemas.js';
 import { escapeMarkdownInline, escapeMarkdownTableCell, sliceAtWordBoundary } from './_text.js';
@@ -528,6 +528,12 @@ const AuthorSchema = z
     collectiveName: z.string().optional().describe('Group name'),
     givenNames: z.string().optional().describe('Given names'),
     lastName: z.string().optional().describe('Last name'),
+    suffix: z
+      .string()
+      .optional()
+      .describe(
+        'Generational name suffix verbatim from the JATS `<suffix>` (e.g. "Jr", "IV"), never normalized. Absent when the deposit gives none.',
+      ),
   })
   .describe('Author entry');
 
@@ -574,7 +580,12 @@ const ReferenceSchema = z
  */
 const TableSchema = z
   .object({
-    label: z.string().optional().describe('Table label as printed, e.g. `TABLE 1`'),
+    label: z
+      .string()
+      .optional()
+      .describe(
+        'Table label as printed, e.g. `TABLE 1`, less one trailing ` |`, `.` or `:` (`Table 1.` reads `Table 1`)',
+      ),
     caption: z.string().optional().describe('Caption text, with the label excluded'),
     id: z
       .string()
@@ -635,7 +646,12 @@ const AssetSchema = z
       .describe(
         'Which captioned element this came from — `figure` for a `<fig>`, `supplementary-material` for a `<supplementary-material>` deposit',
       ),
-    label: z.string().optional().describe('Display label as printed, e.g. `Fig. 1`'),
+    label: z
+      .string()
+      .optional()
+      .describe(
+        'Display label as printed, e.g. `Fig. 1`, less one trailing ` |`, `.` or `:` (`Figure 1.` reads `Figure 1`). Some supplements carry a bare number (`1`), kept as deposited here',
+      ),
     caption: z.string().optional().describe('Caption text, with the label excluded'),
     id: z
       .string()
@@ -986,7 +1002,7 @@ const TruncatedArticleSchema = z
       .array(z.string())
       .optional()
       .describe(
-        "The dropped assets by name, in document order — each asset's label, else its `id`, else `asset <n>` for its position in the article. Contiguous for the same reason `omittedTableNames` is: admission stops at the first asset that did not fit rather than skipping ahead to a smaller one. Absent when none were dropped.",
+        "The dropped assets by name, in document order — each asset's label (a bare-number label led by its type, `Supplementary material 1`), else its `id`, else `asset <n>` for its position in the article. Contiguous for the same reason `omittedTableNames` is: admission stops at the first asset that did not fit rather than skipping ahead to a smaller one. Absent when none were dropped.",
       ),
   })
   .describe('Character accounting for one article the budget shortened');
@@ -1052,30 +1068,30 @@ const DeferredSchema = z
     ids: z
       .array(z.string())
       .describe(
-        'Identifiers of the deferred articles, in response order, keyed as they were requested (PMC IDs in `PMC<digits>` form). Re-call `pubmed_fetch_fulltext` with these under the `idType` field — or, when `idType` is absent, with the `pmcids` / `pmids` / `dois` lists below — and the same other inputs. Never contains an id from `unavailable`.',
+        'Identifiers of the deferred articles, in routing order — `pmcids`, then `pmids`, then `dois`, request order within each — keyed as they were requested (PMC IDs in `PMC<digits>` form). Re-call `pubmed_fetch_fulltext` with these under the `idType` field — or, when `idType` is absent, with the `pmcids` / `pmids` / `dois` lists below — and the same other inputs. Never contains an id from `unavailable`.',
       ),
     pmcids: z
       .array(z.string())
       .optional()
       .describe(
-        'The deferred ids sent as PMC IDs, in response order — re-submit them as `pmcids`. Present only when the deferred ids came from more than one field (so `idType` is absent) and one of them was a PMC ID.',
+        'The deferred ids sent as PMC IDs, in routing order — re-submit them as `pmcids`. Present only when the deferred ids came from more than one field (so `idType` is absent) and one of them was a PMC ID.',
       ),
     pmids: z
       .array(z.string())
       .optional()
       .describe(
-        'The deferred ids sent as PMIDs, in response order — re-submit them as `pmids`. Present only when the deferred ids came from more than one field (so `idType` is absent) and one of them was a PMID.',
+        'The deferred ids sent as PMIDs, in routing order — re-submit them as `pmids`. Present only when the deferred ids came from more than one field (so `idType` is absent) and one of them was a PMID.',
       ),
     dois: z
       .array(z.string())
       .optional()
       .describe(
-        'The deferred ids sent as DOIs, in response order — re-submit them as `dois`. Present only when the deferred ids came from more than one field (so `idType` is absent) and one of them was a DOI.',
+        'The deferred ids sent as DOIs, in routing order — re-submit them as `dois`. Present only when the deferred ids came from more than one field (so `idType` is absent) and one of them was a DOI.',
       ),
     nextDeferredCharacters: z
       .number()
       .describe(
-        'Serialized size of the next deferred article — the first entry in `ids`, where the response stopped. Raise `maxResponseCharacters` to at least this to make progress; a smaller article further down `ids` cannot be reached until this one fits.',
+        'Serialized size of the next deferred article — the first entry in `ids`, where the response stopped — and the continuation ceiling: re-calling with the deferred ids needs `maxResponseCharacters` ≥ this to return anything, and a smaller article further down `ids` cannot be reached until this one fits. Repeating this same call needs `maxResponseCharacters` ≥ `returnedCharacters` + this to return this article as well.',
       ),
   })
   .describe(
@@ -1543,11 +1559,32 @@ function tableDisplayName(
 }
 
 /** How an asset is named in a notice: its label, else its id, else its position. */
-function assetDisplayName(
-  asset: { id?: string | undefined; label?: string | undefined },
-  index: number,
-): string {
-  return asset.label ?? asset.id ?? `asset ${index + 1}`;
+function assetDisplayName(asset: NamedAsset & { id?: string | undefined }, index: number): string {
+  return assetLabelName(asset) ?? asset.id ?? `asset ${index + 1}`;
+}
+
+/** What naming an asset reads: its type and its label. */
+interface NamedAsset {
+  assetType: ParsedPmcAsset['assetType'];
+  label?: string | undefined;
+}
+
+/** The word a bare-number asset label is named with, by asset type. */
+const ASSET_TYPE_NAMES: Record<ParsedPmcAsset['assetType'], string> = {
+  figure: 'Figure',
+  'supplementary-material': 'Supplementary material',
+};
+
+/**
+ * An asset's label as a name in a list or heading, its type leading a label that
+ * is a bare number: NIH-manuscript supplements are labelled `1`, which reads as a
+ * count among names (`7 asset(s) dropped whole: 1, Figure 1`). `label` and the
+ * prose marker keep the number as deposited — the marker (`[Supplementary: 1]`)
+ * names the kind already. (#240)
+ */
+function assetLabelName(asset: NamedAsset): string | undefined {
+  const { label } = asset;
+  return label && /^\d+$/.test(label) ? `${ASSET_TYPE_NAMES[asset.assetType]} ${label}` : label;
 }
 
 /**
@@ -1628,23 +1665,6 @@ function buildTruncationNotice(truncation: z.infer<typeof TruncationSchema>): st
     truncation.maxCharactersPerSection !== undefined ? '`maxCharactersPerSection`' : undefined,
   ].filter((k): k is string => k !== undefined);
   return `Full text was shortened to fit the requested character budget: ${truncation.returnedCharacters} of ${truncation.originalCharacters} body characters returned across ${subject} in ${truncation.mode} mode.${omitted}${omittedTables}${omittedAssets} See \`truncation\` for per-article and per-section counts, and raise ${knobs.join(' or ')} or narrow \`sections\` to retrieve more.`;
-}
-
-/**
- * Compose the recovery notice for articles the whole-response budget withheld.
- * Names what was spent, which identifiers are still retrievable, and the ceiling
- * the next call has to clear — so a caller reading only `content[]` can resume
- * without inspecting `deferred`. (#100)
- */
-function buildDeferralNotice(deferred: z.infer<typeof DeferredSchema>): string {
-  const spent =
-    deferred.returnedCharacters === 0
-      ? `The first article alone exceeds the requested maxResponseCharacters of ${deferred.maxResponseCharacters}, so none were returned.`
-      : `Response character budget reached: ${deferred.returnedCharacters} of ${deferred.maxResponseCharacters} characters returned.`;
-  const resend = deferred.idType
-    ? `Re-call pubmed_fetch_fulltext with those ids under \`${deferred.idType}s\``
-    : `Re-call pubmed_fetch_fulltext with each id under its own field (${idFieldLists(deferred)})`;
-  return `${spent} ${deferred.deferredCount} resolved article(s) were deferred whole: ${deferred.ids.join(', ')}. ${resend} to retrieve them, or raise maxResponseCharacters to at least ${deferred.nextDeferredCharacters} — the size of the next deferred article.`;
 }
 
 /**
@@ -1842,7 +1862,7 @@ export const fetchFulltextTool = tool('pubmed_fetch_fulltext', {
         .min(1)
         .optional()
         .describe(
-          'Opt-in ceiling for the whole response, in characters — the true response-wide counterpart to the per-article `maxCharacters`. Each article is measured as the JSON record it is returned as, after every filter and the per-article body budget: title, abstract, sections, references, identifiers, license and source metadata — every field it carries. One ledger covers all tiers, so PMC-, Europe PMC-, and Unpaywall-served articles spend the same budget. Articles are kept in response order until the next one would cross the ceiling; that article and the rest are deferred whole (never partially populated) and listed in `deferred.ids`. Response envelope fields — counts, `unavailable`, `truncation`, `deferred` itself — are not counted. Omit to return every resolved article.',
+          'Opt-in ceiling for the whole response, in characters — the true response-wide counterpart to the per-article `maxCharacters`. Each article is measured as the JSON record it is returned as, after every filter and the per-article body budget: title, abstract, sections, references, identifiers, license and source metadata — every field it carries. One ledger covers all tiers, so PMC-, Europe PMC-, and Unpaywall-served articles spend the same budget. Articles are kept in the order `articles` lists them until the next one would cross the ceiling; that article and the rest are deferred whole (never partially populated) and listed in `deferred.ids`. Response envelope fields — counts, `unavailable`, `truncation`, `deferred` itself — are not counted. Omit to return every resolved article.',
         ),
       overflowMode: z
         .enum(['truncate', 'outline'])
@@ -1870,7 +1890,11 @@ export const fetchFulltextTool = tool('pubmed_fetch_fulltext', {
     }),
 
   output: z.object({
-    articles: z.array(ArticleSchema).describe('Full-text articles'),
+    articles: z
+      .array(ArticleSchema)
+      .describe(
+        'Full-text articles in routing order — `pmcids`, then `pmids`, then `dois`, request order within each — each at the position of the id it would be deferred under, whichever tier served it. An article several ids name appears once.',
+      ),
     totalReturned: z
       .number()
       .describe(
@@ -2498,28 +2522,46 @@ export const fetchFulltextTool = tool('pubmed_fetch_fulltext', {
       }
     }
 
-    // Whole-response budget: fill with complete records in response order and
-    // hand the rest back as identifiers the caller can re-submit. One ledger for
-    // every tier — a PMC-served article and an Unpaywall-served one spend the
-    // same characters. Without `maxResponseCharacters` nothing is measured and
-    // the response is exactly what it was before the budget existed. (#100)
-    const resolved: FulltextArticle[] = [...pmcArticles, ...fallbackArticles];
-    const ceiling = input.maxResponseCharacters;
-    const fit = ceiling === undefined ? undefined : fitWholeItems(resolved, ceiling);
-    const articles = fit?.kept ?? resolved;
-    const nextDeferredCharacters = fit?.nextDeferredCharacters;
-    // Each deferred article is handed back under the first spelling of the id
-    // that owns it, in the field that id was sent in. Every recovery site
-    // records the owner; a PMC record that came back without a PMC ID has none,
-    // and is reported under the id it carries — the total-function fallback,
-    // not an expected path.
-    const deferredIds = (fit?.deferred ?? []).map((a): CallerId => {
+    // Each article is handed back under the first spelling of the id that owns
+    // it, in the field that id was sent in. Every recovery site records the
+    // owner; a PMC record that came back without a PMC ID has none, and is
+    // reported under the id it carries — the total-function fallback, not an
+    // expected path.
+    const handBackId = (a: FulltextArticle): CallerId => {
       const key = inputIdByArticle.get(a);
       const owner = key === undefined ? undefined : callerIds.get(key)?.[0];
       return (
         owner ?? { id: articleDisplayId(a), idType: a.pmcId ? 'pmcid' : a.pmid ? 'pmid' : 'doi' }
       );
-    });
+    };
+    // Articles run in routing order, each at the position of the id it is
+    // handed back under: PMC EFetch answers in an order that is neither the
+    // request's nor stable between calls, and the tiers finish in tier order,
+    // so neither can decide what a budget keeps. An article with no owner sorts
+    // last; the sort is stable. (#235)
+    const routingPosition = new Map<string, number>();
+    for (const [index, { key }] of requestedIds(fetched).entries()) {
+      if (!routingPosition.has(key)) routingPosition.set(key, index);
+    }
+    const positionOf = (a: FulltextArticle) => {
+      const { idType, id } = handBackId(a);
+      return routingPosition.get(requestKey(idType, id)) ?? routingPosition.size;
+    };
+    const resolved: FulltextArticle[] = [...pmcArticles, ...fallbackArticles]
+      .map((article) => ({ article, position: positionOf(article) }))
+      .sort((a, b) => a.position - b.position)
+      .map(({ article }) => article);
+
+    // Whole-response budget: fill with complete records in routing order and
+    // hand the rest back as identifiers the caller can re-submit. One ledger for
+    // every tier — a PMC-served article and an Unpaywall-served one spend the
+    // same characters. Without `maxResponseCharacters` nothing is measured.
+    // (#100)
+    const ceiling = input.maxResponseCharacters;
+    const fit = ceiling === undefined ? undefined : fitWholeItems(resolved, ceiling);
+    const articles = fit?.kept ?? resolved;
+    const nextDeferredCharacters = fit?.nextDeferredCharacters;
+    const deferredIds = (fit?.deferred ?? []).map(handBackId);
     const deferred: z.infer<typeof DeferredSchema> | undefined =
       ceiling !== undefined && nextDeferredCharacters !== undefined && fit
         ? {
@@ -2548,6 +2590,13 @@ export const fetchFulltextTool = tool('pubmed_fetch_fulltext', {
         }
       }
     }
+
+    // The per-article ledgers fill as the tiers finish; listed in the returned
+    // articles' routing order so identical calls report them identically. (#235)
+    const articleRank = new Map(articles.map((a, i) => [articleDisplayId(a), i]));
+    const rankOf = (id: string) => articleRank.get(id) ?? articleRank.size;
+    truncatedArticles.sort((a, b) => rankOf(a.id) - rankOf(b.id));
+    sectionFilterMisses.sort((a, b) => rankOf(a) - rankOf(b));
 
     ctx.log.info('pubmed_fetch_fulltext completed', {
       requested: idCount,
@@ -2603,7 +2652,15 @@ export const fetchFulltextTool = tool('pubmed_fetch_fulltext', {
       ctx.enrich({ truncated: true });
     }
     if (deferred) {
-      notices.push(buildDeferralNotice(deferred));
+      notices.push(
+        buildDeferralNotice(deferred, {
+          noun: 'article',
+          ids: deferred.ids.join(', '),
+          recall: deferred.idType
+            ? `pubmed_fetch_fulltext with those ids under \`${deferred.idType}s\``
+            : `pubmed_fetch_fulltext with each id under its own field (${idFieldLists(deferred)})`,
+        }),
+      );
       ctx.enrich({ truncated: true });
     }
     if (overLimit) {
@@ -2730,17 +2787,25 @@ interface RequestedId extends CallerId {
  * (#192, #222)
  */
 function requestedIds(fields: IdFields): RequestedId[] {
+  const inField = (idType: IdType, ids: string[] | undefined) =>
+    (ids ?? []).map((id): RequestedId => ({ id, idType, key: requestKey(idType, id) }));
   return [
-    ...(fields.pmcids ?? []).map(
-      (id): RequestedId => ({ id, idType: 'pmcid', key: `pmcid:${normalizePmcId(id)}` }),
-    ),
-    ...(fields.pmids ?? []).map(
-      (id): RequestedId => ({ id, idType: 'pmid', key: `pmid:${normalizePmid(id)}` }),
-    ),
-    ...(fields.dois ?? []).map(
-      (id): RequestedId => ({ id, idType: 'doi', key: `doi:${id.toLowerCase()}` }),
-    ),
+    ...inField('pmcid', fields.pmcids),
+    ...inField('pmid', fields.pmids),
+    ...inField('doi', fields.dois),
   ];
+}
+
+/** The key {@link requestedIds} gives an id sent in `idType`'s field. */
+function requestKey(idType: IdType, id: string): string {
+  switch (idType) {
+    case 'pmcid':
+      return `pmcid:${normalizePmcId(id)}`;
+    case 'pmid':
+      return `pmid:${normalizePmid(id)}`;
+    case 'doi':
+      return `doi:${id.toLowerCase()}`;
+  }
 }
 
 /**
@@ -3653,7 +3718,11 @@ function formatPmcArticle(
   if (a.articleType) lines.push(`**Type:** ${a.articleType}`);
   if (a.publicationDate) {
     const d = a.publicationDate;
-    const dateParts = [d.year, d.month, d.day].filter(Boolean);
+    // JATS deposits often write `<month>7</month>`; the rendered date pads a
+    // one-digit numeric month or day so it reads as ISO, while the structured
+    // parts stay as deposited. A named month (`Jul`) passes through. (#242)
+    const pad = (part: string | undefined) => (part && /^\d$/.test(part) ? `0${part}` : part);
+    const dateParts = [d.year, pad(d.month), pad(d.day)].filter(Boolean);
     if (dateParts.length) lines.push(`**Published:** ${dateParts.join('-')}`);
   }
   if (a.pmcId) lines.push(`**PMCID:** ${a.pmcId}`);
@@ -3758,7 +3827,7 @@ function formatAssets(assets: z.infer<typeof AssetSchema>[], lines: string[]): v
     `\n> \`file\` is the pointer exactly as deposited — a name inside the PMC deposit, not a fetchable URL. Open the article at the PMC link above to view it.`,
   );
   for (const asset of assets) {
-    const heading = [asset.label, asset.caption].filter(Boolean).join(' — ');
+    const heading = [assetLabelName(asset), asset.caption].filter(Boolean).join(' — ');
     lines.push(`\n##### ${escapeMarkdownInline(heading || 'Asset')}`);
 
     const meta = [
@@ -3853,12 +3922,13 @@ type FormattedPmcAuthor = {
   collectiveName?: string | undefined;
   givenNames?: string | undefined;
   lastName?: string | undefined;
+  suffix?: string | undefined;
 };
 
 function formatPmcAuthor(au: FormattedPmcAuthor): string {
   const parts: string[] = [];
   if (au.collectiveName) parts.push(`${au.collectiveName} (collective)`);
-  const name = [au.givenNames, au.lastName].filter(Boolean).join(' ');
+  const name = [au.givenNames, au.lastName, au.suffix].filter(Boolean).join(' ');
   if (name) parts.push(name);
   return parts.join(' — ') || 'Unknown';
 }

@@ -5,6 +5,14 @@
 
 import { JsonRpcErrorCode, McpError } from '@cyanheads/mcp-ts-core/errors';
 import { describe, expect, it, vi } from 'vitest';
+import { parsePmcArticle } from '@/services/ncbi/parsing/pmc-article-parser.js';
+import {
+  childrenOf,
+  findOne,
+  type JatsNodeList,
+  tagNameOf,
+  textOf,
+} from '@/services/ncbi/parsing/pmc-xml-helpers.js';
 import { flattenInlineMarkup, NcbiResponseHandler } from '@/services/ncbi/response-handler.js';
 
 vi.mock('@cyanheads/mcp-ts-core/utils', () => ({
@@ -86,25 +94,37 @@ describe('NcbiResponseHandler', () => {
       expect(serialized).not.toMatch(/e\+\d+/);
     });
 
-    describe('verbatim parser path (regression #108)', () => {
+    describe('ESpell on the ordered parser path (regression #108, #241)', () => {
       /** The exact ESpell body NCBI returns for an all-numeric term. */
-      const espellXml = (query: string, corrected = '') =>
+      const espellXml = (query: string, corrected = '', spelled = '<SpelledQuery/>') =>
         `<?xml version="1.0"?><eSpellResult><Database>pubmed</Database><Query>${query}</Query>${
           corrected ? `<CorrectedQuery>${corrected}</CorrectedQuery>` : '<CorrectedQuery/>'
-        }<SpelledQuery/><ERROR/></eSpellResult>`;
+        }${spelled}<ERROR/></eSpellResult>`;
 
-      const parseEspell = (xml: string) =>
-        createHandler().parseAndHandleResponse<{
-          eSpellResult: { Query?: unknown; CorrectedQuery?: unknown };
-        }>(xml, 'espell', { retmode: 'xml', useVerbatimParser: true });
+      const parseOrdered = (xml: string) =>
+        createHandler().parseAndHandleResponse<JatsNodeList>(xml, 'espell', {
+          retmode: 'xml',
+          useOrderedParser: true,
+        });
+
+      /** The text of one `<eSpellResult>` child, as eSpell reads it. */
+      const field = (xml: string, tag: string) =>
+        childrenOf(findOne(findOne(parseOrdered(xml), 'eSpellResult'), tag) ?? {})
+          .map(textOf)
+          .join('');
+
+      const parseEspell = (xml: string) => ({
+        eSpellResult: { Query: field(xml, 'Query'), CorrectedQuery: field(xml, 'CorrectedQuery') },
+      });
 
       it('characterizes the default parser: an all-numeric ESpell term is coerced to a number', () => {
         // The bug, pinned. `parseTagValue: true` turns <Query>33306283</Query>
         // into a number before eSpell reads it, so the tool's string output
         // schema rejects the result after a successful round-trip.
+        // The body goes without its `<ERROR/>`, which the flat parser reads as an error.
         const result = createHandler().parseAndHandleResponse<{
           eSpellResult: { Query?: unknown };
-        }>(espellXml('33306283'), 'espell', { retmode: 'xml' });
+        }>(espellXml('33306283').replace('<ERROR/>', ''), 'espell', { retmode: 'xml' });
 
         expect(result.eSpellResult.Query).toBe(33306283);
       });
@@ -134,20 +154,23 @@ describe('NcbiResponseHandler', () => {
         expect(result.eSpellResult.CorrectedQuery).toBe('');
       });
 
-      it('keeps the flat named-key shape the ordered parser would destroy', () => {
-        // #69's parser also sets `preserveOrder: true` and hands back a
-        // document-ordered node array, so it is not a drop-in for eSpell's
-        // `response.eSpellResult.Query` property access.
-        const flat = parseEspell(espellXml('33306283'));
-        expect(Array.isArray(flat)).toBe(false);
-        expect(flat.eSpellResult).toBeTypeOf('object');
-
-        const ordered = createHandler().parseAndHandleResponse<unknown>(
-          espellXml('33306283'),
-          'espell',
-          { retmode: 'xml', useOrderedParser: true },
+      it('keeps <SpelledQuery> segments in document order with their whitespace', () => {
+        // A flat parse groups the segments by tag name and trims them, losing
+        // which caller span each replacement stands for.
+        const xml = espellXml(
+          'heart  attack   treatmnt',
+          'heart attack treatment',
+          '<SpelledQuery><Original>heart  attack   </Original><Replaced>treatment</Replaced><Original> 2</Original></SpelledQuery>',
         );
-        expect(Array.isArray(ordered)).toBe(true);
+        const segments = childrenOf(
+          findOne(findOne(parseOrdered(xml), 'eSpellResult'), 'SpelledQuery') ?? {},
+        ).map((node) => [tagNameOf(node), childrenOf(node).map(textOf).join('')]);
+
+        expect(segments).toEqual([
+          ['Original', 'heart  attack   '],
+          ['Replaced', 'treatment'],
+          ['Original', ' 2'],
+        ]);
       });
 
       it('leaves the default parser coercing — the opt-in is scoped, not global', () => {
@@ -160,15 +183,23 @@ describe('NcbiResponseHandler', () => {
         expect((result.eSearchResult as Record<string, unknown>).Count).toBe(42);
       });
 
-      it('still surfaces an NCBI error structure through the named-key error paths', () => {
-        const handler = createHandler();
-        expect(() =>
-          handler.parseAndHandleResponse(
-            '<?xml version="1.0"?><eSearchResult><ERROR>Empty id list</ERROR></eSearchResult>',
-            'espell',
-            { retmode: 'xml', useVerbatimParser: true },
-          ),
-        ).toThrow(McpError);
+      it('reads the empty <ERROR/> ESpell sends with every answer as no error', () => {
+        const xml =
+          '<?xml version="1.0"?><eSpellResult><Database>pubmed</Database><Query>cancr</Query>' +
+          '<CorrectedQuery>cancer</CorrectedQuery><SpelledQuery/><ERROR/></eSpellResult>';
+        expect(parseEspell(xml)).toEqual({
+          eSpellResult: { Query: 'cancr', CorrectedQuery: 'cancer' },
+        });
+      });
+
+      it('surfaces the message of a non-empty ESpell <ERROR>', () => {
+        const xml =
+          '<?xml version="1.0"?><eSpellResult><Database>pubmed</Database><Query>cancr</Query>' +
+          '<CorrectedQuery/><SpelledQuery/><ERROR>Backend spell service unavailable</ERROR></eSpellResult>';
+        expect(() => parseOrdered(xml)).toThrow(McpError);
+        expect(() => parseOrdered(xml)).toThrow(
+          /^NCBI API Error: Backend spell service unavailable$/,
+        );
       });
     });
 
@@ -626,6 +657,90 @@ describe('NcbiResponseHandler', () => {
   });
 });
 
+// ─── Invisible format characters (#224) ──────────────────────────────────────
+
+describe('invisible format characters are dropped before parsing (#224)', () => {
+  /** A PMC EFetch body holding one `<article>` with `inner`, parsed and read as an article. */
+  const pmcArticle = (inner: string) => {
+    const nodes = createHandler().parseAndHandleResponse<JatsNodeList>(
+      `<?xml version="1.0" ?>\n<pmc-articleset><article>${inner}</article></pmc-articleset>`,
+      'efetch',
+      { retmode: 'xml', useOrderedParser: true },
+    );
+    const article = findOne(childrenOf(findOne(nodes, 'pmc-articleset') ?? {}), 'article');
+    if (!article) throw new Error('no <article> parsed');
+    return parsePmcArticle(article);
+  };
+
+  it('reads U+FEFF in PMC12266799 as nothing, not as a space that splits a word', () => {
+    const article = pmcArticle(
+      '<body><sec><title>Results</title><table-wrap id="T1"><label>Table 1</label>' +
+        '<table><tbody><tr><td>MELD</td></tr></tbody></table><table-wrap-foot><fn><p>' +
+        'HPS, hepatopulmonary s\uFEFFyndrome; HRS, hepatorenal syndrome\uFEFF; SBP, spontaneous bacterial peritonitis\uFEFF;' +
+        '</p></fn></table-wrap-foot></table-wrap></sec></body>' +
+        '<back><ref-list><ref id="R10"><label>10</label><mixed-citation>EASL. J Hepatol. 2024;79:1180\uFEFF–1211.</mixed-citation></ref></ref-list></back>',
+    );
+    expect(article.tables?.[0]?.footnotes).toBe(
+      'HPS, hepatopulmonary syndrome; HRS, hepatorenal syndrome; SBP, spontaneous bacterial peritonitis;',
+    );
+    expect(article.references?.[0]?.citation).toBe('EASL. J Hepatol. 2024;79:1180–1211.');
+  });
+
+  it('drops soft hyphens and zero width spaces inside words, keeping a real space beside one', () => {
+    const article = pmcArticle(
+      '<body><sec><title>Methods</title><p>BMI ≥30 kg/m\u200B\u200B\u200B\u200B\u200B<sup>2</sup>, ' +
+        'employ\u00ADment and well\u00ADbe\u00ADing; bleeding \uFEFFincreased in VoPham, \uFEFFKristin.</p></sec></body>',
+    );
+    expect(article.sections[0]?.text).toBe(
+      'BMI ≥30 kg/m2, employment and wellbeing; bleeding increased in VoPham, Kristin.',
+    );
+  });
+
+  it('keeps U+200C, U+200D and U+2060, which carry meaning in some scripts', () => {
+    const article = pmcArticle(
+      '<body><sec><title>S</title><p>a\u200Cb c\u200Dd e\u2060f</p></sec></body>',
+    );
+    expect(article.sections[0]?.text).toBe('a\u200Cb c\u200Dd e\u2060f');
+  });
+
+  it('drops them on the PubMed record path as well', () => {
+    const parsed = createHandler().parseAndHandleResponse<{
+      PubmedArticleSet: {
+        PubmedArticle: {
+          MedlineCitation: {
+            Article: { ArticleTitle: unknown; Abstract: { AbstractText: unknown } };
+          };
+        }[];
+      };
+    }>(
+      '<?xml version="1.0"?><PubmedArticleSet><PubmedArticle><MedlineCitation><PMID>1</PMID><Article>' +
+        '<ArticleTitle>Employ\u00ADment and s\uFEFFyndrome</ArticleTitle><Abstract><AbstractText>' +
+        'Rates rose in kg/m\u200B<sup>2</sup> terms.</AbstractText></Abstract></Article></MedlineCitation>' +
+        '</PubmedArticle></PubmedArticleSet>',
+      'efetch',
+      { retmode: 'xml' },
+    );
+    const record = parsed.PubmedArticleSet.PubmedArticle[0]?.MedlineCitation.Article;
+    expect(record?.ArticleTitle).toBe('Employment and syndrome');
+    expect(record?.Abstract.AbstractText).toBe('Rates rose in kg/m² terms.');
+  });
+
+  it('parses text without them exactly as before', () => {
+    const xml =
+      '<?xml version="1.0"?><pmc-articleset><article><body><p>A <italic>b</italic> c.</p></body></article></pmc-articleset>';
+    const parse = () =>
+      JSON.stringify(
+        createHandler().parseAndHandleResponse<unknown>(xml, 'efetch', {
+          retmode: 'xml',
+          useOrderedParser: true,
+        }),
+      );
+    expect(parse()).toBe(
+      '[{"?xml":[{"#text":""}],":@":{"@_version":"1.0"}},{"pmc-articleset":[{"article":[{"body":[{"p":[{"#text":"A "},{"italic":[{"#text":"b"}]},{"#text":" c."}]}]}]}]}]',
+    );
+  });
+});
+
 // ─── Single-element list normalization (#138) ────────────────────────────────
 
 describe('NCBI_ARRAY_JPATHS single-element normalization (#138)', () => {
@@ -750,8 +865,8 @@ describe('NCBI_ARRAY_JPATHS single-element normalization (#138)', () => {
       '<Item Name="TreeNum" Type="String">C18.452.394</Item></Item></Item>' +
       '</DocSum></eSummaryResult>';
 
-    // lookup-mesh walks three levels of `<Item>` to reach a tree number, so the
-    // nesting is load-bearing, not decorative.
+    // A version-1 DocSum nests `<Item>` to any depth (a `List` of `Structure`s
+    // of fields), so every level must normalize, not just the first.
     const parsed = parse(xml);
     for (const jpath of [
       'eSummaryResult.DocSum',

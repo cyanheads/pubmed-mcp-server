@@ -1,8 +1,9 @@
 /**
  * @fileoverview Whole-response character budgeting shared by the retrieval
- * tools: how many whole items fit under a character ceiling, in order. The
- * sibling of `_text.ts`, which shortens the *inside* of one item's text —
- * nothing here ever cuts into an item. (#99, #100)
+ * tools: how many whole items fit under a character ceiling, in order, and the
+ * notice that tells a caller how to retrieve the rest. The sibling of
+ * `_text.ts`, which shortens the *inside* of one item's text — nothing here
+ * ever cuts into an item. (#99, #100, #236)
  * @module src/mcp-server/tools/definitions/_budget
  */
 
@@ -26,11 +27,55 @@ export interface WholeItemFit<T> {
   keptCharacters: number;
   /**
    * Size of the next deferred item — `deferred[0]`, the one the cut stopped
-   * at. Because the cut is a prefix cut, that item is the ceiling a caller must
-   * clear to make progress: a smaller item further down the tail is unreachable
-   * until the one in front of it fits. Absent when nothing was deferred.
+   * at. Because the cut is a prefix cut, it is the continuation ceiling: a call
+   * for `deferred` alone returns nothing under it, and a smaller item further
+   * down the tail is unreachable until the one in front of it fits. Repeating
+   * the same call needs `keptCharacters` + this to return that item as well.
+   * Absent when nothing was deferred.
    */
   nextDeferredCharacters?: number;
+}
+
+/** The budget state a deferral notice reports — the fields every tool's `deferred` carries. */
+export interface DeferralState {
+  deferredCount: number;
+  maxResponseCharacters: number;
+  nextDeferredCharacters: number;
+  returnedCharacters: number;
+}
+
+/** How one tool names what it deferred and how to ask for it again. */
+export interface DeferralWording {
+  /** The deferred items as the caller re-sends them, already joined. */
+  ids: string;
+  /** One deferred item: `article`, `record`. */
+  noun: string;
+  /** The re-call after its verb — the tool and how the ids go back in. */
+  recall: string;
+}
+
+/**
+ * Compose the recovery notice for items the whole-response budget withheld, so
+ * a caller reading only `content[]` can resume without inspecting `deferred`.
+ * Each ceiling is named with the call it applies to: re-calling for the
+ * deferred items needs `nextDeferredCharacters`; repeating this call needs
+ * `returnedCharacters + nextDeferredCharacters`. Both exceed the current
+ * ceiling whenever they are named, so the notice never asks for a raise to a
+ * value at or below it. (#100, #236)
+ */
+export function buildDeferralNotice(state: DeferralState, wording: DeferralWording): string {
+  const { maxResponseCharacters: max, nextDeferredCharacters: next } = state;
+  const { ids, noun, recall } = wording;
+  const listed = `${state.deferredCount} resolved ${noun}(s) were deferred whole: ${ids}.`;
+  if (state.returnedCharacters === 0) {
+    return `The first ${noun} alone exceeds the requested maxResponseCharacters of ${max}, so none were returned. ${listed} Re-call ${recall} and maxResponseCharacters ≥ ${next}, the size of that first ${noun}.`;
+  }
+  const continuation =
+    next <= max
+      ? `To continue, re-call ${recall} at the current maxResponseCharacters of ${max}, which already fits the next deferred ${noun} (${next} characters).`
+      : `To continue, re-call ${recall} and maxResponseCharacters ≥ ${next}, the size of the next deferred ${noun}.`;
+  const repeat = `To return the next deferred ${noun} in this response instead, repeat this call with maxResponseCharacters ≥ ${state.returnedCharacters + next}.`;
+  return `Response character budget reached: ${state.returnedCharacters} of ${max} characters returned. ${listed} ${continuation} ${repeat}`;
 }
 
 /**

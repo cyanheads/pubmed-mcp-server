@@ -1,12 +1,14 @@
 /**
  * @fileoverview Tests for the whole-response character budget shared by
- * `pubmed_fetch_articles` and `pubmed_fetch_fulltext` (issues #99, #100).
+ * `pubmed_fetch_articles`, `pubmed_europepmc_fetch`, and
+ * `pubmed_fetch_fulltext`, and the deferral notice all three emit (issues #99,
+ * #100, #236).
  * @module tests/mcp-server/tools/definitions/_budget.test
  */
 
 import { describe, expect, it } from 'vitest';
 
-const { fitWholeItems, serializedCharacters } = await import(
+const { buildDeferralNotice, fitWholeItems, serializedCharacters } = await import(
   '@/mcp-server/tools/definitions/_budget.js'
 );
 
@@ -153,5 +155,93 @@ describe('whole-response accounting over an asset-bearing article (issue #130)',
     expect(fit.kept).toEqual([]);
     expect(fit.deferred).toEqual([withAssets, withoutAssets]);
     expect(fit.nextDeferredCharacters).toBe(serializedCharacters(withAssets));
+  });
+});
+
+describe('buildDeferralNotice (#236)', () => {
+  const wording = { noun: 'record', ids: 'A, B', recall: 'tool_x with those ids' };
+
+  it('names the continuation ceiling and the repeat ceiling, each with its call', () => {
+    const notice = buildDeferralNotice(
+      {
+        maxResponseCharacters: 4000,
+        returnedCharacters: 2534,
+        deferredCount: 2,
+        nextDeferredCharacters: 8035,
+      },
+      wording,
+    );
+    expect(notice).toBe(
+      'Response character budget reached: 2534 of 4000 characters returned. 2 resolved record(s) were deferred whole: A, B. To continue, re-call tool_x with those ids and maxResponseCharacters ≥ 8035, the size of the next deferred record. To return the next deferred record in this response instead, repeat this call with maxResponseCharacters ≥ 10569.',
+    );
+  });
+
+  it('says the deferred ids can be re-called at the current ceiling when the next one fits it', () => {
+    const notice = buildDeferralNotice(
+      {
+        maxResponseCharacters: 3000,
+        returnedCharacters: 2747,
+        deferredCount: 1,
+        nextDeferredCharacters: 1628,
+      },
+      wording,
+    );
+    expect(notice).toBe(
+      'Response character budget reached: 2747 of 3000 characters returned. 1 resolved record(s) were deferred whole: A, B. To continue, re-call tool_x with those ids at the current maxResponseCharacters of 3000, which already fits the next deferred record (1628 characters). To return the next deferred record in this response instead, repeat this call with maxResponseCharacters ≥ 4375.',
+    );
+    expect(notice).not.toMatch(/≥ 1628/);
+  });
+
+  it('treats a next record exactly at the ceiling as fitting it', () => {
+    const notice = buildDeferralNotice(
+      {
+        maxResponseCharacters: 100,
+        returnedCharacters: 60,
+        deferredCount: 1,
+        nextDeferredCharacters: 100,
+      },
+      wording,
+    );
+    expect(notice).toBe(
+      'Response character budget reached: 60 of 100 characters returned. 1 resolved record(s) were deferred whole: A, B. To continue, re-call tool_x with those ids at the current maxResponseCharacters of 100, which already fits the next deferred record (100 characters). To return the next deferred record in this response instead, repeat this call with maxResponseCharacters ≥ 160.',
+    );
+  });
+
+  it('names the one ceiling when nothing was returned', () => {
+    const notice = buildDeferralNotice(
+      {
+        maxResponseCharacters: 500,
+        returnedCharacters: 0,
+        deferredCount: 2,
+        nextDeferredCharacters: 812,
+      },
+      wording,
+    );
+    expect(notice).toBe(
+      'The first record alone exceeds the requested maxResponseCharacters of 500, so none were returned. 2 resolved record(s) were deferred whole: A, B. Re-call tool_x with those ids and maxResponseCharacters ≥ 812, the size of that first record.',
+    );
+  });
+
+  it('never names a ceiling at or below the current one', () => {
+    for (const [max, returned, next] of [
+      [4000, 2534, 8035],
+      [3000, 2747, 1628],
+      [100, 60, 100],
+      [100, 1, 100],
+      [500, 0, 812],
+    ] as const) {
+      const notice = buildDeferralNotice(
+        {
+          maxResponseCharacters: max,
+          returnedCharacters: returned,
+          deferredCount: 1,
+          nextDeferredCharacters: next,
+        },
+        wording,
+      );
+      const named = [...notice.matchAll(/≥ (\d+)/g)].map((m) => Number(m[1]));
+      expect(named.length).toBeGreaterThan(0);
+      for (const ceiling of named) expect(ceiling).toBeGreaterThan(max);
+    }
   });
 });

@@ -4,6 +4,9 @@
 
 ### Securing consensus in fractional-order multi-agent systems: Algebraic approaches against Byzantine attacks.
 
+**Notices:**
+- **ErratumIn:** Heliyon. 2025 Jun 30;11(12):e43572. doi: 10.1016/j.heliyon.2025.e43572. — PMID 41216527
+
 **Authors (7):**
 - Yubin Zhong (Y) [aff 0]
 - Asad Khan (A) [aff 1]

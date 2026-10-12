@@ -9,6 +9,7 @@ import { createMockContext, runToolContract } from '@cyanheads/mcp-ts-core/testi
 import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
 
 import { textBlocks } from '../../../_helpers.js';
+import { capturedEspell } from '../../../services/ncbi/_espell-fixtures.js';
 
 const mockESpell = vi.fn();
 vi.mock('@/services/ncbi/ncbi-service.js', () => ({
@@ -136,6 +137,67 @@ describe('spellCheckTool', () => {
     );
   });
 
+  describe('corrections rebuilt over the caller’s text through the real ESpell parse (#241)', () => {
+    // Route the tool through the real `eSpell` behind a stubbed fetch that
+    // replays ESpell's captured answer for each term.
+    let fetchSpy: ReturnType<typeof vi.spyOn> | undefined;
+
+    beforeAll(async () => {
+      const actual = await vi.importActual<typeof import('@/services/ncbi/ncbi-service.js')>(
+        '@/services/ncbi/ncbi-service.js',
+      );
+      fetchSpy = vi.spyOn(globalThis, 'fetch').mockImplementation((input) => {
+        const url = new URL(String(input));
+        if (!url.pathname.endsWith('/espell.fcgi')) {
+          throw new Error(`unexpected request ${url.pathname}`);
+        }
+        return Promise.resolve(
+          new Response(capturedEspell(url.searchParams.get('term') ?? ''), { status: 200 }),
+        );
+      });
+      actual.initNcbiService();
+      const service = actual.getNcbiService();
+      mockESpell.mockImplementation((params, options) => service.eSpell(params, options));
+    });
+
+    afterAll(() => {
+      fetchSpy?.mockRestore();
+      mockESpell.mockReset();
+    });
+
+    it.each([
+      [
+        'breast cancer[MeSH] AND tamoxifen resistence',
+        'breast cancer[MeSH] AND tamoxifen resistance',
+      ],
+      ['BRCA1 tamoxifen resistence', 'BRCA1 tamoxifen resistance'],
+    ])('keeps %j re-runnable on both surfaces', async (query, corrected) => {
+      const result = await runToolContract(spellCheckTool, { query });
+
+      expect(result.isError).toBeFalsy();
+      expect(result.structuredContent).toEqual({ original: query, corrected, hasSuggestion: true });
+      expect(textBlocks(result.content as ContentBlock[])[0]?.text).toBe(
+        `**Suggestion:** "${corrected}" (original: "${query}")`,
+      );
+    });
+
+    it.each(['IL6', 'HbA1c'])(
+      'reports no suggestion for %s, which ESpell only lowercases or rewrites',
+      async (query) => {
+        const result = await runToolContract(spellCheckTool, { query });
+
+        expect(result.structuredContent).toEqual({
+          original: query,
+          corrected: query,
+          hasSuggestion: false,
+        });
+        expect(textBlocks(result.content as ContentBlock[])[0]?.text).toBe(
+          `No correction applied — query "${query}" is returned as written.`,
+        );
+      },
+    );
+  });
+
   describe('blank query rejection (issue #133)', () => {
     // `min(2)` counts the spaces, so a whitespace-only query used to reach
     // ESpell, which answers with an empty <ERROR/> the response handler does
@@ -231,7 +293,7 @@ describe('spellCheckTool', () => {
         hasSuggestion: false,
       }),
     );
-    expect(blocks[0]?.text).toContain('No suggestion');
+    expect(blocks[0]?.text).toBe('No correction applied — query "cancer" is returned as written.');
   });
 });
 

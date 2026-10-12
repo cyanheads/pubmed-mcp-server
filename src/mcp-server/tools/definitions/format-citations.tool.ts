@@ -17,6 +17,7 @@ import {
 import { getNcbiService } from '@/services/ncbi/ncbi-service.js';
 import { parseArticleSet } from '@/services/ncbi/parsing/article-parser.js';
 import { conceptMeta, EDAM_DATA_FORMATTING, SCHEMA_CREATIVE_WORK } from './_concepts.js';
+import { noticeLines } from './_notices.js';
 import { normalizePmid, pmidStringSchema } from './_schemas.js';
 import { escapeMarkdownInline } from './_text.js';
 
@@ -48,24 +49,6 @@ const CitationNoticeSchema = z
       ),
   })
   .describe('A linked notice that qualifies the cited article');
-
-/**
- * The `content[]` lines for one article's notices, opening on a warning when it
- * was retracted. Each line takes `pubmed_fetch_articles`' form for the same link.
- */
-function noticeLines(notices: z.infer<typeof CitationNoticeSchema>[]): string[] {
-  const retracted = notices.some(
-    (notice) => notice.refType === 'RetractionIn' || notice.refType === 'RetractedandRepublishedIn',
-  );
-  return [
-    retracted ? '**Retracted:** NCBI links a retraction notice to this article.' : '**Notices:**',
-    ...notices.map((notice) => {
-      const pmid = notice.pmid ? ` — PMID ${notice.pmid}` : '';
-      const note = notice.note ? ` — Note: ${escapeMarkdownInline(notice.note)}` : '';
-      return `- **${notice.refType}:** ${escapeMarkdownInline(notice.refSource)}${pmid}${note}`;
-    }),
-  ];
-}
 
 /**
  * A union rejects a bad `format` with Zod's top-level `Invalid input`, which
@@ -206,7 +189,8 @@ export const formatCitationsTool = tool('pubmed_format_citations', {
     }
     for (const entry of result.citations) {
       lines.push(`\n## PMID ${entry.pmid}`);
-      if (entry.title) lines.push(`**${entry.title}**`);
+      // One line, Markdown escaped, as pubmed_fetch_articles renders a title (#233)
+      if (entry.title) lines.push(`**${escapeMarkdownInline(entry.title)}**`);
       // Ahead of every style: a notice qualifies how each citation is read. The
       // blank line keeps Markdown from folding it into the title's paragraph.
       if (entry.notices?.length) lines.push('', ...noticeLines(entry.notices));

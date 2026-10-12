@@ -13,7 +13,7 @@
 
 **Journal:** Quantitative Biology, **13**(2), e92, ISSN 2095-4689
 **Type:** article-commentary
-**Published:** 2025-1-14
+**Published:** 2025-01-14
 **PMCID:** PMC12806063
 **PMID:** 41675504
 **DOI:** 10.1002/qub2.92

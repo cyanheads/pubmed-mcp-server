@@ -165,3 +165,24 @@ export function toDisplayText(text: string): string {
     .replace(WHITESPACE_RE, ' ')
     .trim();
 }
+
+/**
+ * U+FEFF (zero width no-break space), U+00AD (soft hyphen) and U+200B (zero
+ * width space): invisible characters PMC deposits carry inside words. U+200C
+ * and U+200D, joiners that carry meaning in some scripts, are left alone, and so
+ * is U+2060, which no deposit sampled carries.
+ */
+const INVISIBLE_FORMAT_CHARS_RE = /[\uFEFF\u00AD\u200B]/g;
+
+/**
+ * Drop {@link INVISIBLE_FORMAT_CHARS_RE} from a raw XML body before it is
+ * parsed, once for every reader of the tree. JavaScript's `\s` matches U+FEFF,
+ * so each whitespace collapse downstream turned one inside a word into a space
+ * that split it (`hepatopulmonary s yndrome`); U+00AD and U+200B survive every
+ * collapse and break a search for the word (`employ` + U+00AD + `ment`). The
+ * characters never stand for spacing, so a real space beside one stays one
+ * space. (#224)
+ */
+export function stripInvisibleFormatChars(xml: string): string {
+  return xml.replace(INVISIBLE_FORMAT_CHARS_RE, '');
+}

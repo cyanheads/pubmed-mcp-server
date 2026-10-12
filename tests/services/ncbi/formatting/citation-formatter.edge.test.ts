@@ -419,8 +419,8 @@ describe('formatApa and formatMla — journal title case edge cases (#217)', () 
   it.each([
     // A word carrying a digit is left as written
     ['Journal of 3d printing', 'Journal of 3d Printing'],
-    // An apostrophe stays inside the word, straight or curly
-    ["Journal of women's health (2002)", "Journal of Women's Health (2002)"],
+    // An apostrophe stays inside the word, straight or curly (NLM's year qualifier dropped, #227)
+    ["Journal of women's health (2002)", "Journal of Women's Health"],
     ['Journal of women\u{2019}s health', 'Journal of Women\u{2019}s Health'],
     // Lowercase is Unicode lowercase
     ['Revista m\u{e9}dica de Chile', 'Revista M\u{e9}dica de Chile'],
@@ -439,7 +439,7 @@ describe('formatApa and formatMla — journal title case edge cases (#217)', () 
     ['Isis; an international review', 'Isis; An International Review'],
     ['Child: care, health and development', 'Child: Care, Health and Development'],
     // Punctuation around a word does not hide it
-    ['BMJ (Clinical research ed.)', 'BMJ (Clinical Research Ed.)'],
+    ['Clinical EEG (electroencephalography)', 'Clinical EEG (Electroencephalography)'],
     ['JMIR mHealth and uHealth', 'JMIR mHealth and uHealth'],
     // A French or Italian elision keeps its particle lowercase and capitalizes the word
     ["Journal francais d'ophtalmologie", "Journal Francais d'Ophtalmologie"],
@@ -466,9 +466,9 @@ describe('formatApa and formatMla — journal title case edge cases (#217)', () 
       'South African medical journal = Suid-Afrikaanse tydskrif vir geneeskunde',
       'South African Medical Journal = Suid-Afrikaanse Tydskrif vir Geneeskunde',
     ],
-    // ...but never a romanized Chinese syllable, nor a place name's own word
+    // ...inside a parenthetical as anywhere, but never a romanized Chinese syllable
+    ['Medicina (Universidad de los Andes)', 'Medicina (Universidad de los Andes)'],
     ['Zhongguo fei ai za zhi', 'Zhongguo Fei Ai Za Zhi'],
-    ['African review (Dar es Salaam, Tanzania)', 'African Review (Dar es Salaam, Tanzania)'],
     // A brand NLM writes in lowercase keeps it
     ['npj quantum materials', 'npj Quantum Materials'],
     ['i-Perception', 'i-Perception'],
@@ -487,6 +487,18 @@ describe('formatApa and formatMla — journal title case edge cases (#217)', () 
     };
     expect(formatApa(book)).toContain('*Clinical methods*.');
     expect(formatMla(book)).toContain('*Clinical methods*,');
+  });
+
+  it('keeps a name that is all parenthetical, or whose parentheses do not balance (#227)', () => {
+    expect(cased('(London, England)')).toEqual(['(London, England)', '(London, England)']);
+    expect(cased('Lancet London, England)')).toEqual([
+      'Lancet London, England)',
+      'Lancet London, England)',
+    ]);
+    expect(cased('Lancet (London, England))')).toEqual([
+      'Lancet (London, England))',
+      'Lancet (London, England))',
+    ]);
   });
 });
 
@@ -637,4 +649,87 @@ describe('formatters — sparse article (only pmid)', () => {
   it('formatVancouver returns an empty string for a pmid-only article', () => {
     expect(formatVancouver(sparse)).toBe('');
   });
+});
+
+// ─── Linear time on long journal names and page strings (#227, #228) ─────────
+
+describe('journal names and page strings format in linear time (#227, #228)', () => {
+  /** CPU time of `run`, in ms — this thread's user + system time, not wall clock. */
+  const cpuMs = (run: () => void): number => {
+    const start = process.threadCpuUsage();
+    run();
+    const { user, system } = process.threadCpuUsage(start);
+    return (user + system) / 1000;
+  };
+
+  /**
+   * CPU time of one call each of `small` and `large`, in ms: each call repeats
+   * until a reading spans a millisecond, then the two are read in turn for seven
+   * rounds (stopping once two seconds are spent) and each keeps its fastest, so
+   * contention lands on both sizes and a quadratic call fails the ratio rather
+   * than the test's timeout.
+   */
+  const cpuMsPerCall = (small: () => void, large: () => void): [number, number] => {
+    const readers = [small, large].map((call) => {
+      const read = (reps: number) =>
+        cpuMs(() => {
+          for (let i = 0; i < reps; i++) call();
+        });
+      let reps = 1;
+      while (read(reps) < 1) reps *= 2;
+      return { reps, read: () => read(reps) };
+    });
+    const fastest = [Number.POSITIVE_INFINITY, Number.POSITIVE_INFINITY];
+    let spentMs = 0;
+    for (let round = 0; round < 7 && spentMs < 2_000; round++) {
+      readers.forEach(({ reps, read }, i) => {
+        const ms = read();
+        spentMs += ms;
+        fastest[i] = Math.min(fastest[i] as number, ms / reps);
+      });
+    }
+    return fastest as [number, number];
+  };
+
+  const every = (article: ParsedArticle) => () => {
+    formatApa(article);
+    formatMla(article);
+    formatBibtex(article);
+    formatRis(article);
+  };
+
+  /** A 64x span: linear is 64 and quadratic 4,096. */
+  it.each([
+    // A dashless run that a range pattern retries from every position
+    ['a page with no dash', (n: number) => ({ pages: '1'.repeat(n) })],
+    [
+      'a page run then spaces',
+      (n: number) => ({ pages: `${'1'.repeat(n / 2)}${' '.repeat(n / 2)}x` }),
+    ],
+    ['a list of pages', (n: number) => ({ pages: '1, '.repeat(n / 3) })],
+    ['a chain of ranges', (n: number) => ({ pages: '1-'.repeat(n / 2) })],
+    // A range whose start has a digit run before its last character
+    ['a long range start', (n: number) => ({ pages: `${'1'.repeat(n)}a-2` })],
+    // Qualifier shapes that almost match: no comma, a stray semicolon, nested openers
+    ['a parenthetical with no comma', (n: number) => ({ title: `J (${'a'.repeat(n)})` })],
+    ['a place with a stray semicolon', (n: number) => ({ title: `J (a,${'b '.repeat(n / 2)};)` })],
+    ['a place before a non-year', (n: number) => ({ title: `J (a,${' b'.repeat(n / 2)} : 12)` })],
+    ['nested openers', (n: number) => ({ title: `J ${'('.repeat(n / 2)}a${')'.repeat(n / 2)}` })],
+    ['unbalanced closers', (n: number) => ({ title: `J ${')'.repeat(n)}` })],
+    ['an edition near-miss', (n: number) => ({ title: `J (${'ed '.repeat(n / 3)}x)` })],
+  ])(
+    '%s',
+    (_label, shape) => {
+      const at = (n: number): ParsedArticle => ({
+        ...baseArticle,
+        journalInfo: { ...baseArticle.journalInfo!, ...shape(n) },
+      });
+      const small = at(5_000);
+      const large = at(320_000);
+      const [t5k, t320k] = cpuMsPerCall(every(small), every(large));
+      expect(t320k / t5k).toBeLessThan(256);
+      expect(t320k).toBeLessThan(200);
+    },
+    30_000,
+  );
 });

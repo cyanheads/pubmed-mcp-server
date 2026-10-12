@@ -57,6 +57,8 @@ import {
   SINGLETON_LIST_XML,
   TGU,
 } from './_investigator-fixtures.js';
+import { NO_PAGINATION_XML, NONE_PAGINATION_XML } from './_pagination-fixtures.js';
+import { AAP_INVESTIGATORS_XML, FRENCK_JR_XML, HORMUTH_2ND_XML } from './_suffix-fixtures.js';
 
 describe('extractAuthors', () => {
   it('returns empty for undefined input', () => {
@@ -246,6 +248,40 @@ describe('extractJournalInfo', () => {
         { Pagination: { MedlinePgn: { '#text': '' } } } as XmlArticle,
       ),
     ).toStrictEqual({ title: 'J' });
+  });
+
+  describe("NCBI's literal None page value (#248)", () => {
+    const withPages = (medlinePgn: string) =>
+      extractJournalInfo({ Title: { '#text': 'J' } }, {
+        Pagination: { StartPage: { '#text': medlinePgn }, MedlinePgn: { '#text': medlinePgn } },
+      } as XmlArticle);
+
+    it('omits pages when MedlinePgn is exactly "None"', () => {
+      expect(withPages('None')).toStrictEqual({ title: 'J' });
+    });
+
+    it('keeps a page value that merely contains the letters None', () => {
+      for (const pages of ['None-12', 'S1-None', 'none', 'NONE', 'Nonetheless 5']) {
+        expect(withPages(pages), pages).toStrictEqual({ title: 'J', pages });
+      }
+    });
+
+    it('omits pages for PMID 42845821 through the production parser, every other field intact', () => {
+      const [none] = parseArticleSet(parseArticleSetXml(articleSetXml(NONE_PAGINATION_XML)));
+      const [bare] = parseArticleSet(parseArticleSetXml(articleSetXml(NO_PAGINATION_XML)));
+
+      expect(none?.pmid).toBe('42845821');
+      expect(none?.journalInfo).toStrictEqual({
+        title: 'The Lancet. Primary care',
+        isoAbbreviation: 'Lancet Prim Care',
+        eIssn: '3050-5143',
+        volume: '2',
+        issue: '9',
+        publicationDate: { year: '2026', month: 'Sep' },
+      });
+      // The record parses exactly as it would with no Pagination element at all.
+      expect(none).toStrictEqual(bare);
+    });
   });
 
   describe('electronic article locators (ELocationID)', () => {
@@ -1144,5 +1180,88 @@ describe('InvestigatorList (#216)', () => {
     ]);
     expect(records[2]?.investigators?.[0]?.affiliationIndices).toEqual([2]);
     expect(records[2]?.affiliations).toEqual([BDI, TGU, KENNEDY]);
+  });
+});
+
+describe('author name suffixes (#226)', () => {
+  const parseOne = (xml: string, options: { includeInvestigators?: boolean } = {}) => {
+    const parsed = parseArticleSet(parseArticleSetXml(articleSetXml(xml)), options)[0];
+    if (!parsed) throw new Error('fixture did not parse');
+    return parsed;
+  };
+
+  it('keeps an author Suffix verbatim and omits the field for authors without one (PMID 34525284)', () => {
+    expect(parseOne(FRENCK_JR_XML).authors).toStrictEqual([
+      {
+        lastName: 'Frenck',
+        firstName: 'Robert W',
+        initials: 'RW',
+        suffix: 'Jr',
+        affiliationIndices: [0],
+      },
+      { lastName: 'Dormitzer', firstName: 'Philip R', initials: 'PR', affiliationIndices: [1] },
+      { lastName: 'Gurtman', firstName: 'Alejandra', initials: 'A', affiliationIndices: [1] },
+    ]);
+  });
+
+  it('keeps an ordinal suffix as NCBI writes it, with no rewriting (PMID 42409342)', () => {
+    const authors = parseOne(HORMUTH_2ND_XML).authors ?? [];
+    expect(authors.map((a) => [a.lastName, a.suffix])).toEqual([
+      ['Das', undefined],
+      ['Hormuth', '2nd'],
+      ['Virostko', undefined],
+      ['Parker', undefined],
+      ['Quarles', undefined],
+      ['Yankeelov', undefined],
+    ]);
+    expect(authors.filter((a) => 'suffix' in a)).toHaveLength(1);
+  });
+
+  it('omits an empty Suffix element rather than writing ""', () => {
+    const result = extractAuthors({
+      Author: [{ LastName: { '#text': 'Solo' }, Suffix: { '#text': '' } }],
+    });
+    expect(result.authors[0]).not.toHaveProperty('suffix');
+  });
+
+  it('reads an investigator Suffix, retiring the name-parts-only gap (PMID 19117881)', () => {
+    const { investigators, authors } = parseOne(AAP_INVESTIGATORS_XML, {
+      includeInvestigators: true,
+    });
+    expect(authors).toEqual([
+      { collectiveName: 'American Academy of Pediatrics Committee on Infectious Diseases' },
+    ]);
+    expect(investigators).toHaveLength(13);
+    expect(investigators?.filter((inv) => inv.suffix)).toStrictEqual([
+      { lastName: 'Bocchini', firstName: 'Joseph A', initials: 'JA', suffix: 'Jr' },
+      { lastName: 'Frenck', firstName: 'Robert W', initials: 'RW', suffix: 'Jr' },
+    ]);
+    expect(investigators?.[1]).toStrictEqual({
+      lastName: 'Bradley',
+      firstName: 'John S',
+      initials: 'JS',
+    });
+  });
+
+  it('carries a suffix onto a Bookshelf editor and a chapter author', () => {
+    // No sampled Bookshelf record carries a suffix; the DTD permits one in
+    // either `Book/AuthorList`, so the GeneReviews chapter gains two.
+    const chapter = parseOne(
+      GENEREVIEWS_CHAPTER_XML.replace(
+        '<LastName>Adam</LastName><ForeName>Margaret P</ForeName><Initials>MP</Initials>',
+        '<LastName>Adam</LastName><ForeName>Margaret P</ForeName><Initials>MP</Initials><Suffix>3rd</Suffix>',
+      ).replace(
+        '<LastName>Petrucelli</LastName><ForeName>Nancie</ForeName><Initials>N</Initials>',
+        '<LastName>Petrucelli</LastName><ForeName>Nancie</ForeName><Initials>N</Initials><Suffix>Jr</Suffix>',
+      ),
+    );
+    expect(chapter.book?.editors?.[0]).toStrictEqual({
+      lastName: 'Adam',
+      firstName: 'Margaret P',
+      initials: 'MP',
+      suffix: '3rd',
+    });
+    expect(chapter.book?.editors?.[1]).not.toHaveProperty('suffix');
+    expect(chapter.authors?.[0]).toMatchObject({ lastName: 'Petrucelli', suffix: 'Jr' });
   });
 });

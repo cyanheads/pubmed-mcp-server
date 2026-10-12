@@ -38,6 +38,8 @@ import {
   RETRACTED_ARTICLE_XML,
   RETRACTION_NOTICE_XML,
 } from '../parsing/_comments-corrections-fixtures.js';
+import { NO_PAGINATION_XML, NONE_PAGINATION_XML } from '../parsing/_pagination-fixtures.js';
+import { FRENCK_JR_XML, HORMUTH_2ND_XML } from '../parsing/_suffix-fixtures.js';
 
 const sampleArticle: ParsedArticle = {
   recordType: 'journal-article',
@@ -1282,13 +1284,14 @@ describe('APA and MLA journal conventions (#217)', () => {
 
     const elided = lancet1998();
     expect(formatVancouver(elided)).toContain('Lancet. 1998;351(9103):637-41.');
-    expect(formatBibtex(elided)).toMatch(/^ {2}pages\s+= \{637-41\},$/m);
+    // BibTeX writes the elided range in full, as RIS does (#228)
+    expect(formatBibtex(elided)).toMatch(/^ {2}pages\s+= \{637-641\},$/m);
     expect(formatRis(elided)).toContain('SP  - 637\nEP  - 641\n');
   });
 
   it('keeps a page that matches no non-DOI locator as a page in APA and MLA', () => {
     const notice = lancet2010();
-    expect(formatApa(notice)).toContain('*Lancet (London, England)*, *375*(9713), 445.');
+    expect(formatApa(notice)).toContain('*Lancet*, *375*(9713), 445.');
     expect(formatMla(notice)).toContain('vol. 375, no. 9713, 2010, p. 445.');
 
     // PMID 39964127: a Lancet page, 2413, whose pii is the article's own S-number.
@@ -1313,9 +1316,7 @@ describe('APA and MLA journal conventions (#217)', () => {
   });
 
   it("writes an APA page range with an en dash and NLM's elided end expanded", () => {
-    expect(formatApa(lancet1998())).toContain(
-      '*Lancet (London, England)*, *351*(9103), 637\u{2013}641.',
-    );
+    expect(formatApa(lancet1998())).toContain('*Lancet*, *351*(9103), 637\u{2013}641.');
     expect(formatApa(gastro())).toContain('*Gastroenterology*, *161*(3), 865\u{2013}878.e8.');
   });
 
@@ -1341,11 +1342,9 @@ describe('APA and MLA journal conventions (#217)', () => {
         'Angewandte Chemie (International ed. in English)',
         'Angewandte Chemie (International Ed. in English)',
       ],
-      [
-        'Health technology assessment (Winchester, England)',
-        'Health Technology Assessment (Winchester, England)',
-      ],
-      ['Lancet (London, England)', 'Lancet (London, England)'],
+      // NLM's place qualifier is dropped before casing (#227)
+      ['Health technology assessment (Winchester, England)', 'Health Technology Assessment'],
+      ['Lancet (London, England)', 'Lancet'],
       [
         'Proceedings of the National Academy of Sciences of the United States of America',
         'Proceedings of the National Academy of Sciences of the United States of America',
@@ -1437,6 +1436,364 @@ describe('APA and MLA journal conventions (#217)', () => {
     };
     expect(formatBibtex(mixed)).toContain('keywords = {{CRISPR}, {gene therapy}, {Humans}}');
     expect(formatRis(mixed)).toContain('KW  - CRISPR\nKW  - gene therapy\nKW  - Humans\nAB  -');
+  });
+});
+
+// ─── NLM journal qualifiers in APA and MLA (#227) ────────────────────────────
+//
+// NLM's `Journal/Title` appends a place, year, or edition to tell same-named
+// journals apart (`Lancet (London, England)`). The journal prints no such text,
+// so APA and MLA drop it; any other parenthetical names the journal and stays.
+// Vancouver, BibTeX, and RIS keep NLM's own values.
+
+describe('NLM journal qualifiers in APA and MLA (#227)', () => {
+  /** The italicized journal name APA and MLA print for a record carrying only its journal. */
+  const citedJournal = (title: string, isoAbbreviation?: string) => {
+    const article: ParsedArticle = {
+      recordType: 'journal-article',
+      pmid: '1',
+      journalInfo: { title, ...(isoAbbreviation && { isoAbbreviation }) },
+    };
+    return [formatApa(article), formatMla(article)].map(
+      (citation) => /\*(.+)\*/.exec(citation)?.[1],
+    );
+  };
+
+  // Each row is NLM's `Title` and `ISOAbbreviation` for that journal.
+  it.each([
+    // PMIDs 9500320, 42855198, 42848938, 42796427, 42817577
+    ['Lancet (London, England)', 'Lancet', 'Lancet'],
+    ['BMJ (Clinical research ed.)', 'BMJ', 'BMJ'],
+    ['Science (New York, N.Y.)', 'Science', 'Science'],
+    ['Medicina (Kaunas, Lithuania)', 'Medicina (Kaunas)', 'Medicina'],
+    ['Sensors (Basel, Switzerland)', 'Sensors (Basel)', 'Sensors'],
+    // A place with a year, a year alone, a format; title case applies to what remains
+    ['Life (Chicago, Ill. : 1978)', 'Life', 'Life'],
+    ["Journal of women's health (2002)", 'J Womens Health (Larchmt)', "Journal of Women's Health"],
+    ['Psychiatric bulletin (2014)', 'Psychiatr Bull (2014)', 'Psychiatric Bulletin'],
+    ['Freshwater science (Print)', 'Freshw Sci', 'Freshwater Science'],
+    ['African review (Dar es Salaam, Tanzania)', 'Afr Rev', 'African Review'],
+    [
+      'Health technology assessment (Winchester, England)',
+      'Health Technol Assess',
+      'Health Technology Assessment',
+    ],
+  ])('drops the qualifier from %s', (title, iso, cited) => {
+    expect(citedJournal(title, iso)).toEqual([cited, cited]);
+  });
+
+  it.each([
+    // An issuing body names a generic title: PMIDs 42847602 and 42361356
+    [
+      'Proceedings (Baylor University. Medical Center)',
+      'Proc (Bayl Univ Med Cent)',
+      'Proceedings (Baylor University. Medical Center)',
+    ],
+    [
+      'Journal (Canadian Dental Association)',
+      'J Can Dent Assoc',
+      'Journal (Canadian Dental Association)',
+    ],
+    // An edition the ISO abbreviation also names is a journal of its own
+    ['Medicina clinica (English ed.)', 'Med Clin (Engl Ed)', 'Medicina Clinica (English Ed.)'],
+    [
+      'Angewandte Chemie (International ed. in English)',
+      'Angew Chem Int Ed Engl',
+      'Angewandte Chemie (International Ed. in English)',
+    ],
+    [
+      'Frontiers in bioscience (Landmark edition)',
+      'Front Biosci (Landmark Ed)',
+      'Frontiers in Bioscience (Landmark Edition)',
+    ],
+    // A nested parenthetical is one unit, never cut at its inner group
+    [
+      'Bulletin (Hospital for Joint Diseases (New York, N.Y.))',
+      'Bull Hosp Jt Dis',
+      'Bulletin (Hospital for Joint Diseases (New York, N.Y.))',
+    ],
+    // A one-word place and a subject are not NLM qualifiers
+    ['Mental health (London)', 'Ment Health (Lond)', 'Mental Health (London)'],
+    [
+      'Seminars in veterinary medicine and surgery (small animal)',
+      'Semin Vet Med Surg Small Anim',
+      'Seminars in Veterinary Medicine and Surgery (Small Animal)',
+    ],
+  ])('keeps the parenthetical of %s', (title, iso, cited) => {
+    expect(citedJournal(title, iso)).toEqual([cited, cited]);
+  });
+
+  it('drops an edition the ISO abbreviation does not name, or when the record has none', () => {
+    expect(citedJournal('BMJ (Clinical research ed.)')).toEqual(['BMJ', 'BMJ']);
+    expect(citedJournal('Medicina clinica (English ed.)')).toEqual([
+      'Medicina Clinica',
+      'Medicina Clinica',
+    ]);
+  });
+
+  /**
+   * The rule's measured misses over NLM's journal list: a place-shaped issuing
+   * body is dropped, and a place carrying no region or a year after a period is
+   * kept, as before the rule.
+   */
+  it.each([
+    ['Collegian (Royal College of Nursing, Australia)', 'Collegian', 'Collegian'],
+    ['Medical record (New York : 1934)', 'Med Rec', 'Medical Record (New York : 1934)'],
+    [
+      'Psychology and behavioral sciences (New York, N.Y. 2012)',
+      'Psychol Behav Sci',
+      'Psychology and Behavioral Sciences (New York, N.Y. 2012)',
+    ],
+  ])('cites %s by the rule as measured', (title, iso, cited) => {
+    expect(citedJournal(title, iso)).toEqual([cited, cited]);
+  });
+
+  it('keeps Vancouver, BibTeX, and RIS on the qualified name (PMID 9500320)', () => {
+    const article = parseArticleSet(parseArticleSetXml(articleSetXml(RETRACTED_ARTICLE_XML)))[0];
+    if (!article) throw new Error('fixture did not parse');
+    expect(formatApa(article)).toContain('*Lancet*, *351*(9103), 637\u{2013}641.');
+    expect(formatMla(article)).toContain('*Lancet*, vol. 351, no. 9103, 1998, pp. 637-41.');
+    expect(formatVancouver(article)).toContain('. Lancet. 1998;351(9103):637-41.');
+    expect(formatBibtex(article)).toMatch(/^ {2}journal\s+= \{Lancet \(London, England\)\},$/m);
+    expect(formatRis(article)).toContain('JF  - Lancet (London, England)\nJO  - Lancet\n');
+  });
+});
+
+// ─── BibTeX and RIS page ranges written in full (#228) ───────────────────────
+//
+// NLM elides a range's end (`637-41`) and drops a prefix from it (`S5-15`).
+// BibTeX and RIS write each range in full by the rule APA uses; NCBI's own
+// `StartPage`/`EndPage` for the same records are the oracle.
+
+describe('BibTeX and RIS page ranges written in full (#228)', () => {
+  const withPages = (pages: string): ParsedArticle => ({
+    ...sampleArticle,
+    journalInfo: { ...sampleArticle.journalInfo!, pages },
+  });
+  const bibtexPages = (pages: string) =>
+    /^ {2}pages\s+= \{(.*)\},$/m.exec(formatBibtex(withPages(pages)))?.[1];
+  const risPages = (pages: string) => {
+    const ris = formatRis(withPages(pages));
+    return [/^SP {2}- (.*)$/m.exec(ris)?.[1], /^EP {2}- (.*)$/m.exec(ris)?.[1]];
+  };
+
+  /** PMID, `MedlinePgn`, and the `StartPage`/`EndPage` NCBI serves beside it. */
+  it.each([
+    ['9500320', '637-41', '637', '641'],
+    ['5071698', '614-7', '614', '617'],
+    ['4626599', '897-900', '897', '900'],
+    ['24564693', 'S5-15', 'S5', 'S15'],
+    ['17016951', 'S99-103', 'S99', 'S103'],
+    ['21883993', 'e58-65', 'e58', 'e65'],
+    ['29018563', 'e16-e18', 'e16', 'e18'],
+    ['34120956', 'xii-xv', 'xii', 'xv'],
+    ['42394887', '145-150.e1', '145', '150.e1'],
+    ['8696098', '1308, 1310-4', '1308', '1314'],
+    ['8696105', '1340, 1343, 1344', '1340', '1344'],
+  ])('PMID %s: %s runs from %s to %s', (_pmid, pages, startPage, endPage) => {
+    expect(risPages(pages)).toEqual([startPage, endPage]);
+  });
+
+  it.each([
+    ['637-41', '637-641'],
+    ['S5-15', 'S5-S15'],
+    ['e1-5', 'e1-e5'],
+    ['xii-xv', 'xii-xv'],
+    ['1308, 1310-4', '1308, 1310-1314'],
+    ['1407-8; author reply 1409-10', '1407-1408; author reply 1409-1410'],
+  ])('writes BibTeX pages %s as %s', (pages, full) => {
+    expect(bibtexPages(pages)).toBe(full);
+  });
+
+  it('keeps a single page and an article number without an end page', () => {
+    expect(risPages('445')).toEqual(['445', undefined]);
+    expect(risPages('e0364621')).toEqual(['e0364621', undefined]);
+    expect(risPages('1407-8; author reply 1409-10')).toEqual(['1407', '1410']);
+  });
+
+  it('leaves full ranges, single pages, and article numbers byte-identical', () => {
+    for (const pages of ['865-878.e8', '123-130', '445', 'e0364621', 'S3-S13']) {
+      expect(bibtexPages(pages), pages).toBe(pages);
+    }
+    expect(formatBibtex(sampleArticle)).toContain('  pages    = {123-130},\n');
+    expect(formatRis(sampleArticle)).toContain('SP  - 123\nEP  - 130\n');
+  });
+
+  it("keeps APA's expansion and MLA's and Vancouver's NLM text", () => {
+    const article = withPages('1308, 1310-4');
+    expect(formatApa(article)).toContain('*30*(5), 1308, 1310\u{2013}1314.');
+    expect(formatMla(article)).toContain('2024, pp. 1308, 1310-4.');
+    expect(formatVancouver(article)).toContain('2024;30(5):1308, 1310-4.');
+  });
+});
+
+// ─── Hyphenated article numbers (#231) ───────────────────────────────────────
+//
+// American Society for Microbiology journals deposit `MedlinePgn` without the
+// hyphen their article number carries (`e0364621` beside pii `e03646-21`).
+// APA and MLA cite the locator's form.
+
+describe('hyphenated article numbers in APA and MLA (#231)', () => {
+  /** PMID 35164571 (mBio 13(1), 2021), as the record carries it. */
+  const asmArticle = (pages: string, elocationId: string): ParsedArticle => ({
+    recordType: 'journal-article',
+    pmid: '35164571',
+    title: 'Structural Basis for the Peptidoglycan-Editing Activity of YfiH.',
+    authors: [{ lastName: 'Lee', firstName: 'Meng-Sheng', initials: 'MS' }],
+    journalInfo: {
+      title: 'mBio',
+      isoAbbreviation: 'mBio',
+      volume: '13',
+      issue: '1',
+      pages,
+      elocationId,
+      elocationIdType: 'pii',
+      publicationDate: { year: '2021', month: 'Feb', day: '22' },
+    },
+    doi: `10.1128/mbio.${elocationId.slice(1)}`,
+  });
+
+  it('cites the locator when MedlinePgn is it without its hyphen', () => {
+    const article = asmArticle('e0364621', 'e03646-21');
+    expect(formatApa(article)).toContain(
+      '*mBio*, *13*(1), Article e03646-21. https://doi.org/10.1128/mbio.03646-21',
+    );
+    expect(formatMla(article)).toContain('*mBio*, vol. 13, no. 1, 2021, art. e03646-21.');
+
+    // PMID 35164570, the same journal issue
+    const other = asmArticle('e0379621', 'e03796-21');
+    expect(formatApa(other)).toContain('*mBio*, *13*(1), Article e03796-21.');
+    expect(formatMla(other)).toContain('vol. 13, no. 1, 2021, art. e03796-21.');
+  });
+
+  it('never reads a page range as an article number', () => {
+    const range = asmArticle('123-45', '12345');
+    expect(formatApa(range)).toContain('*13*(1), 123\u{2013}145.');
+    expect(formatApa(range)).not.toContain('Article');
+    expect(formatMla(range)).toContain('2021, pp. 123-45.');
+  });
+
+  it('keeps Vancouver, BibTeX, and RIS on the pagination NLM gives', () => {
+    const article = asmArticle('e0364621', 'e03646-21');
+    expect(formatVancouver(article)).toContain(
+      'mBio. 2021;13(1):e0364621. doi: 10.1128/mbio.03646-21',
+    );
+    expect(formatBibtex(article)).toMatch(/^ {2}pages\s+= \{e0364621\},$/m);
+    expect(formatBibtex(article)).not.toMatch(/^ {2}eid\s/m);
+    expect(formatRis(article)).toContain('SP  - e0364621\n');
+    expect(formatRis(article)).not.toContain('C7  -');
+  });
+});
+
+// ─── Whitespace in record text (#233) ────────────────────────────────────────
+//
+// The parser trims a field's ends only, so a line break inside one reaches the
+// formatter. Every style writes record text on one line.
+
+describe('whitespace runs in record text collapse in every style (#233)', () => {
+  /** PMID 34120956, its real record with a line break injected into `ArticleTitle`. */
+  const NHSC_XML =
+    '<PubmedArticle><MedlineCitation Status="MEDLINE" Owner="NLM" IndexingMethod="Automated"><PMID Version="1">34120956</PMID><Article PubModel="Print"><Journal><ISSN IssnType="Electronic">1548-6869</ISSN><JournalIssue CitedMedium="Internet"><Volume>32</Volume><Issue>2</Issue><PubDate><Year>2021</Year></PubDate></JournalIssue><Title>Journal of health care for the poor and underserved</Title><ISOAbbreviation>J Health Care Poor Underserved</ISOAbbreviation></Journal><ArticleTitle>NHSC at 50: New Investments for a New Workforce.</ArticleTitle><Pagination><StartPage>xii</StartPage><EndPage>xv</EndPage><MedlinePgn>xii-xv</MedlinePgn></Pagination><ELocationID EIdType="doi" ValidYN="Y">10.1353/hpu.2021.0084</ELocationID><AuthorList CompleteYN="Y"><Author ValidYN="Y"><LastName>Nunez</LastName><ForeName>Felix L</ForeName><Initials>FL</Initials></Author><Author ValidYN="Y"><LastName>Overbeck</LastName><ForeName>Marc</ForeName><Initials>M</Initials></Author><Author ValidYN="Y"><LastName>Kelly</LastName><ForeName>Amanda Pears</ForeName><Initials>AP</Initials></Author></AuthorList><Language>eng</Language><PublicationTypeList><PublicationType UI="D016428">Journal Article</PublicationType></PublicationTypeList></Article><MedlineJournalInfo><Country>United States</Country><MedlineTA>J Health Care Poor Underserved</MedlineTA><NlmUniqueID>9103800</NlmUniqueID><ISSNLinking>1049-2089</ISSNLinking></MedlineJournalInfo></MedlineCitation><PubmedData><PublicationStatus>ppublish</PublicationStatus><ArticleIdList><ArticleId IdType="pubmed">34120956</ArticleId><ArticleId IdType="doi">10.1353/hpu.2021.0084</ArticleId></ArticleIdList></PubmedData></PubmedArticle>';
+  const parsed = (xml: string): ParsedArticle => {
+    const article = parseArticleSet(parseArticleSetXml(articleSetXml(xml)))[0];
+    if (!article) throw new Error('fixture did not parse');
+    return article;
+  };
+  const TITLE = 'NHSC at 50: New Investments for a New Workforce.';
+  /** Each style's output for a record, every style held to one line but RIS and BibTeX. */
+  const expectOneLineEach = (article: ParsedArticle) => {
+    const ris = formatRis(article).split('\n');
+    expect(
+      ris.every((line) => /^[A-Z][A-Z0-9] {2}- /.test(line)),
+      ris.join('\n'),
+    ).toBe(true);
+    const bibtex = formatBibtex(article).split('\n');
+    expect(
+      bibtex.every((line) => /^(@\w+\{pmid\d+,|\}| {2}\w+\s*= \{.*\},?)$/.test(line)),
+      bibtex.join('\n'),
+    ).toBe(true);
+    for (const citation of [formatApa(article), formatMla(article), formatVancouver(article)]) {
+      expect(citation).not.toMatch(/\s{2}|[\n\r]/);
+    }
+  };
+
+  it('keeps the parsed title line break, then writes it on one line in every style', () => {
+    for (const broken of ['NHSC at 50:\n\nNew', 'NHSC at 50:&#10;New']) {
+      const article = parsed(NHSC_XML.replace('NHSC at 50: New', broken));
+      expect(article.title).toMatch(/^NHSC at 50:\n+New Investments/);
+      expectOneLineEach(article);
+      expect(formatRis(article)).toContain(`\nTI  - ${TITLE}\n`);
+      expect(formatBibtex(article)).toMatch(
+        /^ {2}title\s+= \{\{NHSC at 50: New Investments for a New Workforce\}\},$/m,
+      );
+      expect(formatApa(article)).toContain(`(2021). ${TITLE} *Journal of Health Care`);
+      expect(formatMla(article)).toContain(`"${TITLE}"`);
+      expect(formatVancouver(article)).toContain(`Kelly AP. ${TITLE} J Health Care`);
+    }
+  });
+
+  it('writes a collective author, keyword, journal title, and book title on one line', () => {
+    const article: ParsedArticle = {
+      ...sampleArticle,
+      authors: [{ collectiveName: 'NHSC\nWorkforce  Group' }, ...(sampleArticle.authors ?? [])],
+      keywords: ['primary\ncare'],
+      journalInfo: {
+        ...sampleArticle.journalInfo!,
+        title: 'Nature\r\nmedicine',
+        isoAbbreviation: 'Nat\nMed',
+      },
+    };
+    expectOneLineEach(article);
+    expect(formatRis(article)).toContain('AU  - NHSC Workforce Group\n');
+    expect(formatRis(article)).toContain('KW  - primary care\n');
+    expect(formatRis(article)).toContain('JF  - Nature medicine\nJO  - Nat Med\n');
+    expect(formatBibtex(article)).toContain('{primary care}');
+    expect(formatApa(article)).toContain('NHSC Workforce Group, Smith');
+    expect(formatApa(article)).toContain('*Nature Medicine*');
+    expect(formatVancouver(article)).toContain('Nat Med. 2024');
+
+    const chapter = parsed(
+      LACTMED_CHAPTER_XML.replace('Drugs and Lactation', 'Drugs and\nLactation'),
+    );
+    expectOneLineEach(chapter);
+    expect(formatApa(chapter)).toContain('*Drugs and Lactation Database (LactMed®)*');
+    expect(formatMla(chapter)).toContain('*Drugs and Lactation Database (LactMed®)*');
+    expect(formatVancouver(chapter)).toContain(
+      'In: Drugs and Lactation Database (LactMed®) [Internet].',
+    );
+    expect(formatRis(chapter)).toContain('BT  - Drugs and Lactation Database (LactMed®)\n');
+    expect(formatBibtex(chapter)).toMatch(/booktitle\s+= \{Drugs and Lactation Database/);
+  });
+
+  it('leaves a record without a whitespace run byte-identical', () => {
+    const article = parsed(NHSC_XML);
+    expect(formatRis(article)).toBe(
+      [
+        'TY  - JOUR',
+        'AU  - Nunez, Felix L',
+        'AU  - Overbeck, Marc',
+        'AU  - Kelly, Amanda Pears',
+        `TI  - ${TITLE}`,
+        'JF  - Journal of health care for the poor and underserved',
+        'JO  - J Health Care Poor Underserved',
+        'PY  - 2021',
+        'VL  - 32',
+        'IS  - 2',
+        'SP  - xii',
+        'EP  - xv',
+        'SN  - 1548-6869',
+        'DO  - 10.1353/hpu.2021.0084',
+        'AN  - 34120956',
+        'UR  - https://pubmed.ncbi.nlm.nih.gov/34120956/',
+        'ER  - ',
+      ].join('\n'),
+    );
+    expect(formatApa(article)).toBe(
+      `Nunez, F. L., Overbeck, M., & Kelly, A. P. (2021). ${TITLE} *Journal of Health Care for the Poor and Underserved*, *32*(2), xii\u{2013}xv. https://doi.org/10.1353/hpu.2021.0084`,
+    );
+    expect(formatVancouver(article)).toBe(
+      `Nunez FL, Overbeck M, Kelly AP. ${TITLE} J Health Care Poor Underserved. 2021;32(2):xii-xv. doi: 10.1353/hpu.2021.0084`,
+    );
   });
 });
 
@@ -1568,5 +1925,175 @@ describe('retraction and erratum notices (#215)', () => {
         formatCitation(withoutNotices(article), style),
       );
     }
+  });
+});
+
+// NCBI writes the literal `None` as the page value on some records. It is no
+// page: the record cites as one carrying no pagination at all. (#248)
+
+describe("NCBI's literal None page value (#248)", () => {
+  const record = (xml: string): ParsedArticle => {
+    const parsed = parseArticleSet(parseArticleSetXml(articleSetXml(xml)))[0];
+    if (!parsed) throw new Error('fixture did not parse');
+    return parsed;
+  };
+
+  it('cites PMID 42845821 in every style exactly as the record with no pagination', () => {
+    const none = record(NONE_PAGINATION_XML);
+    const bare = record(NO_PAGINATION_XML);
+    for (const style of ['apa', 'mla', 'bibtex', 'ris', 'vancouver'] as const) {
+      const citation = formatCitation(none, style);
+      expect(citation, style).toBe(formatCitation(bare, style));
+      expect(citation, style).not.toContain('None');
+    }
+  });
+});
+
+// An author's generational suffix stays verbatim as NCBI writes it (`Jr`,
+// `2nd`). Inverted name forms set it off with a comma; natural-order and NLM
+// forms append it after a space. (#226)
+
+describe('author name suffixes in every style (#226)', () => {
+  const record = (xml: string): ParsedArticle => {
+    const parsed = parseArticleSet(parseArticleSetXml(articleSetXml(xml)))[0];
+    if (!parsed) throw new Error('fixture did not parse');
+    return parsed;
+  };
+  const frenck = () => record(FRENCK_JR_XML);
+  const hormuth = () => record(HORMUTH_2ND_XML);
+  const withAuthors = (authors: NonNullable<ParsedArticle['authors']>): ParsedArticle => ({
+    ...sampleArticle,
+    authors,
+  });
+  const FRENCK = { lastName: 'Frenck', firstName: 'Robert W', initials: 'RW', suffix: 'Jr' };
+
+  describe('PMID 34525284 — first author Frenck RW Jr', () => {
+    it('APA sets the suffix off after the initials', () => {
+      expect(formatApa(frenck())).toBe(
+        'Frenck, R. W., Jr, Dormitzer, P. R., & Gurtman, A. (2021). BNT162b2 Covid-19 Vaccine in Adolescents. Reply. ' +
+          '*The New England Journal of Medicine*, *385*(14), 1343. https://doi.org/10.1056/NEJMc2113394',
+      );
+    });
+
+    it('MLA inverts the first author with the suffix last', () => {
+      expect(formatMla(frenck())).toBe(
+        'Frenck, Robert W, Jr, et al. "BNT162b2 Covid-19 Vaccine in Adolescents. Reply." ' +
+          '*The New England Journal of Medicine*, vol. 385, no. 14, 2021, p. 1343. https://doi.org/10.1056/NEJMc2113394.',
+      );
+    });
+
+    it('BibTeX uses the three-part {Last}, Jr, First form', () => {
+      expect(formatBibtex(frenck())).toContain(
+        '  author   = {{Frenck}, Jr, Robert W and {Dormitzer}, Philip R and {Gurtman}, Alejandra},\n',
+      );
+    });
+
+    it('RIS writes AU as Lastname, Firstname, Suffix', () => {
+      const ris = formatRis(frenck());
+      expect(ris).toContain(
+        'TY  - JOUR\nAU  - Frenck, Robert W, Jr\nAU  - Dormitzer, Philip R\nAU  - Gurtman, Alejandra\nTI  - ',
+      );
+    });
+
+    it("Vancouver appends the suffix after the initials, as NCBI's NLM export does", () => {
+      expect(formatVancouver(frenck())).toBe(
+        'Frenck RW Jr, Dormitzer PR, Gurtman A. BNT162b2 Covid-19 Vaccine in Adolescents. Reply. ' +
+          'N Engl J Med. 2021;385(14):1343. doi: 10.1056/NEJMc2113394',
+      );
+    });
+  });
+
+  describe('PMID 42409342 — second author Hormuth DA 2nd', () => {
+    it('keeps the ordinal verbatim in Vancouver and APA', () => {
+      expect(formatVancouver(hormuth())).toMatch(
+        /^Das A, Hormuth DA 2nd, Virostko J, Parker P, Quarles CC, Yankeelov TE\. Repeatability /,
+      );
+      expect(formatApa(hormuth())).toMatch(
+        /^Das, A\., Hormuth, D\. A\., 2nd, Virostko, J\., Parker, P\., Quarles, C\. C\., & Yankeelov, T\. E\. \(2026\)\. /,
+      );
+    });
+
+    it('renders it in the BibTeX and RIS author lists', () => {
+      expect(formatBibtex(hormuth())).toContain('{Das}, Ayesha and {Hormuth}, 2nd, David A and');
+      expect(formatRis(hormuth())).toContain('AU  - Das, Ayesha\nAU  - Hormuth, David A, 2nd\n');
+    });
+  });
+
+  describe('a suffix at the end of an author list', () => {
+    it('takes the closing period after the suffix in APA, MLA and Vancouver', () => {
+      const article = withAuthors([FRENCK]);
+      expect(formatApa(article)).toMatch(/^Frenck, R\. W\., Jr\. \(2024\)\. A Novel/);
+      expect(formatMla(article)).toMatch(/^Frenck, Robert W, Jr\. "A Novel/);
+      expect(formatVancouver(article)).toMatch(/^Frenck RW Jr\. A Novel/);
+    });
+
+    it('MLA writes a second author first-name-first, suffix last', () => {
+      const article = withAuthors([sampleArticle.authors?.[0] ?? {}, FRENCK]);
+      expect(formatMla(article)).toMatch(/^Smith, John, and Robert W Frenck Jr\. "A Novel/);
+    });
+  });
+
+  describe('a suffixed name with no ForeName (initials only)', () => {
+    const article = () => withAuthors([{ lastName: 'Frenck', initials: 'RW', suffix: 'Jr' }]);
+
+    it('keeps each style positional', () => {
+      expect(formatApa(article())).toMatch(/^Frenck, R\. W\., Jr\. \(2024\)/);
+      expect(formatMla(article())).toMatch(/^Frenck, Jr\. "A Novel/);
+      expect(formatBibtex(article())).toContain('author   = {{Frenck}, Jr,},');
+      expect(formatRis(article())).toContain('AU  - Frenck, , Jr\n');
+      expect(formatVancouver(article())).toMatch(/^Frenck RW Jr\. A Novel/);
+    });
+  });
+
+  it('leaves a suffix out when there is no surname for it to qualify', () => {
+    const article = withAuthors([{ firstName: 'Robert W', initials: 'RW', suffix: 'Jr' }]);
+    for (const style of ['apa', 'mla', 'bibtex', 'ris', 'vancouver'] as const) {
+      expect(formatCitation(article, style), style).not.toContain('Jr');
+    }
+  });
+
+  describe('editor positions', () => {
+    /** GeneReviews (PMID 20301425) with its first editor given the DTD-permitted `Suffix`. */
+    const chapter = () =>
+      record(
+        GENEREVIEWS_CHAPTER_XML.replace(
+          '<LastName>Adam</LastName><ForeName>Margaret P</ForeName><Initials>MP</Initials>',
+          '<LastName>Adam</LastName><ForeName>Margaret P</ForeName><Initials>MP</Initials><Suffix>Jr</Suffix>',
+        ),
+      );
+
+    it('APA writes the In … (Eds.) editor first-name-first, suffix last', () => {
+      expect(formatApa(chapter())).toContain(
+        'In M. P. Adam Jr, S. Bick, G. M. Mirzaa, S. E. Wallace, & A. Amemiya (Eds.), *GeneReviews®*.',
+      );
+    });
+
+    it('MLA writes the edited-by editor first-name-first, suffix last', () => {
+      expect(formatMla(chapter())).toContain('edited by Margaret P Adam Jr, et al.,');
+    });
+
+    it('BibTeX and RIS invert the editor like an author', () => {
+      expect(formatBibtex(chapter())).toContain(
+        'editor    = {{Adam}, Jr, Margaret P and {Bick}, Sarah',
+      );
+      expect(formatRis(chapter())).toContain('A2  - Adam, Margaret P, Jr\nA2  - Bick, Sarah\n');
+    });
+
+    it('Vancouver lists the editor as NLM lists an author', () => {
+      expect(formatVancouver(chapter())).toContain(
+        'In: Adam MP Jr, Bick S, Mirzaa GM, Wallace SE, Amemiya A, editors.',
+      );
+    });
+
+    it('APA inverts an editor standing in the author position of a whole book', () => {
+      const book = record(
+        ADA_WHOLE_BOOK_XML.replace(
+          '</PubDate>',
+          '</PubDate><AuthorList Type="editors" CompleteYN="Y"><Author ValidYN="Y"><LastName>Adam</LastName>' +
+            '<ForeName>Margaret P</ForeName><Initials>MP</Initials><Suffix>Jr</Suffix></Author></AuthorList>',
+        ),
+      );
+      expect(formatApa(book)).toMatch(/^Adam, M\. P\., Jr \(Ed\.\)\. \(2026\)\. /);
+    });
   });
 });

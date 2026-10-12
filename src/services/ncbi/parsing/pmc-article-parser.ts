@@ -21,6 +21,7 @@ import type {
 } from '../types.js';
 import {
   attrOf,
+  CLOSING_PUNCTUATION,
   childrenOf,
   findAll,
   findAllDescendants,
@@ -169,7 +170,11 @@ function isAuthorContrib(contrib: JatsNode): boolean {
   return !contribType || contribType === 'author';
 }
 
-/** Extract authors from a single `<contrib-group>` node. Non-author contributors are skipped. */
+/**
+ * Extract authors from a single `<contrib-group>` node. Non-author contributors
+ * are skipped. A name part the deposit lacks is omitted; a `<suffix>` is kept
+ * verbatim (`IV`, never rewritten to `4th`). (#226)
+ */
 export function extractJatsAuthors(contribGroup: JatsNode | undefined): ParsedPmcAuthor[] {
   if (!contribGroup) return [];
 
@@ -188,9 +193,11 @@ export function extractJatsAuthors(contribGroup: JatsNode | undefined): ParsedPm
     if (nameNode) {
       const lastName = textContent(findOne(nameNode, 'surname')) || undefined;
       const givenNames = textContent(findOne(nameNode, 'given-names')) || undefined;
+      const suffix = textContent(findOne(nameNode, 'suffix')) || undefined;
       authors.push({
         ...(lastName && { lastName }),
         ...(givenNames && { givenNames }),
+        ...(suffix && { suffix }),
       });
     }
   }
@@ -496,8 +503,11 @@ function flushRun(flow: Flow): void {
  *
  * The run is a {@link TextAssembler}, so prose follows the separator rules every
  * other text field does: a `<break/>`, an inline `<fn>` or a `<label>` beside its
- * text reads as one space rather than fusing the words on either side, and a run
- * of `<xref>` markers with nothing between them reads `[1,2,3,4]`. (#185, #197)
+ * text reads as one space rather than fusing the words on either side, a run of
+ * `<xref>` markers with nothing between them reads `[1,2,3,4]`, and a line break
+ * between a formula — or any element — and the period after it is dropped:
+ * `L<0.`, not `L<0 .`. A `<tex-math>` or `<math>` is opened and closed on the
+ * run like any element, so that rule sees it. (#185, #197, #225)
  */
 function walkFlow(nodes: JatsNodeList, flow: Flow, blockTags: ReadonlySet<string>): void {
   for (const node of nodes) {
@@ -512,12 +522,10 @@ function walkFlow(nodes: JatsNodeList, flow: Flow, blockTags: ReadonlySet<string
       if (chosen) walkFlow([chosen], flow, blockTags);
       continue;
     }
-    if (tag === 'tex-math') {
-      flow.run.text(rawTextContent(node));
-      continue;
-    }
-    if (isMathTag(tag)) {
-      flow.run.text(linearMath(node));
+    if (tag === 'tex-math' || isMathTag(tag)) {
+      flow.run.open(tag);
+      flow.run.text(tag === 'tex-math' ? rawTextContent(node) : linearMath(node));
+      flow.run.close(tag);
       continue;
     }
     if (blockTags.has(tag)) {
@@ -661,14 +669,30 @@ function alternativePointer(alternatives: JatsNode | undefined): JatsNode | unde
  * left in the section text and the `label` reported in `assets[]` cannot
  * disagree — the tool layer removes the marker by rebuilding it from that label,
  * so a label resolved one way here and another way there strands the marker in
- * the prose under `includeAssets: false`. (#130)
+ * the prose under `includeAssets: false`. That is also why the delimiter is
+ * stripped here rather than at render (see {@link floatLabel}). (#130, #240)
  */
 function assetLabel(node: JatsNode): string | undefined {
-  return (
-    textContent(findOne(node, 'label')) ||
-    textContent(findOne(assetPointer(node), 'label')) ||
-    undefined
-  );
+  return floatLabel(findOne(node, 'label')) ?? floatLabel(findOne(assetPointer(node), 'label'));
+}
+
+/** Delimiters a deposit may print after a table or asset label. */
+const LABEL_DELIMITERS: ReadonlySet<string> = new Set(['.', '|', ':']);
+
+/**
+ * A table or asset `<label>`'s text without the one delimiter some deposits
+ * print after it — `Table 1.`, `Figure 1 |`, `Figure 1:` read `Table 1`,
+ * `Figure 1`. Every surface that names the item puts its own punctuation after
+ * the label: a heading's ` — ` before the caption, a list's `, `, a notice's
+ * closing period, which read `Table 2..` with the delimiter kept. Only the last
+ * character goes, so an internal one stays (`Fig. 1.` reads `Fig. 1`). A label
+ * that is nothing but a delimiter reads as no label. Reference labels are not
+ * read here and keep their printed form (#209). (#240)
+ */
+function floatLabel(label: JatsNode | undefined): string | undefined {
+  const text = textContent(label);
+  const stripped = LABEL_DELIMITERS.has(text.at(-1) ?? '') ? text.slice(0, -1).trimEnd() : text;
+  return stripped || undefined;
 }
 
 /**
@@ -861,7 +885,7 @@ function renderBoxedText(
     else if (tag === 'caption') {
       const parts = childrenOf(child).filter((c) => withTitle || tagNameOf(c) !== 'title');
       blocks.push(...flowBlocks(parts, STATEMENT_BLOCK_TAGS));
-    } else if (withLabel || tag !== 'label') blocks.push(...flowBlocks([child]));
+    } else if (withLabel || tag !== 'label') blocks.push(...sectionBlocks(child));
   }
   return blocks.join('\n\n');
 }
@@ -911,7 +935,7 @@ function flattenSec(sec: JatsNode): string[] {
     const tag = tagNameOf(child);
     if (tag === 'title' || tag === 'label') continue;
     if (tag === 'sec') nested.push(...flattenSec(child));
-    else blocks.push(...flowBlocks([child]));
+    else blocks.push(...sectionBlocks(child));
   }
 
   const head = [heading, blocks.join('\n\n')].filter(Boolean).join('\n');
@@ -1025,7 +1049,7 @@ function extractSections(children: JatsNodeList, back: boolean): ParsedPmcSectio
       sections.push({ title, text: renderBlockWithoutTitle(child) });
       continue;
     }
-    pendingBlocks.push(...flowBlocks([child]));
+    pendingBlocks.push(...sectionBlocks(child));
   }
   flushPending();
 
@@ -1058,7 +1082,9 @@ const BACK_MATTER_TITLES: ReadonlyMap<string, string> = new Map([
  * another is a subsection, as a `<sec>` in a `<sec>` is, so a Springer
  * `Declarations` `<notes>` keeps its inner notes' titles out of its text. In
  * `<body>` only a `<sec>` forms one: a `<notes>` or `<fn-group>` closing a body
- * `<sec>` stays that section's text, as it always read. (#206)
+ * `<sec>` stays that section's text, as it always read — a `<fn-group>` one
+ * paragraph per footnote, as in back matter (see {@link sectionBlocks}). (#206,
+ * #229)
  */
 const BACK_SECTION_TAGS: ReadonlySet<string> = new Set([
   'sec',
@@ -1107,11 +1133,13 @@ function fallbackTitle(node: JatsNode): string | undefined {
 }
 
 /**
- * The paragraphs of a back-matter `<fn>`: each `<p>`, and each block one holds,
- * on its own, with the footnote's `<label>` leading the first. Read as one run,
- * a footnote whose heading sits in a `<p>` of its own fused that heading into
- * the statement after it (`Competing interests The authors declare…`), the
- * fusion a titled `<notes>` is kept from. (#206)
+ * The paragraphs of a `<fn>` that stands as a block — in back matter, or in a
+ * body `<sec>`, `<boxed-text>` or `<fn-group>` (see {@link sectionBlocks}): each
+ * `<p>`, and each block one holds, on its own, with the footnote's `<label>`
+ * leading the first. Read as one run, a footnote whose heading sits in a `<p>`
+ * of its own fused that heading into the statement after it (`Competing
+ * interests The authors declare…`), the fusion a titled `<notes>` is kept from.
+ * (#206, #229)
  */
 function footnoteParagraphs(fn: JatsNode): string[] {
   const label = textContent(findOne(fn, 'label'));
@@ -1121,6 +1149,28 @@ function footnoteParagraphs(fn: JatsNode): string[] {
   );
   if (first === undefined) return label ? [label] : [];
   return [label ? `${label} ${first}` : first, ...rest];
+}
+
+/**
+ * The text blocks one child of a section contributes — of a `<sec>`, of
+ * `<body>`, of a `<boxed-text>` or of a `<sec>` one flattens. A `<fn>` reads as
+ * {@link footnoteParagraphs} reads it, and so does each `<fn>` of a
+ * `<fn-group>`, the group's own `<title>` a paragraph ahead of them; anything
+ * else is flow text. Europe PMC moves back matter into `<body>` as
+ * `<sec sec-type="fn-group"><fn-group>…`, and read as flow text there a group's
+ * footnotes ran into one paragraph where the PMC tier, reading the same group
+ * from `<back>`, returned one per statement. A `<fn>` inside a `<p>` is no child
+ * here and still reads inside its sentence. (#229)
+ */
+function sectionBlocks(child: JatsNode): string[] {
+  switch (tagNameOf(child)) {
+    case 'fn':
+      return footnoteParagraphs(child);
+    case 'fn-group':
+      return childrenOf(child).flatMap(sectionBlocks);
+    default:
+      return flowBlocks([child]);
+  }
 }
 
 // ─── Section Reading ────────────────────────────────────────────────────────
@@ -1205,8 +1255,9 @@ function renderBlockWithoutTitle(node: JatsNode): string {
  * reads as a section: the back-matter elements among its children are
  * subsections too, and with neither a title nor a label it takes the title its
  * element names. Each child contributes its own block, so every `<fn>` of a
- * `<fn-group>` is a paragraph of its own, and each `<p>` inside one too (see
- * {@link footnoteParagraphs}). (#206)
+ * `<fn-group>` is a paragraph of its own, and each `<p>` inside one too — in
+ * back matter and, for a `<fn-group>` that stays a body section's text, in
+ * `<body>` alike (see {@link sectionBlocks}). (#206, #229)
  */
 function extractSection(sec: JatsNode, back = false): ParsedPmcSection | null {
   const lone = loneTitledBlock(sec);
@@ -1235,7 +1286,7 @@ function extractSection(sec: JatsNode, back = false): ParsedPmcSection | null {
       subsections.push(...nested);
       continue;
     }
-    textParts.push(...(back && tag === 'fn' ? footnoteParagraphs(child) : flowBlocks([child])));
+    textParts.push(...sectionBlocks(child));
   }
   title ??= fallbackTitle(sec);
 
@@ -1341,7 +1392,7 @@ function collectSectioned<T>(
 
 function parseTableWrap(tableWrap: JatsNode, sectionTitle: string | undefined): ParsedPmcTable {
   const id = attrOf(tableWrap, 'id');
-  const label = textContent(findOne(tableWrap, 'label')) || undefined;
+  const label = floatLabel(findOne(tableWrap, 'label'));
   const caption = renderCaption(findOne(tableWrap, 'caption'));
   // One line per footnote or paragraph: a footer is a list of statements, and a
   // marker run into the previous note (`…dose.*No patient…`) misattributes it. (#185)
@@ -1559,13 +1610,19 @@ const PUB_ID_LABELS: Readonly<Record<string, string>> = {
   pmcid: 'PMCID',
 };
 
-/** Render one `<person-group>` child — a `<name>`, `<collab>`, or `<etal>`. */
+/**
+ * Render one `<person-group>` child — a `<name>`, `<collab>`, or `<etal>`. A
+ * name reads `Surname Given`, then any `<suffix>` verbatim (`Miller ER III`).
+ */
 function renderCitationName(node: JatsNode): string {
   const tag = tagNameOf(node);
   if (tag === 'name' || tag === 'string-name') {
     const surname = textContent(findOne(node, 'surname'));
     const given = textContent(findOne(node, 'given-names'));
-    return [surname, given].filter(Boolean).join(' ') || textContent(node);
+    const name = [surname, given].filter(Boolean).join(' ');
+    if (!name) return textContent(node);
+    const suffix = textContent(findOne(node, 'suffix'));
+    return suffix ? `${name} ${suffix}` : name;
   }
   if (tag === 'collab') return textContent(node);
   if (tag === 'etal') return 'et al.';
@@ -1634,9 +1691,6 @@ const SUPPLIED_ETAL = 'et al.';
 
 /** Any character other than whitespace. */
 const VISIBLE_TEXT = /\S/;
-
-/** Punctuation that closes the citation field before it: `Henry L.`, `Li X,`, `(2020)`. (#219) */
-const CLOSING_PUNCTUATION: ReadonlySet<string> = new Set(['.', ',', ';', ':', ')', ']']);
 
 /**
  * How much of the citation written so far a `<pub-id>` reads for a literal

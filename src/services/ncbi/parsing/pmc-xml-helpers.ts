@@ -126,6 +126,61 @@ export function isMathTag(tag: string): boolean {
 /** MathML token elements, which contribute their text as deposited. */
 const MATH_TOKEN_TAGS: ReadonlySet<string> = new Set(['mi', 'mn', 'mo', 'mtext', 'ms']);
 
+/** The alternate renderings a `<semantics>` carries after its expression. (#230) */
+const MATH_ANNOTATION_TAGS: ReadonlySet<string> = new Set(['annotation', 'annotation-xml']);
+
+/**
+ * Content MathML elements that can stand as a whole expression: the strict
+ * set plus the containers pragmatic markup writes directly. Read as
+ * presentation they contribute only their leaves (`x2` for x²). (#230)
+ */
+const CONTENT_MATH_TAGS: ReadonlySet<string> = new Set([
+  'apply',
+  'bind',
+  'cbytes',
+  'cerror',
+  'ci',
+  'cn',
+  'cs',
+  'csymbol',
+  'interval',
+  'lambda',
+  'list',
+  'matrix',
+  'piecewise',
+  'set',
+  'share',
+  'vector',
+]);
+
+/** `<annotation-xml>` encodings that mark a Presentation MathML rendering. (#230) */
+const PRESENTATION_ENCODINGS: ReadonlySet<string> = new Set([
+  'mathml-presentation',
+  'application/mathml-presentation+xml',
+]);
+
+/**
+ * The child a MathML `<semantics>` renders through: its expression — the first
+ * child that is not an annotation — or, when that expression is Content
+ * MathML, a Presentation MathML `<annotation-xml>` beside it (MathML 3
+ * §5.1.3, §5.2.1). Every other annotation is an alternate spelling of the same
+ * expression (TeX source, MathType data, Content markup) and never reads.
+ */
+function semanticsRendering(args: JatsNodeList): JatsNode | undefined {
+  const isAnnotation = (node: JatsNode): boolean =>
+    MATH_ANNOTATION_TAGS.has(localName(tagNameOf(node) ?? ''));
+  const expression = args.find((arg) => !isAnnotation(arg));
+  if (!expression || !CONTENT_MATH_TAGS.has(localName(tagNameOf(expression) ?? ''))) {
+    return expression;
+  }
+  const presentation = args.find(
+    (arg) =>
+      localName(tagNameOf(arg) ?? '') === 'annotation-xml' &&
+      PRESENTATION_ENCODINGS.has(attrOf(arg, 'encoding')?.toLowerCase() ?? ''),
+  );
+  return presentation ?? expression;
+}
+
 /**
  * A MathML `<math>` element in a TeX-style linear form — the notation a
  * formula deposited as `<tex-math>` already reads in — so a formula keeps the
@@ -141,6 +196,7 @@ const MATH_TOKEN_TAGS: ReadonlySet<string> = new Set(['mi', 'mn', 'mo', 'mtext',
  * | `mfenced` | `open`, the children split by `separators`, `close` (defaults `(`, `,`, `)`) |
  * | `mtable` | cells split by ` & `, rows by ` \\ ` |
  * | `mspace` / `mphantom` | one space / nothing |
+ * | `semantics` | one rendering of its expression, never an annotation (see `semanticsRendering`) |
  * | anything else | its children in order |
  *
  * An empty script slot is left out (`x^{2}`, not `x_{}^{2}`). Whitespace-only
@@ -257,6 +313,9 @@ export function linearMath(math: JatsNode): string {
         return;
       case 'mphantom':
         return;
+      case 'semantics':
+        write(semanticsRendering(args));
+        return;
       default:
         for (const child of childrenOf(node)) write(child);
     }
@@ -343,6 +402,13 @@ const WHITESPACE_CHAR = /\s/;
 const VISIBLE_CHAR = /\S/;
 
 /**
+ * Punctuation that closes the text before it — `L<0.`, `Henry L,`, `(2020)` —
+ * so whitespace a pretty-printed deposit leaves in front of it is formatting,
+ * not spacing. (#219, #225)
+ */
+export const CLOSING_PUNCTUATION: ReadonlySet<string> = new Set(['.', ',', ';', ':', ')', ']']);
+
+/**
  * Accumulates JATS text in document order and decides every separator the
  * markup implies in the same pass, from state it carries rather than by
  * re-reading text already emitted — so the cost stays linear in the size of the
@@ -358,6 +424,12 @@ const VISIBLE_CHAR = /\S/;
  *   between them is preceded by a comma: `[1,2,3,4]`, not `[1234]`, which reads
  *   as one reference. Any source text between them, whitespace included, means
  *   the source already separated them. (#197)
+ * - Whitespace between an element and the {@link CLOSING_PUNCTUATION} after it
+ *   is dropped when it holds a line break, whether the punctuation follows in
+ *   plain text or opens the next element: `</inline-formula>\n<italic>.</italic>`
+ *   reads `L<0.`, not `L<0 .`. A gap with no line break, one before `(` or a
+ *   word, and a line boundary owed there are kept, and so is a line break
+ *   between a word and punctuation with no element closing between them. (#225)
  *
  * An owed separator is only written between two pieces of content, so a reader
  * adds nothing at the edges of what it reads. By default the source text is
@@ -384,6 +456,12 @@ export class TextAssembler {
   #commaOwed = false;
   /** {@link #written} at each open `<label>` and `<xref>`, innermost last. */
   readonly #marks: number[] = [];
+  /** An element closed since the last visible character was written. */
+  #elementClosed = false;
+  /** The whitespace written since the last visible character holds a line break. */
+  #gapHasLineBreak = false;
+  /** Where that whitespace starts in {@link #out}: every piece from here on is whitespace. */
+  #gapStart = 0;
 
   constructor(options: { lines?: boolean } = {}) {
     this.#lines = options.lines ?? false;
@@ -393,23 +471,38 @@ export class TextAssembler {
   text(value: string): void {
     if (value === '') return;
     this.#afterXref = false;
-    if (!VISIBLE_CHAR.test(value)) {
+    const lead = value.search(VISIBLE_CHAR);
+    if (lead === -1) {
       this.#out.push(this.#lines ? ' ' : value);
       this.#endsWithSpace = true;
+      if (value.includes('\n')) this.#gapHasLineBreak = true;
       return;
     }
+    let start = 0;
     if (this.#written > 0 && this.#owed !== NO_SEPARATOR) {
       const separator = this.#owed === LINE_SEPARATOR ? '\n' : ' ';
-      const sourceSpaced = this.#endsWithSpace || WHITESPACE_CHAR.test(value.charAt(0));
+      const sourceSpaced = this.#endsWithSpace || lead > 0;
       if (this.#lines || !sourceSpaced) this.#out.push(separator);
     } else if (this.#commaOwed) {
       this.#out.push(',');
+    } else if (this.#lineBreakBeforePunctuation(value, lead)) {
+      this.#out.length = this.#gapStart;
+      start = lead;
     }
     this.#owed = NO_SEPARATOR;
     this.#afterLabel = false;
     this.#commaOwed = false;
-    this.#out.push(this.#lines ? value.replace(/\s+/g, ' ') : value);
-    this.#endsWithSpace = WHITESPACE_CHAR.test(value.charAt(value.length - 1));
+    // The trailing whitespace goes in a piece of its own, so the gap it opens can be dropped whole.
+    let end = value.length;
+    while (WHITESPACE_CHAR.test(value.charAt(end - 1))) end -= 1;
+    const body = value.slice(start, end);
+    const trail = value.slice(end);
+    this.#out.push(this.#lines ? body.replace(/\s+/g, ' ') : body);
+    this.#gapStart = this.#out.length;
+    if (trail) this.#out.push(this.#lines ? ' ' : trail);
+    this.#endsWithSpace = trail !== '';
+    this.#gapHasLineBreak = trail.includes('\n');
+    this.#elementClosed = false;
     this.#written += 1;
   }
 
@@ -431,6 +524,7 @@ export class TextAssembler {
    * block nested in inline markup — owes nothing.
    */
   close(tag: string): void {
+    this.#elementClosed = true;
     if (LINE_BOUNDARY_TAGS.has(tag)) {
       this.#oweLine();
       return;
@@ -462,6 +556,20 @@ export class TextAssembler {
   #oweLine(): void {
     if (!this.#afterLabel) this.#owed = LINE_SEPARATOR;
   }
+
+  /**
+   * True when `value`, visible from `lead`, opens with closing punctuation, an
+   * element closed since the last visible character, and the whitespace between
+   * them holds a line break.
+   */
+  #lineBreakBeforePunctuation(value: string, lead: number): boolean {
+    return (
+      this.#written > 0 &&
+      this.#elementClosed &&
+      CLOSING_PUNCTUATION.has(value.charAt(lead)) &&
+      (this.#gapHasLineBreak || value.lastIndexOf('\n', lead) !== -1)
+    );
+  }
 }
 
 /**
@@ -488,12 +596,12 @@ function readInto(
     }
     const tag = tagNameOf(node) ?? '';
     if (IDENTIFIER_TAGS.has(tag) || excluded?.has(tag)) continue;
-    if (tag === TEX_MATH_TAG) {
-      sink.text(texMathExpression(readText(childrenOf(node))));
-      continue;
-    }
-    if (isMathTag(tag)) {
-      sink.text(linearMath(node));
+    if (tag === TEX_MATH_TAG || isMathTag(tag)) {
+      sink.open(tag);
+      sink.text(
+        tag === TEX_MATH_TAG ? texMathExpression(readText(childrenOf(node))) : linearMath(node),
+      );
+      sink.close(tag);
       continue;
     }
     if (tag === ALTERNATIVES_TAG) {

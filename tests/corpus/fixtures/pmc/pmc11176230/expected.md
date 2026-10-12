@@ -28,7 +28,7 @@
 
 **Journal:** Amino Acids, **56**, 42, ISSN 0939-4451
 **Type:** research-article
-**Published:** 2024-6-13
+**Published:** 2024-06-13
 **PMCID:** PMC11176230
 **PMID:** 38869518
 **DOI:** 10.1007/s00726-024-03401-w

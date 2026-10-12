@@ -1,5 +1,5 @@
 {
-  "why": "Regression fixture for #207: Elsevier (Heliyon) mathematics article whose 152 formulas — 115 <inline-formula>s and 37 <disp-formula>s — are MathML alone, with no <tex-math>, beside <statement> lemmas and labelled lists. Each formula reads in a TeX-style linear form, keeping its limits (∑_{j=1}^{N}), scripts (M^{T}L^{−1}M), spacing (<0 and L<0) and matrix rows and cells ((L & M \\\\ M^{T} & N)) instead of the run of its leaves. The Funding and Declaration sections' <funding-source><institution-wrap>s name each funder without its <institution-id> Crossref Funder DOI (#208).",
+  "why": "Regression fixture for #207: Elsevier (Heliyon) mathematics article whose 152 formulas — 115 <inline-formula>s and 37 <disp-formula>s — are MathML alone, with no <tex-math>, beside <statement> lemmas and labelled lists. Each formula reads in a TeX-style linear form, keeping its limits (∑_{j=1}^{N}), scripts (M^{T}L^{−1}M), spacing (<0 and L<0) and matrix rows and cells ((L & M \\\\ M^{T} & N)) instead of the run of its leaves. The Funding and Declaration sections' <funding-source><institution-wrap>s name each funder without its <institution-id> Crossref Funder DOI (#208). A line break between a formula and the punctuation after it (`</inline-formula>\\n<italic>.</italic>`) reads as nothing: `and L<0.` (#225).",
   "title": "Securing consensus in fractional-order multi-agent systems: Algebraic approaches against Byzantine attacks",
   "authors": 7,
   "affiliations": 5,
@@ -26,6 +26,7 @@
     "It is evident that ∑_{j=1}^{N}l_{ij}=0 for i=1,2,...,N.",
     "(L & M \\\\ M^{T} & N)<0.",
     "Which also hold the (N−M^{T}L^{−1}M)<0 and L<0",
+    "and L<0.",
     "M=(−4.4 & 0 & 1.2 \\\\ 0 & −4.3 & 0 \\\\ 0.9 & 0 & −4.6)"
   ],
   "notContains": ["501100001809", "501100014881", "∑j=1Nlij", "(LMMTN)", "−4.401.20"],
@@ -33,6 +34,7 @@
     "It is evident that ∑_{j=1}^{N}l_{ij}=0 for i=1,2,...,N.",
     "(L & M \\\\ M^{T} & N)<0.",
     "Which also hold the (N−M^{T}L^{−1}M)<0 and L<0",
+    "and L<0.",
     "M=(−4.4 & 0 & 1.2 \\\\ 0 & −4.3 & 0 \\\\ 0.9 & 0 & −4.6)"
   ]
 }

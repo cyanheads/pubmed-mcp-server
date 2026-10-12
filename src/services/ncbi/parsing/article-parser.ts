@@ -114,6 +114,7 @@ export function extractAuthors(authorListXml?: XmlAuthorList): ExtractedAuthors 
     const indices = affiliations.of(auth.AffiliationInfo);
     const orcid = extractOrcid(auth.Identifier);
     const collectiveName = getText(auth.CollectiveName);
+    const suffix = getOptionalText(auth.Suffix);
     return {
       ...(collectiveName
         ? { collectiveName }
@@ -121,6 +122,7 @@ export function extractAuthors(authorListXml?: XmlAuthorList): ExtractedAuthors 
             lastName: getText(auth.LastName),
             firstName: getText(auth.ForeName), // XML uses ForeName
             initials: getText(auth.Initials),
+            ...(suffix && { suffix }),
           }),
       ...(indices.length > 0 && { affiliationIndices: indices }),
       ...(orcid && { orcid }),
@@ -134,8 +136,8 @@ export function extractAuthors(authorListXml?: XmlAuthorList): ExtractedAuthors 
  * Extracts the members of a collective author from every `InvestigatorList`,
  * flattened in upstream order and uncapped. Investigator affiliations join the
  * article's deduplicated list after the authors' entries, so an author's indices
- * never shift. A name part the record lacks is omitted; `Suffix` is not read,
- * as for authors. (#216)
+ * never shift. A name part the record lacks is omitted, `Suffix` included.
+ * (#216, #226)
  * @param investigatorListsXml - The record's `InvestigatorList` elements.
  * @param authorAffiliations - The authors' affiliations, from {@link extractAuthors}.
  * @returns The investigators, and the affiliation list extended with theirs.
@@ -151,12 +153,14 @@ function extractInvestigators(
       const lastName = getOptionalText(inv.LastName);
       const firstName = getOptionalText(inv.ForeName);
       const initials = getOptionalText(inv.Initials);
+      const suffix = getOptionalText(inv.Suffix);
       const indices = affiliations.of(inv.AffiliationInfo);
       const orcid = extractOrcid(inv.Identifier);
       return {
         ...(lastName && { lastName }),
         ...(firstName && { firstName }),
         ...(initials && { initials }),
+        ...(suffix && { suffix }),
         ...(indices.length > 0 && { affiliationIndices: indices }),
         ...(orcid && { orcid }),
       };
@@ -220,7 +224,9 @@ export function extractJournalInfo(
   const isoAbbreviation = getOptionalText(journalXml.ISOAbbreviation);
   const volume = getOptionalText(journalXml.JournalIssue?.Volume);
   const issue = getOptionalText(journalXml.JournalIssue?.Issue);
-  const pages = getOptionalText(articleXml?.Pagination?.MedlinePgn);
+  const medlinePgn = getOptionalText(articleXml?.Pagination?.MedlinePgn);
+  // NCBI writes the literal `None` where a record has no pagination. (#248)
+  const pages = medlinePgn === 'None' ? undefined : medlinePgn;
   const publicationDate = {
     ...(year && { year }),
     ...(month && { month }),
@@ -614,10 +620,11 @@ export function extractBookInfo(bookDocumentXml: XmlBookDocument): ParsedBookInf
     (list) => getAttribute(list, 'Type') === 'editors',
   );
   const editors: ParsedBookEditor[] = extractAuthors(mergeAuthorLists(editorLists)).authors.map(
-    ({ lastName, firstName, initials, collectiveName }) => ({
+    ({ lastName, firstName, initials, suffix, collectiveName }) => ({
       ...(lastName && { lastName }),
       ...(firstName && { firstName }),
       ...(initials && { initials }),
+      ...(suffix && { suffix }),
       ...(collectiveName && { collectiveName }),
     }),
   );

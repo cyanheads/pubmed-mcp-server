@@ -21,8 +21,9 @@
  * the order its title sources are consulted in (#144), tier failures
  * staying on the chain rather than reaching the caller as an error (#168),
  * the Europe PMC tier's parallel fan-out staying within four requests in flight
- * (#163), and `pmcids`, `pmids`, and `dois` in one call, each tier working a
- * record once for every id that reaches it (#192).
+ * (#163), `pmcids`, `pmids`, and `dois` in one call, each tier working a
+ * record once for every id that reaches it (#192), and articles returned, cut,
+ * and deferred in routing order whatever order PMC EFetch answers in (#235).
  * @module tests/mcp-server/tools/definitions/fetch-fulltext-routing.test
  */
 
@@ -232,6 +233,13 @@ const EMPTY_ID_LIST =
 const asUid = (id: string) => BigInt(id).toString();
 
 /**
+ * Whether PMC EFetch answers in the reverse of the order it was asked. The live
+ * service's record order is neither request order nor stable from one call to
+ * the next, so a test can serve either and expect the same response. (#235)
+ */
+let pmcAnswersReversed = false;
+
+/**
  * PMC EFetch reads each ID as the number it spells, so `03531190` is PMC3531190,
  * answers a repeated UID once, and rejects a list with no UID in it with the
  * `ID list is empty!` envelope.
@@ -239,6 +247,7 @@ const asUid = (id: string) => BigInt(id).toString();
 function pmcEfetch(url: URL): Response {
   const uids = [...new Set((url.searchParams.get('id') ?? '').split(',').map(asUid))];
   if (uids.every((uid) => uid === '0')) return new Response(EMPTY_ID_LIST, { status: 400 });
+  if (pmcAnswersReversed) uids.reverse();
   const articles = uids.map((uid) => pmcJats.get(uid) ?? '').join('');
   return new Response(`<?xml version="1.0"?><pmc-articleset>${articles}</pmc-articleset>`);
 }
@@ -295,6 +304,7 @@ beforeAll(() => {
 
 beforeEach(() => {
   fetchSpy.mockClear();
+  pmcAnswersReversed = false;
   for (const table of [
     converter,
     converterEchoes,
@@ -1032,6 +1042,182 @@ describe('pmcids, pmids, and dois together (#192)', () => {
     });
     expect(text).toContain(`as \`dois\`: ${GENBANK.doi}`);
     expect(text).not.toContain('each under its own field');
+  });
+});
+
+// ─── #235: routing order of articles ─────────────────────────────────────────
+
+describe('articles in routing order (#235)', () => {
+  /** A fourth PMC article, so a cut can leave two behind. */
+  const FOURTH = { pmid: 30000003, pmcid: 'PMC7000003', doi: '10.1000/fourth' };
+  const FOUR_PMCIDS = [SECOND.pmcid, THIRD.pmcid, GENBANK.pmcid, FOURTH.pmcid];
+
+  function serveFour() {
+    serveGenbank();
+    pmcJats.set('7000001', jats(SECOND.pmcid, 'Second', SECOND.doi));
+    pmcJats.set('7000002', jats(THIRD.pmcid, 'Third', THIRD.doi));
+    pmcJats.set('7000003', jats(FOURTH.pmcid, 'Fourth', FOURTH.doi));
+  }
+
+  const pmcIdsOf = (result: Result) =>
+    result.articles.map((a) => (a.source === 'pmc' ? a.pmcId : a.doi));
+
+  it('returns PMC-served articles in request order when PMC EFetch answers out of it', async () => {
+    serveFour();
+    const inOrder = await fetchFulltext({ pmcids: FOUR_PMCIDS });
+    pmcAnswersReversed = true;
+    const reversed = await fetchFulltext({ pmcids: FOUR_PMCIDS });
+
+    expect(pmcIdsOf(inOrder.result)).toEqual(FOUR_PMCIDS);
+    expect(pmcIdsOf(reversed.result)).toEqual(FOUR_PMCIDS);
+    expect(reversed.result).toEqual(inOrder.result);
+    expect(reversed.text).toBe(inOrder.text);
+  });
+
+  it('keeps and defers the same articles under one ceiling whatever order PMC EFetch answers in', async () => {
+    serveFour();
+    const sizes = (await fetchFulltext({ pmcids: FOUR_PMCIDS })).result.articles.map(
+      (a) => JSON.stringify(a).length,
+    );
+    const ceiling = (sizes[0] ?? 0) + (sizes[1] ?? 0) + 1;
+    const budgeted = { pmcids: FOUR_PMCIDS, maxResponseCharacters: ceiling };
+
+    const inOrder = await fetchFulltext(budgeted);
+    pmcAnswersReversed = true;
+    const reversed = await fetchFulltext(budgeted);
+
+    for (const run of [inOrder, reversed]) {
+      expect(pmcIdsOf(run.result)).toEqual([SECOND.pmcid, THIRD.pmcid]);
+      expect(run.result.deferred).toEqual({
+        maxResponseCharacters: ceiling,
+        returnedCharacters: (sizes[0] ?? 0) + (sizes[1] ?? 0),
+        deferredCount: 2,
+        idType: 'pmcid',
+        ids: [GENBANK.pmcid, FOURTH.pmcid],
+        nextDeferredCharacters: sizes[2],
+      });
+    }
+    expect(reversed.enrichment.notice).toBe(inOrder.enrichment.notice);
+
+    // Re-calling with the deferred ids resumes at the article the cut measured.
+    const resumed = await fetchFulltext({ pmcids: reversed.result.deferred?.ids });
+    expect(pmcIdsOf(resumed.result)).toEqual([GENBANK.pmcid, FOURTH.pmcid]);
+    expect(JSON.stringify(resumed.result.articles[0]).length).toBe(
+      reversed.result.deferred?.nextDeferredCharacters,
+    );
+  });
+
+  it('lists per-article truncation in routing order whatever order PMC EFetch answers in', async () => {
+    serveFour();
+    const shortened = { pmcids: FOUR_PMCIDS, maxCharacters: 10 };
+
+    const inOrder = await fetchFulltext(shortened);
+    pmcAnswersReversed = true;
+    const reversed = await fetchFulltext(shortened);
+
+    for (const run of [inOrder, reversed]) {
+      expect(run.result.truncation?.articles.map((a) => a.id)).toEqual(FOUR_PMCIDS);
+    }
+    expect(reversed.result).toEqual(inOrder.result);
+    expect(reversed.text).toBe(inOrder.text);
+    expect(reversed.enrichment.notice).toBe(inOrder.enrichment.notice);
+  });
+
+  it('names section-filter misses in routing order whatever order PMC EFetch answers in', async () => {
+    serveFour();
+    const filtered = { pmcids: FOUR_PMCIDS, sections: ['no such section'] };
+
+    const inOrder = await fetchFulltext(filtered);
+    pmcAnswersReversed = true;
+    const reversed = await fetchFulltext(filtered);
+
+    expect(inOrder.enrichment.notice).toContain(FOUR_PMCIDS.join(', '));
+    expect(reversed.enrichment.notice).toBe(inOrder.enrichment.notice);
+  });
+
+  it('places a Europe PMC- or Unpaywall-served article ahead of a PMC-served one later in routing order', async () => {
+    serveGenbank();
+    pmcJats.set('7000002', jats(THIRD.pmcid, 'Third', THIRD.doi));
+    serveDnaInEpmc('PMC9100001');
+    epmcFullText.set('PMC9100001', jats('PMC9100001', 'Molecular structure', DNA.doi));
+    servePreprint({});
+    pmcAnswersReversed = true;
+    const input = {
+      pmcids: [THIRD.pmcid],
+      pmids: [DNA.pmid],
+      dois: [PREPRINT_DOI, GENBANK.doi],
+    };
+
+    const { result } = await fetchFulltext(input);
+
+    expect(result.articles.map((a) => [a.viaSource, a.doi])).toEqual([
+      ['pmc', THIRD.doi],
+      ['europepmc', DNA.doi],
+      ['unpaywall', PREPRINT_DOI],
+      ['pmc', GENBANK.doi],
+    ]);
+    expect(result.unavailable).toBeUndefined();
+
+    // The cut follows the same order: the PMC-served DOI is deferred last.
+    const sizes = result.articles.map((a) => JSON.stringify(a).length);
+    const budgeted = await fetchFulltext({ ...input, maxResponseCharacters: sizes[0] ?? 0 });
+    expect(budgeted.result.deferred).toMatchObject({
+      ids: [DNA.pmid, PREPRINT_DOI, GENBANK.doi],
+      pmids: [DNA.pmid],
+      dois: [PREPRINT_DOI, GENBANK.doi],
+      nextDeferredCharacters: sizes[1],
+    });
+  });
+
+  it('places an article two ids name at the position of the id it is deferred under', async () => {
+    // THIRD is named by a PMID and by a DOI; the PMID routes first and owns it.
+    converter.set(String(THIRD.pmid), THIRD);
+    converter.set(THIRD.doi, THIRD);
+    serveGenbank();
+    pmcJats.set('7000001', jats(SECOND.pmcid, 'Second', SECOND.doi));
+    pmcJats.set('7000002', jats(THIRD.pmcid, 'Third', THIRD.doi));
+    pmcAnswersReversed = true;
+    const input = {
+      pmcids: [SECOND.pmcid],
+      pmids: [String(THIRD.pmid)],
+      dois: [GENBANK.doi, THIRD.doi],
+    };
+
+    const { result } = await fetchFulltext(input);
+    expect(pmcIdsOf(result)).toEqual([SECOND.pmcid, THIRD.pmcid, GENBANK.pmcid]);
+
+    const sizes = result.articles.map((a) => JSON.stringify(a).length);
+    const budgeted = await fetchFulltext({ ...input, maxResponseCharacters: sizes[0] ?? 0 });
+    expect(budgeted.result.deferred).toMatchObject({
+      ids: [String(THIRD.pmid), GENBANK.doi],
+      pmids: [String(THIRD.pmid)],
+      dois: [GENBANK.doi],
+    });
+  });
+
+  it('places a PMC-served article a Europe PMC hit joins at its owner’s position, once', async () => {
+    const alias = '10.9999/genbank-alias';
+    converter.set(String(THIRD.pmid), THIRD);
+    pmcJats.set('3531190', jats(GENBANK.pmcid, 'GenBank', GENBANK.doi));
+    pmcJats.set('7000002', jats(THIRD.pmcid, 'Third', THIRD.doi));
+    epmcHits.set(`DOI:"${alias}"`, {
+      id: String(GENBANK.pmid),
+      source: 'MED',
+      pmid: String(GENBANK.pmid),
+      pmcid: GENBANK.pmcid,
+      doi: GENBANK.doi,
+    });
+    pmcAnswersReversed = true;
+
+    const { result } = await fetchFulltext({
+      pmcids: [GENBANK.pmcid],
+      pmids: [String(THIRD.pmid)],
+      dois: [alias],
+    });
+
+    expect(pmcIdsOf(result)).toEqual([GENBANK.pmcid, THIRD.pmcid]);
+    expect(result.unavailable).toBeUndefined();
+    expect(fullTextXmlRequests()).toEqual([]);
   });
 });
 
