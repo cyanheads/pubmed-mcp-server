@@ -97,11 +97,14 @@ function stubMesh(): void {
       ? { count: 0, idList: [] }
       : { count: 30, idList: ['68001', '68002', '68003'] },
   );
+  // The parsed `version=2.0` eSummaryResult `NcbiService.eSummary` resolves with.
   mockESummary.mockImplementation(async (params: { id: string }) => ({
-    eSummaryResult: {
-      DocSum: params.id.split(',').map((id) => ({
-        Id: id,
-        Item: [{ '@_Name': 'DS_MeshTerms', Item: [{ '#text': `Descriptor ${id}` }] }],
+    DocumentSummarySet: {
+      DocumentSummary: params.id.split(',').map((id) => ({
+        '@_uid': id,
+        DS_MeshTerms: { string: `Descriptor ${id}` },
+        DS_RecordType: 'descriptor',
+        DS_MeSHUI: `D${id.padStart(6, '0')}`,
       })),
     },
   }));

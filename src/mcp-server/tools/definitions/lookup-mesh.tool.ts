@@ -9,7 +9,8 @@
 import { tool, z } from '@cyanheads/mcp-ts-core';
 import { NCBI_SERVICE_ERRORS, QUERY_INPUT_ERRORS } from '@/services/error-contracts.js';
 import { getNcbiService } from '@/services/ncbi/ncbi-service.js';
-import { ensureArray, getText } from '@/services/ncbi/parsing/xml-helpers.js';
+import { ensureArray, getOptionalText, getText } from '@/services/ncbi/parsing/xml-helpers.js';
+import type { ESummaryResult } from '@/services/ncbi/types.js';
 import {
   conceptMeta,
   EDAM_DATA_RETRIEVAL,
@@ -24,94 +25,75 @@ import { hasVisibleText } from './_visible-text.js';
 interface MeshRecord {
   entrezUid: string;
   entryTerms?: string[];
-  meshId: string;
+  meshId?: string;
   name: string;
   scopeNote?: string;
   treeNumbers?: string[];
 }
 
+/** A parsed `version=2.0` MeSH summary, with the record type the pin reads (#247). */
+interface MeshSummary {
+  record: MeshRecord;
+  recordType: string | undefined;
+}
+
 /**
- * NCBI Entrez mesh UIDs encode the canonical MeSH DescriptorUI as the ASCII code of the
- * UI's letter prefix followed by its 6-digit number: D=68, C=67 (supplementary concept),
- * Q=81 (qualifier). So `68003924` → `D003924`. Modern supplementary-concept records receive
- * plain sequential UIDs that don't encode a UI (e.g. `2025952`); those aren't decodable, so
- * the raw Entrez UID is returned unchanged.
+ * Records the exact-heading (`[MH]`) search reads to choose its pin. A heading
+ * matches one record, or two for a drug class (its pharmacological-action record
+ * and its descriptor); the rest is headroom.
  */
-const ENTREZ_UID_PREFIX: Record<string, string> = { '67': 'C', '68': 'D', '81': 'Q' };
+const EXACT_MATCH_CANDIDATES = 5;
 
-function decodeMeshDescriptorUi(entrezUid: string): string {
-  if (/^\d{8}$/.test(entrezUid)) {
-    const letter = ENTREZ_UID_PREFIX[entrezUid.slice(0, 2)];
-    if (letter) return `${letter}${entrezUid.slice(2)}`;
-  }
-  return entrezUid;
+/**
+ * The record's tree numbers. Two `TreeNum` values are not tree positions: a
+ * supplementary concept record's mapped-heading pointer (`@218176`, #76), and the
+ * record's own UI, which is the only `TreeNum` a pharmacological-action record
+ * carries (#247).
+ */
+function extractTreeNumbers(doc: Record<string, unknown>, meshId: string | undefined): string[] {
+  const idxLinks = doc.DS_IdxLinks as Record<string, unknown> | undefined;
+  return ensureArray(idxLinks?.LinksType as Record<string, unknown>[] | undefined)
+    .map((link) => getText(link.TreeNum))
+    .filter((treeNum) => treeNum && !treeNum.startsWith('@') && treeNum !== meshId);
 }
 
-function findItem(
-  items: Record<string, unknown>[],
-  name: string,
-): Record<string, unknown> | undefined {
-  return items.find((it) => getText(it['@_Name']) === name);
-}
-
-function getItemText(item: Record<string, unknown> | undefined): string {
-  if (!item) return '';
-  const direct = getText(item, '');
-  if (direct) return direct;
-  const subItems = ensureArray(item.Item) as Record<string, unknown>[];
-  return subItems.length > 0 ? getText(subItems[0]) : '';
-}
-
-function getItemTexts(item: Record<string, unknown> | undefined): string[] {
-  if (!item) return [];
-  const subItems = ensureArray(item.Item) as Record<string, unknown>[];
-  return subItems.map((si) => getText(si)).filter((s) => s.length > 0);
-}
-
-function extractTreeNumbers(items: Record<string, unknown>[]): string[] {
-  const idxLinks = findItem(items, 'DS_IdxLinks');
-  if (!idxLinks) return [];
-  const linkStructures = ensureArray(idxLinks.Item) as Record<string, unknown>[];
-  const treeNums: string[] = [];
-  for (const struct of linkStructures) {
-    const structItems = ensureArray(struct.Item) as Record<string, unknown>[];
-    const treeItem = findItem(structItems, 'TreeNum');
-    const val = treeItem ? getText(treeItem) : '';
-    // Supplementary Concept Records (SCRs) surface a non-navigable mapped-heading
-    // pointer (e.g. "@218176") in the same TreeNum field. Drop it so treeNumbers
-    // holds only real, navigable MeSH tree numbers. (#76)
-    if (val && !val.startsWith('@')) treeNums.push(val);
-  }
-  return treeNums;
-}
-
-function parseSummaryRecords(data: unknown, ids: string[], includeDetails: boolean): MeshRecord[] {
-  if (!data || typeof data !== 'object')
-    return ids.map((id) => ({ entrezUid: id, meshId: decodeMeshDescriptorUi(id), name: id }));
-  const root = data as Record<string, unknown>;
-  const summaryResult = root.eSummaryResult as Record<string, unknown> | undefined;
-  const docSums = ensureArray<Record<string, unknown>>(
-    (summaryResult ?? root).DocSum as Record<string, unknown>,
+/**
+ * Index a `version=2.0` MeSH eSummary by Entrez UID. The canonical UI is read from
+ * `DS_MeSHUI`, which every record type carries; the Entrez UID encodes no UI for
+ * records added in recent MeSH years or for pharmacological-action records. A
+ * `<DocumentSummary>` holding only an `<error>` (a UID with no record) yields no
+ * `meshId`. (#238)
+ */
+function parseSummaryRecords(
+  data: ESummaryResult | undefined,
+  includeDetails: boolean,
+): Map<string, MeshSummary> {
+  const docs = ensureArray(
+    data?.DocumentSummarySet?.DocumentSummary as Record<string, unknown>[] | undefined,
   );
-  if (docSums.length === 0)
-    return ids.map((id) => ({ entrezUid: id, meshId: decodeMeshDescriptorUi(id), name: id }));
-
-  return docSums.map((doc) => {
-    const entrezUid = getText(doc.Id);
-    const meshId = decodeMeshDescriptorUi(entrezUid);
-    const items = ensureArray(doc.Item) as Record<string, unknown>[];
-    const name = getItemText(findItem(items, 'DS_MeshTerms')) || meshId;
-    const record: MeshRecord = { entrezUid, meshId, name };
+  const summaries = new Map<string, MeshSummary>();
+  for (const doc of docs) {
+    const entrezUid = getText(doc['@_uid']);
+    const meshId = getOptionalText(doc.DS_MeSHUI);
+    const terms = doc.DS_MeshTerms as Record<string, unknown> | undefined;
+    const entryTerms = ensureArray(terms?.string)
+      .map((term) => getText(term))
+      .filter(Boolean);
+    const record: MeshRecord = {
+      entrezUid,
+      ...(meshId !== undefined && { meshId }),
+      name: entryTerms[0] ?? entrezUid,
+    };
     if (includeDetails) {
-      const scopeNote = getItemText(findItem(items, 'DS_ScopeNote'));
+      const scopeNote = getOptionalText(doc.DS_ScopeNote);
       if (scopeNote) record.scopeNote = scopeNote;
-      const entryTerms = getItemTexts(findItem(items, 'DS_MeshTerms'));
       if (entryTerms.length > 0) record.entryTerms = entryTerms;
-      const treeNumbers = extractTreeNumbers(items);
+      const treeNumbers = extractTreeNumbers(doc, meshId);
       if (treeNumbers.length > 0) record.treeNumbers = treeNumbers;
     }
-    return record;
-  });
+    summaries.set(entrezUid, { record, recordType: getOptionalText(doc.DS_RecordType) });
+  }
+  return summaries;
 }
 
 // ─── Tool Definition ─────────────────────────────────────────────────────────
@@ -178,8 +160,9 @@ export const lookupMeshTool = tool('pubmed_lookup_mesh', {
           .object({
             meshId: z
               .string()
+              .optional()
               .describe(
-                'Canonical MeSH DescriptorUI (e.g. "D003924") — resolves at the MeSH Browser and NLM linked data. Falls back to the raw Entrez UID when a record is not decodable.',
+                'Canonical MeSH unique identifier (e.g. "D003924", "C000626284", "Q000009") — resolves at the MeSH Browser and NLM linked data. A pharmacological-action record carries its descriptor\'s UI. Omitted only when eSummary returned no record for this UID.',
               ),
             entrezUid: z
               .string()
@@ -191,7 +174,7 @@ export const lookupMeshTool = tool('pubmed_lookup_mesh', {
               .array(z.string())
               .optional()
               .describe(
-                'Navigable MeSH tree numbers (e.g. "D02.078.370.141.450"). Omitted for supplementary concept records (SCRs), which map to a heading rather than occupying a tree position.',
+                'Navigable MeSH tree numbers (e.g. "D02.078.370.141.450"). Omitted for supplementary concept records (SCRs), which map to a heading rather than occupying a tree position, and for pharmacological-action records, whose descriptor carries the tree positions.',
               ),
             scopeNote: z.string().optional().describe('Scope note'),
             entryTerms: z.array(z.string()).optional().describe('Synonyms / entry terms'),
@@ -240,11 +223,31 @@ export const lookupMeshTool = tool('pubmed_lookup_mesh', {
     // hold back. The first page leads with it; later pages skip it where it ranks.
     const exactSearch = hasFieldTag
       ? undefined
-      : ncbi.eSearch({ db: 'mesh', term: `${query}[MH]`, retmax: 1 }, callOpts);
+      : ncbi.eSearch(
+          { db: 'mesh', term: `${query}[MH]`, retmax: EXACT_MATCH_CANDIDATES },
+          callOpts,
+        );
     const [broadResult, exactResult] = await Promise.all([broadSearch, exactSearch]);
 
     const totalCount = broadResult.count;
-    const pinnedUid = exactResult?.idList[0];
+    const exactIds = exactResult?.idList ?? [];
+    const fetchSummaries = (uids: string[]) =>
+      ncbi
+        .eSummary({ db: 'mesh', id: uids.join(','), version: '2.0' }, callOpts)
+        .then((data) => parseSummaryRecords(data, includeDetails));
+    // A drug-class heading matches its pharmacological-action record ahead of its
+    // descriptor. When the heading matches more than one record and this page
+    // leads with the pin or holds a candidate at its rank, read the record types
+    // first — the page's own summaries ride the same request — and pin the first
+    // that is not a pharmacological-action record. (#247)
+    const pinShapesPage = offset === 0 || exactIds.some((id) => broadResult.idList.includes(id));
+    const prefetched =
+      exactIds.length > 1 && pinShapesPage
+        ? await fetchSummaries([...new Set([...exactIds, ...broadResult.idList])])
+        : undefined;
+    const pinnedUid =
+      exactIds.find((id) => prefetched?.get(id)?.recordType !== 'pharmacological-action') ??
+      exactIds[0];
     const ids: string[] = [];
     if (pinnedUid !== undefined && offset === 0) ids.push(pinnedUid);
     // Count the ranked records this page consumed rather than assuming maxResults:
@@ -283,8 +286,10 @@ export const lookupMeshTool = tool('pubmed_lookup_mesh', {
       return { query, offset, ...(hasMore && { nextOffset }), results: [] };
     }
 
-    const summaryData = await ncbi.eSummary({ db: 'mesh', id: ids.join(',') }, callOpts);
-    const results = parseSummaryRecords(summaryData, ids, includeDetails);
+    const summaries = prefetched ?? (await fetchSummaries(ids));
+    const results = ids.map(
+      (id): MeshRecord => summaries.get(id)?.record ?? { entrezUid: id, name: id },
+    );
 
     const queryLower = query.toLowerCase();
     results.sort((a, b) => {
@@ -315,7 +320,7 @@ export const lookupMeshTool = tool('pubmed_lookup_mesh', {
     }
     for (const r of result.results) {
       lines.push(`\n## ${r.name}`);
-      lines.push(`- **MeSH ID:** ${r.meshId}`);
+      if (r.meshId) lines.push(`- **MeSH ID:** ${r.meshId}`);
       lines.push(`- **Entrez UID:** ${r.entrezUid}`);
       if (r.treeNumbers?.length) lines.push(`- **Tree Numbers:** ${r.treeNumbers.join(', ')}`);
       if (r.scopeNote) lines.push(`- **Scope Note:** ${r.scopeNote}`);
