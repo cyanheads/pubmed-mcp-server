@@ -7,7 +7,7 @@
 
 <div align="center">
 
-[![Version](https://img.shields.io/badge/Version-2.10.21-blue.svg?style=flat-square)](./CHANGELOG.md) [![License](https://img.shields.io/badge/License-Apache%202.0-orange.svg?style=flat-square)](./LICENSE) [![Docker](https://img.shields.io/badge/Docker-ghcr.io-2496ED?style=flat-square&logo=docker&logoColor=white)](https://github.com/users/cyanheads/packages/container/package/pubmed-mcp-server) [![MCP SDK](https://img.shields.io/badge/MCP%20SDK-^2.2.0-green.svg?style=flat-square)](https://modelcontextprotocol.io/) [![npm](https://img.shields.io/npm/v/@cyanheads/pubmed-mcp-server?style=flat-square&logo=npm&logoColor=white)](https://www.npmjs.com/package/@cyanheads/pubmed-mcp-server) [![TypeScript](https://img.shields.io/badge/TypeScript-^7.0.2-3178C6.svg?style=flat-square)](https://www.typescriptlang.org/) [![Bun](https://img.shields.io/badge/Bun-v1.4.2-blueviolet.svg?style=flat-square)](https://bun.sh/)
+[![Version](https://img.shields.io/badge/Version-2.10.21-blue.svg?style=flat-square)](./CHANGELOG.md) [![License](https://img.shields.io/badge/License-Apache%202.0-orange.svg?style=flat-square)](./LICENSE) [![Docker](https://img.shields.io/badge/Docker-ghcr.io-2496ED?style=flat-square&logo=docker&logoColor=white)](https://github.com/users/cyanheads/packages/container/package/pubmed-mcp-server) [![MCP SDK](https://img.shields.io/badge/MCP%20SDK-^2.3.1-green.svg?style=flat-square)](https://modelcontextprotocol.io/) [![npm](https://img.shields.io/npm/v/@cyanheads/pubmed-mcp-server?style=flat-square&logo=npm&logoColor=white)](https://www.npmjs.com/package/@cyanheads/pubmed-mcp-server) [![TypeScript](https://img.shields.io/badge/TypeScript-^7.0.2-3178C6.svg?style=flat-square)](https://www.typescriptlang.org/) [![Bun](https://img.shields.io/badge/Bun-v1.4.3-blueviolet.svg?style=flat-square)](https://bun.sh/)
 
 </div>
 
@@ -39,7 +39,7 @@ Biomedical literature from PubMed, PubMed Central, and Europe PMC. Search it, fe
 | `pubmed_fetch_articles` | Fetch article metadata by PMID: abstract, authors, journal, MeSH terms, grants, a collective author's investigators on request, linked retraction and correction notices |
 | `pubmed_fetch_fulltext` | Fetch full text by PMID, PMCID, or DOI, falling back from PMC to Europe PMC to Unpaywall |
 | `pubmed_europepmc_search` | Search Europe PMC for preprints, patents, Agricola, and open-access records PubMed doesn't carry |
-| `pubmed_europepmc_fetch` | Fetch complete Europe PMC records, including the untruncated abstract, by `source` + `epmcId` |
+| `pubmed_europepmc_fetch` | Fetch complete Europe PMC records, including the untruncated abstract, as `records: [{ source, epmcId }]` |
 | `pubmed_format_citations` | Format citations in APA 7th, MLA 9th, BibTeX, RIS, or Vancouver (ICMJE/NLM), with linked retraction and correction notices |
 | `pubmed_find_related` | Find similar articles, citing articles, or references for a PMID |
 | `pubmed_spell_check` | Correct a misspelled PubMed query via NCBI ESpell |
@@ -74,6 +74,7 @@ Biomedical literature from PubMed, PubMed Central, and Europe PMC. Search it, fe
 
 - Up to 200 PMIDs per call; misses are listed in `unavailablePmids`
 - Abstract, authors, journal, DOI, publication types, linked retraction/erratum/comment notices, and links; MeSH terms on by default, grants via `includeGrants`, and the members of a collective author (its `InvestigatorList`, thousands on some consortium trials) via `includeInvestigators`
+- A retracted, corrected, or questioned article opens with the same notice block as `pubmed_format_citations`, directly under its title
 - `recordType` separates journal articles from Bookshelf chapters and books; opt-in `maxResponseCharacters` defers overflow to `deferred.ids`
 
 ---
@@ -90,13 +91,14 @@ Biomedical literature from PubMed, PubMed Central, and Europe PMC. Search it, fe
 
 - Adds preprints (`PPR`), patents (`PAT`), and Agricola (`AGR`) to `MED` and `PMC`; defaults to `MED`, `PMC`, `PPR`
 - Cursor pagination via `cursorMark` / `nextCursorMark`, up to 100 per page; abstracts arrive as 400-character snippets
+- Optional `sort` of comma-separated `<field> asc|desc` keys; `relevance` is the default order, and a sort Europe PMC cannot use fails as `europepmc_invalid_input`
 - Not registered when `EUROPEPMC_ENABLED=false`
 
 ---
 
 ### `pubmed_europepmc_fetch` <sub>tool</sub>
 
-- Up to 25 records per call, addressed by a search hit's `source` + `epmcId`, with the full abstract; unresolved ids land in `notFound`; opt-in `maxResponseCharacters` defers overflow to `deferred.records`
+- Up to 25 records per call as `records: [{ source, epmcId }]`, each pair copied from a search hit, with the full abstract; unresolved ids land in `notFound`; opt-in `maxResponseCharacters` defers overflow to `deferred.records`
 - Not registered when `EUROPEPMC_ENABLED=false`
 
 ---
@@ -118,15 +120,15 @@ Biomedical literature from PubMed, PubMed Central, and Europe PMC. Search it, fe
 
 ### `pubmed_spell_check` <sub>tool</sub>
 
-- Returns `original`, `corrected`, and `hasSuggestion`, fixing every misspelled token in one call
+- Returns `original`, `corrected`, and `hasSuggestion`; corrections land in place, so field tags, operators, spacing, and gene symbols stay as written
 - Run it after a zero-hit or thin search, then retry `pubmed_search_articles` with `corrected`
 
 ---
 
 ### `pubmed_lookup_mesh` <sub>tool</sub>
 
-- Descriptors by name or free-text term, with an exact heading match pinned first; up to 50 per page, continued via `nextOffset`
-- Records carry `meshId`; `includeDetails` (default on) adds tree numbers, scope notes, and entry terms
+- Descriptors by name or free-text term, with an exact heading match pinned first (the descriptor, for a drug-class heading); up to 50 per page, continued via `nextOffset`
+- Records carry their MeSH unique ID (`meshId`, e.g. `D000072657`) beside the Entrez UID; `includeDetails` (default on) adds tree numbers, scope notes, and entry terms
 
 ---
 
