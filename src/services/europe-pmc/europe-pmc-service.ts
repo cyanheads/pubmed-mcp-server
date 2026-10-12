@@ -14,10 +14,13 @@
  * A search's retry boundary covers fetch and response classification, so
  * Europe PMC's intermittent empty `{ version }` envelope is retried like an
  * HTTP outage; only a sort or cursor that explains it is reported as bad input.
- * Europe PMC answers an unreadable cursor with the HTTP 503 it uses for an
- * outage, so a 503 on a caller-supplied cursor is checked against the first
- * page of the same query, and the cursor is blamed only when a retry draws
- * the 503 again while that first page was served.
+ * A `relevance` sort is sent as none, and a sort whose keys are not each one
+ * field plus `asc`/`desc` fails before the request. Europe PMC answers an
+ * unreadable cursor, and a sort it cannot use, with the HTTP 503 it uses for an
+ * outage, so a 503 on a caller-supplied cursor or a sort is checked against the
+ * first page of the same query — with the sort for the cursor, without it for
+ * the sort — and the input is blamed only when a retry draws the 503 again
+ * while that first page was served.
  * A search reports the effective query Europe PMC echoes back, or — with no
  * echo — the source-filtered query it sent.
  *
@@ -48,6 +51,7 @@ import { XMLParser, XMLValidator } from 'fast-xml-parser';
 import { getServerConfig } from '@/config/server-config.js';
 import { ORDERED_XML_PARSER_OPTIONS } from '@/services/ncbi/parsing/ordered-xml-parser-options.js';
 import type { JatsNode, JatsNodeList } from '@/services/ncbi/parsing/pmc-xml-helpers.js';
+import { stripInvisibleFormatChars } from '@/services/ncbi/parsing/text-helpers.js';
 import { ensureArray } from '@/services/ncbi/parsing/xml-helpers.js';
 import { buildSearchQuery, EuropePmcApiClient } from './api-client.js';
 import { createEuropePmcRequestQueue } from './request-queue.js';
@@ -139,30 +143,73 @@ const CURSOR_RECOVERY_HINT =
   "Pass the previous response's `nextCursorMark` verbatim as `cursorMark`, or `*` to restart from the first page.";
 
 /** The sort fields Europe PMC documents. */
-const DOCUMENTED_SORT_FIELDS = new Set(['P_PDATE_D', 'CITED', 'AUTH_FIRST', 'PUB_YEAR']);
+const DOCUMENTED_SORT_FIELDS = new Set([
+  'P_PDATE_D',
+  'CITED',
+  'AUTH_FIRST',
+  'PUB_YEAR',
+  'FIRST_IDATE_D',
+]);
+
+/** Next step for a sort Europe PMC cannot use, whichever way it signals that. */
+const SORT_RECOVERY_HINT =
+  'Use a documented sort (`P_PDATE_D desc`, `CITED desc`, `AUTH_FIRST asc`, `PUB_YEAR desc`, or `FIRST_IDATE_D desc`), or omit `sort` for relevance ranking.';
+
+/** `relevance`, alone or with `desc`: Europe PMC's default order, which it refuses as a sort. */
+const RELEVANCE_SORT_RE = /^\s*relevance(?:\s+desc)?\s*$/i;
+
+/** One sort key: a single field token and an `asc`/`desc` direction, any case and spacing. */
+const SORT_KEY_RE = /^\s*\S+\s+(?:asc|desc)\s*$/i;
 
 /**
- * Whether a sort is the likely cause of an empty `{ version }` envelope: one of
- * its comma-separated keys has a field outside the documented set, or lacks an
- * `asc`/`desc` direction. Europe PMC answers those shapes with the envelope on
- * every request, and orders by every key of a valid list (`PUB_YEAR desc, CITED
- * desc`). Field and direction compare case-insensitively and tolerate extra
- * whitespace, matching Europe PMC's own parsing.
+ * The sort a search sends. `relevance` and `relevance desc` read as no sort,
+ * since relevance is Europe PMC's default order and it refuses the word as a
+ * sort. Any other sort must be a comma-separated list of keys, each one field
+ * token plus `asc` or `desc`, or it fails here with no request: Europe PMC
+ * refuses every other shape (a key with no direction, an empty key, an extra
+ * token) on every request, with the HTTP 503 it also uses for an outage.
  *
- * Classification only, never a local allowlist: the request always goes out.
- * Europe PMC honors some undocumented fields (`ID asc` reorders results) and
- * silently ignores others (`SCORE desc`), so only the envelope itself decides.
+ * The field itself is never checked locally: Europe PMC honors some
+ * undocumented fields (`ID asc` reorders results), silently ignores others
+ * (`SCORE desc`), and refuses the rest with a 503 the search diagnoses by
+ * probing the same query unsorted. An empty or whitespace-only sort is no sort,
+ * as Europe PMC serves it. (#159, #239)
+ */
+function effectiveSort(sort: string | undefined): string | undefined {
+  if (!sort?.trim() || RELEVANCE_SORT_RE.test(sort)) return;
+  if (sort.split(',').every((key) => SORT_KEY_RE.test(key))) return sort;
+  throw validationError(
+    `Europe PMC cannot use the sort "${sort}" — each comma-separated key needs one field and an \`asc\` or \`desc\` direction.`,
+    {
+      reason: 'europepmc_invalid_input',
+      retryable: false,
+      sort,
+      recovery: { hint: SORT_RECOVERY_HINT },
+    },
+  );
+}
+
+/**
+ * Whether a well-shaped sort is the likely cause of an empty `{ version }`
+ * envelope: one of its keys names a field outside the documented set. Europe
+ * PMC orders by every key of a valid list (`PUB_YEAR desc, CITED desc`); fields
+ * compare case-insensitively, matching its own parsing.
+ *
+ * Classification only, never a local allowlist: the request has already gone
+ * out, and only the envelope decides. Malformed keys never get this far —
+ * {@link effectiveSort} rejects them before the request. (#159)
  */
 function sortExplainsEnvelope(sort: string): boolean {
-  return sort.split(',').some((key) => {
-    const [field = '', direction = '', ...rest] = key.trim().split(/\s+/);
-    return (
-      rest.length > 0 ||
-      !DOCUMENTED_SORT_FIELDS.has(field.toUpperCase()) ||
-      !/^(asc|desc)$/i.test(direction)
-    );
-  });
+  return sort
+    .split(',')
+    .some((key) => !DOCUMENTED_SORT_FIELDS.has(key.trim().split(/\s+/)[0]?.toUpperCase() ?? ''));
 }
+
+/**
+ * What a served first-page probe says about a search answered with HTTP 503:
+ * the caller's cursor is the likely cause, the sort is, or neither (an outage).
+ */
+type Http503Suspect = 'cursor' | 'sort' | 'none';
 
 /**
  * Facade over the Europe PMC REST API:
@@ -199,44 +246,90 @@ export class EuropePmcService {
    * together, so an empty envelope retries like any other transient failure
    * rather than surfacing after the loop has already returned. (#159)
    *
-   * The first HTTP 503 on a caller-supplied cursor draws one probe of the same
-   * query's first page, and the cursor is retried either way: one 503 is not
-   * enough to tell a bad cursor from a transient outage. A later 503 fails the
-   * search at once as non-retryable input only when that probe was served;
-   * otherwise it goes on through the ordinary retry path. A 503 with no retry
-   * left is never probed, since nothing could use the answer. (#180)
+   * The sort is resolved before any request (see {@link effectiveSort}): a
+   * `relevance` sort is dropped, and a malformed one fails with no request.
+   *
+   * Europe PMC answers both an unreadable cursor and a sort it cannot use with
+   * the HTTP 503 it uses for an outage. The first 503 on a search carrying a
+   * caller-supplied cursor or a sort draws probes of the same query's first
+   * page, and the search is retried either way: one 503 is not enough to tell
+   * bad input from a transient outage. With a cursor, the first page with the
+   * sort is probed first (#180); when it is served, the cursor is the suspect.
+   * Otherwise, with a sort, the first page without the sort is probed — never
+   * with the caller's cursor, which Europe PMC binds to the sort that issued
+   * it — and when that is served, the sort is the suspect (#239). A later 503
+   * fails the search at once as non-retryable input naming the suspect; with
+   * no suspect it goes on through the ordinary retry path. A 503 with no retry
+   * left is never probed, since nothing could use the answer.
    */
-  search(params: EuropePmcSearchParams): Promise<EuropePmcSearchResult> {
-    const cursorMark = callerCursor(params);
-    let firstPage: 'unknown' | 'served' | 'failed' = 'unknown';
-    return this.runPaced(
+  async search(params: EuropePmcSearchParams): Promise<EuropePmcSearchResult> {
+    const { sort: requestedSort, ...rest } = params;
+    const sort = effectiveSort(requestedSort);
+    const request: EuropePmcSearchParams = { ...rest, ...(sort && { sort }) };
+    const cursorMark = callerCursor(request);
+    let suspect: Http503Suspect | undefined;
+    return await this.runPaced(
       'search',
-      params.signal,
-      (attempt) => this.searchOnce(params, attempt === this.maxRetries + 1),
-      cursorMark === undefined
+      request.signal,
+      (attempt) => this.searchOnce(request, attempt === this.maxRetries + 1),
+      cursorMark === undefined && sort === undefined
         ? undefined
         : async (error, signal, attempt) => {
             if (!(error instanceof McpError) || error.data?.status !== 503) return error;
-            if (firstPage === 'unknown') {
+            if (suspect === undefined) {
               if (attempt <= this.maxRetries) {
-                firstPage = (await this.firstPageServed(params, signal)) ? 'served' : 'failed';
+                suspect = await this.diagnose503(request, signal);
               }
               return error;
             }
-            if (firstPage === 'failed') return error;
-            return validationError(
-              `Europe PMC answered cursorMark "${cursorMark}" with HTTP 503 twice but served the first page of the same query — the cursor is most likely invalid or expired.`,
-              {
-                reason: 'europepmc_invalid_input',
-                cursorMark,
-                status: 503,
-                retryable: false,
-                recovery: { hint: CURSOR_RECOVERY_HINT },
-              },
-              { cause: error },
-            );
+            if (suspect === 'cursor') {
+              return validationError(
+                `Europe PMC answered cursorMark "${cursorMark}" with HTTP 503 twice but served the first page of the same query — the cursor is most likely invalid or expired.`,
+                {
+                  reason: 'europepmc_invalid_input',
+                  cursorMark,
+                  status: 503,
+                  retryable: false,
+                  recovery: { hint: CURSOR_RECOVERY_HINT },
+                },
+                { cause: error },
+              );
+            }
+            if (suspect === 'sort') {
+              return validationError(
+                `Europe PMC answered sort "${sort}" with HTTP 503 twice but served the same query without it — Europe PMC most likely cannot sort by it.`,
+                {
+                  reason: 'europepmc_invalid_input',
+                  sort,
+                  status: 503,
+                  retryable: false,
+                  recovery: { hint: SORT_RECOVERY_HINT },
+                },
+                { cause: error },
+              );
+            }
+            return error;
           },
     );
+  }
+
+  /**
+   * Which input, if any, explains a 503 on `request`: the caller's cursor when
+   * the first page with the same sort is served, the sort when the first page
+   * without it is served, otherwise neither.
+   */
+  private async diagnose503(
+    request: EuropePmcSearchParams,
+    signal: AbortSignal,
+  ): Promise<Http503Suspect> {
+    if (callerCursor(request) !== undefined && (await this.firstPageServed(request, signal))) {
+      return 'cursor';
+    }
+    if (request.sort !== undefined) {
+      const { sort: _sort, ...unsorted } = request;
+      if (await this.firstPageServed(unsorted, signal)) return 'sort';
+    }
+    return 'none';
   }
 
   /**
@@ -332,16 +425,14 @@ export class EuropePmcService {
       const cursorMark = callerCursor(params);
       if (params.sort && sortExplainsEnvelope(params.sort)) {
         throw validationError(
-          `Europe PMC silently rejected the request — most likely the sort "${params.sort}", which needs a documented field and an asc/desc direction.`,
+          `Europe PMC silently rejected the request — most likely the sort "${params.sort}", which uses a field outside the documented set.`,
           {
             reason: 'europepmc_invalid_input',
             retryable: false,
             sort: params.sort,
             ...(cursorMark && { cursorMark }),
             responseSnippet: text.substring(0, 200),
-            recovery: {
-              hint: 'Use a documented sort (`P_PDATE_D desc`, `CITED desc`, `AUTH_FIRST asc`, or `PUB_YEAR desc`), or omit `sort` for relevance ranking.',
-            },
+            recovery: { hint: SORT_RECOVERY_HINT },
           },
         );
       }
@@ -565,7 +656,9 @@ export class EuropePmcService {
    *
    * Throws `SerializationError` only for fundamentally invalid XML; an
    * article-free but well-formed body returns `undefined` so callers can
-   * surface a `no-epmc-fulltext` outcome without a hard failure.
+   * surface a `no-epmc-fulltext` outcome without a hard failure. Invisible
+   * characters a deposit carries inside words are dropped before parsing, as
+   * on the PMC EFetch tier. (#224)
    */
   parseFullTextXml(xml: string): JatsNode | undefined {
     const validationResult = XMLValidator.validate(xml.replace(/<!DOCTYPE[^>]*>/gi, ''));
@@ -578,7 +671,7 @@ export class EuropePmcService {
 
     let parsed: unknown;
     try {
-      parsed = this.orderedXmlParser.parse(xml);
+      parsed = this.orderedXmlParser.parse(stripInvisibleFormatChars(xml));
     } catch (error: unknown) {
       const parserError = error instanceof Error ? error.message : String(error);
       throw serializationError(

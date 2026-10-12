@@ -3,7 +3,7 @@
  * @module tests/mcp-server/tools/definitions/pubmed-europepmc-search.tool.test
  */
 
-import type { ContentBlock } from '@cyanheads/mcp-ts-core';
+import { type ContentBlock, z } from '@cyanheads/mcp-ts-core';
 import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
 import { createMockContext, getEnrichment, runToolContract } from '@cyanheads/mcp-ts-core/testing';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
@@ -909,5 +909,94 @@ describe('pubmedEuropepmcSearchTool entity-encoded title markup (issue #181)', (
     const text = contractText(result);
     expect(text).toContain(`#### ${title}`);
     expect(text).not.toMatch(/<\/?b>|\\</);
+  });
+});
+
+describe('pubmedEuropepmcSearchTool source case and the fetch hand-off (issue #244)', () => {
+  beforeEach(() => {
+    mockSearch.mockReset();
+    mockGetEpmc.mockReset();
+    mockGetEpmc.mockReturnValue({ search: mockSearch });
+    mockSearch.mockResolvedValue(
+      page(
+        2,
+        [
+          { id: 'PPR1', source: 'PPR', title: 'A preprint' },
+          { id: '111', source: 'MED', title: 'An article', pmid: '111' },
+        ],
+        '(sepsis) AND (SRC:"MED" OR SRC:"PPR")',
+      ),
+    );
+  });
+
+  it('searches lower-case `sources` exactly as it searches the upper-case codes', async () => {
+    const lower = await runToolContract(pubmedEuropepmcSearchTool, {
+      query: 'sepsis',
+      sources: ['med', 'ppr'] as never,
+    });
+    const upper = await runToolContract(pubmedEuropepmcSearchTool, {
+      query: 'sepsis',
+      sources: ['MED', 'PPR'],
+    });
+
+    expect(lower.isError).toBeFalsy();
+    expect(mockSearch).toHaveBeenCalledTimes(2);
+    expect(mockSearch.mock.calls[0]?.[0]).toMatchObject({ sources: ['MED', 'PPR'] });
+    expect(mockSearch.mock.calls[1]?.[0]).toMatchObject({ sources: ['MED', 'PPR'] });
+    expect(lower.structuredContent).toEqual(upper.structuredContent);
+    expect(contractText(lower)).toBe(contractText(upper));
+    expect(contractText(lower)).toContain('**Sources:** MED, PPR');
+  });
+
+  it.each([['pubmed'], ['pmid'], ['']])(
+    'still rejects %j, listing the source codes, with no search',
+    async (value) => {
+      const result = await runToolContract(pubmedEuropepmcSearchTool, {
+        query: 'sepsis',
+        sources: [value] as never,
+      });
+
+      expect(result.isError).toBe(true);
+      expect(result.structuredContent).toMatchObject({
+        error: { code: JsonRpcErrorCode.InvalidParams },
+      });
+      expect(contractText(result)).toContain('"MED"|"PMC"|"PPR"|"PAT"|"AGR"');
+      expect(mockSearch).not.toHaveBeenCalled();
+    },
+  );
+
+  it('advertises `sources` items as the plain upper-case enum', () => {
+    const schema = z.toJSONSchema(pubmedEuropepmcSearchTool.input, { io: 'input' }) as unknown as {
+      properties: Record<string, Record<string, unknown>>;
+    };
+    // Serialized, so key order counts: the advertised bytes are what must not move.
+    expect(JSON.stringify(schema.properties.sources?.items)).toBe(
+      JSON.stringify({ type: 'string', enum: ['MED', 'PMC', 'PPR', 'PAT', 'AGR'] }),
+    );
+  });
+
+  it('names the `records` shape on every text that hands a hit to the fetch tool', async () => {
+    const shape = '`pubmed_europepmc_fetch` as `records: [{ source, epmcId }]`';
+    const hitShape = pubmedEuropepmcSearchTool.output.shape.hits.element.shape;
+    expect(pubmedEuropepmcSearchTool.description).toContain(shape);
+    expect(hitShape.epmcId.description).toContain(shape);
+    expect(hitShape.abstractTruncated.description).toContain(shape);
+
+    mockSearch.mockResolvedValue(
+      page(1, [{ id: 'PPR1', source: 'PPR', abstractText: 'x'.repeat(900) }], 'q'),
+    );
+    const result = await runToolContract(pubmedEuropepmcSearchTool, { query: 'sepsis' });
+    expect(contractText(result)).toContain(
+      '_Abstract truncated at 400 characters — pass this hit to `pubmed_europepmc_fetch` as `records: [{ source, epmcId }]` for the complete text._',
+    );
+  });
+
+  it('documents FIRST_IDATE_D and the relevance rewrite in the `sort` description (#239)', () => {
+    const description = pubmedEuropepmcSearchTool.input.shape.sort.description ?? '';
+    expect(description).toContain('`FIRST_IDATE_D` (date first indexed in Europe PMC)');
+    expect(description).toContain('`relevance` or `relevance desc` is sent as no sort');
+    expect(description).toContain(
+      'a key without a direction, an empty key, or an extra word fails with `europepmc_invalid_input` before the request',
+    );
   });
 });

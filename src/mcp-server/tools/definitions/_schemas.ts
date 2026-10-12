@@ -5,6 +5,7 @@
  */
 
 import { z } from '@cyanheads/mcp-ts-core';
+import { EUROPEPMC_ALL_SOURCES } from '@/services/europe-pmc/types.js';
 
 /**
  * Zod string schema for a single PubMed ID. Accepts only digit characters.
@@ -59,3 +60,15 @@ export const doiStringSchema = z
     /^10\.[^\s,]+\/[^\s,]+$/,
     'DOI must start with "10." and contain a "/" (e.g. "10.1093/nar/gks1195"). Remove any whitespace or commas — provide each DOI separately.',
   );
+
+/**
+ * A Europe PMC source code as a tool accepts it: a lower-case code (`med`,
+ * `pmc`) is folded to the code itself before the enum check, since Europe PMC
+ * matches `SRC:` case-insensitively and search hits always carry the upper-case
+ * form. A value that is no code (`pubmed`) is still rejected. The fold stays off
+ * the advertised schema, which remains the plain enum. (#244)
+ */
+export const europePmcSourceInputSchema = z.preprocess(
+  (value) => (typeof value === 'string' ? value.toUpperCase() : value),
+  z.enum(EUROPEPMC_ALL_SOURCES),
+);

@@ -158,6 +158,15 @@ describe('server entry point', () => {
     expect(appConfig.tools).toHaveLength(9);
   });
 
+  it('names the `records` input shape where its instructions hand a Europe PMC hit to the fetch tool (#244)', async () => {
+    await loadModule();
+
+    const appConfig = createApp.mock.calls[0]?.[0] as { instructions: string };
+    expect(appConfig.instructions).toContain(
+      'then `pubmed_europepmc_fetch` with `records: [{ source, epmcId }]` copied from a hit',
+    );
+  });
+
   it('initializes NCBI, Unpaywall, and Europe PMC services in the app setup hook', async () => {
     await loadModule();
 

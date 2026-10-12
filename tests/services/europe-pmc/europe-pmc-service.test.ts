@@ -605,11 +605,8 @@ describe('EuropePmcService.search — upstream failures and empty envelopes (#15
 
     it.each([
       ['an undocumented field', 'BOGUSFIELD desc'],
-      ['a documented field with no direction', 'CITED'],
       ['an honored undocumented field', 'ID asc'],
-      ['a direction that is not asc/desc', 'CITED down'],
       ['a key list with one undocumented field', 'CITED desc, BOGUSFIELD asc'],
-      ['keys joined by a semicolon', 'CITED desc; PUB_YEAR asc'],
     ])('fails fast on an envelope for %s, naming the sort', async (_label, sort) => {
       mockFetchWithTimeout.mockImplementation(() => Promise.resolve(envelope()));
       const err = (await service()
@@ -948,6 +945,367 @@ describe('EuropePmcService.search — upstream failures and empty envelopes (#15
         service().search({ query: 'malaria', cursorMark: 'abc', signal: controller.signal }),
       ).rejects.toBe(reason);
       expect(sentCursors()).toEqual(['abc', '*']);
+    });
+  });
+
+  /**
+   * Europe PMC answers a sort it cannot use with the same HTTP 503 it uses for an
+   * outage, on every request. A sort whose shape it always refuses fails before
+   * the request; `relevance` is its default order and is sent as no sort; any
+   * other refused sort is caught by probing the same query without the sort on
+   * the first 503 (#239).
+   */
+  describe('sorts Europe PMC refuses with HTTP 503 (#239)', () => {
+    const refused503 = () =>
+      httpErrorRejection(
+        503,
+        JsonRpcErrorCode.ServiceUnavailable,
+        '{"errCode":503,"errMsg":"Search service is temporarily unavailable. Please retry later."}',
+      );
+
+    /** The URL parameters of every request sent, in order. */
+    const sent = () =>
+      mockFetchWithTimeout.mock.calls.map((call) => new URL(String(call[0])).searchParams);
+
+    type Reply = () => Promise<Response>;
+    const reject503: Reply = () => Promise.reject(refused503());
+    const resolveResults: Reply = () => Promise.resolve(results());
+
+    /**
+     * Answers by request kind: a request carrying `sort` draws from `sorted`,
+     * one without it from `unsorted`; each list's last entry repeats.
+     */
+    function routeBySort(sorted: Reply[], unsorted: Reply[]) {
+      let sortedCalls = 0;
+      let unsortedCalls = 0;
+      mockFetchWithTimeout.mockImplementation((url: string) => {
+        const hasSort = new URL(url).searchParams.has('sort');
+        const replies = hasSort ? sorted : unsorted;
+        const index = hasSort ? sortedCalls++ : unsortedCalls++;
+        return (replies[Math.min(index, replies.length - 1)] as Reply)();
+      });
+    }
+
+    const settle = (promise: Promise<unknown>) =>
+      promise.then(
+        () => undefined,
+        (e: unknown) => e as McpError,
+      );
+
+    const hintOf = (err: McpError | undefined) =>
+      (err?.data?.recovery as { hint?: string } | undefined)?.hint ?? '';
+
+    /** The recovery hint every refused sort carries. */
+    const SORT_HINT =
+      'Use a documented sort (`P_PDATE_D desc`, `CITED desc`, `AUTH_FIRST asc`, `PUB_YEAR desc`, or `FIRST_IDATE_D desc`), or omit `sort` for relevance ranking.';
+
+    it('fails a sort Europe PMC refuses as non-retryable europepmc_invalid_input once the unsorted probe is served', async () => {
+      routeBySort([reject503], [resolveResults]);
+
+      const err = await settle(
+        service().search({
+          query: 'sepsis',
+          sources: ['MED'],
+          pageSize: 10,
+          sort: 'FOOBAR desc',
+        }),
+      );
+
+      expect(err).toBeInstanceOf(McpError);
+      expect(err?.code).toBe(JsonRpcErrorCode.ValidationError);
+      expect(err?.data).toMatchObject({
+        reason: 'europepmc_invalid_input',
+        retryable: false,
+        sort: 'FOOBAR desc',
+        status: 503,
+      });
+      expect(err?.message).toBe(
+        'Europe PMC answered sort "FOOBAR desc" with HTTP 503 twice but served the same query without it — Europe PMC most likely cannot sort by it.',
+      );
+      expect(hintOf(err)).toBe(SORT_HINT);
+      expect(defaultIsTransient(err)).toBe(false);
+
+      // The sorted request, one unsorted first-page probe, and one retry of the
+      // sorted request that draws the 503 again — nothing else.
+      expect(mockFetchWithTimeout).toHaveBeenCalledTimes(3);
+      const [original, probe, retry] = sent();
+      expect(original?.get('sort')).toBe('FOOBAR desc');
+      expect(probe?.has('sort')).toBe(false);
+      expect(probe?.get('cursorMark')).toBe('*');
+      expect(probe?.get('pageSize')).toBe('1');
+      expect(probe?.get('query')).toBe(original?.get('query'));
+      expect(retry?.toString()).toBe(original?.toString());
+    });
+
+    it.each([
+      ['a key with no direction', 'CITED'],
+      ['a lower-case key with no direction', 'cited'],
+      ['another documented field with no direction', 'PUB_YEAR'],
+      ['a word that is not asc/desc', 'CITED ascending'],
+      ['a direction that is not asc/desc', 'CITED down'],
+      ['a trailing comma', 'CITED desc,'],
+      ['a leading comma', ',CITED desc'],
+      ['two keys with no comma between them', 'CITED desc PUB_YEAR asc'],
+      ['keys joined by a semicolon', 'CITED desc; PUB_YEAR asc'],
+      ['a bare word', 'DATE'],
+    ])('fails %s before any request, naming the sort', async (_label, sort) => {
+      mockFetchWithTimeout.mockImplementation(resolveResults);
+
+      const err = await settle(service().search({ query: 'sepsis', sort }));
+
+      expect(err).toBeInstanceOf(McpError);
+      expect(err?.code).toBe(JsonRpcErrorCode.ValidationError);
+      expect(err?.data).toMatchObject({
+        reason: 'europepmc_invalid_input',
+        retryable: false,
+        sort,
+      });
+      expect(err?.message).toBe(
+        `Europe PMC cannot use the sort "${sort}" — each comma-separated key needs one field and an \`asc\` or \`desc\` direction.`,
+      );
+      expect(hintOf(err)).toBe(SORT_HINT);
+      expect(mockFetchWithTimeout).not.toHaveBeenCalled();
+    });
+
+    it.each([
+      'relevance',
+      'RELEVANCE',
+      'relevance desc',
+      'RELEVANCE desc',
+      'Relevance DESC',
+      '  relevance\tdesc ',
+    ])('sends %j as no sort, since relevance is the default order', async (sort) => {
+      mockFetchWithTimeout.mockImplementation(resolveResults);
+
+      const result = await service().search({ query: 'sepsis', sort });
+
+      expect(result.hits).toHaveLength(1);
+      expect(mockFetchWithTimeout).toHaveBeenCalledTimes(1);
+      expect(sent()[0]?.has('sort')).toBe(false);
+    });
+
+    it.each([' ', '\t', '   '])(
+      'sends the whitespace-only sort %j as no sort, as Europe PMC serves it',
+      async (sort) => {
+        mockFetchWithTimeout.mockImplementation(resolveResults);
+
+        const result = await service().search({ query: 'sepsis', sort });
+
+        expect(result.hits).toHaveLength(1);
+        expect(mockFetchWithTimeout).toHaveBeenCalledTimes(1);
+        expect(sent()[0]?.has('sort')).toBe(false);
+      },
+    );
+
+    it('sends `relevance asc` unchanged — only the default direction is rewritten', async () => {
+      mockFetchWithTimeout.mockImplementation(resolveResults);
+
+      await service().search({ query: 'sepsis', sort: 'relevance asc' });
+
+      expect(sent()[0]?.get('sort')).toBe('relevance asc');
+    });
+
+    it.each([
+      'CITED desc',
+      'cited DESC',
+      'CITED  desc',
+      'CITED\tdesc',
+      '  CITED desc  ',
+      'p_pdate_d desc',
+      'auth_first asc',
+      'PUB_YEAR desc, CITED desc',
+      'CITED desc,PUB_YEAR asc',
+      'ID asc',
+      'SCORE desc',
+      'FIRST_IDATE_D desc',
+      'FOOBAR desc',
+    ])('sends the well-shaped sort %j unchanged in one request', async (sort) => {
+      mockFetchWithTimeout.mockImplementation(resolveResults);
+
+      const result = await service().search({ query: 'sepsis', sort });
+
+      expect(result.hits).toHaveLength(1);
+      expect(mockFetchWithTimeout).toHaveBeenCalledTimes(1);
+      expect(sent()[0]?.get('sort')).toBe(sort);
+    });
+
+    it('reports an outage, not the sort, when the unsorted probe is refused too', async () => {
+      routeBySort([reject503], [reject503]);
+
+      const err = await settle(service().search({ query: 'sepsis', sort: 'FOOBAR desc' }));
+
+      expect(err?.code).toBe(JsonRpcErrorCode.ServiceUnavailable);
+      expect(err?.data?.reason).toBe('europepmc_unreachable');
+      expect(err?.data?.attempts).toBe(EXHAUSTED);
+      expect(err?.data?.sort).toBeUndefined();
+      expect(err?.message).toMatch(
+        new RegExp(`Status: 503.*\\(failed after ${EXHAUSTED} attempts\\)$`),
+      );
+      expect(err?.message).not.toContain('FOOBAR');
+      expect(defaultIsTransient(err)).toBe(true);
+      // Every attempt of the sorted request plus one probe, right after the first failure.
+      expect(sent().map((params) => params.get('sort'))).toEqual([
+        'FOOBAR desc',
+        null,
+        'FOOBAR desc',
+        'FOOBAR desc',
+        'FOOBAR desc',
+      ]);
+    });
+
+    it('returns the results when one 503 on a sorted search clears on the retry', async () => {
+      routeBySort([reject503, resolveResults], [resolveResults]);
+
+      const result = await service().search({ query: 'sepsis', sort: 'CITED desc' });
+
+      expect(result.hitCount).toBe(1);
+      expect(sent().map((params) => params.get('sort'))).toEqual([
+        'CITED desc',
+        null,
+        'CITED desc',
+      ]);
+    });
+
+    it('skips the probe when the first 503 of a sorted search lands on the last attempt', async () => {
+      const resolveEnvelope: Reply = () => Promise.resolve(envelope());
+      routeBySort([resolveEnvelope, resolveEnvelope, resolveEnvelope, reject503], [resolveResults]);
+
+      const err = await settle(service().search({ query: 'sepsis', sort: 'CITED desc' }));
+
+      expect(err?.code).toBe(JsonRpcErrorCode.ServiceUnavailable);
+      expect(err?.data?.reason).toBe('europepmc_unreachable');
+      expect(sent().every((params) => params.get('sort') === 'CITED desc')).toBe(true);
+      expect(mockFetchWithTimeout).toHaveBeenCalledTimes(EXHAUSTED);
+    });
+
+    it('skips the probe on a sorted search with no retries configured', async () => {
+      routeBySort([reject503], [resolveResults]);
+
+      const err = await settle(
+        makeService({ maxRetries: 0 }).search({ query: 'sepsis', sort: 'FOOBAR desc' }),
+      );
+
+      expect(err).toMatchObject(UNREACHABLE_AFTER_ONE_503);
+      expect(mockFetchWithTimeout).toHaveBeenCalledTimes(1);
+    });
+
+    it('blames the sort, not the cursor, when a cursor search with a refused sort is served unsorted', async () => {
+      routeBySort([reject503], [resolveResults]);
+
+      const err = await settle(
+        service().search({ query: 'sepsis', cursorMark: 'abc', sort: 'FOOBAR desc' }),
+      );
+
+      expect(err?.code).toBe(JsonRpcErrorCode.ValidationError);
+      expect(err?.data).toMatchObject({
+        reason: 'europepmc_invalid_input',
+        retryable: false,
+        sort: 'FOOBAR desc',
+      });
+      expect(err?.data?.cursorMark).toBeUndefined();
+      expect(err?.message).toBe(
+        'Europe PMC answered sort "FOOBAR desc" with HTTP 503 twice but served the same query without it — Europe PMC most likely cannot sort by it.',
+      );
+      expect(hintOf(err)).toBe(SORT_HINT);
+
+      // The cursor request, the first page with the sort (#180), the first page
+      // without it — never carrying the caller's cursor — then the retry.
+      const requests = sent().map((params) => ({
+        cursorMark: params.get('cursorMark'),
+        sort: params.get('sort'),
+        pageSize: params.get('pageSize'),
+      }));
+      expect(requests).toEqual([
+        { cursorMark: 'abc', sort: 'FOOBAR desc', pageSize: '25' },
+        { cursorMark: '*', sort: 'FOOBAR desc', pageSize: '1' },
+        { cursorMark: '*', sort: null, pageSize: '1' },
+        { cursorMark: 'abc', sort: 'FOOBAR desc', pageSize: '25' },
+      ]);
+    });
+
+    it('reports an outage when a cursor search with a sort finds neither first page served', async () => {
+      routeBySort([reject503], [reject503]);
+
+      const err = await settle(
+        service().search({ query: 'sepsis', cursorMark: 'abc', sort: 'FOOBAR desc' }),
+      );
+
+      expect(err?.code).toBe(JsonRpcErrorCode.ServiceUnavailable);
+      expect(err?.data?.reason).toBe('europepmc_unreachable');
+      // Both probes once, after the first failure, then the rest of the retries.
+      expect(sent().map((params) => params.get('cursorMark'))).toEqual([
+        'abc',
+        '*',
+        '*',
+        'abc',
+        'abc',
+        'abc',
+      ]);
+    });
+
+    describe('linear time on adversarial sorts', () => {
+      /** CPU time of `run`, in ms — this thread's user + system time, not wall clock. */
+      const cpuMs = (run: () => void): number => {
+        const start = process.threadCpuUsage();
+        run();
+        const { user, system } = process.threadCpuUsage(start);
+        return (user + system) / 1000;
+      };
+
+      /**
+       * The sort check runs synchronously at the top of `search()`, before its
+       * first await, so the rejection is fully computed inside `run`.
+       */
+      const rejectSort = (sort: string) => {
+        service()
+          .search({ query: 'sepsis', sort })
+          .catch(() => undefined);
+      };
+
+      /** Fastest of five measurements of ten calls each — the least noisy reading of the work. */
+      const fastestMs = (sort: string): number => {
+        rejectSort(sort);
+        return Math.min(
+          ...Array.from({ length: 5 }, () =>
+            cpuMs(() => {
+              for (let i = 0; i < 10; i++) rejectSort(sort);
+            }),
+          ),
+        );
+      };
+
+      /** Repeat `unit` to exactly `length` characters. */
+      const fill = (unit: string, length: number) =>
+        unit.repeat(Math.ceil(length / unit.length)).slice(0, length);
+
+      it.each([
+        [
+          '`relevance` then spaces then a stray token',
+          (n: number) => `relevance${fill(' ', n - 10)}x`,
+        ],
+        ['whitespace then an empty key', (n: number) => `${fill(' ', n - 1)},`],
+        ['one unbroken field token', (n: number) => fill('a', n)],
+        ['single-letter tokens with no direction', (n: number) => fill('a ', n)],
+        ['repeated keys with no comma', (n: number) => fill('CITED desc ', n)],
+        ['empty keys', (n: number) => fill(', ', n)],
+        ['valid keys ending in an empty key', (n: number) => `${fill('a asc,', n - 1)},`],
+      ])('scales linearly from 5k to 320k characters of %s', (_label, build) => {
+        const [t5k, t80k, t320k] = [5_000, 80_000, 320_000].map((n) => fastestMs(build(n)));
+        // Linear work grows 64× across the span; quadratic grows 4096×.
+        expect((t320k ?? 0) / Math.max(t5k ?? 0, 0.001)).toBeLessThan(256);
+        expect(t80k).toBeLessThan(400);
+        expect(t320k).toBeLessThan(1_600);
+        expect(mockFetchWithTimeout).not.toHaveBeenCalled();
+      });
+    });
+
+    it('lists FIRST_IDATE_D among the documented fields an envelope does not blame', async () => {
+      mockFetchWithTimeout.mockImplementation(() => Promise.resolve(envelope()));
+
+      const err = await settle(service().search({ query: 'sepsis', sort: 'FIRST_IDATE_D desc' }));
+
+      expect(err?.data?.reason).toBe('europepmc_unreachable');
+      expect(mockFetchWithTimeout).toHaveBeenCalledTimes(EXHAUSTED);
     });
   });
 });
@@ -1517,6 +1875,26 @@ describe('EuropePmcService.parseFullTextXml', () => {
     ]);
     // Two <p>s, two lines; each marker is an inline <sup>, so it stays attached.
     expect(table?.footnotes).toBe('aFisher’s exact test\nbMann–Whitney test');
+  });
+
+  /**
+   * The Europe PMC tier feeds the same article reader as PMC EFetch, so the
+   * invisible characters a deposit carries inside words go before parsing here
+   * too. U+200C, U+200D and U+2060 stay. (#224)
+   */
+  it('drops U+FEFF, soft hyphens and zero width spaces before parsing', () => {
+    const node = makeService().parseFullTextXml(
+      '<?xml version="1.0" encoding="UTF-8"?>\n<article><body><sec><title>Results</title>' +
+        '<p>hepatopulmonary s\uFEFFyndrome\uFEFF; employ\u00ADment at 30 kg/m\u200B\u200B<sup>2</sup>; ' +
+        'bleeding \uFEFFincreased; a\u200Cb c\u200Dd e\u2060f</p></sec></body>' +
+        '<back><ref-list><ref id="R10"><mixed-citation>J Hepatol. 2024;79:1180\uFEFF–1211.</mixed-citation></ref></ref-list></back></article>',
+    );
+    if (!node) throw new Error('expected an <article> node');
+    const article = parsePmcArticle(node);
+    expect(article.sections[0]?.text).toBe(
+      'hepatopulmonary syndrome; employment at 30 kg/m2; bleeding increased; a\u200Cb c\u200Dd e\u2060f',
+    );
+    expect(article.references?.[0]?.citation).toBe('J Hepatol. 2024;79:1180–1211.');
   });
 });
 

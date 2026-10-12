@@ -180,7 +180,7 @@ export const EUROPEPMC_SERVICE_ERRORS = [
   {
     reason: 'europepmc_invalid_input',
     code: JsonRpcErrorCode.ValidationError,
-    when: 'Europe PMC rejected the request input — an error message in place of results, an empty response to a sort with an undocumented field or no asc/desc direction, or a pagination cursor it cannot read (an empty response on the last attempt the retry budget allows, or a second HTTP 503 when the first page of the same query is served).',
+    when: 'Europe PMC rejected the request input — an error message in place of results; a sort it cannot use (one whose keys are not each a field plus asc/desc, rejected before any request; an empty response to a sort with an undocumented field; or a second HTTP 503 to a sorted search when the same query without the sort is served); or a pagination cursor it cannot read (an empty response on the last attempt the retry budget allows, or a second HTTP 503 when the first page of the same query is served).',
     recovery:
       "Fix the rejected input before retrying — the query, the sort, or the cursorMark (pass the previous response's `nextCursorMark` verbatim, or `*` to restart); the same input will most likely be rejected again.",
     retryable: false,

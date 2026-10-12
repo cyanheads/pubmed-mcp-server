@@ -6,7 +6,7 @@
  * because EPMC's search API doesn't support offset. `max_results`, `limit`, and
  * `maxResults` are accepted as aliases for `pageSize`. A `query` with no search
  * term (`()`, `<b></b>`) or a blank `cursorMark` is rejected before Europe PMC
- * is called.
+ * is called. A lower-case `sources` code is read as its upper-case form.
  * The total hit count rides in `output` so `format()` can state it in the
  * header, and `searchUrl` opens the source-filtered query Europe PMC actually
  * ran.
@@ -35,6 +35,7 @@ import {
   EDAM_PUBMED_ID,
   SCHEMA_SEARCH_ACTION,
 } from './_concepts.js';
+import { europePmcSourceInputSchema } from './_schemas.js';
 import { escapeMarkdownInline, sliceCodeUnits } from './_text.js';
 import { hasVisibleText } from './_visible-text.js';
 
@@ -53,7 +54,7 @@ const ABSTRACT_SNIPPET_LIMIT = 400;
 
 export const pubmedEuropepmcSearchTool = tool('pubmed_europepmc_search', {
   description:
-    'Search Europe PMC, a broad open-access biomedical corpus. Surfaces preprints (`source: PPR`), patents (`source: PAT`), Agricola (`source: AGR`), plus everything in PubMed (`MED`) and PMC. Use when additional coverage is needed — preprints and EPMC-only OA records are the typical recovery. Paginate via `cursorMark`. Defaults to `MED`, `PMC`, and `PPR`; pass `sources` to include `PAT` / `AGR`. Abstracts arrive as a bounded `abstractSnippet` with `abstractTruncated` marking the cut ones — pass a hit’s `source` and `epmcId` to `pubmed_europepmc_fetch` for the complete abstract.',
+    'Search Europe PMC, a broad open-access biomedical corpus. Surfaces preprints (`source: PPR`), patents (`source: PAT`), Agricola (`source: AGR`), plus everything in PubMed (`MED`) and PMC. Use when additional coverage is needed — preprints and EPMC-only OA records are the typical recovery. Paginate via `cursorMark`. Defaults to `MED`, `PMC`, and `PPR`; pass `sources` to include `PAT` / `AGR`. Abstracts arrive as a bounded `abstractSnippet` with `abstractTruncated` marking the cut ones — pass a hit to `pubmed_europepmc_fetch` as `records: [{ source, epmcId }]` for the complete abstract.',
   annotations: { readOnlyHint: true, openWorldHint: true },
   _meta: conceptMeta([SCHEMA_SEARCH_ACTION, EDAM_DATABASE_SEARCH, EDAM_PUBMED_ID]),
   sourceUrl:
@@ -104,7 +105,7 @@ export const pubmedEuropepmcSearchTool = tool('pubmed_europepmc_search', {
         "Pagination cursor. Use `*` (default) for the first page; pass the previous response's `nextCursorMark` verbatim for subsequent pages. A whitespace-only cursor, invisible characters included, is rejected before the request, and a cursor Europe PMC cannot read fails with `europepmc_invalid_input` once a retry of it fails again while the first page of the same query is served.",
       ),
     sources: z
-      .array(SourceEnum)
+      .array(europePmcSourceInputSchema)
       .min(1)
       .optional()
       .describe(
@@ -120,7 +121,7 @@ export const pubmedEuropepmcSearchTool = tool('pubmed_europepmc_search', {
       .string()
       .optional()
       .describe(
-        'Optional EPMC sort: `<field> asc|desc`, or several comma-separated keys applied in order (`PUB_YEAR desc, CITED desc`). Documented sortable fields: `P_PDATE_D` (publication date), `CITED` (citation count), `AUTH_FIRST` (first author surname), `PUB_YEAR` (publication year). Examples: `P_PDATE_D desc` (newest first), `CITED desc` (most cited). Omit for relevance ranking. Field and direction match case-insensitively. A field outside the documented set may be honored, silently ignored, or rejected, and a sort using one — or a key without `asc`/`desc` — can fail with `europepmc_invalid_input` naming it, even when Europe PMC honors the field. Note: `P_PDATE_D` is ignored for preprint-only (`sources: ["PPR"]`) result sets — preprints have no populated publication date, so use `PUB_YEAR` to order preprints by date.',
+        'Optional EPMC sort: `<field> asc|desc`, or several comma-separated keys applied in order (`PUB_YEAR desc, CITED desc`). Documented sortable fields: `P_PDATE_D` (publication date), `CITED` (citation count), `AUTH_FIRST` (first author surname), `PUB_YEAR` (publication year), `FIRST_IDATE_D` (date first indexed in Europe PMC). Examples: `P_PDATE_D desc` (newest first), `CITED desc` (most cited). Omit for relevance ranking; `relevance` or `relevance desc` is sent as no sort. Field and direction match case-insensitively. Each key must be one field plus `asc` or `desc`: a key without a direction, an empty key, or an extra word fails with `europepmc_invalid_input` before the request. A field outside the documented set may be honored, silently ignored, or refused — a sort Europe PMC refuses fails with `europepmc_invalid_input` naming it, and an empty Europe PMC response to a sort with an undocumented field fails the same way, even when Europe PMC honors the field. Note: `P_PDATE_D` is ignored for preprint-only (`sources: ["PPR"]`) result sets — preprints have no populated publication date, so use `PUB_YEAR desc` to order preprints by date.',
       ),
   }),
 
@@ -135,7 +136,7 @@ export const pubmedEuropepmcSearchTool = tool('pubmed_europepmc_search', {
             epmcId: z
               .string()
               .describe(
-                "Europe PMC's internal record id. Pass it with this hit's `source` to `pubmed_europepmc_fetch` for the complete record. Europe PMC's `fullTextXML` is keyed on `pmcId`, not on this id, so records without a PMC counterpart have no full text to fetch.",
+                "Europe PMC's internal record id. Pass it with this hit's `source` to `pubmed_europepmc_fetch` as `records: [{ source, epmcId }]` for the complete record. Europe PMC's `fullTextXML` is keyed on `pmcId`, not on this id, so records without a PMC counterpart have no full text to fetch.",
               ),
             title: z
               .string()
@@ -188,7 +189,7 @@ export const pubmedEuropepmcSearchTool = tool('pubmed_europepmc_search', {
               .boolean()
               .optional()
               .describe(
-                'Whether `abstractSnippet` was cut short of the full abstract. Retrieve the complete text with `pubmed_europepmc_fetch` using this record’s `source` and `epmcId`. Present whenever `abstractSnippet` is; omitted when Europe PMC carries no abstract.',
+                'Whether `abstractSnippet` was cut short of the full abstract. Retrieve the complete text by passing this record to `pubmed_europepmc_fetch` as `records: [{ source, epmcId }]`. Present whenever `abstractSnippet` is; omitted when Europe PMC carries no abstract.',
               ),
             citedByCount: z.number().optional().describe('Citation count reported by Europe PMC'),
             epmcUrl: z.string().describe('Europe PMC article URL'),
@@ -326,7 +327,7 @@ export const pubmedEuropepmcSearchTool = tool('pubmed_europepmc_search', {
         'No results matched your Europe PMC query. Try broadening the query, removing source filters, or running pubmed_spell_check on the term.';
     } else if (sortField === 'P_PDATE_D' && isPprOnly) {
       notice =
-        'Europe PMC ignores `P_PDATE_D` sort for preprint-only (PPR) results — preprints have no populated publication date, so records are returned in relevance order, not by date. To order preprints by date, sort by `PUB_YEAR`, or re-rank the returned page by each record’s `firstPublicationDate`.';
+        'Europe PMC ignores `P_PDATE_D` sort for preprint-only (PPR) results — preprints have no populated publication date, so records are returned in relevance order, not by date. To order preprints by date, sort by `PUB_YEAR desc`, or re-rank the returned page by each record’s `firstPublicationDate`.';
     }
 
     ctx.log.info('pubmed_europepmc_search completed', {
@@ -385,7 +386,7 @@ export const pubmedEuropepmcSearchTool = tool('pubmed_europepmc_search', {
           lines.push(`\n${h.abstractSnippet}`);
           if (h.abstractTruncated) {
             lines.push(
-              `_Abstract truncated at ${ABSTRACT_SNIPPET_LIMIT} characters — call \`pubmed_europepmc_fetch\` with this record's \`source\` and \`epmcId\` for the complete text._`,
+              `_Abstract truncated at ${ABSTRACT_SNIPPET_LIMIT} characters — pass this hit to \`pubmed_europepmc_fetch\` as \`records: [{ source, epmcId }]\` for the complete text._`,
             );
           }
         }

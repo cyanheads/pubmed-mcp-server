@@ -117,7 +117,11 @@ export interface EuropePmcSearchParams {
   /** Default `core` — richest payload with abstract, IDs, dates, license. */
   resultType?: 'core' | 'lite' | 'idlist';
   signal?: AbortSignal;
-  /** Optional sort spec, e.g. `FIRST_PIDATE desc`. */
+  /**
+   * Optional sort spec: comma-separated `<field> asc|desc` keys, e.g.
+   * `CITED desc` or `PUB_YEAR desc, CITED desc`. `relevance` (Europe PMC's
+   * default order) is sent as no sort.
+   */
   sort?: string;
   /**
    * Allowed sources, OR-joined into a `(SRC:"MED" OR ...)` clause ANDed with the

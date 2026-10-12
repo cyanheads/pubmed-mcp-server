@@ -4,6 +4,7 @@
  * and returns each one's complete, untruncated abstract. That pair is the only
  * identifier many PPR, PAT, and AGR records carry, so `pubmed_fetch_articles`
  * (PMIDs) and `pubmed_fetch_fulltext` (PMCIDs / PMIDs / DOIs) cannot reach them.
+ * A lower-case `source` is read as its upper-case code.
  *
  * Only registered when `EUROPEPMC_ENABLED=true` (the default). The handler
  * fails fast with a configuration error if the service is unset, since the
@@ -18,13 +19,14 @@ import { EUROPEPMC_SERVICE_ERRORS } from '@/services/error-contracts.js';
 import { getEuropePmcService } from '@/services/europe-pmc/europe-pmc-service.js';
 import { EUROPEPMC_ALL_SOURCES } from '@/services/europe-pmc/types.js';
 import { toDisplayText } from '@/services/ncbi/parsing/text-helpers.js';
-import { fitWholeItems } from './_budget.js';
+import { buildDeferralNotice, fitWholeItems } from './_budget.js';
 import {
   conceptMeta,
   EDAM_ACCESSION,
   EDAM_DATA_RETRIEVAL,
   SCHEMA_SCHOLARLY_ARTICLE,
 } from './_concepts.js';
+import { europePmcSourceInputSchema } from './_schemas.js';
 import { escapeMarkdownInline } from './_text.js';
 
 const SourceEnum = z.enum(EUROPEPMC_ALL_SOURCES);
@@ -48,7 +50,7 @@ const PMCID_SHAPED_RE = /^PMC\d+$/i;
 
 const RecordRefSchema = z
   .object({
-    source: SourceEnum.describe(
+    source: europePmcSourceInputSchema.describe(
       "Europe PMC source corpus — `MED` (PubMed), `PMC` (PubMed Central), `PPR` (preprint), `PAT` (patent), `AGR` (Agricola). Copy it from the search hit's `source`. `PMC` paired with a PMCID resolves whether or not the article is also indexed in PubMed, and a PubMed-indexed one comes back as its canonical `MED` record carrying that PMCID in `pmcId`.",
     ),
     epmcId: epmcIdSchema.describe(
@@ -133,7 +135,7 @@ const DeferredSchema = z
     nextDeferredCharacters: z
       .number()
       .describe(
-        'Serialized size of the next deferred record — the first entry in `records`, where the response stopped. Raise `maxResponseCharacters` to at least this to make progress; a smaller record further down `records` cannot be reached until this one fits.',
+        'Serialized size of the next deferred record — the first entry in `records`, where the response stopped — and the continuation ceiling: re-calling with the deferred pairs needs `maxResponseCharacters` ≥ this to return anything, and a smaller record further down `records` cannot be reached until this one fits. Repeating this same call needs `maxResponseCharacters` ≥ `returnedCharacters` + this to return this record as well.',
       ),
   })
   .describe(
@@ -144,7 +146,7 @@ const DeferredSchema = z
 
 export const pubmedEuropepmcFetchTool = tool('pubmed_europepmc_fetch', {
   description:
-    "Fetch complete Europe PMC records — including the full, untruncated abstract — for records addressed by `source` plus `epmcId`. Pairs with `pubmed_europepmc_search`, which returns bounded `abstractSnippet` values and flags cut ones with `abstractTruncated: true`; pass those hits' `source` and `epmcId` here to read the whole abstract. This is the retrieval path for preprint (`PPR`), patent (`PAT`), and Agricola (`AGR`) records, which frequently carry no PMID and no DOI, so `pubmed_fetch_articles` and `pubmed_fetch_fulltext` cannot address them. Up to 25 records per call. Set `maxResponseCharacters` to bound the whole response: records past the ceiling are deferred whole and listed in `deferred.records` for a follow-up call.",
+    "Fetch complete Europe PMC records — including the full, untruncated abstract — addressed as `records: [{ source, epmcId }]`, an array even for one record. Pairs with `pubmed_europepmc_search`, which returns bounded `abstractSnippet` values and flags cut ones with `abstractTruncated: true`; copy each hit's `source` and `epmcId` into `records` here to read the whole abstract. This is the retrieval path for preprint (`PPR`), patent (`PAT`), and Agricola (`AGR`) records, which frequently carry no PMID and no DOI, so `pubmed_fetch_articles` and `pubmed_fetch_fulltext` cannot address them. Up to 25 records per call. Set `maxResponseCharacters` to bound the whole response: records past the ceiling are deferred whole and listed in `deferred.records` for a follow-up call.",
   annotations: { readOnlyHint: true, openWorldHint: true },
   _meta: conceptMeta([SCHEMA_SCHOLARLY_ARTICLE, EDAM_DATA_RETRIEVAL, EDAM_ACCESSION]),
   sourceUrl:
@@ -321,7 +323,13 @@ export const pubmedEuropepmcFetchTool = tool('pubmed_europepmc_fetch', {
     }
     if (deferred) {
       ctx.enrich({ truncated: true });
-      notices.push(buildDeferralNotice(deferred));
+      notices.push(
+        buildDeferralNotice(deferred, {
+          noun: 'record',
+          ids: deferred.records.map(formatPair).join(', '),
+          recall: 'pubmed_europepmc_fetch with those pairs as `records: [{ source, epmcId }]`',
+        }),
+      );
     }
     if (notices.length > 0) ctx.enrich.notice(notices.join(' '));
 
@@ -377,18 +385,4 @@ export const pubmedEuropepmcFetchTool = tool('pubmed_europepmc_fetch', {
 /** A record address as the notices and `content[]` render it: `SOURCE/epmcId`. */
 function formatPair(pair: { epmcId: string; source: string }): string {
   return `${pair.source}/${pair.epmcId}`;
-}
-
-/**
- * Compose the recovery notice for a response the whole-response budget bounded.
- * Names what was spent, which pairs are still retrievable, and the ceiling the
- * next call has to clear — so a caller reading only `content[]` can resume
- * without inspecting `deferred`. (#188)
- */
-function buildDeferralNotice(deferred: z.infer<typeof DeferredSchema>): string {
-  const spent =
-    deferred.returnedCharacters === 0
-      ? `The first record alone exceeds the requested maxResponseCharacters of ${deferred.maxResponseCharacters}, so none were returned.`
-      : `Response character budget reached: ${deferred.returnedCharacters} of ${deferred.maxResponseCharacters} characters returned.`;
-  return `${spent} ${deferred.deferredCount} resolved record(s) were deferred whole: ${deferred.records.map(formatPair).join(', ')}. Re-call pubmed_europepmc_fetch with those pairs as \`records\` to retrieve them, or raise maxResponseCharacters to at least ${deferred.nextDeferredCharacters} — the size of the next deferred record.`;
 }

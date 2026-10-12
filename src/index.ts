@@ -46,7 +46,7 @@ await createApp({
   resources: [databaseInfoResource],
   prompts: [researchPlanPrompt],
   instructions:
-    "Use the pubmed_* tools to search PubMed and PubMed Central, fetch article metadata and full text, format citations, and find related articles via NCBI's E-utilities. Articles are keyed by PMID (integer); PMC full text by PMCID (`PMC` prefix); most also carry a DOI. Typical flow: `pubmed_search_articles` → `pubmed_fetch_articles` → `pubmed_fetch_fulltext`. When PubMed itself comes up empty (preprints, EPMC-only OA), broaden via `pubmed_europepmc_search`, then `pubmed_europepmc_fetch` with a hit's `source` + `epmcId` for its complete abstract. Prefer deterministic resolvers when inputs are structured: `pubmed_lookup_citation` for partial references, `pubmed_convert_ids` to crosswalk IDs. Refine queries with `pubmed_lookup_mesh` and `pubmed_spell_check`.",
+    "Use the pubmed_* tools to search PubMed and PubMed Central, fetch article metadata and full text, format citations, and find related articles via NCBI's E-utilities. Articles are keyed by PMID (integer); PMC full text by PMCID (`PMC` prefix); most also carry a DOI. Typical flow: `pubmed_search_articles` → `pubmed_fetch_articles` → `pubmed_fetch_fulltext`. When PubMed itself comes up empty (preprints, EPMC-only OA), broaden via `pubmed_europepmc_search`, then `pubmed_europepmc_fetch` with `records: [{ source, epmcId }]` copied from a hit for its complete abstract. Prefer deterministic resolvers when inputs are structured: `pubmed_lookup_citation` for partial references, `pubmed_convert_ids` to crosswalk IDs. Refine queries with `pubmed_lookup_mesh` and `pubmed_spell_check`.",
   landing: {
     requireAuth: false,
     tagline:

@@ -213,7 +213,7 @@ describe('pubmed_europepmc_search sort handling (#159)', () => {
     expect(fetchSpy).toHaveBeenCalledTimes(EXHAUSTED);
   });
 
-  it.each(['BOGUSFIELD desc', 'CITED'])(
+  it.each(['BOGUSFIELD desc'])(
     'fails %s fast as europepmc_invalid_input naming the sort',
     async (sort) => {
       stubFetch([ENVELOPE]);
@@ -253,6 +253,143 @@ describe('pubmed_europepmc_search sort handling (#159)', () => {
 /** The URL parameters of each request the stubbed `fetch` received, in order. */
 const sentParams = (): URLSearchParams[] =>
   fetchSpy.mock.calls.map((call: unknown[]) => new URL(String(call[0])).searchParams);
+
+describe('pubmed_europepmc_search sorts Europe PMC refuses (#239)', () => {
+  /** Europe PMC's answer to a sort it cannot use — byte-identical to its outage answer. */
+  const SORT_503: Reply = {
+    status: 503,
+    body: {
+      errCode: 503,
+      errMsg: 'Search service is temporarily unavailable. Please retry later.',
+    },
+  };
+
+  /**
+   * Stubs global fetch by request kind: a request carrying `sort` draws from
+   * `sorted`, one without it from `unsorted`; each list's last reply repeats.
+   */
+  function stubFetchBySort(sorted: Reply[], unsorted: Reply[]) {
+    let sortedCalls = 0;
+    let unsortedCalls = 0;
+    fetchSpy = vi.spyOn(globalThis, 'fetch').mockImplementation((input) => {
+      const hasSort = new URL(String(input)).searchParams.has('sort');
+      const replies = hasSort ? sorted : unsorted;
+      const index = hasSort ? sortedCalls++ : unsortedCalls++;
+      const reply = replies[Math.min(index, replies.length - 1)] as Reply;
+      return Promise.resolve(
+        new Response(JSON.stringify(reply.body ?? {}), {
+          status: reply.status,
+          headers: { 'content-type': 'application/json' },
+        }),
+      );
+    });
+  }
+
+  /** The recovery a sort Europe PMC cannot use carries, whichever way it was caught. */
+  const SORT_HINT =
+    'Use a documented sort (`P_PDATE_D desc`, `CITED desc`, `AUTH_FIRST asc`, `PUB_YEAR desc`, or `FIRST_IDATE_D desc`), or omit `sort` for relevance ranking.';
+  /** The message a sort Europe PMC answered with a 503 twice fails with. */
+  const refusedSortMessage = (sort: string) =>
+    `Europe PMC answered sort "${sort}" with HTTP 503 twice but served the same query without it — Europe PMC most likely cannot sort by it.`;
+  /** The `content[]` text of a non-retryable sort failure carrying `message`. */
+  const sortFailureText = (message: string) =>
+    `Error: ${message}\n\nRecovery: ${SORT_HINT}\n\n(reason europepmc_invalid_input · not retryable)`;
+
+  it('fails a refused sort as a non-retryable europepmc_invalid_input on both paths', async () => {
+    stubFetchBySort([SORT_503], [RESULTS]);
+    const { error, text } = errorOf(await search({ query: 'sepsis', sort: 'FOOBAR desc' }));
+
+    expect(error.code).toBe(JsonRpcErrorCode.ValidationError);
+    expect(error.message).toBe(refusedSortMessage('FOOBAR desc'));
+    expect(error.data).toMatchObject({
+      reason: 'europepmc_invalid_input',
+      retryable: false,
+      sort: 'FOOBAR desc',
+    });
+    expect(error.data?.recovery?.hint).toBe(SORT_HINT);
+    expect(text).toBe(sortFailureText(refusedSortMessage('FOOBAR desc')));
+
+    // The sorted request, one unsorted first-page probe, and one retry.
+    expect(fetchSpy).toHaveBeenCalledTimes(3);
+    expect(sentParams().map((p) => p.get('sort'))).toEqual(['FOOBAR desc', null, 'FOOBAR desc']);
+  });
+
+  it.each(['CITED', 'CITED desc,', 'CITED desc; PUB_YEAR asc'])(
+    'fails %j before any request on both paths',
+    async (sort) => {
+      stubFetch([RESULTS]);
+      const { error, text } = errorOf(await search({ query: 'sepsis', sort }));
+
+      expect(error.code).toBe(JsonRpcErrorCode.ValidationError);
+      expect(error.data).toMatchObject({
+        reason: 'europepmc_invalid_input',
+        retryable: false,
+        sort,
+      });
+      const message = `Europe PMC cannot use the sort "${sort}" — each comma-separated key needs one field and an \`asc\` or \`desc\` direction.`;
+      expect(error.message).toBe(message);
+      expect(error.data?.recovery?.hint).toBe(SORT_HINT);
+      expect(text).toBe(sortFailureText(message));
+      expect(fetchSpy).not.toHaveBeenCalled();
+    },
+  );
+
+  it.each(['relevance', 'RELEVANCE desc'])(
+    'sends %j as no sort and returns the results on both paths',
+    async (sort) => {
+      stubFetch([RESULTS]);
+      const result = await search({ query: 'sepsis', sort });
+
+      expect(result.isError).toBeFalsy();
+      expect((result.structuredContent as { hits: unknown[] }).hits).toHaveLength(1);
+      expect(allText(result)).toContain('31295471');
+      expect(fetchSpy).toHaveBeenCalledTimes(1);
+      expect(sentParams()[0]?.has('sort')).toBe(false);
+    },
+  );
+
+  it('reports an outage, naming no sort, when the unsorted probe is refused too', async () => {
+    stubFetchBySort([SORT_503], [SORT_503]);
+    const { error, text } = errorOf(await search({ query: 'sepsis', sort: 'FOOBAR desc' }));
+
+    expect(error.code).toBe(JsonRpcErrorCode.ServiceUnavailable);
+    expect(error.data?.reason).toBe('europepmc_unreachable');
+    expect(error.message).toMatch(
+      new RegExp(`Status: 503.*\\(failed after ${EXHAUSTED} attempts\\)$`),
+    );
+    expect(error.message).not.toContain('FOOBAR');
+    expect(text).not.toContain('FOOBAR');
+    expect(text).toContain(`Recovery: ${UNREACHABLE_HINT}`);
+    // Every attempt plus one probe.
+    expect(fetchSpy).toHaveBeenCalledTimes(EXHAUSTED + 1);
+  });
+
+  it('returns the results when one 503 on a sorted search clears on the retry', async () => {
+    stubFetchBySort([SORT_503, RESULTS], [RESULTS]);
+    const result = await search({ query: 'sepsis', sort: 'CITED desc' });
+
+    expect(result.isError).toBeFalsy();
+    expect(allText(result)).toContain('31295471');
+    expect(sentParams().map((p) => p.get('sort'))).toEqual(['CITED desc', null, 'CITED desc']);
+  });
+
+  it('blames the sort, not the cursor, for a cursor search with a refused sort', async () => {
+    stubFetchBySort([SORT_503], [RESULTS]);
+    const { error, text } = errorOf(
+      await search({ query: 'sepsis', cursorMark: 'abc', sort: 'FOOBAR desc' }),
+    );
+
+    expect(error.code).toBe(JsonRpcErrorCode.ValidationError);
+    expect(error.data).toMatchObject({ reason: 'europepmc_invalid_input', sort: 'FOOBAR desc' });
+    expect(text).toBe(sortFailureText(refusedSortMessage('FOOBAR desc')));
+    expect(sentParams().map((p) => [p.get('cursorMark'), p.get('sort')])).toEqual([
+      ['abc', 'FOOBAR desc'],
+      ['*', 'FOOBAR desc'],
+      ['*', null],
+      ['abc', 'FOOBAR desc'],
+    ]);
+  });
+});
 
 /** Every text block of a contract run, joined. */
 const allText = (result: Awaited<ReturnType<typeof runToolContract>>) =>

@@ -845,10 +845,10 @@ describe('pubmedEuropepmcFetchTool whole-response budget (#188)', () => {
     });
     expect(structured.truncated).toBe(true);
     const notice = structured.notice ?? '';
-    expect(notice).toContain(`at least ${sizes[0]}`);
-    // The second record alone fits this ceiling, so "no record fits" would be false.
-    expect(notice).toContain(
-      `The first record alone exceeds the requested maxResponseCharacters of ${sizes[1]}, so none were returned.`,
+    // The second record alone fits this ceiling, so "no record fits" would be
+    // false; the one ceiling to name is the first record's size. (#236)
+    expect(notice).toBe(
+      `The first record alone exceeds the requested maxResponseCharacters of ${sizes[1]}, so none were returned. 2 resolved record(s) were deferred whole: PPR/PPR1, MED/111. Re-call pubmed_europepmc_fetch with those pairs as \`records: [{ source, epmcId }]\` and maxResponseCharacters ≥ ${sizes[0]}, the size of that first record.`,
     );
     expect(notice).not.toMatch(/no record fits/i);
     expect(notice).not.toMatch(/returned no record/i);
@@ -880,7 +880,10 @@ describe('pubmedEuropepmcFetchTool whole-response budget (#188)', () => {
     expect(notice).toContain('Europe PMC returned no record for 1 of 3 requested pairs');
     expect(notice).toContain('AGR/IND000000000');
     expect(notice).toContain('deferred whole: MED/34265844');
-    expect(notice).toContain(`at least ${sizes[1]}`);
+    const [returned = 0, next = 0] = sizes;
+    expect(notice).toContain(
+      `Response character budget reached: ${returned} of ${returned} characters returned. 1 resolved record(s) were deferred whole: MED/34265844. To continue, re-call pubmed_europepmc_fetch with those pairs as \`records: [{ source, epmcId }]\` and maxResponseCharacters ≥ ${next}, the size of the next deferred record. To return the next deferred record in this response instead, repeat this call with maxResponseCharacters ≥ ${returned + next}.`,
+    );
   });
 
   it('carries the PMCID pointer and the deferral in one notice', async () => {
@@ -912,10 +915,44 @@ describe('pubmedEuropepmcFetchTool whole-response budget (#188)', () => {
     expect(text).toContain('### Record PPR1');
     expect(text).not.toContain('### Record 111');
     expect(text).not.toContain('x'.repeat(80));
+    const returned = d?.returnedCharacters ?? 0;
+    const next = d?.nextDeferredCharacters ?? 0;
+    expect(next).toBeGreaterThan(d?.maxResponseCharacters ?? 0);
     expect(structured.notice).toBe(
-      `Response character budget reached: ${d?.returnedCharacters} of ${d?.maxResponseCharacters} characters returned. 2 resolved record(s) were deferred whole: MED/111, PAT/KR1. Re-call pubmed_europepmc_fetch with those pairs as \`records\` to retrieve them, or raise maxResponseCharacters to at least ${d?.nextDeferredCharacters} — the size of the next deferred record.`,
+      `Response character budget reached: ${returned} of ${d?.maxResponseCharacters} characters returned. 2 resolved record(s) were deferred whole: MED/111, PAT/KR1. To continue, re-call pubmed_europepmc_fetch with those pairs as \`records: [{ source, epmcId }]\` and maxResponseCharacters ≥ ${next}, the size of the next deferred record. To return the next deferred record in this response instead, repeat this call with maxResponseCharacters ≥ ${returned + next}.`,
     );
     expect(text).toContain(structured.notice ?? '');
+  });
+
+  it('says the deferred pairs can be re-called at the current ceiling when the next record fits it (#236)', async () => {
+    const hits = [hit('PPR', 'PPR1', 400), hit('MED', '111', 10)];
+    const refs = hits.map(pairOf);
+    const sizes = sizesOf((await call(hits, refs)).structured);
+    const [returned = 0, next = 0] = sizes;
+    const ceiling = returned + next - 1;
+
+    const { structured, text } = await call(hits, refs, { maxResponseCharacters: ceiling });
+
+    expect(structured.deferred?.records).toEqual([{ source: 'MED', epmcId: '111' }]);
+    expect(next).toBeLessThan(ceiling);
+    expect(structured.notice).toBe(
+      `Response character budget reached: ${returned} of ${ceiling} characters returned. 1 resolved record(s) were deferred whole: MED/111. To continue, re-call pubmed_europepmc_fetch with those pairs as \`records: [{ source, epmcId }]\` at the current maxResponseCharacters of ${ceiling}, which already fits the next deferred record (${next} characters). To return the next deferred record in this response instead, repeat this call with maxResponseCharacters ≥ ${returned + next}.`,
+    );
+    expect(text).toContain(structured.notice ?? '');
+
+    // The repeat ceiling is exact: at it the call returns both records.
+    const repeated = await call(hits, refs, { maxResponseCharacters: returned + next });
+    expect(repeated.structured.records.map((r) => r.epmcId)).toEqual(['PPR1', '111']);
+    expect(repeated.structured.deferred).toBeUndefined();
+  });
+
+  it('advertises both ceilings on `nextDeferredCharacters` (#236)', () => {
+    const description =
+      pubmedEuropepmcFetchTool.output.shape.deferred.unwrap().shape.nextDeferredCharacters
+        .description ?? '';
+    expect(description).toBe(
+      'Serialized size of the next deferred record — the first entry in `records`, where the response stopped — and the continuation ceiling: re-calling with the deferred pairs needs `maxResponseCharacters` ≥ this to return anything, and a smaller record further down `records` cannot be reached until this one fits. Repeating this same call needs `maxResponseCharacters` ≥ `returnedCharacters` + this to return this record as well.',
+    );
   });
 
   it('reports no deferral when the budget is set but nothing resolved', async () => {
@@ -966,5 +1003,101 @@ describe('pubmedEuropepmcFetchTool whole-response budget (#188)', () => {
     expect(ceiling).toMatch(/deferred whole/);
     expect(ceiling).toContain('`notFound`');
     expect(pubmedEuropepmcFetchTool.output.shape.notFound.description).toMatch(/not deferrals/);
+  });
+});
+
+describe('pubmedEuropepmcFetchTool source case and the records shape (issue #244)', () => {
+  beforeEach(() => {
+    mockFetchRecords.mockReset();
+    mockGetEpmc.mockReset();
+    mockGetEpmc.mockReturnValue({ fetchRecords: mockFetchRecords });
+  });
+
+  /** The `source` field's advertised description, unchanged by the case fold. */
+  const SOURCE_DESCRIPTION =
+    "Europe PMC source corpus — `MED` (PubMed), `PMC` (PubMed Central), `PPR` (preprint), `PAT` (patent), `AGR` (Agricola). Copy it from the search hit's `source`. `PMC` paired with a PMCID resolves whether or not the article is also indexed in PubMed, and a PubMed-indexed one comes back as its canonical `MED` record carrying that PMCID in `pmcId`.";
+
+  it.each([
+    ['med', '42805292', { id: '42805292', source: 'MED', pmid: '42805292', title: 'A' }],
+    ['pmc', 'PMC13652117', { id: 'PMC13652117', source: 'PMC', pmcid: 'PMC13652117', title: 'B' }],
+    ['Ppr', 'PPR1', { id: 'PPR1', source: 'PPR', title: 'C' }],
+  ])(
+    'resolves a lower-case %j source as its code, with no notFound entry',
+    async (source, epmcId, hit) => {
+      mockFetchRecords.mockResolvedValue([hit]);
+
+      const result = await runToolContract(pubmedEuropepmcFetchTool, {
+        records: [{ source, epmcId }] as never,
+      });
+
+      expect(result.isError).toBeFalsy();
+      expect(mockFetchRecords).toHaveBeenCalledWith(
+        [{ source: source.toUpperCase(), epmcId }],
+        expect.anything(),
+      );
+      const structured = result.structuredContent as { records: unknown[]; notFound?: unknown };
+      expect(structured.records).toHaveLength(1);
+      expect(structured).not.toHaveProperty('notFound');
+      expect(structured).not.toHaveProperty('notice');
+      const text = contractText(result);
+      expect(text).not.toContain('Not found');
+      expect(text).toContain(`**EPMC ID:** ${epmcId}`);
+    },
+  );
+
+  it('reports a lower-case miss in notFound by its folded code', async () => {
+    mockFetchRecords.mockResolvedValue([]);
+
+    const result = await runToolContract(pubmedEuropepmcFetchTool, {
+      records: [{ source: 'ppr', epmcId: 'PPR404' }] as never,
+    });
+
+    expect(result.structuredContent).toMatchObject({
+      notFound: [{ source: 'PPR', epmcId: 'PPR404' }],
+    });
+    expect(contractText(result)).toContain('**Not found:** PPR/PPR404');
+  });
+
+  it.each([['pubmed'], ['pmid'], ['']])(
+    'still rejects the source %j, listing the source codes, with no lookup',
+    async (source) => {
+      const result = await runToolContract(pubmedEuropepmcFetchTool, {
+        records: [{ source, epmcId: '42805292' }] as never,
+      });
+
+      expect(result.isError).toBe(true);
+      expect(result.structuredContent).toMatchObject({
+        error: { code: JsonRpcErrorCode.InvalidParams },
+      });
+      expect(contractText(result)).toContain('"MED"|"PMC"|"PPR"|"PAT"|"AGR"');
+      expect(mockFetchRecords).not.toHaveBeenCalled();
+    },
+  );
+
+  it('advertises `source` as the plain upper-case enum on input and on `notFound`', () => {
+    const plain = {
+      type: 'string',
+      enum: ['MED', 'PMC', 'PPR', 'PAT', 'AGR'],
+      description: SOURCE_DESCRIPTION,
+    };
+    const input = z.toJSONSchema(pubmedEuropepmcFetchTool.input, { io: 'input' }) as unknown as {
+      properties: { records: { items: { properties: Record<string, unknown> } } };
+    };
+    const output = z.toJSONSchema(pubmedEuropepmcFetchTool.output, {
+      io: 'output',
+    }) as unknown as {
+      properties: { notFound: { items: { properties: Record<string, unknown> } } };
+    };
+    expect(input.properties.records.items.properties.source).toStrictEqual(plain);
+    expect(output.properties.notFound.items.properties.source).toStrictEqual(plain);
+  });
+
+  it('names the `records: [{ source, epmcId }]` input shape in its description', () => {
+    expect(pubmedEuropepmcFetchTool.description).toContain(
+      'addressed as `records: [{ source, epmcId }]`, an array even for one record',
+    );
+    expect(pubmedEuropepmcFetchTool.description).toContain(
+      "copy each hit's `source` and `epmcId` into `records` here",
+    );
   });
 });
