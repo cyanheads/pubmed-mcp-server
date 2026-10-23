@@ -132,7 +132,7 @@ Ali, Sharib, et al. "A Pilot Study on Automatic Three-Dimensional Quantification
   volume   = {161},
   number   = {3},
   pages    = {865-878.e8},
-  issn     = {1528-0012},
+  issn     = {0016-5085},
   doi      = {10.1053/j.gastro.2021.05.059},
   pmid     = {34116029},
   pmcid    = {PMC7617121},
@@ -153,7 +153,7 @@ AU  - Lu, Xin
 AU  - East, James E
 AU  - Rittscher, Jens
 AU  - Braden, Barbara
-TI  - A Pilot Study on Automatic Three-Dimensional Quantification of Barrett's Esophagus for Risk Stratification and Therapy Monitoring.
+TI  - A Pilot Study on Automatic Three-Dimensional Quantification of Barrett's Esophagus for Risk Stratification and Therapy Monitoring
 JF  - Gastroenterology
 JO  - Gastroenterology
 PY  - 2021
@@ -161,7 +161,7 @@ VL  - 161
 IS  - 3
 SP  - 865
 EP  - 878.e8
-SN  - 1528-0012
+SN  - 0016-5085
 DO  - 10.1053/j.gastro.2021.05.059
 AN  - 34116029
 UR  - https://pubmed.ncbi.nlm.nih.gov/34116029/

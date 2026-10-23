@@ -408,8 +408,8 @@ describe('formatVancouver', () => {
     // NLM journal abbreviation, not the full title
     expect(citation).toContain('Nat Med.');
     expect(citation).not.toContain('Nature Medicine');
-    // Year;Volume(Issue):Pages
-    expect(citation).toContain('2024;30(5):123-130.');
+    // Year;Volume(Issue):Pages, the range elided in Citing Medicine form (#253)
+    expect(citation).toContain('2024;30(5):123-30.');
     // DOI in NLM "doi: " form
     expect(citation).toContain('doi: 10.1038/s41591-024-00001-0');
   });
@@ -639,7 +639,7 @@ describe('paginated records render byte-identically across every style', () => {
 
   it('formatVancouver', () => {
     expect(formatVancouver(sampleArticle)).toBe(
-      'Smith J, Doe JA, Johnson RB. A Novel Approach to Gene Therapy. Nat Med. 2024;30(5):123-130. doi: 10.1038/s41591-024-00001-0',
+      'Smith J, Doe JA, Johnson RB. A Novel Approach to Gene Therapy. Nat Med. 2024;30(5):123-30. doi: 10.1038/s41591-024-00001-0',
     );
   });
 });
@@ -1627,6 +1627,158 @@ describe('BibTeX and RIS page ranges written in full (#228)', () => {
   });
 });
 
+// ─── Vancouver page ranges, ISSN-L, and RIS title punctuation (#253) ─────────
+//
+// `MedlinePgn` is elided on indexed MEDLINE records but arrives in full on
+// publisher-supplied ones, so two articles of one journal cited different
+// forms. Vancouver writes every range in Citing Medicine's elided form.
+// `Journal/ISSN` is the medium NLM indexed the record from; BibTeX and RIS
+// print the journal's linking ISSN instead.
+
+describe('Vancouver page ranges in Citing Medicine form (#253)', () => {
+  const withPages = (pages: string): ParsedArticle => ({
+    ...sampleArticle,
+    journalInfo: { ...sampleArticle.journalInfo!, pages },
+  });
+  /** The pages Vancouver prints after `Year;Vol(Issue):`. */
+  const vancouverPages = (pages: string) =>
+    /^.*2024;30\(5\):(.*)\. doi: /.exec(formatVancouver(withPages(pages)))?.[1];
+  const bibtexPages = (pages: string) =>
+    /^ {2}pages\s+= \{(.*)\},$/m.exec(formatBibtex(withPages(pages)))?.[1];
+
+  it.each([
+    ['1637-1645', '1637-45'],
+    ['123-129', '123-9'],
+    ['1199-1201', '1199-201'],
+    ['99-101', '99-101'],
+    ['S12-S15', 'S12-5'],
+    ['e123-e129', 'e123-9'],
+    ['R1-R10', 'R1-10'],
+    ['S5-S15', 'S5-15'],
+    ['123-130', '123-30'],
+    ['1637\u{2013}1645', '1637\u{2013}45'],
+    ['1407-1408; author reply 1409-1410', '1407-8; author reply 1409-10'],
+    ['1308, 1310-1314', '1308, 1310-4'],
+  ])('elides %s to %s', (pages, elided) => {
+    expect(vancouverPages(pages)).toBe(elided);
+  });
+
+  it.each([
+    '637-41',
+    'S5-15',
+    'e58-65',
+    '1407-8; author reply 1409-10',
+    'e123',
+    'S12',
+    '662953',
+    '445',
+    'iii-v',
+    'xii-xv',
+    '865-878.e8',
+    'S12-e15',
+    '123-123',
+    'S5-S5',
+  ])('leaves %s unchanged', (pages) => {
+    expect(vancouverPages(pages)).toBe(pages);
+  });
+
+  it('writes an elided end back out to the end it came from', () => {
+    for (const pages of [
+      '1637-1645',
+      '123-129',
+      '1199-1201',
+      '99-101',
+      'S12-S15',
+      'e123-e129',
+      'R1-R10',
+      '1407-1408; author reply 1409-1410',
+    ]) {
+      const elided = vancouverPages(pages);
+      if (elided === undefined) throw new Error(`no Vancouver pages for ${pages}`);
+      expect(bibtexPages(elided), elided).toBe(pages);
+    }
+  });
+
+  it('cites two articles of one journal in one form, whatever form NLM gave', () => {
+    const elided = parseArticleSet(parseArticleSetXml(articleSetXml(RETRACTED_ARTICLE_XML)))[0];
+    const full = parseArticleSet(
+      parseArticleSetXml(
+        articleSetXml(
+          RETRACTION_NOTICE_XML.replace(
+            '<MedlinePgn>445</MedlinePgn>',
+            '<MedlinePgn>1637-1645</MedlinePgn>',
+          ),
+        ),
+      ),
+    )[0];
+    if (!elided || !full) throw new Error('fixture did not parse');
+    expect(formatVancouver(elided)).toContain('Lancet. 1998;351(9103):637-41.');
+    expect(formatVancouver(full)).toContain('Lancet. 2010;375(9713):1637-45.');
+  });
+
+  it("keeps APA's, MLA's, BibTeX's, and RIS's pagination byte-identical", () => {
+    const article = withPages('1637-1645');
+    expect(formatApa(article)).toContain('*30*(5), 1637\u{2013}1645.');
+    expect(formatMla(article)).toContain('2024, pp. 1637-1645.');
+    expect(bibtexPages('1637-1645')).toBe('1637-1645');
+    expect(formatRis(article)).toContain('SP  - 1637\nEP  - 1645\n');
+  });
+});
+
+describe('BibTeX and RIS ISSN: the journal linking ISSN (#253)', () => {
+  const parse = (xml: string) => {
+    const [article] = parseArticleSet(parseArticleSetXml(articleSetXml(xml)), {
+      includeIssnLinking: true,
+    });
+    if (!article) throw new Error('fixture did not parse');
+    return article;
+  };
+  const bibtexIssn = (article: ParsedArticle) =>
+    /^ {2}issn\s+= \{(.*)\},$/m.exec(formatBibtex(article))?.[1];
+  const risSn = (article: ParsedArticle) => formatRis(article).match(/^SN {2}- .*$/gm);
+
+  it('prints ISSN-L for a record NLM indexed from the electronic edition', () => {
+    // PMID 20137807: `<ISSN IssnType="Electronic">1474-547X</ISSN>`, ISSN-L 0140-6736
+    const notice = parse(RETRACTION_NOTICE_XML);
+    expect(bibtexIssn(notice)).toBe('0140-6736');
+    expect(risSn(notice)).toEqual(['SN  - 0140-6736']);
+  });
+
+  it('prints the same ISSN-L for a print-indexed record of that journal', () => {
+    // PMID 9500320: `<ISSN IssnType="Print">0140-6736</ISSN>`, ISSN-L 0140-6736
+    const article = parse(RETRACTED_ARTICLE_XML);
+    expect(bibtexIssn(article)).toBe('0140-6736');
+    expect(risSn(article)).toEqual(['SN  - 0140-6736']);
+  });
+
+  it('falls back to Journal/ISSN when the record carries no ISSN-L', () => {
+    const noLinking = parse(
+      RETRACTION_NOTICE_XML.replace('<ISSNLinking>0140-6736</ISSNLinking>', ''),
+    );
+    expect(bibtexIssn(noLinking)).toBe('1474-547X');
+    expect(risSn(noLinking)).toEqual(['SN  - 1474-547X']);
+  });
+});
+
+describe('RIS TI drops one trailing period (#253)', () => {
+  it('ends the title without its period, as BibTeX does', () => {
+    const article = parseArticleSet(parseArticleSetXml(articleSetXml(RETRACTED_ARTICLE_XML)))[0];
+    if (!article) throw new Error('fixture did not parse');
+    expect(formatRis(article)).toContain(
+      '\nTI  - Ileal-lymphoid-nodular hyperplasia, non-specific colitis, and pervasive developmental disorder in children\n',
+    );
+    expect(formatBibtex(article)).toContain(
+      '{Ileal-lymphoid-nodular hyperplasia, non-specific colitis, and pervasive developmental disorder in children}',
+    );
+  });
+
+  it('keeps a question mark, and drops only one of two periods', () => {
+    const titled = (title: string) => formatRis({ ...sampleArticle, title });
+    expect(titled('Is it safe?')).toContain('\nTI  - Is it safe?\n');
+    expect(titled('Wait for it..')).toContain('\nTI  - Wait for it.\n');
+  });
+});
+
 // ─── Hyphenated article numbers (#231) ───────────────────────────────────────
 //
 // American Society for Microbiology journals deposit `MedlinePgn` without the
@@ -1722,7 +1874,8 @@ describe('whitespace runs in record text collapse in every style (#233)', () => 
       const article = parsed(NHSC_XML.replace('NHSC at 50: New', broken));
       expect(article.title).toMatch(/^NHSC at 50:\n+New Investments/);
       expectOneLineEach(article);
-      expect(formatRis(article)).toContain(`\nTI  - ${TITLE}\n`);
+      // RIS drops the title's one trailing period, as BibTeX does (#253)
+      expect(formatRis(article)).toContain(`\nTI  - ${TITLE.replace(/\.$/, '')}\n`);
       expect(formatBibtex(article)).toMatch(
         /^ {2}title\s+= \{\{NHSC at 50: New Investments for a New Workforce\}\},$/m,
       );
@@ -1773,7 +1926,7 @@ describe('whitespace runs in record text collapse in every style (#233)', () => 
         'AU  - Nunez, Felix L',
         'AU  - Overbeck, Marc',
         'AU  - Kelly, Amanda Pears',
-        `TI  - ${TITLE}`,
+        `TI  - ${TITLE.replace(/\.$/, '')}`,
         'JF  - Journal of health care for the poor and underserved',
         'JO  - J Health Care Poor Underserved',
         'PY  - 2021',

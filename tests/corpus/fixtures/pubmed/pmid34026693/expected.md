@@ -81,7 +81,7 @@ AU  - Fishbein, Michael C
 AU  - Porritt, Rebecca A
 AU  - Noval Rivas, Magali
 AU  - Arditi, Moshe
-TI  - MicroRNA-223 Regulates the Development of Cardiovascular Lesions in LCWE-Induced Murine Kawasaki Disease Vasculitis by Repressing the NLRP3 Inflammasome.
+TI  - MicroRNA-223 Regulates the Development of Cardiovascular Lesions in LCWE-Induced Murine Kawasaki Disease Vasculitis by Repressing the NLRP3 Inflammasome
 JF  - Frontiers in pediatrics
 JO  - Front Pediatr
 PY  - 2021

@@ -119,8 +119,23 @@ const TITLES_ARTICLE = `<article article-type="research-article"><front><article
 </def-list></sec>
 </body></article>`;
 
+/** PMC10727567's repeated frameshift variant, in prose two subsection levels deep (#255). */
+const VARIANT = 'Both alleles carried p.His252Glnfs*21 and p.His252Glnfs*21 in exon 4.';
+const NESTED_ARTICLE = `<article article-type="case-report"><front><article-meta>
+<article-id pub-id-type="pmcid">PMC10727567</article-id>
+<title-group><article-title>A frameshift in two siblings</article-title></title-group>
+</article-meta></front><body>
+<sec><title>Results</title><p>Sizes were 41*47 mm and 10*8*6 mm.</p>
+<sec><title>Genetics</title><p>Sequencing of TP53_mutant and NM_003482.3 lines.</p>
+<sec><title>Variants</title><p>${VARIANT}</p></sec></sec></sec>
+</body></article>`;
+
 /** Saved PMC EFetch payloads by the id requested. */
-const ARTICLES: Record<string, string> = { '13546078': ARTICLE, '12696417': TITLES_ARTICLE };
+const ARTICLES: Record<string, string> = {
+  '13546078': ARTICLE,
+  '12696417': TITLES_ARTICLE,
+  '10727567': NESTED_ARTICLE,
+};
 
 let fetchSpy: ReturnType<typeof vi.spyOn>;
 
@@ -318,5 +333,51 @@ describe('pubmed_fetch_fulltext section and box titles (#169)', () => {
     expect(text).toContain(`\n#### ${escaped}\n`);
     expect(text.split('\n').some((line) => line.startsWith(`  - ${escaped} — `))).toBe(true);
     expect(text).not.toContain(`#### 1 ${MARKUP_TITLE}`);
+  });
+});
+
+describe('pubmed_fetch_fulltext section text escaping at every depth (#255)', () => {
+  const nested = (extra: Record<string, unknown> = {}) =>
+    fetchFulltext({ pmcids: ['PMC10727567'], ...extra });
+
+  /** Genetics' text: its own prose, then its `<sec>` past the schema's depth, flattened in. */
+  const GENETICS = `Sequencing of TP53_mutant and NM_003482.3 lines.\n\nVariants\n${VARIANT}`;
+
+  it('escapes section and subsection text in content[] and keeps it plain in structuredContent', async () => {
+    const { article, text } = await nested();
+    const results = article.sections[0];
+
+    expect(results?.text).toBe('Sizes were 41*47 mm and 10*8*6 mm.');
+    expect(results?.subsections?.[0]?.text).toBe(GENETICS);
+    expect(text).toContain('#### Results\nSizes were 41\\*47 mm and 10\\*8\\*6 mm.');
+    // Intraword underscores cannot emphasize and stay raw; the flattened
+    // section's block pairs its two `*` and escapes both.
+    expect(text).toContain(
+      '##### Genetics\nSequencing of TP53_mutant and NM_003482.3 lines.\n\nVariants\nBoth alleles carried p.His252Glnfs\\*21 and p.His252Glnfs\\*21 in exon 4.',
+    );
+  });
+
+  it('cuts the plain text under an outline budget exactly where the unescaped length puts the cut', async () => {
+    const { article, result, text } = await nested({ maxCharacters: 150, overflowMode: 'outline' });
+    const results = article.sections[0];
+    /** Genetics cut at the last word boundary inside its share: 100 plain characters. */
+    const kept = GENETICS.slice(0, GENETICS.indexOf(' p.His252Glnfs*21 in exon'));
+
+    expect(kept).toHaveLength(100);
+    expect(results?.text).toBe('Sizes were 41*47 mm and 10*8*6 mm.');
+    expect(results?.subsections?.[0]?.text).toBe(kept);
+    // Every count is measured off structuredContent; the escape adds bytes to content[] only.
+    expect(result.truncation?.articles[0]?.sections?.[0]).toMatchObject({
+      originalCharacters: 162,
+      returnedCharacters: 134,
+      truncated: true,
+      subsections: [
+        { title: 'Genetics', originalCharacters: 128, returnedCharacters: 100, truncated: true },
+      ],
+    });
+    // The escape runs on the kept text: the one `*` the cut left cannot pair and stays raw.
+    expect(text).toContain(
+      `#### Results\nSizes were 41\\*47 mm and 10\\*8\\*6 mm.\n\n##### Genetics\n${kept}`,
+    );
   });
 });

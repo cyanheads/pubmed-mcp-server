@@ -26,7 +26,7 @@ import {
 } from '@/services/openalex/types.js';
 import { conceptMeta, EDAM_DATA_RETRIEVAL, SCHEMA_SCHOLARLY_ARTICLE } from './_concepts.js';
 import { normalizePmid, pmidStringSchema } from './_schemas.js';
-import { escapeMarkdownInline } from './_text.js';
+import { escapeMarkdownInline, escapeMarkdownLineStart } from './_text.js';
 
 // ─── ELink XML types ─────────────────────────────────────────────────────────
 
@@ -896,20 +896,26 @@ export const findRelatedTool = tool('pubmed_find_related', {
     if (result.articles.length === 0) {
       lines.push('No related articles found.');
     } else {
+      const escaped = (part: string | undefined) => (part ? escapeMarkdownInline(part) : '');
       for (const a of result.articles) {
         lines.push(`- **[PMID ${a.pmid}](https://pubmed.ncbi.nlm.nih.gov/${a.pmid}/)**`);
-        if (a.title) lines.push(`  ${escapeMarkdownInline(a.title)}`);
+        // The title and meta lines open a line of the list item, where a
+        // leading `#`, `>` or `- ` would start a heading, quote or nested list,
+        // so the line start is escaped as well. (#255)
+        if (a.title) lines.push(`  ${escapeMarkdownLineStart(escapeMarkdownInline(a.title))}`);
         if (a.authors) lines.push(`  *${escapeMarkdownInline(a.authors)}*`);
         if (a.editors?.length)
           lines.push(`  edited by ${escapeMarkdownInline(a.editors.join(', '))}`);
         // A Bookshelf record has no journal: its book and publisher stand in
         // for the source so the row still names a venue. (#114)
-        const book = [a.bookTitle, a.publisherName].filter(Boolean).join(' — ');
+        const book = [escaped(a.bookTitle), escaped(a.publisherName)].filter(Boolean).join(' — ');
         // `citation` is every ordinary journal article; the segment earns its
         // place only when it flags a Bookshelf chapter or book. (#146)
         const docType = a.docType === 'citation' ? undefined : a.docType;
-        const meta = [a.source, book, docType, a.pubDate].filter(Boolean).join(', ');
-        if (meta) lines.push(`  ${meta}`);
+        const meta = [escaped(a.source), book, escaped(docType), escaped(a.pubDate)]
+          .filter(Boolean)
+          .join(', ');
+        if (meta) lines.push(`  ${escapeMarkdownLineStart(meta)}`);
       }
     }
     return [{ type: 'text', text: lines.join('\n') }];

@@ -2,7 +2,7 @@
  * @fileoverview PubMed citation tool — generates formatted citations (APA, MLA,
  * BibTeX, RIS, Vancouver) for one or more PubMed articles. A zero-padded PMID
  * is fetched and matched as the PMID it spells; `ids` is accepted as an alias
- * for `pmids`.
+ * for `pmids`, and `styles` for `format`.
  * @module src/mcp-server/tools/definitions/format-citations.tool
  */
 
@@ -19,7 +19,7 @@ import { parseArticleSet } from '@/services/ncbi/parsing/article-parser.js';
 import { conceptMeta, EDAM_DATA_FORMATTING, SCHEMA_CREATIVE_WORK } from './_concepts.js';
 import { noticeLines } from './_notices.js';
 import { normalizePmid, pmidStringSchema } from './_schemas.js';
-import { escapeMarkdownInline } from './_text.js';
+import { escapeMarkdownBlock, escapeMarkdownInline, markdownCodeFence } from './_text.js';
 
 const CitationStyleEnum = z.enum(['apa', 'mla', 'bibtex', 'ris', 'vancouver']);
 
@@ -71,8 +71,9 @@ export const formatCitationsTool = tool('pubmed_format_citations', {
 
   errors: [...NCBI_SERVICE_ERRORS] as const,
 
-  // Never advertised; rewritten to the canonical key before the schema parses. (#156)
-  inputAliases: { ids: 'pmids' },
+  // Never advertised; rewritten to the canonical key before the schema parses.
+  // `styles` is the word the `format` descriptions use. (#156, #254)
+  inputAliases: { ids: 'pmids', styles: 'format' },
 
   input: z.object({
     pmids: z.array(pmidStringSchema).min(1).max(50).describe('PubMed IDs to cite'),
@@ -152,16 +153,19 @@ export const formatCitationsTool = tool('pubmed_format_citations', {
     );
     // Reads both members of the set. Taking `PubmedArticleSet.PubmedArticle`
     // alone discards every NCBI Bookshelf record, leaving a chapter or book
-    // uncitable and its PMID reported unavailable. (#114)
-    const citations = parseArticleSet(raw?.PubmedArticleSet).map((parsed) => {
-      const notices = citationNotices(parsed);
-      return {
-        pmid: parsed.pmid,
-        title: parsed.title,
-        citations: formatCitations(parsed, formats),
-        ...(notices.length > 0 && { notices }),
-      };
-    });
+    // uncitable and its PMID reported unavailable. (#114) BibTeX and RIS cite
+    // the journal's linking ISSN, read here only. (#253)
+    const citations = parseArticleSet(raw?.PubmedArticleSet, { includeIssnLinking: true }).map(
+      (parsed) => {
+        const notices = citationNotices(parsed);
+        return {
+          pmid: parsed.pmid,
+          title: parsed.title,
+          citations: formatCitations(parsed, formats),
+          ...(notices.length > 0 && { notices }),
+        };
+      },
+    );
 
     const returnedPmids = new Set(citations.map((entry) => entry.pmid));
     const unavailablePmids = input.pmids.filter((pmid) => !returnedPmids.has(normalizePmid(pmid)));
@@ -194,12 +198,17 @@ export const formatCitationsTool = tool('pubmed_format_citations', {
       // Ahead of every style: a notice qualifies how each citation is read. The
       // blank line keeps Markdown from folding it into the title's paragraph.
       if (entry.notices?.length) lines.push('', ...noticeLines(entry.notices));
+      // BibTeX and RIS pass verbatim inside a fence no backtick run in them can
+      // close. APA and MLA are Markdown already — the formatter italicizes the
+      // journal and volume — and pass as they are; Vancouver is plain text
+      // carrying the record's own title and names, escaped as prose. (#255)
       for (const [style, citation] of Object.entries(entry.citations)) {
         lines.push(`\n### ${style.toUpperCase()}`);
         if (style === 'bibtex' || style === 'ris') {
-          lines.push(`\`\`\`${style}\n${citation}\n\`\`\``);
+          const fence = markdownCodeFence(citation);
+          lines.push(`${fence}${style}\n${citation}\n${fence}`);
         } else {
-          lines.push(citation);
+          lines.push(style === 'vancouver' ? escapeMarkdownBlock(citation, 'plain') : citation);
         }
       }
     }

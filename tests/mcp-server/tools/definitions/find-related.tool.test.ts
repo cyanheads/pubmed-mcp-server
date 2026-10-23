@@ -2198,3 +2198,48 @@ describe('findRelatedTool Doc Type rendering (issue #146)', () => {
     expect(text).not.toContain('citation');
   });
 });
+
+describe('findRelatedTool content[] escaping of the row lines (issue #255)', () => {
+  beforeEach(() => {
+    mockELink.mockReset();
+    mockESummary.mockReset();
+    mockExtractBriefSummaries.mockReset();
+    mockGetEpmcService.mockReturnValue(epmcService);
+    mockGetOaService.mockReturnValue(oaService);
+    mockELink.mockResolvedValue(eLinkResponse(['111', '222']));
+    mockESummary.mockResolvedValue({ eSummaryResult: {} });
+  });
+
+  const rows = [
+    {
+      pmid: '111',
+      title: '# Not a heading',
+      source: 'J *Bold* Res',
+      docType: 'citation',
+      pubDate: '2021 *Jan*',
+    },
+    {
+      pmid: '222',
+      title: 'Book record',
+      source: '> Lancet',
+      bookTitle: 'Book [1](x)',
+      publisherName: 'Pub _A_',
+      docType: '`chapter`',
+      pubDate: '1993',
+    },
+  ];
+
+  it('escapes the meta line and a block marker opening a row line, structuredContent unchanged', async () => {
+    mockExtractBriefSummaries.mockResolvedValue(rows);
+    const result = await runToolContract(findRelatedTool, { pmid: '34265844' });
+
+    const { articles } = result.structuredContent as { articles: Record<string, unknown>[] };
+    expect(articles[0]).toMatchObject(rows[0] ?? {});
+    expect(articles[1]).toMatchObject(rows[1] ?? {});
+
+    const text = contractText(result);
+    expect(text).toContain('\n  \\# Not a heading\n');
+    expect(text).toContain('\n  J \\*Bold\\* Res, 2021 \\*Jan\\*');
+    expect(text).toContain('\n  \\> Lancet, Book \\[1\\](x) — Pub \\_A\\_, \\`chapter\\`, 1993');
+  });
+});

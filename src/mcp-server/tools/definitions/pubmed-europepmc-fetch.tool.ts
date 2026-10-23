@@ -27,7 +27,7 @@ import {
   SCHEMA_SCHOLARLY_ARTICLE,
 } from './_concepts.js';
 import { europePmcSourceInputSchema } from './_schemas.js';
-import { escapeMarkdownInline } from './_text.js';
+import { escapeMarkdownBlock, escapeMarkdownInline } from './_text.js';
 
 const SourceEnum = z.enum(EUROPEPMC_ALL_SOURCES);
 
@@ -343,15 +343,19 @@ export const pubmedEuropepmcFetchTool = tool('pubmed_europepmc_fetch', {
   format: (result) => {
     const lines = ['## Europe PMC Records', `**Returned:** ${result.records.length}`];
 
+    // A pair's epmcId is the caller's, or Europe PMC's on a deferred one: escaped
+    // here, kept as written in the notices. (#255)
+    const pairs = (refs: { epmcId: string; source: string }[]) =>
+      escapeMarkdownInline(refs.map(formatPair).join(', '));
     if (result.notFound?.length) {
-      lines.push(`**Not found:** ${result.notFound.map(formatPair).join(', ')}`);
+      lines.push(`**Not found:** ${pairs(result.notFound)}`);
     }
 
     if (result.deferred) {
       const d = result.deferred;
       lines.push(
         `**Deferred by the response budget:** ${d.deferredCount} record(s) — ${d.returnedCharacters} of ${d.maxResponseCharacters} budgeted characters returned; next deferred record ${d.nextDeferredCharacters} characters`,
-        `Re-call \`pubmed_europepmc_fetch\` with these as \`records\` (\`source\`/\`epmcId\`): ${d.records.map(formatPair).join(', ')}`,
+        `Re-call \`pubmed_europepmc_fetch\` with these as \`records\` (\`source\`/\`epmcId\`): ${pairs(d.records)}`,
       );
     }
 
@@ -359,14 +363,16 @@ export const pubmedEuropepmcFetchTool = tool('pubmed_europepmc_fetch', {
       // Escaping is render-time only — the structuredContent values above stay
       // plain text; only these interpolations are neutralized. (#102)
       lines.push(`\n### ${escapeMarkdownInline(r.title ?? r.epmcId)}`);
-      lines.push(`**Source:** ${r.source} | **EPMC ID:** ${r.epmcId}`);
+      lines.push(`**Source:** ${r.source} | **EPMC ID:** ${escapeMarkdownInline(r.epmcId)}`);
       if (r.authors) lines.push(`**Authors:** ${escapeMarkdownInline(r.authors)}`);
       if (r.journal) lines.push(`**Journal:** ${escapeMarkdownInline(r.journal)}`);
-      if (r.firstPublicationDate) lines.push(`**Published:** ${r.firstPublicationDate}`);
-      if (r.pubYear) lines.push(`**Year:** ${r.pubYear}`);
-      if (r.pmid) lines.push(`**PMID:** ${r.pmid}`);
-      if (r.pmcId) lines.push(`**PMCID:** ${r.pmcId}`);
-      if (r.doi) lines.push(`**DOI:** ${r.doi}`);
+      if (r.firstPublicationDate) {
+        lines.push(`**Published:** ${escapeMarkdownInline(r.firstPublicationDate)}`);
+      }
+      if (r.pubYear) lines.push(`**Year:** ${escapeMarkdownInline(r.pubYear)}`);
+      if (r.pmid) lines.push(`**PMID:** ${escapeMarkdownInline(r.pmid)}`);
+      if (r.pmcId) lines.push(`**PMCID:** ${escapeMarkdownInline(r.pmcId)}`);
+      if (r.doi) lines.push(`**DOI:** ${escapeMarkdownInline(r.doi)}`);
       if (r.isOpenAccess !== undefined) {
         lines.push(`**Open Access:** ${r.isOpenAccess ? 'yes' : 'no'}`);
       }
@@ -375,7 +381,9 @@ export const pubmedEuropepmcFetchTool = tool('pubmed_europepmc_fetch', {
       }
       if (typeof r.citedByCount === 'number') lines.push(`**Cited by:** ${r.citedByCount}`);
       lines.push(`**URL:** ${r.epmcUrl}`);
-      if (r.abstract) lines.push(`\n#### Abstract\n${r.abstract}`);
+      // Plain text with no structure of its own, escaped as prose throughout,
+      // line starts included. (#255)
+      if (r.abstract) lines.push(`\n#### Abstract\n${escapeMarkdownBlock(r.abstract, 'plain')}`);
     }
 
     return [{ type: 'text', text: lines.join('\n') }];

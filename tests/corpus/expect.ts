@@ -41,9 +41,9 @@ export const fixtureExpectSchema = z
     abstractStartsWith: z.string().optional(),
     /** Section and subsection titles that must appear in this order (others may sit between). */
     sectionTitles: z.array(z.string()).optional(),
-    /** Substrings `content[]` must contain. */
+    /** Substrings `content[]` must show, its Markdown backslash escapes read as the characters they stand for. */
     contains: z.array(z.string()).optional(),
-    /** Substrings no surface may contain: neither `content[]` nor any `structuredContent` string. */
+    /** Substrings no surface may contain: neither `content[]` (as written or as shown) nor any `structuredContent` string. */
     notContains: z.array(z.string()).optional(),
     /** Substrings some single `structuredContent` string must contain. */
     structuredContains: z.array(z.string()).optional(),
@@ -117,11 +117,16 @@ export function checkExpect(
       at = found + 1;
     }
   }
+  // What a renderer shows: `format()` escapes upstream text with a backslash
+  // before ASCII punctuation, which a reader never sees. (#255)
+  const shown = text.replace(/\\([!-/:-@[-`{-~])/g, '$1');
   for (const needle of expect.contains ?? []) {
-    if (!text.includes(needle)) problems.push(`content[] lacks "${needle}"`);
+    if (!shown.includes(needle)) problems.push(`content[] lacks "${needle}"`);
   }
   for (const needle of expect.notContains ?? []) {
-    if (text.includes(needle)) problems.push(`content[] contains "${needle}"`);
+    if (text.includes(needle) || shown.includes(needle)) {
+      problems.push(`content[] contains "${needle}"`);
+    }
     if (strings.some((value) => value.includes(needle))) {
       problems.push(`structuredContent contains "${needle}"`);
     }

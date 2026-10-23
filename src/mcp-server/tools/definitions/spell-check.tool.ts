@@ -10,11 +10,12 @@ import { tool, z } from '@cyanheads/mcp-ts-core';
 import { NCBI_SERVICE_ERRORS, QUERY_INPUT_ERRORS } from '@/services/error-contracts.js';
 import { getNcbiService } from '@/services/ncbi/ncbi-service.js';
 import { conceptMeta, SCHEMA_SEARCH_ACTION } from './_concepts.js';
+import { markdownCodeSpan } from './_text.js';
 import { hasVisibleText } from './_visible-text.js';
 
 export const spellCheckTool = tool('pubmed_spell_check', {
   description:
-    'Spell-check a PubMed search query against NCBI ESpell and get the corrected query back. Use after a zero-hit or thin `pubmed_search_articles` result, or when a drug, gene, disease, or author name may be misspelled. Corrections are applied in place, so field tags, operators, spacing, and gene symbols stay as written (`alzhiemer diseese treatmnt outcomse` → `alzheimer disease treatment outcomes`). Words in all capitals, with digits or non-ASCII letters, or differing only in case are never changed, words after a number or symbol ESpell skips are left as written, and `hasSuggestion` is false when no correction was applied. Re-run the search with `corrected`.',
+    'Spell-check a PubMed search query against NCBI ESpell and get the corrected query back. Use after a zero-hit or thin `pubmed_search_articles` result, or when a drug, gene, disease, or author name may be misspelled. Corrections are applied in place, so field tags, operators, spacing, and gene symbols stay as written (`alzhiemer diseese treatmnt outcomse` → `alzheimer disease treatment outcomes`). Words in all capitals, with digits or non-ASCII letters, or differing only in case are never changed, nor is a single letter swapped for another (`q fever`, the initial in `smith q`), words after a number or symbol ESpell skips are left as written, and `hasSuggestion` is false when no correction was applied. Re-run the search with `corrected`.',
   annotations: { readOnlyHint: true, openWorldHint: true },
   _meta: conceptMeta([SCHEMA_SEARCH_ACTION]),
   sourceUrl:
@@ -40,7 +41,7 @@ export const spellCheckTool = tool('pubmed_spell_check', {
     corrected: z
       .string()
       .describe(
-        "The query with ESpell's accepted corrections applied in place; field tags, operators, spacing, and words in capitals or with digits are kept as written. Same as `original` when `hasSuggestion` is false.",
+        "The query with ESpell's accepted corrections applied in place; field tags, operators, spacing, words in capitals or with digits, and a single letter ESpell would swap for another are kept as written. Same as `original` when `hasSuggestion` is false.",
       ),
     hasSuggestion: z
       .boolean()
@@ -68,19 +69,21 @@ export const spellCheckTool = tool('pubmed_spell_check', {
     };
   },
 
+  // Both queries are code spans: a caller re-runs `corrected` as written, so its
+  // field tags, wildcards and operators must read exactly, raw and rendered. (#255)
   format: (result) => {
     if (result.hasSuggestion) {
       return [
         {
           type: 'text',
-          text: `**Suggestion:** "${result.corrected}" (original: "${result.original}")`,
+          text: `**Suggestion:** ${markdownCodeSpan(result.corrected)} (original: ${markdownCodeSpan(result.original)})`,
         },
       ];
     }
     return [
       {
         type: 'text',
-        text: `No correction applied — query "${result.original}" is returned as written.`,
+        text: `No correction applied — query ${markdownCodeSpan(result.original)} is returned as written.`,
       },
     ];
   },

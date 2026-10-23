@@ -52,36 +52,36 @@ The structure of the remaining content is as follows:
 4. In the section 4 Provided numerical experiments, and two examples provided for the effectiveness of results.
 5. In section 5 made conclusions
 
-Notation. Given that R represents the set of real numbers, R^{n} and R^{n_{1}×n_{2}} indicate the n-dimensional real vector space and n_{1}×n_{2} real matrices, respectively. Here, I_{n} stands for the n-dimensional identity matrix, and “T” signifies matrix transposition. The notation λ_{max}(S) denotes the maximum eigenvalue of matrix S, where S is a real matrix. For a vector z∈R^{n}, its norm is described as |z|=\sqrt{z^{T}z}.
+Notation. Given that R represents the set of real numbers, R^{n} and R^{n\_{1}×n\_{2}} indicate the n-dimensional real vector space and n\_{1}×n\_{2} real matrices, respectively. Here, I\_{n} stands for the n-dimensional identity matrix, and “T” signifies matrix transposition. The notation λ\_{max}(S) denotes the maximum eigenvalue of matrix S, where S is a real matrix. For a vector z∈R^{n}, its norm is described as |z|=\sqrt{z^{T}z}.
 
 #### 2 Preliminaries
 
 ##### 2.1 Communication typologies
-Let G = (V, E) be a directed weighted graph, which consists of a set of nodes V={v_{1},v_{2},...,v_{N}} and a set of directed edges E⊂{(v_{i},v_{j}):v_{i},v_{j}∈V}. Each directed edge (v_{i},v_{j}) denotes an edge starting at node v_{i} and ending at node v_{j}, where v_{i} and v_{j} are referred to as the tail and head, respectively. N_{i}={v_{j} | (v_{j},v_{i})∈E} denotes the set of neighbors of node v_{i}. A weighted adjacency matrix A=(a_{ij})_{N×N}, where a_{ij}>0 if (v_{i},v_{j})∈E, else a_{ij}=0. A directed spanning tree of the digraph G is a sub-graph of G where the directed edges allow the root node to reach every other node.
+Let G = (V, E) be a directed weighted graph, which consists of a set of nodes V={v\_{1},v\_{2},...,v\_{N}} and a set of directed edges E⊂{(v\_{i},v\_{j}):v\_{i},v\_{j}∈V}. Each directed edge (v\_{i},v\_{j}) denotes an edge starting at node v\_{i} and ending at node v\_{j}, where v\_{i} and v\_{j} are referred to as the tail and head, respectively. N\_{i}={v\_{j} | (v\_{j},v\_{i})∈E} denotes the set of neighbors of node v\_{i}. A weighted adjacency matrix A=(a\_{ij})\_{N×N}, where a\_{ij}>0 if (v\_{i},v\_{j})∈E, else a\_{ij}=0. A directed spanning tree of the digraph G is a sub-graph of G where the directed edges allow the root node to reach every other node.
 
-The Laplacian matrix L=(l_{ij})_{N×N} of graph G is defined as follows:
+The Laplacian matrix L=(l\_{ij})\_{N×N} of graph G is defined as follows:
 
-l_{ij}={−a_{ij}, & i≠j \\ ∑_{k=1 \\ k≠i}^{N}a_{ik}, & i=j.
+l\_{ij}={−a\_{ij}, & i≠j \\\ ∑\_{k=1 \\\ k≠i}^{N}a\_{ik}, & i=j.
 
-It is evident that ∑_{j=1}^{N}l_{ij}=0 for i=1,2,...,N.
+It is evident that ∑\_{j=1}^{N}l\_{ij}=0 for i=1,2,...,N.
 
 Lemma 2.1 [30] Inequality hold for the matrices L, M, N
 
-(L & M \\ M^{T} & N)<0.
+(L & M \\\ M^{T} & N)<0.
 
 Which also hold the (N−M^{T}L^{−1}M)<0 and L<0.
 
-Lemma 2.2 [29] Given matrices L∈R^{n×n} and M∈R^{r×r} with eigenvalues ζ_{1},ζ_{2},…,ζ_{n} and ψ_{1},ψ_{2},…,ψ_{r} respectively, the eigenvalues of their Kronecker product L⊗M can be expressed as ζ_{i}ψ_{j} for i=1,2,…,n and j=1,2,…,r.
+Lemma 2.2 [29] Given matrices L∈R^{n×n} and M∈R^{r×r} with eigenvalues ζ\_{1},ζ\_{2},…,ζ\_{n} and ψ\_{1},ψ\_{2},…,ψ\_{r} respectively, the eigenvalues of their Kronecker product L⊗M can be expressed as ζ\_{i}ψ\_{j} for i=1,2,…,n and j=1,2,…,r.
 
-Lemma 2.3 [28] Suppose that u[k]∈R^{n} and z_{i}[k]∈R^{n} (where z_{i}[k] represents the state of agents) are discrete functions. Then the following relationship holds:
+Lemma 2.3 [28] Suppose that u[k]∈R^{n} and z\_{i}[k]∈R^{n} (where z\_{i}[k] represents the state of agents) are discrete functions. Then the following relationship holds:
 
-∇_{T}^{α}(u^{T}[k]u[k])≤2u^{T}[k] ∇_{T}^{α}u[k] ∀α∈(0,1),
+∇\_{T}^{α}(u^{T}[k]u[k])≤2u^{T}[k] ∇\_{T}^{α}u[k] ∀α∈(0,1),
 
 where ∇_{T}^{α} is the discrete-time fractional difference operator. We now consider a general discrete fractional nonlinear equation with time delay:
 
-∇_{T}^{α}z_{i}[k]=f(k,z_{k}) k≥k_{0},
+∇\_{T}^{α}z\_{i}[k]=f(k,z\_{k}) k≥k\_{0},
 
-where 0<α≤1, z_{k}[ξ]=z_{i}[k+ξ] for ξ∈{−r,…,0}, and f maps R× (bounded sets of N) into bounded sets of R^{n}, satisfying f(k,0)=0.
+where 0<α≤1, z\_{k}[ξ]=z\_{i}[k+ξ] for ξ∈{−r,…,0}, and f maps R× (bounded sets of N) into bounded sets of R^{n}, satisfying f(k,0)=0.
 
 Definition 2.1 [32] A function f:R^{r}×R→R^{r} is said to be QUAD(Δ,η) if there exists a positive constant η and a diagonal matrix Δ∈R^{r×r} such that:
 
@@ -91,59 +91,59 @@ for any m,n∈R^{r}.
 
 Definition 2.2 [38] The discrete-time difference operator of order α for a function f(k) is defined as:
 
-∇_{T}^{α}f(k)=\frac{1}{T^{α}}∑_{r=0}^{⌊\frac{k}{T}⌋}(−1)^{r}(α \\ r)f(k−rT), α>0,
+∇\_{T}^{α}f(k)=\frac{1}{T^{α}}∑\_{r=0}^{⌊\frac{k}{T}⌋}(−1)^{r}(α \\\ r)f(k−rT), α>0,
 
 where T is the time step. For convenience, when T = 1, this reduces to:
 
-∇^{α}f(k)=∑_{r=0}^{k}(−1)^{r}(α \\ r)f(k−r).
+∇^{α}f(k)=∑_{r=0}^{k}(−1)^{r}(α \\\ r)f(k−r).
 
 #### 3 Problem formation
 The paper explores the complexity of Byzantine attacks, including weaknesses related to both actuators and sensors, by examining a leader-following consensus framework for fractional-order nonlinear multi-agent systems. The paper provides brief conditions based on fractional-order concepts to strengthen consensus dynamics through a careful investigation. These settings are designed to foster positive agent interaction while strengthening resistance to harmful interference. The research provides useful tactics for enhancing system security and resilience in complex operating situations by examining fractional-order dynamics in combination with several attack vectors.
 
 Consider a MAS consists of n agents, then the dynamics of follower i-th agents can be described as.
 
-(1) ∇_{T}^{α}z_{i}(k+1)=Mz_{i}(k)+h(k,z_{i}(k))+(u_{i}(k)+g_{i}(k)).
+(1) ∇\_{T}^{α}z\_{i}(k+1)=Mz\_{i}(k)+h(k,z\_{i}(k))+(u\_{i}(k)+g\_{i}(k)).
 
-Where z_{i}(k), u_{i}(k), h(k,z_{i}(k)), and g_{i}(k) show the state of follower agent, control input, nonlinear function, and attack signals on the follower agent respectively. M is a constant matrix.
+Where z\_{i}(k), u\_{i}(k), h(k,z\_{i}(k)), and g\_{i}(k) show the state of follower agent, control input, nonlinear function, and attack signals on the follower agent respectively. M is a constant matrix.
 
 Similarly, the dynamics of leader agents.
 
-(2) ∇_{T}^{α}z_{0}(k+1)=Mz_{0}(k)+h(k,z_{0}(k))+u_{0}(k).
+(2) ∇\_{T}^{α}z\_{0}(k+1)=Mz\_{0}(k)+h(k,z\_{0}(k))+u\_{0}(k).
 
-Where z_{0}(k), u_{0}(k) and h(k,z_{0}(k)) denote the state of the leader agent, control input, and nonlinear function respectively.
+Where z\_{0}(k), u\_{0}(k) and h(k,z\_{0}(k)) denote the state of the leader agent, control input, and nonlinear function respectively.
 
 ##### 3.1 Effect of attacks on MAS
 The MAS under the actuator attack can be represented as
 
-(3) u_{i}^{c^{˜}}(k)=u_{i}(k)+λ_{i}u_{i}^{b}(k).
+(3) u\_{i}^{c^{˜}}(k)=u\_{i}(k)+λ\_{i}u\_{i}^{b}(k).
 
-Where u_{i}(k), u_{i}^{c}(k) and u_{i}^{b}(k) represents the nominal state, corrupted control input and attack signals. The attack occurs only if λ_{i}=1; otherwise λ_{0}=0.
+Where u\_{i}(k), u\_{i}^{c}(k) and u\_{i}^{b}(k) represents the nominal state, corrupted control input and attack signals. The attack occurs only if λ\_{i}=1; otherwise λ\_{0}=0.
 
 The MAS under the sensor attack which can be expressed as
 
-(4) z_{i}^{c}(k)=z_{i}(k)+γ_{i}z_{i}^{b}(k).
+(4) z\_{i}^{c}(k)=z\_{i}(k)+γ\_{i}z\_{i}^{b}(k).
 
-Where z_{i}^{c}(k), z_{i}(k), z_{i}^{b}(k) shows the corrupted input, nominal state and attack signal. Similarly attack only when if γ_{i}=1 otherwise γ_{i}=0.
+Where z\_{i}^{c}(k), z\_{i}(k), z\_{i}^{b}(k) shows the corrupted input, nominal state and attack signal. Similarly attack only when if γ\_{i}=1 otherwise γ\_{i}=0.
 
 Now combining the effect of both attacks Eq (3) and Eq (4) we can write such that.
 
-(5) g_{i}(k)=λu_{i}^{b}(k)+d_{k}∑_{m_{i}}a_{ij}[γ_{j}z_{j}^{b}(k)−γ_{i}z_{i}^{b}(k)].
+(5) g\_{i}(k)=λu\_{i}^{b}(k)+d\_{k}∑\_{m\_{i}}a\_{ij}[γ\_{j}z\_{j}^{b}(k)−γ\_{i}z\_{i}^{b}(k)].
 
-Where actuator attack and sensor attack are represented by z_{i}^{b}(k) and u_{i}^{b}(k), respectively, z_{j}^{b}(k) represents the attack signals with nearby j of agent i. Where d_{k} and a_{ij} represent the scaler gain, and (i, j) adjacency matrix A.
+Where actuator attack and sensor attack are represented by z\_{i}^{b}(k) and u\_{i}^{b}(k), respectively, z\_{j}^{b}(k) represents the attack signals with nearby j of agent i. Where d\_{k} and a\_{ij} represent the scaler gain, and (i, j) adjacency matrix A.
 
 Now design a control protocol under the effect of both attacks combining Eq (5).
 
-(6) u_{i}(k)=K∑_{j=1}^{N}a_{ij}(z_{j}(k)−z_{i}(k))+Ka_{i0}(z_{0}(k))+λ_{i}u_{i}^{b}(k)+d_{k}∑_{j=1}^{N}a_{ij}(γ_{j}z_{j}^{b}(k)−γ_{i}z_{i}^{b}(k)).
+(6) u\_{i}(k)=K∑\_{j=1}^{N}a\_{ij}(z\_{j}(k)−z\_{i}(k))+Ka\_{i0}(z\_{0}(k))+λ\_{i}u\_{i}^{b}(k)+d\_{k}∑\_{j=1}^{N}a\_{ij}(γ\_{j}z\_{j}^{b}(k)−γ\_{i}z\_{i}^{b}(k)).
 
-Where u_{i}(k) is the control input for the i-th follower agent. K is Controller gain. a_{ij} is the adjacency matrix element representing connectivity between agents, x_{j}(k) represents the state of the j-th agent at time k, x_{0}(k) also represents the state of the leader agent at time k. λ_{i} indicates actuator attack occurrence on the i-th follower agent, u_{i}^{b}(k) actuator attack signal, d_{k} is scalar gain for sensor attack compensation, γ_{j} also indicates sensor attack occurrence on the j-th follower agent, z_{j}^{b}(k) is sensor attack signal for the j-th follower agent. γ_{i} also indicator of sensor attack occurrence on the i-th follower agent and z_{i}^{b}(k) is sensor attack signal for the i-th follower agent. Nonlinear with directed connected graph agents under the sensor attack and actuator attack shown in Fig. 1.
+Where u\_{i}(k) is the control input for the i-th follower agent. K is Controller gain. a\_{ij} is the adjacency matrix element representing connectivity between agents, x\_{j}(k) represents the state of the j-th agent at time k, x\_{0}(k) also represents the state of the leader agent at time k. λ\_{i} indicates actuator attack occurrence on the i-th follower agent, u\_{i}^{b}(k) actuator attack signal, d\_{k} is scalar gain for sensor attack compensation, γ\_{j} also indicates sensor attack occurrence on the j-th follower agent, z\_{j}^{b}(k) is sensor attack signal for the j-th follower agent. γ\_{i} also indicator of sensor attack occurrence on the i-th follower agent and z\_{i}^{b}(k) is sensor attack signal for the i-th follower agent. Nonlinear with directed connected graph agents under the sensor attack and actuator attack shown in Fig. 1.
 
 [Figure: Figure 1]
 
 Definition 3.1 [27] The follower-leader Eq (1)-(2) consensus converges to zero under the control protocol Eq (6) when i=1,2,3,..., N.
 
-(7) lim_{k→∞}⁡‖z_{i}(t)−z_{0}(t)‖=0.
+(7) lim\_{k→∞}⁡‖z\_{i}(t)−z\_{0}(t)‖=0.
 
-So, the error lim_{k→∞}⁡‖σ_{i}(k)‖=0.
+So, the error lim\_{k→∞}⁡‖σ\_{i}(k)‖=0.
 
 We make some lemmas and hypothesis:
 
@@ -153,61 +153,61 @@ We make some lemmas and hypothesis:
 
 Remark 3.1 A positive real component of the eigenvalues of the matrix H⊗K indicates a link between the square of matrix H and the positively of real sections of eigenvalues if the condition (H_{2}) in Lemma 2.2 is met. This need is necessary in order to ensure convergence or stability.
 
-Theorem 3.2 The leader-following consensus of system Eq (1) and Eq (2) under the control law Eq (6) may be reached as long as (H_{1}) and (H_{2}) hold, and there exist a scalar Q>0 and a positive definite matrix S>0 such that,
+Theorem 3.2 The leader-following consensus of system Eq (1) and Eq (2) under the control law Eq (6) may be reached as long as (H\_{1}) and (H\_{2}) hold, and there exist a scalar Q>0 and a positive definite matrix S>0 such that,
 
-(8) I_{N}⊗(M+M^{T}+2Δ−2ηI_{n}+βI_{n}+S)+\frac{1}{β}(H^{T}⊗K^{T})(H⊗K)<0
+(8) I\_{N}⊗(M+M^{T}+2Δ−2ηI\_{n}+βI\_{n}+S)+\frac{1}{β}(H^{T}⊗K^{T})(H⊗K)<0
 
 and
 
-(9) I_{N}⊗(βI_{n}−S)+\frac{1}{β}(I_{N}⊗N^{T})(I_{N}⊗N)<0.
+(9) I\_{N}⊗(βI\_{n}−S)+\frac{1}{β}(I\_{N}⊗N^{T})(I\_{N}⊗N)<0.
 
-Proof We take σ_{i}(k)=z_{i}(k)−z_{0}(k), for i=1,2,…,N. As the leader-following consensus requires that σ_{i}(k)→0 as k→∞, which aligns with the convergence requirement stated in Eq (7), lim_{k→∞}⁡‖z_{i}(t)−z_{0}(t)‖=lim_{k→∞}⁡‖σ_{i}(k)‖=0. Subtracting Eq (1) from Eq (6) and using Eq (5), we get
+Proof We take σ\_{i}(k)=z\_{i}(k)−z\_{0}(k), for i=1,2,…,N. As the leader-following consensus requires that σ\_{i}(k)→0 as k→∞, which aligns with the convergence requirement stated in Eq (7), lim\_{k→∞}⁡‖z\_{i}(t)−z\_{0}(t)‖=lim\_{k→∞}⁡‖σ\_{i}(k)‖=0. Subtracting Eq (1) from Eq (6) and using Eq (5), we get
 
-(10) ∇_{T}^{α}σ(k)=Mσ_{i}(k)+h(k,z_{i}(k))−h(k,z_{0}(k)) +K∑_{j=1}^{N}a_{ij}(σ_{j}(k)−σ_{i}(k))+Ka_{i0}(σ_{0}(k))+λ_{i}u_{i}^{b}(k) +d_{k}∑_{j=1}^{N}a_{ij}(γ_{j}σ_{j}^{b}(k)−γ_{i}σ_{i}^{b}(k)).
+(10) ∇\_{T}^{α}σ(k)=Mσ\_{i}(k)+h(k,z\_{i}(k))−h(k,z\_{0}(k)) +K∑\_{j=1}^{N}a\_{ij}(σ\_{j}(k)−σ\_{i}(k))+Ka\_{i0}(σ\_{0}(k))+λ\_{i}u\_{i}^{b}(k) +d\_{k}∑\_{j=1}^{N}a\_{ij}(γ\_{j}σ\_{j}^{b}(k)−γ\_{i}σ\_{i}^{b}(k)).
 
 Choose the Lyapunov function in quadratic form,
 
-υ(k)=∑_{i=1}^{N}σ_{i}^{T}(k)σ_{i}(k).
+υ(k)=∑\_{i=1}^{N}σ\_{i}^{T}(k)σ\_{i}(k).
 
 Taking the derivative of order α of the Lyapunov function, using Lemma 2.3, and solving Eq (10),
 
-∇_{T}^{α}υ(k)≤2∑_{i=1}^{N}σ_{i}(k)∇_{T}^{α}σ_{i}(k)
+∇\_{T}^{α}υ(k)≤2∑\_{i=1}^{N}σ\_{i}(k)∇\_{T}^{α}σ\_{i}(k)
 
-(11) =2∑_{i=1}^{N}σ_{i}^{T}(k)[Mσ_{i}(k)+h(k,z_{i}(k))−h(k,z_{0}(k)) +K∑_{j=1}^{N}a_{ij}(σ_{j}(k)−σ_{i}(k))+Ka_{i0}(σ_{0}(k))+λ_{i}u_{i}^{b}(k) +d_{k}∑_{j=1}^{N}a_{ij}(γ_{j}σ_{j}^{b}(k)−γ_{i}σ_{i}^{b}(k))].
+(11) =2∑\_{i=1}^{N}σ\_{i}^{T}(k)[Mσ\_{i}(k)+h(k,z\_{i}(k))−h(k,z\_{0}(k)) +K∑\_{j=1}^{N}a\_{ij}(σ\_{j}(k)−σ\_{i}(k))+Ka\_{i0}(σ\_{0}(k))+λ\_{i}u\_{i}^{b}(k) +d\_{k}∑\_{j=1}^{N}a\_{ij}(γ\_{j}σ\_{j}^{b}(k)−γ\_{i}σ\_{i}^{b}(k))].
 
 By using the Definition 2.1 and satisfying the hypothesis,
 
-(12) σ_{i}^{T}(k)[h(k,z_{i}(k))−h(k,z_{0}(k))]≤σ_{i}^{T}(k)(Δ−ηI_{n})σ_{i}(k).
+(12) σ\_{i}^{T}(k)[h(k,z\_{i}(k))−h(k,z\_{0}(k))]≤σ\_{i}^{T}(k)(Δ−ηI\_{n})σ\_{i}(k).
 
 By using the Eq (12), we can write the Eq (11)
 
-∇_{T}^{α}σ_{i}(k)≤2∑_{i=1}^{N}σ_{i}^{T}(k)(M+Δ−ηI_{n})σ_{i}(k) +2d_{k}∑_{i=1}^{N}σ_{i}(I_{N}⊗N)∑_{j=1}^{N}γ_{j}σ_{j}^{b}u_{i}^{b}(k) +λ_{i}u_{i}^{b}(k)−2∑_{i=1}^{N}σ_{i}^{T}(k)∑_{j=1}^{N}l_{ij}σ_{j}(k)−2∑_{i=1}^{N}a_{i0}σ_{i}^{T}(k)Kσ_{i}(k).
+∇\_{T}^{α}σ\_{i}(k)≤2∑\_{i=1}^{N}σ\_{i}^{T}(k)(M+Δ−ηI\_{n})σ\_{i}(k) +2d\_{k}∑\_{i=1}^{N}σ\_{i}(I\_{N}⊗N)∑\_{j=1}^{N}γ\_{j}σ\_{j}^{b}u\_{i}^{b}(k) +λ\_{i}u\_{i}^{b}(k)−2∑\_{i=1}^{N}σ\_{i}^{T}(k)∑\_{j=1}^{N}l\_{ij}σ\_{j}(k)−2∑\_{i=1}^{N}a\_{i0}σ\_{i}^{T}(k)Kσ\_{i}(k).
 
-∇_{T}^{α}υ(k)≤2∑_{i=1}^{N}σ_{i}^{T}(k)(M+Δ−ηI_{n}+L)σ_{i}(k) −2σ^{T}(k)(I_{N}⊗L)σ(k)−2∑_{i=1}^{N}a_{i0}σ_{i}^{T}(k)Kσ_{i}(k).
+∇\_{T}^{α}υ(k)≤2∑\_{i=1}^{N}σ\_{i}^{T}(k)(M+Δ−ηI\_{n}+L)σ\_{i}(k) −2σ^{T}(k)(I\_{N}⊗L)σ(k)−2∑\_{i=1}^{N}a\_{i0}σ\_{i}^{T}(k)Kσ\_{i}(k).
 
 To satisfy equation (8), using Lemma 2.3, rewrite in the form,
 
-σ^{T}(k)[2(M+M^{T}+2Δ−2ηI_{n}+L)⊗I_{n}]σ(k).
+σ^{T}(k)[2(M+M^{T}+2Δ−2ηI\_{n}+L)⊗I\_{n}]σ(k).
 
 Thus, to satisfy equation (8),
 
-2(M+M^{T}+2Δ−2ηI_{n}+L)⊗I_{n}+\frac{1}{β}(H^{T}⊗K^{T})(H⊗K)<0.
+2(M+M^{T}+2Δ−2ηI\_{n}+L)⊗I\_{n}+\frac{1}{β}(H^{T}⊗K^{T})(H⊗K)<0.
 
 For equation (9), rewrite involving K as,
 
-−2σ^{T}(k)(I_{N}⊗(βI_{n}−S))σ(k).
+−2σ^{T}(k)(I\_{N}⊗(βI\_{n}−S))σ(k).
 
 Therefore, to satisfy equation (9),
 
-I_{N}⊗(βI_{n}−S)+\frac{1}{β}(I_{N}⊗N^{T})(I_{N}⊗N)<0.
+I\_{N}⊗(βI\_{n}−S)+\frac{1}{β}(I\_{N}⊗N^{T})(I\_{N}⊗N)<0.
 
 From Lemma 2.3 and equations (8) and Eq (9), we conclude that,
 
-(I_{n}⊗(M+M^{T}+2Δ+βI_{n}+S) & −H⊗K \\ −H^{T}⊗K^{T} & −βI_{n}⊗I_{n})<0
+(I\_{n}⊗(M+M^{T}+2Δ+βI\_{n}+S) & −H⊗K \\\ −H^{T}⊗K^{T} & −βI\_{n}⊗I\_{n})<0
 
 and
 
-(I_{N}⊗(βI_{n}−S) & I_{n}⊗N \\ I_{N}⊗N^{T} & −βI_{N}⊗I_{n})<0.
+(I\_{N}⊗(βI\_{n}−S) & I\_{n}⊗N \\\ I\_{N}⊗N^{T} & −βI\_{N}⊗I\_{n})<0.
 
 Thus, we conclude that equation that the system asymptotically stable and the consensus of the system is achieved. □
 
@@ -216,7 +216,7 @@ In the numerical experiments, we provide two examples for the effectiveness and 
 
 Example 4.1 We consider that there is leader and four follower MAS which shown in Fig. 2. The error trajectories of MAS shown in Fig. 3. The Fig. 4 shows the influence of sensor and actuator attacks on one leader and four follower multi-agents and the Fig. 5 shows the impact of both attacks on control protocol performance. Let us define the matrices M and N such that
 
-M=(−4.4 & 0 & 1.2 \\ 0 & −4.3 & 0 \\ 0.9 & 0 & −4.6),and N=(0.3 & 0 & 0 \\ 0.2 & 0.4 & 0 \\ 0 & 0 & 0.16).
+M=(−4.4 & 0 & 1.2 \\\ 0 & −4.3 & 0 \\\ 0.9 & 0 & −4.6),and N=(0.3 & 0 & 0 \\\ 0.2 & 0.4 & 0 \\\ 0 & 0 & 0.16).
 
 [Figure: Figure 2]
 
@@ -228,30 +228,30 @@ M=(−4.4 & 0 & 1.2 \\ 0 & −4.3 & 0 \\ 0.9 & 0 & −4.6),and N=(0.3 & 0 & 0 \\
 
 We define the network communication according to Fig. 2,
 
-A=(0 & 0 & 0 & 0.7 \\ 1.5 & 0 & 0 & 0 \\ 0 & 0 & 0 & 0.6 \\ 0 & 0 & 0.10 & 0),and A_{0}=(0.3 & 0 & 0 & 0 \\ 0 & 0 & 0 & 0 \\ 0 & 0 & 0 & 0 \\ 0 & 0 & 0 & 0.6).
+A=(0 & 0 & 0 & 0.7 \\\ 1.5 & 0 & 0 & 0 \\\ 0 & 0 & 0 & 0.6 \\\ 0 & 0 & 0.10 & 0),and A_{0}=(0.3 & 0 & 0 & 0 \\\ 0 & 0 & 0 & 0 \\\ 0 & 0 & 0 & 0 \\\ 0 & 0 & 0 & 0.6).
 
 Similarly, we can write the Laplacian matrix L and H, we get it as follows L=H=L+A_{0} such that,
 
-L=(0.7 & 0 & 0 & 0.7 \\ −1.5 & 1.5 & 0 & 0 \\ 0 & 0 & 0.6 & −0.6 \\ 0 & 0 & −0.10 & 1.5),and H=(0.9 & 0 & 0 & −0.7 \\ −1.5 & −1.5 & 0 & 0 \\ 0 & 0 & 0.6 & −0.5 \\ 0 & 0 & −0.10 & 1.5).
+L=(0.7 & 0 & 0 & 0.7 \\\ −1.5 & 1.5 & 0 & 0 \\\ 0 & 0 & 0.6 & −0.6 \\\ 0 & 0 & −0.10 & 1.5),and H=(0.9 & 0 & 0 & −0.7 \\\ −1.5 & −1.5 & 0 & 0 \\\ 0 & 0 & 0.6 & −0.5 \\\ 0 & 0 & −0.10 & 1.5).
 
-We define η=0.6, α=0.9, Δ=(0.7 & 0 & 0 \\ 0 & 0.7 & 0 \\ 0 & 0 & 0.7), and h(k,z_{i}(k))=\frac{1}{6}sinz_{i}(k). Given,
+We define η=0.6, α=0.9, Δ=(0.7 & 0 & 0 \\\ 0 & 0.7 & 0 \\\ 0 & 0 & 0.7), and h(k,z\_{i}(k))=\frac{1}{6}sinz\_{i}(k). Given,
 
-• Actuator attack signal u_{i}^{b}(k)=0.5.
-• Actuator attack indicator λ_{i} = 1 (attack occurs).
-• Sensor attack signal z_{i}^{b}(k)=0.3.
-• Sensor attack indicator γ_{i} = 1 (attack occurs).
-• Scalar gain for sensor attack compensation d_{k}=0.2.
+• Actuator attack signal u\_{i}^{b}(k)=0.5.
+• Actuator attack indicator λ\_{i} = 1 (attack occurs).
+• Sensor attack signal z\_{i}^{b}(k)=0.3.
+• Sensor attack indicator γ\_{i} = 1 (attack occurs).
+• Scalar gain for sensor attack compensation d\_{k}=0.2.
 • Adjacency matrix A as provided earlier,
 
 The expression for g_{i}(k) is,
 
-g_{i}(k)=λ_{i}u_{i}^{b}(k)+d_{k}∑_{j=1}^{N}a_{ij}[γ_{j}z_{j}^{b}(k)−γ_{i}z_{i}^{b}(k)].
+g\_{i}(k)=λ\_{i}u\_{i}^{b}(k)+d\_{k}∑\_{j=1}^{N}a\_{ij}[γ\_{j}z\_{j}^{b}(k)−γ\_{i}z\_{i}^{b}(k)].
 
 Substituting the given numerical values and the adjacency matrix,
 
 g_{i}(k)=1×0.5+0.2×(0×(0.3−0.3)+1.5×(0.3−0.3)+0×(0.3−0.3)+0.7×(0.3−0.3))=0.5+0=0.5.
 
-Where β=0.6,S=(0.8 & 0 & 0.09 \\ 0 & 0.6 & 0 \\ 0.09 & 0 & 0.7) and K=(0.3 & 0 & 0 \\ 0.4 & 0.5 & 0 \\ 0 & 0 & 0.2).
+Where β=0.6,S=(0.8 & 0 & 0.09 \\\ 0 & 0.6 & 0 \\\ 0.09 & 0 & 0.7) and K=(0.3 & 0 & 0 \\\ 0.4 & 0.5 & 0 \\\ 0 & 0 & 0.2).
 
 Example 4.2 Similarly, we consider a leader and four followers which are shown in Fig. 6 and state error trajectories shown in Fig. 7. The Fig. 8 shows the influence of sensor and actuator attack on one leader and four follower multi-agent system. And Fig. 9 shows the effect of both attacks on control protocol performance.
 
@@ -265,15 +265,15 @@ Example 4.2 Similarly, we consider a leader and four followers which are shown i
 
 Similarly we define the matrices M and N such that
 
-M=(−3.9 & 0 & 0.6 \\ 0 & −4.6 & 0 \\ 2 & 0 & −3.8),and N=(0.3 & 0 & 0 \\ 0.3 & 0.4 & \\ 0 & 0 & 0.2).
+M=(−3.9 & 0 & 0.6 \\\ 0 & −4.6 & 0 \\\ 2 & 0 & −3.8),and N=(0.3 & 0 & 0 \\\ 0.3 & 0.4 & \\\ 0 & 0 & 0.2).
 
-A=(0 & 1.2 & 0 & 0 \\ 1.2 & 0 & 0.4 & 0.8 \\ 0 & 0.4 & 0 & 0 \\ 0 & 0.8 & 0 & 0),and A_{0}=(0.5 & 0 & 0 & 0 \\ 0 & 0.3 & 0 & 0 \\ 0 & 0 & 0 & 0 \\ 0 & 0 & 0 & 0).
+A=(0 & 1.2 & 0 & 0 \\\ 1.2 & 0 & 0.4 & 0.8 \\\ 0 & 0.4 & 0 & 0 \\\ 0 & 0.8 & 0 & 0),and A_{0}=(0.5 & 0 & 0 & 0 \\\ 0 & 0.3 & 0 & 0 \\\ 0 & 0 & 0 & 0 \\\ 0 & 0 & 0 & 0).
 
 Similarly, we can derive the laplacian matrices as we calculate in Example 4.1.
 
-L=(1.2 & −1.2 & 0 & 0 \\ −1.2 & 2.2 & −0.4 & −0.8 \\ 0 & −0.4 & 0.4 & 0 \\ 0 & −0.8 & 0 & 0.8),and H=(1.6 & −1.2 & 0 & 0 \\ −1.2 & 2.4 & −0.4 & −0.8 \\ 0 & −0.4 & 0.4 & 0 \\ 0 & −0.8 & 0 & 0.8).
+L=(1.2 & −1.2 & 0 & 0 \\\ −1.2 & 2.2 & −0.4 & −0.8 \\\ 0 & −0.4 & 0.4 & 0 \\\ 0 & −0.8 & 0 & 0.8),and H=(1.6 & −1.2 & 0 & 0 \\\ −1.2 & 2.4 & −0.4 & −0.8 \\\ 0 & −0.4 & 0.4 & 0 \\\ 0 & −0.8 & 0 & 0.8).
 
-Where we define h(k,z_{i}(k))=\frac{1}{2}tanhz_{i}(k), Δ=(0.6 & 0 & 0 \\ 0 & 0.6 & 0 \\ 0 & 0 & 0.6), η=0.27, S=(0.5 & 0 & 0.5 \\ 0 & 0.6 & 0 \\ 0.05 & 0 & 0.6) and K=(0.4 & 0 & 0 \\ 0.3 & 0.6 & 0 \\ 0 & 0 & 0.5). Remaining values remain same as mentioned in Example 4.1.
+Where we define h(k,z\_{i}(k))=\frac{1}{2}tanhz\_{i}(k), Δ=(0.6 & 0 & 0 \\\ 0 & 0.6 & 0 \\\ 0 & 0 & 0.6), η=0.27, S=(0.5 & 0 & 0.5 \\\ 0 & 0.6 & 0 \\\ 0.05 & 0 & 0.6) and K=(0.4 & 0 & 0 \\\ 0.3 & 0.6 & 0 \\\ 0 & 0 & 0.5). Remaining values remain same as mentioned in Example 4.1.
 
 ##### 4.1 Explanation
 The figures in this paper visually represent the dynamics of leader-following multi-agent systems (MAS) under various attack conditions, including sensor, actuator, and Byzantine attacks. Figure 1, Figure 2 illustrate the network communication typologies of nonlinear agents using directed graphs, showcasing the system's vulnerability when subject to sensor, actuator, and Byzantine assaults. Figure 3, Figure 4, Figure 7 plot the state error trajectories of the leader and follower agents, emphasizing how the system converges to consensus or deviates when attacks occur. Figure 5, Figure 8 delve deeper into the impact of these attacks on the control protocol, highlighting the system's robustness under different attack profiles. Annotating key transitions and deviations across these figures offer a clearer understanding of how the control strategies perform, enhancing the visual presentation and ensuring that critical behaviors are evident to the reader. Fig. 6 depicts the network communication topology of nonlinear agents connected through an undirected graph under Byzantine attack, offering insight into how different communication structures influence system resilience. Fig. 9 summarizes the effect of various attacks on the control protocol performance, showing how these adversarial conditions degrade or influence the system's control and stability.

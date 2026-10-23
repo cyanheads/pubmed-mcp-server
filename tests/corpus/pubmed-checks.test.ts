@@ -114,6 +114,24 @@ describe('PubMed corpus invariants', () => {
       '2 linked notices in the source, 1 returned',
     ],
     [
+      'a data bank the output lacks',
+      (s: string) =>
+        s.replace(
+          '<GrantList',
+          '<DataBankList CompleteYN="Y"><DataBank><DataBankName>ClinicalTrials.gov</DataBankName><AccessionNumberList><AccessionNumber>NCT03951753</AccessionNumber></AccessionNumberList></DataBank></DataBankList><GrantList',
+        ),
+      '1 data banks in the source, 0 returned',
+    ],
+    [
+      'a databank accession the output does not hold',
+      (s: string) =>
+        s.replace(
+          '<GrantList',
+          '<DataBankList CompleteYN="Y"><DataBank><DataBankName>OMIM</DataBankName><AccessionNumberList><AccessionNumber>300460</AccessionNumber></AccessionNumberList></DataBank></DataBankList><GrantList',
+        ),
+      'data bank 0 accessions is ["300460"] in the source, undefined returned',
+    ],
+    [
       'a different DOI',
       (s: string) => s.replaceAll('10.1053/j.gastro.2021.05.059', '10.1053/j.gastro.2021.05.060'),
       'apa: no DOI',

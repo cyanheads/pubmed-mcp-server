@@ -11,7 +11,7 @@ import { toJSONSchema } from 'zod/v4/core';
 
 import type { ParsedBriefSummary } from '@/services/ncbi/types.js';
 
-import { textBlocks } from '../../../_helpers.js';
+import { bunMarkdown, renderedText, textBlocks } from '../../../_helpers.js';
 import {
   BOOK_ESUMMARY_XML,
   CHAPTER_DATES_ESUMMARY_XML,
@@ -1412,13 +1412,39 @@ describe('searchArticlesTool', () => {
     expect(blocks[0]?.text).toBe(
       [
         '## PubMed Search Results',
-        '**Query:** cancer',
+        '**Query:** `cancer`',
         '**Returned:** 2 of 2 | **Offset:** 0',
         '**Search URL:** https://pubmed.ncbi.nlm.nih.gov/?term=cancer',
         '',
         '**PMIDs:** 111, 222',
       ].join('\n'),
     );
+  });
+
+  describe('a query carrying Markdown-significant characters (issue #255)', () => {
+    const query = 'cance* AND neuro*[tiab] AND <i>x</i> AND a_b_c_';
+
+    it('echoes the query exactly on the raw content[] text, structuredContent unchanged', async () => {
+      mockESearch.mockResolvedValue({ count: 0, retmax: 0, retstart: 0, idList: [] });
+      const result = await runToolContract(searchArticlesTool, { query });
+
+      expect((result.structuredContent as { query: string }).query).toBe(query);
+      expect(contractText(result)).toContain(`**Query:** \`${query}\`\n`);
+    });
+
+    it.runIf(bunMarkdown !== undefined)('renders the query exactly', () => {
+      const text = textBlocks(
+        searchArticlesTool.format!({
+          query,
+          offset: 0,
+          pmids: [],
+          summaries: [],
+          searchUrl: 'https://pubmed.ncbi.nlm.nih.gov/?term=x',
+          totalCount: 0,
+        }),
+      )[0]?.text;
+      expect(renderedText(text ?? '')).toContain(`Query: ${query} Returned: 0 of 0`);
+    });
   });
 
   describe('count-split note (issue #44)', () => {
@@ -1595,6 +1621,44 @@ describe('searchArticlesTool format() heading escaping (issue #102)', () => {
 
   it('escapes the PMID fallback heading the same way when no title is present', () => {
     expect(render(undefined)).toContain('#### 42');
+  });
+});
+
+describe('searchArticlesTool format() escaping of the other summary fields (issue #255)', () => {
+  it('escapes authors, editors, source, book, doc type, date and DOI', () => {
+    const text =
+      textBlocks(
+        searchArticlesTool.format!({
+          query: 'cancer',
+          offset: 0,
+          pmids: ['42'],
+          summaries: [
+            {
+              pmid: '42',
+              title: 'Plain title',
+              authors: 'Smith *A*, Lee <b>B</b>',
+              editors: ['Adam _MP_', '[Bick](x)'],
+              source: 'J *Bold* Res',
+              bookTitle: 'GeneReviews(®) *2*',
+              publisherName: 'Univ ~WA~',
+              docType: '`chapter`',
+              pubDate: '2026 *Mar*',
+              doi: '10.1000/[abc](def)',
+              pubmedUrl: 'https://pubmed.ncbi.nlm.nih.gov/42/',
+            },
+          ],
+          searchUrl: 'https://pubmed.ncbi.nlm.nih.gov/?term=cancer',
+          totalCount: 1,
+        }),
+      )[0]?.text ?? '';
+
+    expect(text).toContain('**Authors:** Smith \\*A\\*, Lee \\<b>B\\</b>');
+    expect(text).toContain('**Editors:** Adam \\_MP\\_, \\[Bick\\](x)');
+    expect(text).toContain('**Source:** J \\*Bold\\* Res');
+    expect(text).toContain('**Book:** GeneReviews(®) \\*2\\* — Univ \\~WA\\~');
+    expect(text).toContain('**Doc Type:** \\`chapter\\`');
+    expect(text).toContain('**Published:** 2026 \\*Mar\\*');
+    expect(text).toContain('**DOI:** 10.1000/\\[abc\\](def)');
   });
 });
 

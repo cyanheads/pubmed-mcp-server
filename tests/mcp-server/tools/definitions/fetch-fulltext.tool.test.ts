@@ -10,7 +10,7 @@ import { XMLParser } from 'fast-xml-parser';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { ORDERED_XML_PARSER_OPTIONS } from '@/services/ncbi/parsing/ordered-xml-parser-options.js';
 
-import { textBlocks } from '../../../_helpers.js';
+import { bunMarkdown, renderedHtml, renderedText, textBlocks } from '../../../_helpers.js';
 
 /** Reader-side view of a body section at any nesting level. */
 interface DeepSection {
@@ -1876,6 +1876,132 @@ describe('fetchFulltextTool', () => {
 
       expect(text).toContain('[pmid] 42 — doi-lookup-failed');
       expect(text).toContain('chain: unpaywall:doi-lookup-failed (NCBI 503)');
+    });
+
+    describe('upstream and caller strings carrying Markdown-significant characters (issue #255)', () => {
+      const output = {
+        articles: [],
+        totalReturned: 0,
+        unavailable: [
+          {
+            id: 'PMC123',
+            idType: 'pmcid' as const,
+            reason: 'service-error' as const,
+            triedTiers: [
+              {
+                tier: 'pmc' as const,
+                outcome: 'service-error' as const,
+                detail:
+                  'Fetch failed for https://eutils.ncbi.nlm.nih.gov/entrez/eutils/efetch.fcgi?db=pmc&id=123 Status: 400 *retry* later',
+              },
+            ],
+          },
+          {
+            id: '10.1000/a_b_*c*',
+            idType: 'doi' as const,
+            reason: 'not-found' as const,
+            triedTiers: [
+              {
+                tier: 'unpaywall' as const,
+                outcome: 'not-attempted' as const,
+                detail: 'UNPAYWALL_EMAIL is not set — see https://unpaywall.org/products/api',
+              },
+            ],
+            unqueriedTiers: ['unpaywall' as const],
+          },
+        ],
+        overLimit: { limit: 10, ids: ['PMC9', '10.1/_x_'], pmcids: ['PMC9'], dois: ['10.1/_x_'] },
+      };
+      const format = () => textBlocks(fetchFulltextTool.format!(output))[0]?.text ?? '';
+
+      it('escapes the id, the sanitized chain details and the resend ids', () => {
+        const text = format();
+
+        expect(text).toContain(
+          'pmc:service-error (Fetch failed for \\<upstream> Status: 400 \\*retry\\* later)',
+        );
+        expect(text).toContain('- [doi] 10.1000/a_b_\\*c\\* — not-found');
+        expect(text).toContain(
+          'Not queried: Unpaywall (UNPAYWALL_EMAIL is not set — see \\<upstream>)',
+        );
+        expect(text).toContain('each under its own field — `pmcids`: PMC9; `dois`: 10.1/\\_x\\_');
+      });
+
+      it.runIf(bunMarkdown !== undefined)('renders every character of them', () => {
+        const visible = renderedText(format());
+
+        expect(visible).toContain(
+          'pmc:service-error (Fetch failed for <upstream> Status: 400 *retry* later)',
+        );
+        expect(visible).toContain('[doi] 10.1000/a_b_*c* — not-found');
+        expect(visible).toContain('Unpaywall (UNPAYWALL_EMAIL is not set — see <upstream>)');
+        expect(visible).toContain('pmcids: PMC9; dois: 10.1/_x_');
+      });
+
+      const article = {
+        source: 'pmc' as const,
+        viaSource: 'pmc' as const,
+        pmcId: 'PMC1',
+        doi: '10.1000/*x*_y_',
+        title: 'Article',
+        sections: [{ title: 'Body', text: 'Body.' }],
+        references: [
+          { label: 'x', citation: 'Tagged like a checked task' },
+          { citation: '[ ] Opens like an open task' },
+          { label: '2', citation: 'Plain [Internet]: reference' },
+        ],
+      };
+      const truncated = {
+        articles: [article],
+        totalReturned: 1,
+        truncation: {
+          mode: 'truncate' as const,
+          maxCharacters: 5,
+          originalCharacters: 50,
+          returnedCharacters: 5,
+          omittedSections: 0,
+          omittedTables: 1,
+          omittedAssets: 1,
+          articles: [
+            {
+              id: '10.1000/*x*_y_',
+              source: 'pmc' as const,
+              originalCharacters: 50,
+              returnedCharacters: 5,
+              omittedTables: 1,
+              omittedTableNames: ['Table <b>1</b>'],
+              omittedAssets: 1,
+              omittedAssetNames: ['_S1_'],
+            },
+          ],
+        },
+      };
+      const formatTruncated = () => textBlocks(fetchFulltextTool.format!(truncated))[0]?.text ?? '';
+
+      it('escapes the ledger id, the dropped table and asset names, and a reference opening like a task', () => {
+        const text = formatTruncated();
+
+        expect(text).toContain(
+          '- 10.1000/\\*x\\*\\_y\\_ (pmc): 5 of 50 characters, 1 table(s) dropped whole: Table \\<b>1\\</b>, 1 asset(s) dropped whole: \\_S1\\_',
+        );
+        expect(text).toContain('\n- \\[x] Tagged like a checked task\n');
+        expect(text).toContain('\n- \\[ \\] Opens like an open task\n');
+        expect(text).toContain('\n- [2] Plain \\[Internet\\]: reference');
+      });
+
+      it.runIf(bunMarkdown !== undefined)(
+        'renders them without a checkbox or lost character',
+        () => {
+          const markdown = formatTruncated();
+
+          expect(renderedHtml(markdown)).not.toContain('<input');
+          const visible = renderedText(markdown);
+          expect(visible).toContain(
+            '10.1000/*x*_y_ (pmc): 5 of 50 characters, 1 table(s) dropped whole: Table <b>1</b>, 1 asset(s) dropped whole: _S1_',
+          );
+          expect(visible).toContain('[x] Tagged like a checked task [ ] Opens like an open task');
+        },
+      );
     });
   });
 
@@ -3762,6 +3888,74 @@ describe('fetchFulltextTool', () => {
       expect(text).toContain('Paper text');
     });
 
+    describe('Unpaywall content escaping (issue #255)', () => {
+      const PDF_TEXT =
+        '# 1 Background\nsize: 10*8*6 mm and p.(V764Rfs*19)\n- 5 mg\n> 18 years\n1. not a list\nTP53_mutant [12]';
+
+      it('escapes pdf-text content as plain prose in content[], every line start and pairable delimiter, and keeps structuredContent plain', async () => {
+        mockGetUnpaywallService.mockReturnValue({
+          resolve: mockUnpaywallResolve,
+          fetchContent: mockUnpaywallFetchContent,
+        });
+        mockIdConvert.mockResolvedValue([{ 'requested-id': '42', pmid: '42' }]);
+        mockEFetchBy({ pubmedDois: { '42': '10.1000/_x_' } });
+        mockUnpaywallResolve.mockResolvedValue({
+          kind: 'found',
+          location: {
+            url: 'https://repo.example.org/paper',
+            url_for_pdf: 'https://repo.example.org/paper.pdf',
+            license: 'cc-by',
+          },
+        });
+        mockUnpaywallFetchContent.mockResolvedValue({
+          kind: 'pdf',
+          fetchedUrl: 'https://repo.example.org/paper.pdf',
+          body: new Uint8Array([0x25, 0x50, 0x44, 0x46]),
+        });
+        mockPdfExtractText.mockResolvedValue({ totalPages: 1, text: PDF_TEXT });
+
+        const result = await runToolContract(fetchFulltextTool, { pmids: ['42'] });
+
+        expect(result.isError).toBeFalsy();
+        const [article] = (
+          result.structuredContent as {
+            articles: { contentFormat?: string; content?: string; doi?: string }[];
+          }
+        ).articles;
+        expect(article).toMatchObject({ contentFormat: 'pdf-text', doi: '10.1000/_x_' });
+        expect(article?.content).toBe(PDF_TEXT);
+        const text = textBlocks(result.content as ContentBlock[])
+          .map((b) => b.text)
+          .join('\n');
+        expect(text).toContain(
+          '#### Full Text\n\\# 1 Background\nsize: 10\\*8\\*6 mm and p.(V764Rfs\\*19)\n\\- 5 mg\n\\> 18 years\n1\\. not a list\nTP53_mutant [12]',
+        );
+        expect(text).toContain('**DOI:** 10.1000/\\_x\\_');
+      });
+
+      it('passes html-markdown content through untouched, Markdown structure and all', () => {
+        const content = '# A Paper\n\n- item *emphasis*\n\n> quote';
+        const text =
+          textBlocks(
+            fetchFulltextTool.format!({
+              articles: [
+                {
+                  source: 'unpaywall',
+                  viaSource: 'unpaywall',
+                  contentFormat: 'html-markdown',
+                  doi: '10.1000/example',
+                  sourceUrl: 'https://repo.example.org/paper',
+                  content,
+                },
+              ],
+              totalReturned: 1,
+            }),
+          )[0]?.text ?? '';
+
+        expect(text).toContain(`#### Full Text\n${content}`);
+      });
+    });
+
     describe('empty-result recovery guidance (issue #33)', () => {
       it('emits a recovery blockquote when totalReturned is 0', () => {
         const blocks = textBlocks(
@@ -5019,7 +5213,7 @@ describe('fetchFulltextTool per-call fetch limit (issue #222)', () => {
     [
       'a field holding 51 distinct identifiers',
       { pmids: range(1, 51).map(pmidOf) },
-      ['pmids: Too big: expected array to have <=50 items', '51 distinct identifiers'],
+      ['pmids: Too big: expected array to have <=50 items'],
     ],
     [
       'a field holding 51 elements that name one identifier',
@@ -6511,6 +6705,31 @@ describe('fetchFulltextTool JATS assets (issue #130)', () => {
       );
     });
 
+    it('escapes a dropped asset name on content[] and keeps it plain on structuredContent (#255)', async () => {
+      stageArticle({
+        sections: [{ title: 'RESULTS', text: 'M'.repeat(20) }],
+        assets: [
+          { assetType: 'figure', label: 'Fig. 1', sectionTitle: 'RESULTS' },
+          { ...NUMBERED_SUPPLEMENT, label: '*S1*', caption: 'C'.repeat(200) },
+          { ...NUMBERED_FIGURE, label: '*S2*' },
+        ],
+      });
+
+      const call = await runToolContract(fetchFulltextTool, {
+        pmcids: ['PMC11726426'],
+        maxCharacters: 30,
+      });
+      const structured = call.structuredContent as {
+        truncation?: { articles: { omittedAssetNames?: string[] }[] };
+      };
+
+      expect(structured.truncation?.articles[0]?.omittedAssetNames).toEqual(['*S1*', '*S2*']);
+      expect(rendered(call)).toContain(', 2 asset(s) dropped whole: \\*S1\\*, \\*S2\\*');
+      if (bunMarkdown !== undefined) {
+        expect(renderedText(rendered(call))).toContain('2 asset(s) dropped whole: *S1*, *S2*');
+      }
+    });
+
     it('strips its `[Supplementary: 1]` marker under includeAssets: false', async () => {
       stageArticle({
         sections: [{ title: 'RESULTS', text: 'Results body.\n\n[Supplementary: 1]' }],
@@ -7180,14 +7399,18 @@ describe('fetchFulltextTool word-boundary cuts and subsection budgets (issue #14
       },
       { label: '3', title: 'Results', text: RESULTS },
     ]);
+    // Introduction (75) and Results (70) fit their shares whole, leaving Methods
+    // 149. Inside Methods its own text and the two subsections share that, each
+    // below the 100-character floor, so the subsections are emptied last-first
+    // and the own text keeps all 70 characters. (#252)
     const { result, text } = await run({
       pmcids: ['PMC13546078'],
-      maxCharacters: 90,
+      maxCharacters: 295,
       overflowMode: 'outline',
     });
 
     const methods = sectionsOf(result)[1];
-    expect(methods?.text).toBe('We followed the PRISMA');
+    expect(methods?.text).toBe(methodsOwn);
     expect(methods?.subsections).toEqual([
       { label: '2.1', title: 'Study Design', text: '' },
       { label: '2.2', title: 'Search Strategy', text: '' },
@@ -7229,7 +7452,7 @@ describe('fetchFulltextTool word-boundary cuts and subsection budgets (issue #14
     expect(text).toContain('    - 2.3 Data Availability — 0 of 0 characters (truncated: false)\n');
   });
 
-  it('marks a top-level section the outline budget left empty, and cuts a first word it cannot fit', async () => {
+  it('marks a top-level section the outline budget left empty, and returns heading-only rather than a first-word fragment', async () => {
     stageSections([
       { title: 'Introduction', text: 'Obesity is common.' },
       { title: 'Methods', text: 'We searched three databases.' },
@@ -7240,10 +7463,16 @@ describe('fetchFulltextTool word-boundary cuts and subsection budgets (issue #14
       overflowMode: 'outline',
     });
 
-    // One character reaches no word boundary, so the single allowance cuts the
-    // first token rather than returning nothing.
-    expect(sectionsOf(result).map((s) => s.text)).toEqual(['O', '']);
+    // One character is below the 100-character floor and below either
+    // section's length, so both come back heading-only instead of 'O'. (#252)
+    expect(sectionsOf(result).map((s) => s.text)).toEqual(['', '']);
+    expect(result.truncation?.returnedCharacters).toBe(0);
+    expect(result.truncation?.omittedSections).toBe(0);
+    expect(text).toContain(`#### Introduction\n${MARKER('Obesity is common.'.length)}`);
     expect(text).toContain(`#### Methods\n${MARKER('We searched three databases.'.length)}`);
+    expect(text).toContain(
+      `  - Introduction — 0 of ${'Obesity is common.'.length} characters (truncated: true) — heading only`,
+    );
     expect(text).toContain(
       `  - Methods — 0 of ${'We searched three databases.'.length} characters (truncated: true) — heading only`,
     );
@@ -7382,6 +7611,309 @@ describe('fetchFulltextTool word-boundary cuts and subsection budgets (issue #14
     expect(entry.required).not.toContain('subsections');
     expect(entry.required).not.toContain('label');
   });
+});
+
+describe('fetchFulltextTool outline allotment at every level (issue #252)', () => {
+  beforeEach(() => {
+    mockEFetch.mockReset();
+    mockIdConvert.mockReset();
+    mockParsePmcArticle.mockReset();
+    mockGetUnpaywallService.mockReset();
+    mockGetEpmcService.mockReset();
+    mockGetUnpaywallService.mockReturnValue(undefined);
+    mockGetEpmcService.mockReturnValue(undefined);
+  });
+
+  /** Letter runs carry no word boundary, so a cut returns exactly its allowance. */
+  const FIVE = ['One', 'Two', 'Three', 'Four', 'Five'].map((title, i) => ({
+    title,
+    text: 'ABCDE'.charAt(i).repeat(1000),
+  }));
+  const FUNDING = 'This study received no funding.';
+  const DATA_AVAILABILITY = 'Data available on request from the authors.';
+
+  function stage(sections: unknown[], backSections?: unknown[]) {
+    mockParsePmcArticle.mockReturnValue({
+      pmcId: 'PMC9293434',
+      pmcUrl: 'https://www.ncbi.nlm.nih.gov/pmc/articles/PMC9293434/',
+      title: 'Pregabalin poisoning',
+      sections,
+      ...(backSections && { backSections }),
+    });
+    mockEFetch.mockResolvedValue([{ 'pmc-articleset': [{ article: [] }] }]);
+  }
+
+  async function run(input: Record<string, unknown>) {
+    const ctx = createMockContext({ errors: fetchFulltextTool.errors });
+    const result = await fetchFulltextTool.handler(
+      fetchFulltextTool.input.parse({ pmcids: ['PMC9293434'], ...input }),
+      ctx,
+    );
+    const text = textBlocks(fetchFulltextTool.format!(result))[0]?.text ?? '';
+    return { result, text };
+  }
+
+  function sectionsOf(result: Awaited<ReturnType<typeof fetchFulltextTool.handler>>) {
+    const article = result.articles[0];
+    if (article?.source !== 'pmc') throw new Error('expected a pmc article');
+    return article.sections as DeepSection[];
+  }
+
+  /** Top-level sections, or the subsections of one own-text-less section. */
+  const LEVELS = [
+    ['top-level sections', (parts: unknown[]) => parts, (s: DeepSection[]) => s],
+    [
+      'subsections of a section with no own text',
+      (parts: unknown[]) => [{ title: 'Results', text: '', subsections: parts }],
+      (s: DeepSection[]) => s[0]?.subsections ?? [],
+    ],
+  ] as const;
+
+  const MARKER = (original: number) =>
+    `> Text omitted to fit the requested character budget — 0 of ${original} characters returned.`;
+
+  it('splits a section evenly across its own text and each subsection, a folded deeper level and an empty subsection included', async () => {
+    stage([
+      {
+        label: '2',
+        title: 'Methods',
+        text: 'M'.repeat(600),
+        subsections: [
+          {
+            label: '2.1',
+            title: 'Design',
+            text: 'A'.repeat(300),
+            // Past the schema's depth, so it folds into Design's text before the
+            // budget sees it — one part of Methods, cut like any other.
+            subsections: [{ label: '2.1.1', title: 'Sampling', text: 'B'.repeat(300) }],
+          },
+          { label: '2.2', title: 'Search', text: 'C'.repeat(600) },
+          { label: '2.3', title: 'Data Availability', text: '' },
+        ],
+      },
+      {
+        label: '4',
+        title: 'Discussion',
+        text: 'D'.repeat(600),
+        subsections: [{ label: '4.1', title: 'Limitations', text: 'L'.repeat(600) }],
+      },
+    ]);
+    const { result, text } = await run({ maxCharacters: 1000, overflowMode: 'outline' });
+
+    // 500 per top-level section. Methods' own text, Design and Search share its
+    // 500 (167 / 167 / 166); the empty subsection takes no share. Discussion's
+    // own text and Limitations share its 500 equally.
+    const [methods, discussion] = sectionsOf(result);
+    expect(methods?.text).toBe('M'.repeat(167));
+    expect(methods?.subsections?.map((s) => s.text)).toEqual([
+      'A'.repeat(167),
+      'C'.repeat(166),
+      '',
+    ]);
+    expect(discussion?.text).toBe('D'.repeat(250));
+    expect(discussion?.subsections?.map((s) => s.text)).toEqual(['L'.repeat(250)]);
+    expect(result.truncation?.returnedCharacters).toBe(1000);
+    expect(result.truncation?.omittedSections).toBe(0);
+
+    const ledger = result.truncation?.articles[0]?.sections ?? [];
+    expect(ledger.map((e) => e.returnedCharacters)).toEqual([500, 500]);
+    expect(
+      ledger[0]?.subsections?.map((e) => [e.returnedCharacters, e.originalCharacters]),
+    ).toEqual([
+      [167, 300 + '\n\n2.1.1 Sampling\n'.length + 300],
+      [166, 600],
+      [0, 0],
+    ]);
+    expect(ledger[0]?.subsections?.[2]?.truncated).toBe(false);
+    expect(ledger[1]?.subsections).toEqual([
+      {
+        label: '4.1',
+        title: 'Limitations',
+        originalCharacters: 600,
+        returnedCharacters: 250,
+        truncated: true,
+      },
+    ]);
+
+    expect(text).toContain(`##### 2.2 Search\n${'C'.repeat(166)}\n`);
+    expect(text).toContain(`##### 4.1 Limitations\n${'L'.repeat(250)}`);
+    expect(text).toContain('    - 2.2 Search — 166 of 600 characters (truncated: true)\n');
+    expect(text).toContain('    - 4.1 Limitations — 250 of 600 characters (truncated: true)');
+  });
+
+  it.each(LEVELS)(
+    'gives five 1,000-character %s sharing 450 characters 113 / 113 / 112 / 112 and empties the fifth',
+    async (_level, shape, read) => {
+      stage(shape(FIVE));
+      const { result, text } = await run({ maxCharacters: 450, overflowMode: 'outline' });
+
+      // An even split is 90 each, all below the floor; emptying the last part
+      // lifts the other four to 112.5.
+      expect(read(sectionsOf(result)).map((s) => s.text.length)).toEqual([113, 113, 112, 112, 0]);
+      expect(read(sectionsOf(result)).map((s) => s.title)).toEqual(FIVE.map((p) => p.title));
+      expect(result.truncation?.returnedCharacters).toBe(450);
+      expect(result.truncation?.omittedSections).toBe(0);
+      expect(text).toContain(`Five\n${MARKER(1000)}`);
+      expect(text).toMatch(/- Five — 0 of 1000 characters \(truncated: true\) — heading only/);
+    },
+  );
+
+  it.each(LEVELS)(
+    'returns a short part among %s whole when it fits its share, however short',
+    async (_level, shape, read) => {
+      stage(
+        shape([
+          { title: 'Design', text: 'A'.repeat(1000) },
+          { title: 'Funding', text: FUNDING },
+          { title: 'Analysis', text: 'B'.repeat(1000) },
+        ]),
+      );
+      const { result, text } = await run({ maxCharacters: 400, overflowMode: 'outline' });
+
+      // Funding needs 31 of its 133 and hands the rest to the two long parts.
+      expect(read(sectionsOf(result)).map((s) => s.text)).toEqual([
+        'A'.repeat(185),
+        FUNDING,
+        'B'.repeat(184),
+      ]);
+      expect(result.truncation?.returnedCharacters).toBe(400);
+      expect(text).toContain(`Funding\n${FUNDING}\n`);
+    },
+  );
+
+  it('returns a back-matter section heading-only instead of a fragment of the slack the body left', async () => {
+    // 'Pregabalin ' runs end their cut on a word boundary 6 characters short of
+    // the 225 allowance; those 6 are all that reaches the back matter.
+    const intro = 'Pregabalin '.repeat(100).trim();
+    stage(
+      [{ title: 'Introduction', text: intro }],
+      [{ title: 'Data Availability Statement', text: DATA_AVAILABILITY }],
+    );
+    const { result, text } = await run({ maxCharacters: 225, overflowMode: 'outline' });
+
+    const sections = sectionsOf(result);
+    expect(sections[0]?.text).toBe('Pregabalin '.repeat(20).trim());
+    expect(sections[1]).toEqual({ title: 'Data Availability Statement', text: '' });
+    expect(result.truncation?.articles[0]?.sections?.[1]).toEqual({
+      title: 'Data Availability Statement',
+      originalCharacters: DATA_AVAILABILITY.length,
+      returnedCharacters: 0,
+      truncated: true,
+    });
+    expect(result.truncation?.omittedSections).toBe(0);
+    expect(text).toContain(`#### Data Availability Statement\n${MARKER(DATA_AVAILABILITY.length)}`);
+    expect(text).not.toContain('Data available on');
+  });
+
+  it('lets maxCharactersPerSection cap each top-level section, then splits the cap inside it', async () => {
+    stage([
+      { title: 'Introduction', text: 'A'.repeat(1000) },
+      {
+        title: 'Methods',
+        text: '',
+        subsections: [
+          { title: 'Design', text: 'B'.repeat(1000) },
+          { title: 'Analysis', text: 'C'.repeat(1000) },
+        ],
+      },
+    ]);
+    const { result } = await run({
+      maxCharacters: 2000,
+      maxCharactersPerSection: 300,
+      overflowMode: 'outline',
+    });
+
+    const [intro, methods] = sectionsOf(result);
+    expect(intro?.text).toHaveLength(300);
+    expect(methods?.subsections?.map((s) => s.text.length)).toEqual([150, 150]);
+    expect(result.truncation?.returnedCharacters).toBe(600);
+  });
+
+  it('keeps an excerpt maxCharactersPerSection sets below the floor', async () => {
+    // Characterization: a per-section cap under 100 is the excerpt the caller
+    // asked for, so the floor never empties a section for honoring it; inside
+    // the section the floor drops to that cap.
+    stage([
+      { title: 'Introduction', text: 'A'.repeat(1000) },
+      {
+        title: 'Methods',
+        text: '',
+        subsections: [
+          { title: 'Design', text: 'B'.repeat(1000) },
+          { title: 'Analysis', text: 'C'.repeat(1000) },
+        ],
+      },
+    ]);
+    const { result } = await run({
+      maxCharacters: 2000,
+      maxCharactersPerSection: 60,
+      overflowMode: 'outline',
+    });
+
+    const [intro, methods] = sectionsOf(result);
+    expect(intro?.text).toBe('A'.repeat(60));
+    expect(methods?.subsections?.map((s) => s.text)).toEqual(['B'.repeat(60), '']);
+  });
+
+  it.each([
+    // An even split of 150 is 75 a part, under the 100 floor: the subsection
+    // empties and the own text, which fits the whole 150, keeps all 122.
+    [150, 122, '', 150],
+    // 125 a part: the own text needs only 122 and its 3 spare go to the subsection.
+    [250, 122, 'B'.repeat(128), 250],
+    // A cap under 100 is the floor: 30 a part is under 60, so the subsection
+    // empties and the own text is cut to the whole 60.
+    [60, 60, '', 60],
+  ])(
+    'splits maxCharactersPerSection %i alone, with no maxCharacters, per level under a floor of min(100, cap)',
+    async (cap, ownKept, subsectionText, discussionKept) => {
+      // Characterization of the bare per-section budget in outline mode.
+      stage([
+        {
+          title: 'Methods',
+          text: 'A'.repeat(122),
+          subsections: [{ title: 'Design', text: 'B'.repeat(300) }],
+        },
+        { title: 'Discussion', text: 'D'.repeat(400) },
+      ]);
+      const { result, text } = await run({
+        maxCharactersPerSection: cap,
+        overflowMode: 'outline',
+      });
+
+      const [methods, discussion] = sectionsOf(result);
+      expect(methods?.text).toBe('A'.repeat(ownKept));
+      expect(methods?.subsections?.map((s) => s.text)).toEqual([subsectionText]);
+      // No total: every top-level section takes its own cap.
+      expect(discussion?.text).toBe('D'.repeat(discussionKept));
+      expect(result.truncation?.returnedCharacters).toBe(
+        ownKept + subsectionText.length + discussionKept,
+      );
+      expect(result.truncation?.omittedSections).toBe(0);
+      expect(result.truncation?.articles[0]?.sections?.[0]?.subsections).toEqual([
+        {
+          title: 'Design',
+          originalCharacters: 300,
+          returnedCharacters: subsectionText.length,
+          truncated: true,
+        },
+      ]);
+      if (subsectionText === '') expect(text).toContain(`Design\n${MARKER(300)}`);
+    },
+  );
+
+  it.each(LEVELS)(
+    'leaves truncate mode filling %s in document order',
+    async (_level, shape, read) => {
+      // Characterization: the floor and the per-level split are outline-only.
+      stage(shape(FIVE));
+      const { result } = await run({ maxCharacters: 450 });
+
+      expect(read(sectionsOf(result)).map((s) => s.text)).toEqual(['A'.repeat(450)]);
+      expect(result.truncation?.returnedCharacters).toBe(450);
+      expect(result.truncation?.omittedSections).toBe(4);
+    },
+  );
 });
 
 describe('fetchFulltextTool section headings match the truncation ledger (issue #148)', () => {
@@ -8400,5 +8932,110 @@ describe('fetchFulltextTool author name suffixes (issue #226)', () => {
       suffix: 'IV',
     });
     expect(text).toContain(AUTHORS_BLOCK);
+  });
+});
+
+describe('fetchFulltextTool a collective author with a nested member list (issue #251)', () => {
+  beforeEach(() => {
+    mockEFetch.mockReset();
+    mockIdConvert.mockReset();
+    mockParsePmcArticle.mockReset();
+    mockGetUnpaywallService.mockReset();
+    mockGetEpmcService.mockReset();
+    mockEpmcSearch.mockReset();
+    mockEpmcFullTextXml.mockReset();
+    mockEpmcParseFullTextXml.mockReset();
+    mockGetUnpaywallService.mockReturnValue(undefined);
+    mockGetEpmcService.mockReturnValue(undefined);
+    mockParsePmcArticle.mockImplementation(realParsePmcArticle);
+  });
+
+  /** Members nested in the `<collab>`: enough that, read into the name, the record overruns the ceiling below. */
+  const MEMBERS = Array.from(
+    { length: 2_000 },
+    (_, i) =>
+      `<contrib contrib-type="author" id="au${i}"><name name-style="western"><surname>Member${i}</surname><given-names>Given</given-names></name></contrib>`,
+  ).join('');
+
+  /** PMC8084355's front matter shape — the collab, its nested members, the footnote marker after it — and a Discussion. */
+  const JATS =
+    '<article article-type="research-article"><front><article-meta>' +
+    '<article-id pub-id-type="pmcid">PMC8084355</article-id>' +
+    '<title-group><article-title>Tocilizumab in patients admitted to hospital with COVID-19 (RECOVERY)</article-title></title-group>' +
+    `<contrib-group><contrib contrib-type="author"><collab>RECOVERY Collaborative Group<contrib-group>${MEMBERS}</contrib-group></collab>` +
+    '<xref rid="fn1" ref-type="fn">†</xref></contrib></contrib-group>' +
+    '</article-meta></front><body><sec><title>Discussion</title><p>Tocilizumab improved survival.</p></sec></body></article>';
+
+  /** The `<article>` node the ordered parser makes of `xml`. */
+  function articleNode(xml: string) {
+    const nodes = new XMLParser(ORDERED_XML_PARSER_OPTIONS).parse(xml) as Record<string, unknown>[];
+    const node = nodes.find((n) => 'article' in n);
+    if (!node) throw new Error('fixture has no <article>');
+    return node;
+  }
+
+  const INPUT = {
+    sections: ['Discussion'],
+    maxCharacters: 500,
+    maxResponseCharacters: 15_000,
+  };
+
+  it('returns the article under the response ceiling, the collab named once and no member listed', async () => {
+    mockEFetch.mockResolvedValue([{ 'pmc-articleset': [articleNode(JATS)] }]);
+    const result = await runToolContract(fetchFulltextTool, { pmcids: ['PMC8084355'], ...INPUT });
+
+    expect(result.isError).toBeFalsy();
+    const structured = result.structuredContent as {
+      articles: { authors?: Record<string, unknown>[] }[];
+      deferred?: unknown;
+      totalReturned: number;
+    };
+    expect(structured.totalReturned).toBe(1);
+    expect(structured.deferred).toBeUndefined();
+    expect(structured.articles[0]?.authors).toStrictEqual([
+      { collectiveName: 'RECOVERY Collaborative Group' },
+    ]);
+    expect(JSON.stringify(structured.articles[0]).length).toBeLessThan(15_000);
+
+    const text = textBlocks(result.content as ContentBlock[])
+      .map((block) => block.text)
+      .join('\n');
+    expect(text).toContain('**Authors (1):**\n- RECOVERY Collaborative Group (collective)\n');
+    expect(text).not.toContain('Member0');
+    expect(text).not.toContain('†');
+  });
+
+  it('reads the same name on the Europe PMC tier', async () => {
+    mockGetEpmcService.mockReturnValue({
+      search: mockEpmcSearch,
+      fullTextXml: mockEpmcFullTextXml,
+      parseFullTextXml: mockEpmcParseFullTextXml,
+    });
+    mockIdConvert.mockResolvedValue([{ 'requested-id': '33933206', pmid: '33933206' }]);
+    mockEFetchBy({ pubmedDois: {} });
+    mockEpmcSearch.mockResolvedValue({
+      hits: [{ id: '33933206', source: 'MED', pmid: '33933206', pmcid: 'PMC8084355' }],
+      hitCount: 1,
+      cursorMark: '*',
+    });
+    mockEpmcFullTextXml.mockResolvedValue({
+      kind: 'found',
+      xml: JATS,
+      epmcId: 'PMC8084355',
+      source: 'MED',
+    });
+    mockEpmcParseFullTextXml.mockReturnValue(articleNode(JATS));
+    const result = await runToolContract(fetchFulltextTool, { pmids: ['33933206'], ...INPUT });
+
+    expect(result.isError).toBeFalsy();
+    const structured = result.structuredContent as {
+      articles: { authors?: Record<string, unknown>[]; viaSource?: string }[];
+      deferred?: unknown;
+    };
+    expect(structured.deferred).toBeUndefined();
+    expect(structured.articles[0]?.viaSource).toBe('europepmc');
+    expect(structured.articles[0]?.authors).toStrictEqual([
+      { collectiveName: 'RECOVERY Collaborative Group' },
+    ]);
   });
 });

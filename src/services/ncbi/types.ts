@@ -68,6 +68,12 @@ export interface ParseFullArticleOptions {
   includeGrants?: boolean;
   /** Read `MedlineCitation/InvestigatorList` into `investigators`. (#216) */
   includeInvestigators?: boolean;
+  /**
+   * Read `MedlineJournalInfo/ISSNLinking` into `journalInfo.issnLinking`, the
+   * ISSN the citation formatter prints. Off for `pubmed_fetch_articles`, whose
+   * record reports the indexed `Journal/ISSN` only. (#253)
+   */
+  includeIssnLinking?: boolean;
   includeMesh?: boolean;
 }
 
@@ -194,6 +200,7 @@ export interface XmlArticle {
   ArticleIdList?: XmlArticleIdList;
   ArticleTitle?: XmlTextElement | string; // Can be just string or object with #text
   AuthorList?: XmlAuthorList;
+  DataBankList?: XmlDataBankList;
   ELocationID?: XmlELocationID[] | XmlELocationID;
   GrantList?: XmlGrantList;
   Journal?: XmlJournal;
@@ -201,7 +208,22 @@ export interface XmlArticle {
   Language?: XmlTextElement[] | XmlTextElement; // Array of languages
   Pagination?: XmlPagination;
   PublicationTypeList?: XmlPublicationTypeList;
-  // Other elements like VernacularTitle, DataBankList, etc.
+  // Other elements like VernacularTitle, etc.
+}
+
+/**
+ * One `DataBank`: a databank or registry and the record's accessions in it.
+ * `AccessionNumber` arrives as the text NCBI wrote, an all-digit OMIM number
+ * included: the response handler exempts it from numeric coercion. (#257)
+ */
+export interface XmlDataBank {
+  AccessionNumberList?: { AccessionNumber: XmlTextElement[] | XmlTextElement };
+  DataBankName?: XmlTextElement;
+}
+
+export interface XmlDataBankList {
+  '@_CompleteYN'?: 'Y' | 'N';
+  DataBank: XmlDataBank[] | XmlDataBank;
 }
 
 export interface XmlMeshQualifierName extends XmlTextElement {
@@ -275,6 +297,8 @@ export interface XmlMedlineCitation {
   GeneralNote?: (XmlTextElement & { '@_Owner'?: string })[];
   InvestigatorList?: XmlInvestigatorList[] | XmlInvestigatorList;
   KeywordList?: XmlKeywordList[] | XmlKeywordList;
+  /** `ISSNLinking` names the journal across its print and electronic editions. (#253) */
+  MedlineJournalInfo?: { ISSNLinking?: XmlTextElement };
   MeshHeadingList?: XmlMeshHeadingList;
   PMID: XmlPMID;
 }
@@ -430,6 +454,12 @@ export interface ParsedJournalInfo {
   elocationIdType?: string;
   isoAbbreviation?: string;
   issn?: string;
+  /**
+   * The journal's linking ISSN (ISSN-L) from `MedlineJournalInfo/ISSNLinking`,
+   * one value whichever edition NLM indexed. Set only under
+   * `includeIssnLinking`, so never on a `pubmed_fetch_articles` record. (#253)
+   */
+  issnLinking?: string;
   issue?: string;
   pages?: string;
   publicationDate?: ParsedJournalPublicationDate;
@@ -455,6 +485,16 @@ export interface ParsedGrant {
   agency?: string;
   country?: string;
   grantId?: string;
+}
+
+/**
+ * A databank or registry the record links to, from `DataBankList`: `name` is
+ * `DataBankName` and `accessionNumbers` its `AccessionNumberList`, both verbatim.
+ * `accessionNumbers` is absent when NCBI lists the bank without one. (#257)
+ */
+export interface ParsedDataBank {
+  accessionNumbers?: string[];
+  name: string;
 }
 
 /**
@@ -540,6 +580,11 @@ export interface ParsedArticle {
    * articles only: the DTD gives a Bookshelf record no such list.
    */
   commentsCorrections?: ParsedCommentsCorrection[];
+  /**
+   * Every `DataBankList/DataBank`, in upstream order, uncapped. Journal articles
+   * only: the DTD gives a Bookshelf record no such list. (#257)
+   */
+  dataBanks?: ParsedDataBank[];
   doi?: string;
   grantList?: ParsedGrant[];
   /**

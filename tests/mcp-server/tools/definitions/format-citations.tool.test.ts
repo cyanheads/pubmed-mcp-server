@@ -8,7 +8,7 @@ import { createMockContext, getEnrichment, runToolContract } from '@cyanheads/mc
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { toJSONSchema } from 'zod/v4/core';
 
-import { textBlocks } from '../../../_helpers.js';
+import { bunMarkdown, renderedHtml, renderedText, textBlocks } from '../../../_helpers.js';
 import {
   ADA_WHOLE_BOOK_XML,
   articleSetXml,
@@ -323,7 +323,8 @@ describe('formatCitationsTool', () => {
 
     const vancouver = result.citations[0]?.citations.vancouver ?? '';
     expect(vancouver).toContain('Jumper J.');
-    expect(vancouver).toContain('Nature. 2021;596(7873):583-589.');
+    // MedlinePgn `583-589` in Citing Medicine's elided form (#253)
+    expect(vancouver).toContain('Nature. 2021;596(7873):583-9.');
   });
 
   it('carries an electronic article locator into every style end to end (issue #121)', async () => {
@@ -611,6 +612,70 @@ describe('formatCitationsTool', () => {
     const text = blocks[0]?.text ?? '';
     expect(text).toContain('```bibtex\n@article{pmid12345}\n```');
     expect(text).toContain('```ris\nTY  - JOUR\n```');
+  });
+
+  describe('citation text carrying Markdown-significant characters (issue #255)', () => {
+    const entry = {
+      pmid: '12345',
+      title: 'T',
+      citations: {
+        apa: 'Smith, J. (2024). Effect of drug. *J Biol Chem*, *1*(2), 3.',
+        vancouver:
+          '1. Smith J. Effect of *drug* on <i>risk</i>: 10*8*6 mm [Internet]. J Biol Chem. 2024;1(2):3.',
+        bibtex: '@article{pmid12345,\n  title = {A ```fenced``` title},\n}',
+      },
+    };
+    const format = () =>
+      textBlocks(
+        formatCitationsTool.format!({ totalSubmitted: 1, totalFormatted: 1, citations: [entry] }),
+      )[0]?.text ?? '';
+
+    it('escapes Vancouver, keeps the italics APA writes, and sizes the fence past any backtick run', () => {
+      const text = format();
+
+      expect(text).toContain(`### APA\n${entry.citations.apa}\n`);
+      expect(text).toContain(
+        '### VANCOUVER\n1\\. Smith J. Effect of \\*drug\\* on \\<i>risk\\</i>: 10\\*8\\*6 mm [Internet]. J Biol Chem. 2024;1(2):3.\n',
+      );
+      expect(text).toContain(`\`\`\`\`bibtex\n${entry.citations.bibtex}\n\`\`\`\``);
+    });
+
+    it('keeps structuredContent plain while content[] escapes', async () => {
+      mockEFetch.mockResolvedValue({
+        PubmedArticleSet: parseArticleSetXml(
+          articleSetXml(
+            JOURNAL_ARTICLE_XML.replace('Paramedic analgesia', 'Paramedic *opioid* analgesia'),
+          ),
+        ),
+      });
+
+      const result = await runToolContract(formatCitationsTool, {
+        pmids: ['42474064'],
+        format: ['vancouver'],
+      });
+      const vancouver = (
+        result.structuredContent as { citations: { citations: { vancouver: string } }[] }
+      ).citations[0]?.citations.vancouver;
+      expect(vancouver).toContain('Paramedic *opioid* analgesia');
+      const text = textBlocks(result.content as ContentBlock[])
+        .map((b) => b.text)
+        .join('\n');
+      const vancouverLine = text.split('### VANCOUVER\n')[1]?.split('\n')[0];
+      expect(vancouverLine).toContain('Paramedic \\*opioid\\* analgesia');
+    });
+
+    it.runIf(bunMarkdown !== undefined)('renders every character of each style', () => {
+      const markdown = format();
+      const html = renderedHtml(markdown);
+
+      expect(html.split('<em>').length - 1).toBe(2);
+      expect(html).not.toMatch(/<(?:i|ol)[\s>]/);
+      expect(html.split('<pre').length - 1).toBe(1);
+      const visible = renderedText(markdown);
+      expect(visible).toContain('Smith, J. (2024). Effect of drug. J Biol Chem, 1(2), 3.');
+      expect(visible).toContain(entry.citations.vancouver);
+      expect(visible).toContain(entry.citations.bibtex.replace(/\s+/g, ' '));
+    });
   });
 });
 
@@ -1035,7 +1100,7 @@ describe('formatCitationsTool record text holding a line break (issue #233)', ()
       expect(entry?.citations[style], style).toContain(oneLine);
       expect(entry?.citations[style], style).not.toContain('\n');
     }
-    expect(entry?.citations.ris).toContain(`\nTI  - ${oneLine}\n`);
+    expect(entry?.citations.ris).toContain(`\nTI  - ${oneLine.replace(/\.$/, '')}\n`);
     expect(entry?.citations.bibtex).toContain(`{${oneLine.replace(/\.$/, '')}}`);
 
     const text = textBlocks(result.content as ContentBlock[])

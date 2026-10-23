@@ -24,6 +24,7 @@ import {
   EDAM_PUBMED_ID,
   SCHEMA_SCHOLARLY_ARTICLE,
 } from './_concepts.js';
+import { escapeMarkdownInline } from './_text.js';
 import { hasVisibleText } from './_visible-text.js';
 
 /** Extract the surname token (first whitespace-separated part) from an author string. */
@@ -407,19 +408,25 @@ export const lookupCitationTool = tool('pubmed_lookup_citation', {
     // and text-only clients read this markdown instead of structuredContent — so
     // without the index two results can render under identical headings with no
     // way to tell which block answers which submitted citation. (#128)
+    //
+    // The caller's label, NCBI's author and outcome text, and the warning
+    // messages quoting both are escaped at render time; structuredContent keeps
+    // them as written. PMIDs are digits the parser validated. (#255)
     for (const [i, r] of result.results.entries()) {
-      lines.push(`\n### ${i + 1} · ${r.key}`);
+      lines.push(`\n### ${i + 1} · ${escapeMarkdownInline(r.key)}`);
       if (r.pmid) lines.push(`**PMID:** ${r.pmid}`);
-      if (r.matchedFirstAuthor) lines.push(`**First Author:** ${r.matchedFirstAuthor}`);
+      if (r.matchedFirstAuthor) {
+        lines.push(`**First Author:** ${escapeMarkdownInline(r.matchedFirstAuthor)}`);
+      }
       if (r.candidatePmids?.length) {
         lines.push(`**Candidate PMIDs:** ${r.candidatePmids.join(', ')}`);
       }
-      if (r.detail) lines.push(`**Detail:** ${r.detail}`);
+      if (r.detail) lines.push(`**Detail:** ${escapeMarkdownInline(r.detail)}`);
 
       if (r.warnings?.length) {
         lines.push(`**Warnings:**`);
         for (const w of r.warnings) {
-          lines.push(`- [${w.code}] ${w.message}`);
+          lines.push(`- [${w.code}] ${escapeMarkdownInline(w.message)}`);
         }
       }
 

@@ -27,7 +27,7 @@ import {
   EDAM_PUBMED_ID,
   SCHEMA_SEARCH_ACTION,
 } from './_concepts.js';
-import { escapeMarkdownInline } from './_text.js';
+import { escapeMarkdownInline, markdownCodeSpan } from './_text.js';
 import { hasVisibleText } from './_visible-text.js';
 
 /**
@@ -795,7 +795,9 @@ export const searchArticlesTool = tool('pubmed_search_articles', {
   format: (result) => {
     const lines = [
       `## PubMed Search Results`,
-      `**Query:** ${result.query}`,
+      // A code span, so the caller's query reads exactly as sent — wildcards,
+      // field tags and all — raw and rendered. (#255)
+      `**Query:** ${markdownCodeSpan(result.query)}`,
       `**Returned:** ${result.pmids.length} of ${result.totalCount} | **Offset:** ${result.offset}`,
       `**Search URL:** ${result.searchUrl}`,
     ];
@@ -817,19 +819,28 @@ export const searchArticlesTool = tool('pubmed_search_articles', {
         // plain-text value the eSummary parser produced. (#102)
         lines.push(`\n#### ${escapeMarkdownInline(s.title ?? s.pmid)}`);
         lines.push(`**PMID:** ${s.pmid}`);
-        if (s.authors) lines.push(`**Authors:** ${s.authors}`);
-        if (s.editors?.length) lines.push(`**Editors:** ${s.editors.join(', ')}`);
-        if (s.source) lines.push(`**Source:** ${s.source}`);
+        // Every eSummary string below is escaped the same way. (#255)
+        if (s.authors) lines.push(`**Authors:** ${escapeMarkdownInline(s.authors)}`);
+        if (s.editors?.length) {
+          lines.push(`**Editors:** ${escapeMarkdownInline(s.editors.join(', '))}`);
+        }
+        if (s.source) lines.push(`**Source:** ${escapeMarkdownInline(s.source)}`);
         // A Bookshelf record has no journal, so its venue takes the Source
         // slot rather than leaving the summary without one. (#114)
         if (s.bookTitle || s.publisherName) {
-          lines.push(`**Book:** ${[s.bookTitle, s.publisherName].filter(Boolean).join(' — ')}`);
+          const book = [s.bookTitle, s.publisherName]
+            .filter((part): part is string => !!part)
+            .map(escapeMarkdownInline)
+            .join(' — ');
+          lines.push(`**Book:** ${book}`);
         }
         // `citation` is every ordinary journal article; the line earns its
         // place only when it flags a Bookshelf chapter or book. (#146)
-        if (s.docType && s.docType !== 'citation') lines.push(`**Doc Type:** ${s.docType}`);
-        if (s.pubDate) lines.push(`**Published:** ${s.pubDate}`);
-        if (s.doi) lines.push(`**DOI:** ${s.doi}`);
+        if (s.docType && s.docType !== 'citation') {
+          lines.push(`**Doc Type:** ${escapeMarkdownInline(s.docType)}`);
+        }
+        if (s.pubDate) lines.push(`**Published:** ${escapeMarkdownInline(s.pubDate)}`);
+        if (s.doi) lines.push(`**DOI:** ${escapeMarkdownInline(s.doi)}`);
         if (s.pmcId) lines.push(`**PMCID:** ${s.pmcId}`);
         if (s.pubmedUrl) lines.push(`**PubMed:** ${s.pubmedUrl}`);
         if (s.pmcUrl) lines.push(`**PMC:** ${s.pmcUrl}`);

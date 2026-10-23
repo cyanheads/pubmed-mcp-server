@@ -7,7 +7,7 @@
 
 <div align="center">
 
-[![Version](https://img.shields.io/badge/Version-2.10.22-blue.svg?style=flat-square)](./CHANGELOG.md) [![License](https://img.shields.io/badge/License-Apache%202.0-orange.svg?style=flat-square)](./LICENSE) [![Docker](https://img.shields.io/badge/Docker-ghcr.io-2496ED?style=flat-square&logo=docker&logoColor=white)](https://github.com/users/cyanheads/packages/container/package/pubmed-mcp-server) [![MCP SDK](https://img.shields.io/badge/MCP%20SDK-^2.3.1-green.svg?style=flat-square)](https://modelcontextprotocol.io/) [![npm](https://img.shields.io/npm/v/@cyanheads/pubmed-mcp-server?style=flat-square&logo=npm&logoColor=white)](https://www.npmjs.com/package/@cyanheads/pubmed-mcp-server) [![TypeScript](https://img.shields.io/badge/TypeScript-^7.0.2-3178C6.svg?style=flat-square)](https://www.typescriptlang.org/) [![Bun](https://img.shields.io/badge/Bun-v1.4.3-blueviolet.svg?style=flat-square)](https://bun.sh/)
+[![Version](https://img.shields.io/badge/Version-2.10.22-blue.svg?style=flat-square)](./CHANGELOG.md) [![License](https://img.shields.io/badge/License-Apache%202.0-orange.svg?style=flat-square)](./LICENSE) [![Docker](https://img.shields.io/badge/Docker-ghcr.io-2496ED?style=flat-square&logo=docker&logoColor=white)](https://github.com/users/cyanheads/packages/container/package/pubmed-mcp-server) [![MCP SDK](https://img.shields.io/badge/MCP%20SDK-^2.3.1-green.svg?style=flat-square)](https://modelcontextprotocol.io/) [![npm](https://img.shields.io/npm/v/@cyanheads/pubmed-mcp-server?style=flat-square&logo=npm&logoColor=white)](https://www.npmjs.com/package/@cyanheads/pubmed-mcp-server) [![TypeScript](https://img.shields.io/badge/TypeScript-^7.0.2-3178C6.svg?style=flat-square)](https://www.typescriptlang.org/) [![Bun](https://img.shields.io/badge/Bun-v1.4.4-blueviolet.svg?style=flat-square)](https://bun.sh/)
 
 </div>
 
@@ -29,14 +29,14 @@
 
 ## Overview
 
-Biomedical literature from PubMed, PubMed Central, and Europe PMC. Search it, fetch metadata and full text, resolve identifiers and partial citations, format references, and ground queries in MeSH vocabulary. Runs as a stdio process, a local Streamable HTTP server, or the public hosted endpoint above.
+Biomedical literature from PubMed, PubMed Central, and Europe PMC. Search it, fetch metadata and full text, resolve identifiers and partial citations, format references, and ground queries in MeSH vocabulary.
 
 ### Tools
 
 | Tool | Description |
 |:---|:---|
 | `pubmed_search_articles` | Search PubMed with full query syntax, structured filters, date ranges, and optional summaries |
-| `pubmed_fetch_articles` | Fetch article metadata by PMID: abstract, authors, journal, MeSH terms, grants, a collective author's investigators on request, linked retraction and correction notices |
+| `pubmed_fetch_articles` | Fetch article metadata by PMID: abstract, authors, journal, MeSH terms, databank accessions such as trial registration IDs, grants, a collective author's investigators on request, linked retraction and correction notices |
 | `pubmed_fetch_fulltext` | Fetch full text by PMID, PMCID, or DOI, falling back from PMC to Europe PMC to Unpaywall |
 | `pubmed_europepmc_search` | Search Europe PMC for preprints, patents, Agricola, and open-access records PubMed doesn't carry |
 | `pubmed_europepmc_fetch` | Fetch complete Europe PMC records, including the untruncated abstract, as `records: [{ source, epmcId }]` |
@@ -75,6 +75,7 @@ Biomedical literature from PubMed, PubMed Central, and Europe PMC. Search it, fe
 - Up to 200 PMIDs per call; misses are listed in `unavailablePmids`
 - Abstract, authors, journal, DOI, publication types, linked retraction/erratum/comment notices, and links; MeSH terms on by default, grants via `includeGrants`, and the members of a collective author (its `InvestigatorList`, thousands on some consortium trials) via `includeInvestigators`
 - A retracted, corrected, or questioned article opens with the same notice block as `pubmed_format_citations`, directly under its title
+- `dataBanks` lists the record's trial registrations and data deposits (ClinicalTrials.gov NCT IDs, GenBank and PDB accessions, Dryad DOIs) verbatim; search `pubmed_search_articles` for `<accession>[si]` to find other records citing one
 - `recordType` separates journal articles from Bookshelf chapters and books; opt-in `maxResponseCharacters` defers overflow to `deferred.ids`
 
 ---
@@ -107,6 +108,7 @@ Biomedical literature from PubMed, PubMed Central, and Europe PMC. Search it, fe
 
 - Up to 50 PMIDs per call, in any mix of `apa`, `mla`, `bibtex`, `ris`, and `vancouver`
 - Bookshelf records cite as edited books, each chapter dated by its own last revision or contribution date; PMIDs that can't be fetched are reported as unavailable
+- Vancouver writes page ranges in elided Citing Medicine form (`1637-1645` → `1637-45`); BibTeX `issn` and RIS `SN` carry the journal's linking ISSN, and RIS `TI` drops its trailing period
 - Retractions, errata, and expressions of concern NCBI links to an article come back as `notices` and are shown ahead of its citations; Vancouver adds a `Retraction in:` / `Erratum in:` note and APA a retraction parenthetical
 
 ---
@@ -120,7 +122,7 @@ Biomedical literature from PubMed, PubMed Central, and Europe PMC. Search it, fe
 
 ### `pubmed_spell_check` <sub>tool</sub>
 
-- Returns `original`, `corrected`, and `hasSuggestion`; corrections land in place, so field tags, operators, spacing, and gene symbols stay as written
+- Returns `original`, `corrected`, and `hasSuggestion`; corrections land in place, so field tags, operators, spacing, and gene symbols stay as written, and a single letter such as an author initial is never swapped for another
 - Run it after a zero-hit or thin search, then retry `pubmed_search_articles` with `corrected`
 
 ---

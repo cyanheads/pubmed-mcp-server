@@ -258,6 +258,16 @@ function articleLocator(journal?: ParsedJournalInfo): string | undefined {
 }
 
 /**
+ * The ISSN BibTeX and RIS print: the journal's linking ISSN, then the record's
+ * own `Journal/ISSN`. That one names whichever edition NLM indexed the record
+ * from, so two articles of one journal can carry different ISSNs (Lancet
+ * `0140-6736` in print, `1474-547X` electronic); ISSN-L is one for both. (#253)
+ */
+function citedIssn(journal?: ParsedJournalInfo): string | undefined {
+  return journal?.issnLinking ?? journal?.issn ?? journal?.eIssn;
+}
+
+/**
  * The article number APA and MLA cite in place of a page range: the record's
  * non-DOI locator when it has no pagination, or when its pagination is that
  * same value — NCBI copies an article number into `MedlinePgn` (Frontiers
@@ -318,6 +328,46 @@ function expandPageRanges(pages: string, dash?: string): string {
     if (end === undefined) return item;
     const join = dash ?? item.slice(start.length, item.length - end.length);
     return `${start}${join}${fullPageEnd(start, end)}`;
+  });
+}
+
+/**
+ * The end of a range in *Citing Medicine*'s elided form, the inverse of
+ * {@link fullPageEnd}: the end, written in full, drops the letter prefix it
+ * shares with the start and the leading digits its digits share with the
+ * start's, keeping at least one (`1637-1645` → `45`, `1199-1201` → `201`,
+ * `S12-S15` → `5`). An end with more digits than the start keeps them all
+ * (`99-101`, `R1-R10` → `10`). An end with another prefix or a non-digit tail
+ * (`865-878.e8`), a start without digits (`iii-v`), or a range ending on its
+ * own start page (`123-123`) keeps NLM's text.
+ */
+function elidedPageEnd(start: string, end: string): string {
+  const digits = TRAILING_DIGITS.exec(start);
+  if (!digits) return end;
+  const [run] = digits;
+  const prefix = start.slice(0, digits.index);
+  const full = fullPageEnd(start, end);
+  if (full === start) return end;
+  const endRun = full.startsWith(prefix) ? full.slice(prefix.length) : '';
+  if (!/^\d+$/.test(endRun) || endRun.length < run.length) return end;
+  if (endRun.length > run.length) return endRun;
+  let shared = 0;
+  while (shared < run.length - 1 && endRun[shared] === run[shared]) shared++;
+  return endRun.slice(shared);
+}
+
+/**
+ * NLM's pagination with each range elided as Vancouver cites it (`1637-1645` →
+ * `1637-45`, `S12-S15` → `S12-5`), joined by NLM's own dash; a range NLM already
+ * elided is unchanged (`637-41`), and so is the rest of NLM's text
+ * (`1407-1408; author reply 1409-1410` → `1407-8; author reply 1409-10`). Writing
+ * the result out with {@link expandPageRanges} returns the full range. (#253)
+ */
+function elidePageRanges(pages: string): string {
+  return pages.replace(PAGE_ITEM, (item, start: string, end: string | undefined) => {
+    if (end === undefined) return item;
+    const join = item.slice(start.length, item.length - end.length);
+    return `${start}${join}${elidedPageEnd(start, end)}`;
   });
 }
 
@@ -1070,7 +1120,7 @@ export function formatBibtex(article: ParsedArticle): string {
 
   // ISSN, or a book's ISBNs — a book commonly carries a print and an
   // electronic one, and dropping either loses a real identifier
-  const issn = journal?.issn ?? journal?.eIssn;
+  const issn = citedIssn(journal);
   if (issn) {
     fields.push(['issn', escapeBibtex(issn)]);
   }
@@ -1161,8 +1211,8 @@ export function formatRis(article: ParsedArticle): string {
   // Authors — one AU tag per author
   for (const author of article.authors ?? []) tag('AU', formatNameRis(author));
 
-  // Title
-  tag('TI', article.title);
+  // Title — one trailing period dropped, as BibTeX's `title` drops it
+  tag('TI', article.title && stripTrailingPeriod(article.title));
 
   // Container — the journal, or the book a chapter sits in. `BT` is the book
   // title; on a whole-book record it would only repeat `TI`, so it is omitted.
@@ -1207,7 +1257,7 @@ export function formatRis(article: ParsedArticle): string {
 
   // SN carries the ISSN for a serial and the ISBN for a book; a book with both
   // a print and an electronic ISBN gets one line each.
-  tag('SN', journal?.issn ?? journal?.eIssn);
+  tag('SN', citedIssn(journal));
   for (const isbn of book?.isbns ?? []) tag('SN', isbn);
 
   // DOI (without URL prefix — RIS DO tag holds the bare DOI)
@@ -1352,8 +1402,9 @@ const VANCOUVER_NOTE_LABELS: Partial<Record<CitationNoticeType, string>> = {
  * ```
  * Surname AB, Surname CD, et al. Article title. Abbrev J Name. Year;Vol(Issue):Pages. doi: 10.x/y
  * ```
- * Journal name uses the NLM/ISO abbreviation when available; pages are used as
- * PubMed supplies them (often elided, e.g. "583-9"); the DOI carries no trailing
+ * Journal name uses the NLM/ISO abbreviation when available; each page range is
+ * elided in *Citing Medicine* form whether PubMed supplies it elided or in full
+ * (`583-9`, `1637-1645` → `1637-45`; {@link elidePageRanges}); the DOI carries no trailing
  * period so it stays copy-pasteable, unless a note follows it. An article number replaces nothing — with
  * no pagination it trails the source as an NLM note (`. pii: 2400512.`). A
  * retraction or erratum follows as a note (`Retraction in: <RefSource>`). A
@@ -1383,13 +1434,14 @@ export function formatVancouver(article: ParsedArticle): string {
 
   // Source — "Year;Volume(Issue):Pages."
   const year = getYear(article);
+  const pages = journal?.pages && elidePageRanges(journal.pages);
   let source = year !== 'n.d.' ? year : '';
   if (journal?.volume) {
     source += source ? `;${journal.volume}` : journal.volume;
     if (journal.issue) source += `(${journal.issue})`;
-    if (journal.pages) source += `:${journal.pages}`;
-  } else if (journal?.pages) {
-    source += source ? `:${journal.pages}` : journal.pages;
+    if (pages) source += `:${pages}`;
+  } else if (pages) {
+    source += source ? `:${pages}` : pages;
   }
   if (source) segments.push(`${source}.`);
 

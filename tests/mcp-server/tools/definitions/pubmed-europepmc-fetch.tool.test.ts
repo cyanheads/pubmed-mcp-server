@@ -12,7 +12,7 @@ import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
 import { createMockContext, getEnrichment, runToolContract } from '@cyanheads/mcp-ts-core/testing';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
-import { textBlocks } from '../../../_helpers.js';
+import { bunMarkdown, textBlocks, renderedText as visibleText } from '../../../_helpers.js';
 
 const mockFetchRecords = vi.fn();
 const mockGetEpmc = vi.fn();
@@ -637,6 +637,126 @@ describe('pubmedEuropepmcFetchTool markup in MED records (#181, #195)', () => {
     const { records } = result.structuredContent as { records: Array<{ abstract?: string }> };
     expect(records[0]?.abstract).toBe(expected);
     expect(contractText(result)).toContain(expected);
+  });
+});
+
+describe('pubmedEuropepmcFetchTool literal tag-shaped terms in PAT records (#256)', () => {
+  beforeEach(() => {
+    mockFetchRecords.mockReset();
+    mockGetEpmc.mockReset();
+    mockGetEpmc.mockReturnValue({ fetchRecords: mockFetchRecords });
+  });
+
+  it('keeps `HuMab<CD20>` in the complete abstract (PAT/US2011076273)', async () => {
+    // Europe PMC's core record, abstract verbatim.
+    const abstractText =
+      'The present invention relates to a highly concentrated, stable pharmaceutical formulation of a pharmaceutically active anti-CD20 antibody, such as e.g. Rituximab, Ocrelizumab, or HuMab<CD20>, or a mixture of such antibody molecules for subcutaneous injection. In particular, the present invention relates to formulations comprising, in addition to a suitable amount of the anti-CD20 antibody, an effective amount of at least one hyaluronidase enzyme as a combined formulation or for use in form of a co-formulation. The said formulations comprise additionally at least one buffering agent, such as e.g. a histidine buffer, a stabilizer or a mixture of two or more stabilizers (e.g. a saccharide, such as e.g. [alpha],[alpha]-trehalose dihydrate or sucrose, and optionally methionine as a second stabilizer), a nonionic surfactant and an effective amount of at least one hyaluronidase enzyme. Methods for preparing such formulations and their uses thereof are also provided.';
+    mockFetchRecords.mockResolvedValue([
+      {
+        id: 'US2011076273',
+        source: 'PAT',
+        title: 'Highly Concentrated Pharmaceutical Formulations',
+        authorString: 'ADLER MICHAEL, MAHLER HANNS-CHRISTIAN, STAUCH OLIVER BORIS.',
+        abstractText,
+        pubYear: '2011',
+      },
+    ]);
+
+    const result = await runToolContract(pubmedEuropepmcFetchTool, {
+      records: [{ source: 'PAT', epmcId: 'US2011076273' }],
+    });
+
+    expect(result.isError).toBeFalsy();
+    const { records } = result.structuredContent as { records: Array<{ abstract?: string }> };
+    expect(records[0]?.abstract).toBe(abstractText);
+    // Escaped in `content[]`, where a renderer would otherwise read `<CD20>`
+    // as a raw HTML tag and hide it; the bracket pairs stay raw. (#255)
+    const text = contractText(result);
+    expect(text).toContain('Ocrelizumab, or HuMab\\<CD20>, or a mixture');
+    expect(text).toContain('such as e.g. [alpha],[alpha]-trehalose dihydrate');
+  });
+});
+
+describe('pubmedEuropepmcFetchTool content[] escaping of the abstract (#255)', () => {
+  beforeEach(() => {
+    mockFetchRecords.mockReset();
+    mockGetEpmc.mockReset();
+    mockGetEpmc.mockReturnValue({ fetchRecords: mockFetchRecords });
+  });
+
+  /** Europe PMC's MED/39292993 abstract, the HGVS sentence verbatim. */
+  const HGVS_ABSTRACT =
+    'Exome sequencing identified biallelic variants in EPB41L3 in all affected individuals: two nonsense [c.466C>T, p.(R156*); c.2776C>T, p.(R926*)] and three frameshift [c.666delT, p.(F222Lfs*46); c.2289dupC, p.(V764Rfs*19); c.948_949delTG, p.(A317Kfs*33)].';
+
+  it('escapes paired HGVS asterisks in content[] and keeps the structured abstract plain (MED/39292993)', async () => {
+    mockFetchRecords.mockResolvedValue([
+      {
+        id: '39292993',
+        source: 'MED',
+        pmid: '39292993',
+        doi: '10.1093/brain/awae300',
+        title: 'Biallelic EPB41L3 variants underlie a developmental disorder.',
+        abstractText: HGVS_ABSTRACT,
+      },
+    ]);
+
+    const result = await runToolContract(pubmedEuropepmcFetchTool, {
+      records: [{ source: 'MED', epmcId: '39292993' }],
+    });
+
+    expect(result.isError).toBeFalsy();
+    const { records } = result.structuredContent as { records: Array<{ abstract?: string }> };
+    expect(records[0]?.abstract).toBe(HGVS_ABSTRACT);
+    const text = contractText(result);
+    expect(text).toContain(
+      '#### Abstract\nExome sequencing identified biallelic variants in EPB41L3 in all affected individuals: two nonsense [c.466C>T, p.(R156\\*); c.2776C>T, p.(R926\\*)] and three frameshift [c.666delT, p.(F222Lfs\\*46); c.2289dupC, p.(V764Rfs\\*19); c.948_949delTG, p.(A317Kfs\\*33)].',
+    );
+  });
+
+  it('escapes a block marker opening the abstract and an upstream DOI', () => {
+    const text = renderedText({
+      records: [
+        {
+          source: 'PPR',
+          epmcId: 'PPR_1_',
+          doi: '10.1101/[x](y)',
+          abstract: '> 18 years of age; a <b>bold</b> claim',
+          epmcUrl: 'https://europepmc.org/article/PPR/PPR_1_',
+        },
+      ],
+    });
+
+    expect(text).toContain('#### Abstract\n\\> 18 years of age; a \\<b>bold\\</b> claim');
+    expect(text).toContain('**DOI:** 10.1101/\\[x\\](y)');
+  });
+
+  // A not-found pair is the caller's own (`_` and `.` pass the id schema); a
+  // deferred pair is Europe PMC's, whose ids the server never validates.
+  const pairs = {
+    records: [],
+    notFound: [{ source: 'PPR' as const, epmcId: '_a_b_' }],
+    deferred: {
+      maxResponseCharacters: 1,
+      returnedCharacters: 0,
+      deferredCount: 1,
+      records: [{ source: 'PAT' as const, epmcId: 'KR*1*' }],
+      nextDeferredCharacters: 500,
+    },
+  };
+
+  it('escapes the not-found and deferred pairs', () => {
+    const text = renderedText(pairs);
+
+    // The middle `_` is intraword and cannot pair.
+    expect(text).toContain('**Not found:** PPR/\\_a_b\\_\n');
+    expect(text).toContain('(`source`/`epmcId`): PAT/KR\\*1\\*');
+  });
+
+  it.runIf(bunMarkdown !== undefined)('renders every character of the pairs', () => {
+    const visible = visibleText(renderedText(pairs));
+
+    expect(visible).toContain('Not found: PPR/_a_b_');
+    expect(visible).toContain('(source/epmcId): PAT/KR*1*');
   });
 });
 

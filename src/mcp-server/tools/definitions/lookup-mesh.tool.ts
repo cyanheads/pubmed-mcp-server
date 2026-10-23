@@ -18,6 +18,7 @@ import {
   SCHEMA_DEFINED_TERM,
   SCHEMA_DEFINED_TERM_SET,
 } from './_concepts.js';
+import { escapeMarkdownInline, markdownCodeSpan } from './_text.js';
 import { hasVisibleText } from './_visible-text.js';
 
 // ─── MeSH eSummary parsing helpers ───────────────────────────────────────────
@@ -312,19 +313,25 @@ export const lookupMeshTool = tool('pubmed_lookup_mesh', {
 
   format: (result) => {
     const lines = [
-      `# MeSH Lookup: "${result.query}"`,
+      // The caller's query as sent, read exactly raw and rendered. (#255)
+      `# MeSH Lookup: ${markdownCodeSpan(result.query)}`,
       `Found **${result.results.length}** result(s) at offset **${result.offset}**.`,
     ];
     if (result.nextOffset !== undefined) {
       lines.push(`More available — call again with \`offset: ${result.nextOffset}\`.`);
     }
     for (const r of result.results) {
-      lines.push(`\n## ${r.name}`);
+      // NLM's descriptor name, scope note and entry terms are escaped at render
+      // time; structuredContent keeps them as written. The entry terms share a
+      // line, so they are escaped joined. (#255)
+      lines.push(`\n## ${escapeMarkdownInline(r.name)}`);
       if (r.meshId) lines.push(`- **MeSH ID:** ${r.meshId}`);
       lines.push(`- **Entrez UID:** ${r.entrezUid}`);
       if (r.treeNumbers?.length) lines.push(`- **Tree Numbers:** ${r.treeNumbers.join(', ')}`);
-      if (r.scopeNote) lines.push(`- **Scope Note:** ${r.scopeNote}`);
-      if (r.entryTerms?.length) lines.push(`- **Entry Terms:** ${r.entryTerms.join('; ')}`);
+      if (r.scopeNote) lines.push(`- **Scope Note:** ${escapeMarkdownInline(r.scopeNote)}`);
+      if (r.entryTerms?.length) {
+        lines.push(`- **Entry Terms:** ${escapeMarkdownInline(r.entryTerms.join('; '))}`);
+      }
     }
     return [{ type: 'text', text: lines.join('\n') }];
   },

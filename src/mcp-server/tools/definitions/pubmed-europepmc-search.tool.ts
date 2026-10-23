@@ -36,7 +36,12 @@ import {
   SCHEMA_SEARCH_ACTION,
 } from './_concepts.js';
 import { europePmcSourceInputSchema } from './_schemas.js';
-import { escapeMarkdownInline, sliceCodeUnits } from './_text.js';
+import {
+  escapeMarkdownBlock,
+  escapeMarkdownInline,
+  markdownCodeSpan,
+  sliceCodeUnits,
+} from './_text.js';
 import { hasVisibleText } from './_visible-text.js';
 
 const SourceEnum = z.enum(['MED', 'PMC', 'PPR', 'PAT', 'AGR']);
@@ -357,7 +362,9 @@ export const pubmedEuropepmcSearchTool = tool('pubmed_europepmc_search', {
     const lines = [
       '## Europe PMC Search Results',
       `**Returned:** ${result.hits.length} of ${result.totalCount}`,
-      `**Cursor:** ${result.cursorMark}${result.nextCursorMark ? ` → \`${result.nextCursorMark}\` (next page)` : ' (final page)'}`,
+      // Opaque cursors a caller passes back verbatim: code spans, so each reads
+      // exactly raw and rendered. (#255)
+      `**Cursor:** ${markdownCodeSpan(result.cursorMark)}${result.nextCursorMark ? ` → ${markdownCodeSpan(result.nextCursorMark)} (next page)` : ' (final page)'}`,
       `**Search URL:** ${result.searchUrl}`,
     ];
 
@@ -367,14 +374,16 @@ export const pubmedEuropepmcSearchTool = tool('pubmed_europepmc_search', {
         // Escaping is render-time only — the structuredContent values above stay
         // plain text; only these interpolations are neutralized. (#102)
         lines.push(`\n#### ${escapeMarkdownInline(h.title ?? h.epmcId)}`);
-        lines.push(`**Source:** ${h.source} | **EPMC ID:** ${h.epmcId}`);
+        lines.push(`**Source:** ${h.source} | **EPMC ID:** ${escapeMarkdownInline(h.epmcId)}`);
         if (h.authors) lines.push(`**Authors:** ${escapeMarkdownInline(h.authors)}`);
         if (h.journal) lines.push(`**Journal:** ${escapeMarkdownInline(h.journal)}`);
-        if (h.firstPublicationDate) lines.push(`**Published:** ${h.firstPublicationDate}`);
-        if (h.pubYear) lines.push(`**Year:** ${h.pubYear}`);
-        if (h.pmid) lines.push(`**PMID:** ${h.pmid}`);
-        if (h.pmcId) lines.push(`**PMCID:** ${h.pmcId}`);
-        if (h.doi) lines.push(`**DOI:** ${h.doi}`);
+        if (h.firstPublicationDate) {
+          lines.push(`**Published:** ${escapeMarkdownInline(h.firstPublicationDate)}`);
+        }
+        if (h.pubYear) lines.push(`**Year:** ${escapeMarkdownInline(h.pubYear)}`);
+        if (h.pmid) lines.push(`**PMID:** ${escapeMarkdownInline(h.pmid)}`);
+        if (h.pmcId) lines.push(`**PMCID:** ${escapeMarkdownInline(h.pmcId)}`);
+        if (h.doi) lines.push(`**DOI:** ${escapeMarkdownInline(h.doi)}`);
         if (h.isOpenAccess !== undefined)
           lines.push(`**Open Access:** ${h.isOpenAccess ? 'yes' : 'no'}`);
         if (h.hasFullTextXml !== undefined) {
@@ -383,9 +392,15 @@ export const pubmedEuropepmcSearchTool = tool('pubmed_europepmc_search', {
         if (typeof h.citedByCount === 'number') lines.push(`**Cited by:** ${h.citedByCount}`);
         lines.push(`**URL:** ${h.epmcUrl}`);
         if (h.abstractSnippet) {
-          lines.push(`\n${h.abstractSnippet}`);
+          // Plain text that opens a line of its own: escaped as prose, line
+          // start included. The truncation note takes a paragraph of its own —
+          // on the next line it would share the snippet's paragraph, and a
+          // delimiter the cut left lone (one backtick) would pair with the
+          // note's code spans. (#255)
+          lines.push(`\n${escapeMarkdownBlock(h.abstractSnippet, 'plain')}`);
           if (h.abstractTruncated) {
             lines.push(
+              '',
               `_Abstract truncated at ${ABSTRACT_SNIPPET_LIMIT} characters — pass this hit to \`pubmed_europepmc_fetch\` as \`records: [{ source, epmcId }]\` for the complete text._`,
             );
           }

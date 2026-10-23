@@ -11,6 +11,7 @@ import type {
   ParsedBookEditor,
   ParsedBookInfo,
   ParsedCommentsCorrection,
+  ParsedDataBank,
   ParsedGrant,
   ParsedInvestigator,
   ParsedJournalInfo,
@@ -25,6 +26,7 @@ import type {
   XmlAuthorList,
   XmlBookDocument,
   XmlCommentsCorrectionsList,
+  XmlDataBankList,
   XmlGrant,
   XmlGrantList,
   XmlJournal,
@@ -50,6 +52,20 @@ import {
 } from './xml-helpers.js';
 
 /**
+ * Text of a free-text element with one residual entity layer decoded. NCBI
+ * double-encodes some deposits (`R&amp;amp;D`, `Parkinson&amp;apos;s`,
+ * `P &amp;lt; 0.001`), so the XML parser's single decode leaves a literal
+ * `&amp;D` in the text. The decode is one pass — `&amp;amp;lt;` becomes `&lt;`,
+ * never `<` — and a bare `&` (`AT&T`) stays put. Titles, abstracts,
+ * affiliations, keywords, and grant fields read through this: the free text in
+ * which EFetch records were seen double-encoded. Names and NLM-controlled
+ * values (MeSH, publication types, journal titles) read as parsed. (#74, #255)
+ */
+function getDecodedText(element: unknown): string {
+  return decodeHtmlEntities(getText(element));
+}
+
+/**
  * Result of extracting authors with deduplicated affiliations.
  */
 export interface ExtractedAuthors {
@@ -71,7 +87,7 @@ function affiliationIndex(seed: readonly string[] = []) {
     of(infos: XmlAuthor['AffiliationInfo']): number[] {
       const indices: number[] = [];
       for (const info of ensureArray(infos)) {
-        const text = getText(info?.Affiliation);
+        const text = getDecodedText(info?.Affiliation);
         if (!text) continue;
         let index = indexOf.get(text);
         if (index === undefined) {
@@ -197,11 +213,13 @@ function extractELocationId(articleXml?: XmlArticle): { value: string; type?: st
  * Extracts and formats journal information from XML.
  * @param journalXml - The XML Journal element from an Article.
  * @param articleXml - The XML Article element (for Pagination and ELocationID).
+ * @param medlineJournalXml - `MedlineJournalInfo`, passed only to read its `ISSNLinking`. (#253)
  * @returns Formatted journal information.
  */
 export function extractJournalInfo(
   journalXml?: XmlJournal,
   articleXml?: XmlArticle,
+  medlineJournalXml?: XmlMedlineCitation['MedlineJournalInfo'],
 ): ParsedJournalInfo | undefined {
   if (!journalXml) return;
 
@@ -214,6 +232,7 @@ export function extractJournalInfo(
   const issnType = getAttribute(issnElement, 'IssnType');
   const issn = issnType === 'Electronic' ? undefined : issnValue || undefined;
   const eIssn = issnType === 'Electronic' ? issnValue || undefined : undefined;
+  const issnLinking = getOptionalText(medlineJournalXml?.ISSNLinking);
 
   const month = getText(pubDate?.Month);
   const day = getText(pubDate?.Day);
@@ -239,6 +258,7 @@ export function extractJournalInfo(
     ...(isoAbbreviation && { isoAbbreviation }),
     ...(issn && { issn }),
     ...(eIssn && { eIssn }),
+    ...(issnLinking && { issnLinking }),
     ...(volume && { volume }),
     ...(issue && { issue }),
     ...(pages && { pages }),
@@ -294,19 +314,34 @@ export function extractGrants(grantListXml?: XmlGrantList): ParsedGrant[] {
   if (!grantListXml) return [];
   const grants = ensureArray(grantListXml.Grant);
   return grants.map((g: XmlGrant): ParsedGrant => {
-    // NCBI double-encodes ampersands in grant identifiers and agencies
-    // (`CSR&amp;amp;D`), so the XML parser's single entity-decode pass still
-    // leaves a literal `&amp;`. Decode once more here to surface display-ready
-    // text (`CSR&D`) rather than making every caller re-sanitize. (#74)
-    const grantId = decodeHtmlEntities(getText(g.GrantID));
-    const acronym = decodeHtmlEntities(getText(g.Acronym));
-    const agency = decodeHtmlEntities(getText(g.Agency));
-    const country = decodeHtmlEntities(getText(g.Country));
+    // NCBI double-encodes ampersands in grant identifiers and agencies (`CSR&amp;amp;D`). (#74)
+    const grantId = getDecodedText(g.GrantID);
+    const acronym = getDecodedText(g.Acronym);
+    const agency = getDecodedText(g.Agency);
+    const country = getDecodedText(g.Country);
     return {
       ...(grantId && { grantId }),
       ...(acronym && { acronym }),
       ...(agency && { agency }),
       ...(country && { country }),
+    };
+  });
+}
+
+/**
+ * Extracts the databanks and registries a record links to, in upstream order
+ * and uncapped, each with its accessions verbatim (`NCT03951753`, an all-digit
+ * OMIM `300460`, a Dryad DOI). A bank listed without accessions keeps its name. (#257)
+ * @param dataBankListXml - The XML DataBankList element.
+ */
+function extractDataBanks(dataBankListXml?: XmlDataBankList): ParsedDataBank[] {
+  return ensureArray(dataBankListXml?.DataBank).map((bank): ParsedDataBank => {
+    const accessionNumbers = ensureArray(bank.AccessionNumberList?.AccessionNumber)
+      .map((accession) => getText(accession))
+      .filter(Boolean);
+    return {
+      name: getText(bank.DataBankName),
+      ...(accessionNumbers.length > 0 && { accessionNumbers }),
     };
   });
 }
@@ -451,7 +486,7 @@ export function extractKeywords(keywordListsXml?: XmlKeywordList[] | XmlKeywordL
   const allKeywords: string[] = [];
   for (const list of lists) {
     for (const kw of ensureArray(list.Keyword) as XmlKeyword[]) {
-      const keywordText = getText(kw);
+      const keywordText = getDecodedText(kw);
       if (keywordText) {
         allKeywords.push(keywordText);
       }
@@ -491,7 +526,8 @@ export function extractAbstractText(abstractXml?: XmlArticle['Abstract']): strin
 
   if (processedTexts.length === 0) return;
 
-  return processedTexts.join('\n\n').trim() || undefined; // Join sections with double newline
+  // Join sections with a blank line; no entity can span the join, so one decode covers every section.
+  return decodeHtmlEntities(processedTexts.join('\n\n').trim()) || undefined;
 }
 
 /**
@@ -533,10 +569,19 @@ export function parseFullArticle(
 ): ParsedArticle {
   const medlineCitation = xmlArticle.MedlineCitation;
   const article = medlineCitation?.Article;
-  const { includeMesh = true, includeGrants = false, includeInvestigators = false } = options;
+  const {
+    includeMesh = true,
+    includeGrants = false,
+    includeInvestigators = false,
+    includeIssnLinking = false,
+  } = options;
 
   const abstractText = extractAbstractText(article?.Abstract);
-  const journalInfo = extractJournalInfo(article?.Journal, article);
+  const journalInfo = extractJournalInfo(
+    article?.Journal,
+    article,
+    includeIssnLinking ? medlineCitation?.MedlineJournalInfo : undefined,
+  );
   const pubmedDataArticleIdList = xmlArticle.PubmedData?.ArticleIdList;
   const doi = extractDoi(article, pubmedDataArticleIdList);
   const pmcId = extractPmcId(article, pubmedDataArticleIdList);
@@ -551,11 +596,12 @@ export function parseFullArticle(
   const articleDates = extractArticleDates(article);
   const meshTerms = includeMesh ? extractMeshTerms(medlineCitation?.MeshHeadingList) : undefined;
   const grantList = includeGrants ? extractGrants(article?.GrantList) : undefined;
+  const dataBanks = extractDataBanks(article?.DataBankList);
 
   return {
     recordType: 'journal-article',
     pmid: extractPmid(medlineCitation) ?? '',
-    title: getText(article?.ArticleTitle),
+    title: getDecodedText(article?.ArticleTitle),
     ...(abstractText !== undefined && { abstractText }),
     ...(affiliations.length > 0 && { affiliations }),
     authors,
@@ -566,6 +612,7 @@ export function parseFullArticle(
     ...(keywords.length > 0 && { keywords }),
     ...(meshTerms !== undefined && meshTerms.length > 0 && { meshTerms }),
     ...(grantList !== undefined && grantList.length > 0 && { grantList }),
+    ...(dataBanks.length > 0 && { dataBanks }),
     ...(doi !== undefined && { doi }),
     ...(pmcId !== undefined && { pmcId }),
     ...(articleDates.length > 0 && { articleDates }),
@@ -637,7 +684,7 @@ export function extractBookInfo(bookDocumentXml: XmlBookDocument): ParsedBookInf
     .map(getOptionalText)
     .find(Boolean);
 
-  const title = getOptionalText(book?.BookTitle);
+  const title = getDecodedText(book?.BookTitle) || undefined;
   const publisher = getOptionalText(book?.Publisher?.PublisherName);
   const publisherLocation = getOptionalText(book?.Publisher?.PublisherLocation);
   const pubDate = extractYear(book?.PubDate);
@@ -684,7 +731,7 @@ export function parseFullBookArticle(xmlBookArticle: XmlPubmedBookArticle): Pars
   const bookDocument = xmlBookArticle.BookDocument;
   const book = extractBookInfo(bookDocument);
 
-  const chapterTitle = getOptionalText(bookDocument?.ArticleTitle);
+  const chapterTitle = getDecodedText(bookDocument?.ArticleTitle) || undefined;
   const bookAuthorLists = ensureArray(bookDocument?.Book?.AuthorList).filter(
     (list) => getAttribute(list, 'Type') !== 'editors',
   );

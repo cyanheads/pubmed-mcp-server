@@ -10,7 +10,7 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { NcbiResponseHandler } from '@/services/ncbi/response-handler.js';
 import type { ESummaryResponseContainer, ESummaryResult } from '@/services/ncbi/types.js';
-import { textBlocks } from '../../../_helpers.js';
+import { bunMarkdown, renderedHtml, renderedText, textBlocks } from '../../../_helpers.js';
 import { MESH_V2_RECORDS, meshSummaryXml } from './_mesh-esummary-fixtures.js';
 
 const mockESearch = vi.fn();
@@ -1031,7 +1031,7 @@ describe('lookupMeshTool', () => {
     );
     expect(blocks[0]?.text).toBe(
       [
-        '# MeSH Lookup: "Neoplasms"',
+        '# MeSH Lookup: `Neoplasms`',
         'Found **1** result(s) at offset **10**.',
         'More available — call again with `offset: 20`.',
         '',
@@ -1054,5 +1054,52 @@ describe('lookupMeshTool', () => {
     );
     expect(blocks[0]?.text).toContain('Found **0** result(s) at offset **0**.');
     expect(blocks[0]?.text).not.toContain('offset:');
+  });
+
+  it('escapes the descriptor name, scope note and entry terms (issue #255)', () => {
+    const text =
+      textBlocks(
+        lookupMeshTool.format!({
+          query: 'x',
+          offset: 0,
+          results: [
+            {
+              entrezUid: '68009369',
+              name: 'Neoplasms, *Second* Primary',
+              scopeNote:
+                'Growths of 10*8*6 mm; see [Tumors](https://evil.test) and <i>Neoplasia</i>.',
+              entryTerms: ['_Tumor_', 'Cancer *A', 'B*'],
+            },
+          ],
+        }),
+      )[0]?.text ?? '';
+
+    expect(text).toContain('\n## Neoplasms, \\*Second\\* Primary\n');
+    expect(text).toContain(
+      '- **Scope Note:** Growths of 10\\*8\\*6 mm; see \\[Tumors\\](https://evil.test) and \\<i>Neoplasia\\</i>.',
+    );
+    // Pairing is judged across the joined line: one `*` in each of two terms
+    // would pair once rendered side by side.
+    expect(text).toContain('- **Entry Terms:** \\_Tumor\\_; Cancer \\*A; B\\*');
+  });
+
+  describe('a query carrying Markdown-significant characters (issue #255)', () => {
+    const query = 'neoplasm* AND <b>tumor</b>[MH] OR a_b_c_';
+
+    it('echoes the query exactly in the heading, structuredContent unchanged', async () => {
+      mockESearch.mockResolvedValue({ count: 0, retmax: 0, retstart: 0, idList: [] });
+      const result = await runToolContract(lookupMeshTool, { query });
+
+      expect((result.structuredContent as { query: string }).query).toBe(query);
+      expect(textBlocks(result.content as ContentBlock[])[0]?.text).toContain(
+        `# MeSH Lookup: \`${query}\`\n`,
+      );
+    });
+
+    it.runIf(bunMarkdown !== undefined)('renders the query exactly', () => {
+      const text = textBlocks(lookupMeshTool.format!({ query, offset: 0, results: [] }))[0]?.text;
+      expect(renderedHtml(text ?? '').split('<h1').length - 1).toBe(1);
+      expect(renderedText(text ?? '')).toContain(`MeSH Lookup: ${query} Found 0`);
+    });
   });
 });

@@ -8,7 +8,7 @@ import { JsonRpcErrorCode, serviceUnavailable } from '@cyanheads/mcp-ts-core/err
 import { createMockContext, runToolContract } from '@cyanheads/mcp-ts-core/testing';
 import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
 
-import { textBlocks } from '../../../_helpers.js';
+import { bunMarkdown, renderedText, textBlocks } from '../../../_helpers.js';
 import { capturedEspell } from '../../../services/ncbi/_espell-fixtures.js';
 
 const mockESpell = vi.fn();
@@ -131,7 +131,7 @@ describe('spellCheckTool', () => {
           corrected: query,
           hasSuggestion: false,
         });
-        expect(textBlocks(spellCheckTool.format!(result))[0]?.text).toContain(`"${query}"`);
+        expect(textBlocks(spellCheckTool.format!(result))[0]?.text).toContain(`\`${query}\``);
         expect(fetchSpy).toHaveBeenCalled();
       },
     );
@@ -171,13 +171,17 @@ describe('spellCheckTool', () => {
         'breast cancer[MeSH] AND tamoxifen resistance',
       ],
       ['BRCA1 tamoxifen resistence', 'BRCA1 tamoxifen resistance'],
+      // ESpell rewrites the tag text and swaps the letter; both stay as written. (#250)
+      ['risk[tiab] AND alzhiemer', 'risk[tiab] AND alzheimer'],
+      ['smith j[au] AND diabetis', 'smith j[au] AND diabetes'],
+      ['q fever outbreak', 'q fever outbreaks'],
     ])('keeps %j re-runnable on both surfaces', async (query, corrected) => {
       const result = await runToolContract(spellCheckTool, { query });
 
       expect(result.isError).toBeFalsy();
       expect(result.structuredContent).toEqual({ original: query, corrected, hasSuggestion: true });
       expect(textBlocks(result.content as ContentBlock[])[0]?.text).toBe(
-        `**Suggestion:** "${corrected}" (original: "${query}")`,
+        `**Suggestion:** \`${corrected}\` (original: \`${query}\`)`,
       );
     });
 
@@ -192,10 +196,39 @@ describe('spellCheckTool', () => {
           hasSuggestion: false,
         });
         expect(textBlocks(result.content as ContentBlock[])[0]?.text).toBe(
-          `No correction applied — query "${query}" is returned as written.`,
+          `No correction applied — query \`${query}\` is returned as written.`,
         );
       },
     );
+  });
+
+  describe('a query carrying Markdown-significant characters (issue #255)', () => {
+    const query = 'cance* AND neuro*[tiab] AND <b>a_b_c</b> AND x`y';
+    const corrected = 'cancer* AND neuro*[tiab] AND <b>a_b_c</b> AND x`y';
+
+    it('echoes both queries exactly on the raw content[] text, structuredContent unchanged', async () => {
+      mockESpell.mockResolvedValue({ original: query, corrected, hasSuggestion: true });
+      const result = await runToolContract(spellCheckTool, { query });
+
+      expect(result.structuredContent).toEqual({ original: query, corrected, hasSuggestion: true });
+      expect(textBlocks(result.content as ContentBlock[])[0]?.text).toBe(
+        `**Suggestion:** \`\`${corrected}\`\` (original: \`\`${query}\`\`)`,
+      );
+    });
+
+    it.runIf(bunMarkdown !== undefined)('renders both queries exactly', () => {
+      const suggestion = textBlocks(
+        spellCheckTool.format!({ original: query, corrected, hasSuggestion: true }),
+      )[0]?.text;
+      const none = textBlocks(
+        spellCheckTool.format!({ original: query, corrected: query, hasSuggestion: false }),
+      )[0]?.text;
+
+      expect(renderedText(suggestion ?? '')).toBe(`Suggestion: ${corrected} (original: ${query})`);
+      expect(renderedText(none ?? '')).toBe(
+        `No correction applied — query ${query} is returned as written.`,
+      );
+    });
   });
 
   describe('blank query rejection (issue #133)', () => {
@@ -293,7 +326,7 @@ describe('spellCheckTool', () => {
         hasSuggestion: false,
       }),
     );
-    expect(blocks[0]?.text).toBe('No correction applied — query "cancer" is returned as written.');
+    expect(blocks[0]?.text).toBe('No correction applied — query `cancer` is returned as written.');
   });
 });
 
@@ -331,7 +364,7 @@ describe('spellCheckTool description (issue #151)', () => {
       hasSuggestion: true,
     });
     expect(textBlocks(result.content as ContentBlock[])[0]?.text).toContain(
-      `**Suggestion:** "${example?.[2]}"`,
+      `**Suggestion:** \`${example?.[2]}\``,
     );
   });
 });

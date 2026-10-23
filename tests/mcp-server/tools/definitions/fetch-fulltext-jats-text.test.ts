@@ -15,6 +15,8 @@ import { XMLParser } from 'fast-xml-parser';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { ORDERED_XML_PARSER_OPTIONS } from '@/services/ncbi/parsing/ordered-xml-parser-options.js';
 
+import { bunMarkdown, renderedHtml, renderedText } from '../../../_helpers.js';
+
 const mockEFetch = vi.fn();
 const mockIdConvert = vi.fn();
 
@@ -263,5 +265,200 @@ describe('fetchFulltextTool JATS text structure (#185, #196, #197, #200, #202, #
 
     expect(article?.abstract).toBe(abstract);
     expect(rendered(result)).toContain(`#### Abstract\n${abstract}`);
+  });
+});
+
+/**
+ * One EFetch body carrying the #255 reproductions: PMC10754557's measurements,
+ * PMC11609225's MathML subscripts and matrix row separator, PMC10727567's
+ * repeated frameshift variant, beside the parser structure the escape must keep
+ * — a nested list, a quote, a preformat whose content holds a fence line — and
+ * front matter and references carrying Markdown delimiters.
+ */
+const ESCAPE_BODY = `<?xml version="1.0"?>
+<pmc-articleset><article article-type="case-report"><front>
+<journal-meta><journal-title-group><journal-title>J_Mol_ *Med*</journal-title></journal-title-group><issn pub-type="epub">1234-5678</issn></journal-meta>
+<article-meta>
+<article-id pub-id-type="pmcid">PMC10754557</article-id>
+<title-group><article-title>Furmonertinib for brain metastases</article-title></title-group>
+<contrib-group><contrib contrib-type="author"><collab>*Lung* Study_Group_ [A]</collab></contrib>
+<contrib contrib-type="author"><name><surname>Li</surname><given-names>Wen</given-names></name><xref ref-type="aff" rid="aff1">1</xref></contrib>
+<aff id="aff1"># 1 Department of *Thoracic* and *Oncology* Surgery</aff></contrib-group>
+<volume>12</volume><issue>3*</issue><fpage>1</fpage><lpage>9*</lpage>
+<abstract><sec><title>Results</title><p>Both alleles carried p.His252Glnfs*21 and p.His252Glnfs*21.</p><list list-type="bullet"><list-item><p>size 10*8*6 mm</p></list-item><list-item><p>&lt;CD20&gt; positive</p></list-item></list></sec></abstract>
+<kwd-group><kwd>EGFR*</kwd><kwd>Lys*</kwd></kwd-group>
+</article-meta></front><body>
+<sec><title>Structure</title><p>Findings:</p><list list-type="bullet"><list-item><p>tumour 3*4 cm</p><list list-type="order"><list-item><p>nested 5*6 item</p></list-item></list></list-item></list>
+<disp-quote><p>a *quoted* remark</p></disp-quote>
+<preformat>run *raw*
+\`\`\`
+still raw \\* &amp;amp;</preformat><p>After the block *a* *b*.</p></sec>
+<sec><title>Case</title><p>MRI showed brain metastasis (size: 10*8*6 mm). After 1 month the lesion measured 10*6*6 mm.</p></sec>
+<sec><title>Model</title><p>A weighted adjacency matrix <inline-formula><mml:math><mml:mi>A</mml:mi><mml:mo>=</mml:mo><mml:msub><mml:mrow><mml:mo>(</mml:mo><mml:msub><mml:mi>a</mml:mi><mml:mrow><mml:mi>i</mml:mi><mml:mi>j</mml:mi></mml:mrow></mml:msub><mml:mo>)</mml:mo></mml:mrow><mml:mrow><mml:mi>N</mml:mi><mml:mo>×</mml:mo><mml:mi>N</mml:mi></mml:mrow></mml:msub></mml:math></inline-formula>, where <inline-formula><mml:math><mml:msub><mml:mi>a</mml:mi><mml:mrow><mml:mi>i</mml:mi><mml:mi>j</mml:mi></mml:mrow></mml:msub><mml:mo>&gt;</mml:mo><mml:mn>0</mml:mn></mml:math></inline-formula>.</p>
+<disp-formula><mml:math><mml:mfenced><mml:mtable><mml:mtr><mml:mtd><mml:mi>L</mml:mi></mml:mtd><mml:mtd><mml:mi>M</mml:mi></mml:mtd></mml:mtr><mml:mtr><mml:mtd><mml:msup><mml:mi>M</mml:mi><mml:mi>T</mml:mi></mml:msup></mml:mtd><mml:mtd><mml:mi>N</mml:mi></mml:mtd></mml:mtr></mml:mtable></mml:mfenced><mml:mo>&lt;</mml:mo><mml:mn>0</mml:mn></mml:math></disp-formula></sec>
+</body><back><ref-list>
+<ref id="R1"><label>1</label><mixed-citation>WHO. Report [Internet]. Geneva; 2021 [accessed 2021].</mixed-citation></ref>
+<ref><mixed-citation>- Dash *first* citation</mixed-citation></ref>
+</ref-list></back></article></pmc-articleset>`;
+
+/** The structured values the parser returns for {@link ESCAPE_BODY} — plain text, unescaped. */
+const PLAIN = {
+  abstract:
+    'Results: Both alleles carried p.His252Glnfs*21 and p.His252Glnfs*21.\n\n- size 10*8*6 mm\n- <CD20> positive',
+  structure:
+    'Findings:\n\n- tumour 3*4 cm\n  1. nested 5*6 item\n\n> a *quoted* remark\n\n````\nrun *raw*\n```\nstill raw \\* &amp;\n````\n\nAfter the block *a* *b*.',
+  case: 'MRI showed brain metastasis (size: 10*8*6 mm). After 1 month the lesion measured 10*6*6 mm.',
+  model:
+    'A weighted adjacency matrix A=(a_{ij})_{N×N}, where a_{ij}>0.\n\n(L & M \\\\ M^{T} & N)<0',
+};
+
+/**
+ * A structured value as a reader should see it: the parser's list and quote
+ * markup taken off its prose lines, its fence lines dropped and fence content
+ * kept as written.
+ */
+const shown = (text: string) => {
+  const lines: string[] = [];
+  let fence = 0;
+  for (const line of text.split('\n')) {
+    const run = /^(?:> )*(`{3,})$/.exec(line)?.[1]?.length ?? 0;
+    if (fence > 0) {
+      if (run >= fence) fence = 0;
+      else lines.push(line);
+    } else if (run > 0) fence = run;
+    else lines.push(line.replace(/^(?: {2})*(?:> )*(?: {2})*(?:- |\d{1,9}\. )?/, ''));
+  }
+  return lines.join(' ').replace(/\s+/g, ' ').trim();
+};
+
+/** How many `<tag` elements `markdown` renders to. */
+const count = (markdown: string, tag: string) => renderedHtml(markdown).split(`<${tag}`).length - 1;
+
+describe('fetchFulltextTool escapes JATS prose for content[] (#255)', () => {
+  beforeEach(() => {
+    vi.stubGlobal('fetch', vi.fn().mockRejectedValue(new Error('unmocked fetch')));
+    mockIdConvert.mockReset().mockRejectedValue(new Error('unmocked idConvert'));
+    mockEFetch.mockReset().mockImplementation(async (params: { db: string }) => {
+      if (params.db !== 'pmc') throw new Error(`unmocked eFetch db=${params.db}`);
+      return new XMLParser(ORDERED_XML_PARSER_OPTIONS).parse(ESCAPE_BODY);
+    });
+  });
+
+  async function call(input: Record<string, unknown> = {}) {
+    const result = await runToolContract(fetchFulltextTool, {
+      pmcids: ['PMC10754557'],
+      includeReferences: true,
+      ...input,
+    });
+    const article = (result.structuredContent as { articles: ReadArticle[] }).articles[0];
+    if (!article) throw new Error('expected one article');
+    return { article, structured: result.structuredContent, text: rendered(result) };
+  }
+
+  it('keeps structuredContent plain: every value as the parser returned it', async () => {
+    const { article } = await call();
+    const full = article as ReadArticle & Record<string, unknown>;
+
+    expect(article.abstract).toBe(PLAIN.abstract);
+    expect(article.sections.map((s) => s.text)).toEqual([PLAIN.structure, PLAIN.case, PLAIN.model]);
+    expect(full.authors).toEqual([
+      { collectiveName: '*Lung* Study_Group_ [A]' },
+      { lastName: 'Li', givenNames: 'Wen' },
+    ]);
+    expect(article.affiliations).toEqual(['# 1 Department of *Thoracic* and *Oncology* Surgery']);
+    expect(full.journal).toEqual({
+      title: 'J_Mol_ *Med*',
+      issn: '1234-5678',
+      volume: '12',
+      issue: '3*',
+      pages: '1-9*',
+    });
+    expect(full.keywords).toEqual(['EGFR*', 'Lys*']);
+    expect(article.references).toEqual([
+      { id: 'R1', label: '1', citation: 'WHO. Report [Internet]. Geneva; 2021 [accessed 2021].' },
+      { citation: '- Dash *first* citation' },
+    ]);
+  });
+
+  it('escapes section text and the abstract around the parser structure', async () => {
+    const { text } = await call();
+
+    expect(text).toContain(
+      '#### Abstract\nResults: Both alleles carried p.His252Glnfs\\*21 and p.His252Glnfs\\*21.\n\n- size 10\\*8\\*6 mm\n- \\<CD20> positive',
+    );
+    expect(text).toContain(
+      '#### Structure\nFindings:\n\n- tumour 3\\*4 cm\n  1. nested 5\\*6 item\n\n> a \\*quoted\\* remark\n\n````\nrun *raw*\n```\nstill raw \\* &amp;\n````\n\nAfter the block \\*a\\* \\*b\\*.',
+    );
+    expect(text).toContain(
+      '#### Case\nMRI showed brain metastasis (size: 10\\*8\\*6 mm). After 1 month the lesion measured 10\\*6\\*6 mm.',
+    );
+    expect(text).toContain(
+      '#### Model\nA weighted adjacency matrix A=(a\\_{ij})\\_{N×N}, where a\\_{ij}>0.\n\n(L & M \\\\\\ M^{T} & N)<0',
+    );
+  });
+
+  it('escapes every other upstream value, list-item values at their line start too', async () => {
+    const { text } = await call();
+
+    expect(text).toContain('- \\*Lung\\* Study_Group_ \\[A\\] (collective)\n- Wen Li');
+    expect(text).toContain('- \\# 1 Department of \\*Thoracic\\* and \\*Oncology\\* Surgery');
+    expect(text).toContain('**Journal:** J_Mol_ \\*Med\\*, **12**(3*), 1-9*, ISSN 1234-5678');
+    expect(text).toContain('**Keywords:** EGFR\\*, Lys\\*');
+    expect(text).toContain(
+      '- [1 R1] WHO. Report \\[Internet\\]. Geneva; 2021 \\[accessed 2021\\].\n- \\- Dash \\*first\\* citation',
+    );
+  });
+
+  it.runIf(bunMarkdown !== undefined)(
+    'renders every structured character, and the same lists, quotes and code block',
+    async () => {
+      const { article, text } = await call();
+      const page = renderedText(text);
+
+      for (const value of [PLAIN.abstract, PLAIN.structure, PLAIN.case, PLAIN.model]) {
+        expect(page).toContain(shown(value));
+      }
+      for (const value of [
+        '*Lung* Study_Group_ [A] (collective)',
+        '# 1 Department of *Thoracic* and *Oncology* Surgery',
+        'J_Mol_ *Med*, 12(3*), 1-9*',
+        'EGFR*, Lys*',
+        '[1 R1] WHO. Report [Internet]. Geneva; 2021 [accessed 2021].',
+        '- Dash *first* citation',
+      ]) {
+        expect(page).toContain(value);
+      }
+      expect(count(text, 'em')).toBe(0);
+      expect(count(text, 'h1')).toBe(0);
+      // The parser's structure renders as it did before escaping.
+      for (const section of article.sections) {
+        const heading = `#### ${section.title}\n`;
+        const start = text.indexOf(heading);
+        expect(start).toBeGreaterThan(-1);
+        const escaped = text.slice(start + heading.length).split('\n#### ')[0] ?? '';
+        for (const tag of ['li', 'ol', 'blockquote', 'pre']) {
+          expect(count(escaped, tag)).toBe(count(section.text, tag));
+        }
+      }
+      expect(count(text, 'pre')).toBe(1);
+    },
+  );
+
+  it('closes a fence a budget cut left open, after cutting the plain text where it always did', async () => {
+    const cutAt = PLAIN.structure.indexOf('\n```\nstill');
+    const { article, text } = await call({ maxCharacters: cutAt });
+    const kept = PLAIN.structure.slice(0, cutAt);
+
+    expect(kept.endsWith('````\nrun *raw*')).toBe(true);
+    expect(article.sections.map((s) => s.text)).toEqual([kept]);
+    expect(text).toContain(
+      '#### Structure\nFindings:\n\n- tumour 3\\*4 cm\n  1. nested 5\\*6 item\n\n> a \\*quoted\\* remark\n\n````\nrun *raw*\n````\n',
+    );
+    if (bunMarkdown) {
+      // The references after the cut render as a heading and a list, not as code.
+      expect(count(text, 'pre')).toBe(1);
+      expect(renderedText(text)).toContain('References (2)');
+      expect(count(text, 'h4')).toBeGreaterThanOrEqual(3);
+    }
   });
 });

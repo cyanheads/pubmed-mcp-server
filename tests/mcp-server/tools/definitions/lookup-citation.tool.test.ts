@@ -9,7 +9,7 @@ import { createMockContext, runToolContract } from '@cyanheads/mcp-ts-core/testi
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { toJSONSchema } from 'zod/v4/core';
 
-import { textBlocks } from '../../../_helpers.js';
+import { bunMarkdown, renderedHtml, renderedText, textBlocks } from '../../../_helpers.js';
 
 const mockECitMatch = vi.fn();
 const mockESummary = vi.fn();
@@ -947,6 +947,68 @@ describe('lookupCitationTool', () => {
     );
 
     expect(blocks[0]?.text).toContain('author_mismatch + year_mismatch detected');
+  });
+
+  describe('caller labels and NCBI strings carrying Markdown-significant characters (issue #255)', () => {
+    const key = '*ref* <i>1</i> [a](b)';
+    const authorName = 'o_brien_ k';
+    const authors = '*Smith* J_, Doe_ K';
+
+    async function run() {
+      mockECitMatch.mockResolvedValue([
+        { key, matched: true, pmid: '111', status: 'matched' },
+        {
+          key: '2',
+          matched: false,
+          status: 'not_found',
+          detail: 'NOT_FOUND;INVALID_JOURNAL *x* <b>',
+        },
+      ]);
+      mockExtractBriefSummaries.mockResolvedValue([
+        { pmid: '111', authors, authorNames: ['*Smith* J_', 'Doe_ K'], pubDate: '2020' },
+      ]);
+      return runToolContract(lookupCitationTool, {
+        citations: [
+          { journal: 'Nature', year: '2020', authorName, key },
+          { journal: 'Nature', year: '2021' },
+        ],
+      });
+    }
+
+    const message = `Queried author "${authorName}" not found in the matched article's 2-author roster (${authors}). ECitMatch weights journal+volume+page and may return a PMID whose authors disagree with the query — verify before using this PMID.`;
+
+    it('escapes the key, first author, detail and warning on content[], structuredContent unchanged', async () => {
+      const result = await run();
+
+      expect(result.structuredContent).toMatchObject({
+        results: [
+          {
+            key,
+            matchedFirstAuthor: '*Smith* J_',
+            warnings: [{ code: 'author_mismatch', message }],
+          },
+          { key: '2', detail: 'NOT_FOUND;INVALID_JOURNAL *x* <b>' },
+        ],
+      });
+      const text = textBlocks(result.content as ContentBlock[])[0]?.text ?? '';
+      expect(text).toContain('### 1 · \\*ref\\* \\<i>1\\</i> \\[a\\](b)\n');
+      // A lone or intraword `_` cannot pair and stays raw.
+      expect(text).toContain('**First Author:** \\*Smith\\* J_\n');
+      expect(text).toContain('**Detail:** NOT_FOUND;INVALID_JOURNAL \\*x\\* \\<b>\n');
+      expect(text).toContain(
+        '- [author_mismatch] Queried author "o_brien\\_ k" not found in the matched article\'s 2-author roster (\\*Smith\\* J\\_, Doe\\_ K).',
+      );
+    });
+
+    it.runIf(bunMarkdown !== undefined)('renders every caller and NCBI character', async () => {
+      const text = textBlocks((await run()).content as ContentBlock[])[0]?.text ?? '';
+      const visible = renderedText(text);
+
+      expect(renderedHtml(text)).not.toMatch(/<(?:em|a|i|b)[\s>]/);
+      expect(visible).toContain(`1 · ${key} PMID: 111 First Author: *Smith* J_`);
+      expect(visible).toContain(`[author_mismatch] ${message}`);
+      expect(visible).toContain('Detail: NOT_FOUND;INVALID_JOURNAL *x* <b>');
+    });
   });
 });
 

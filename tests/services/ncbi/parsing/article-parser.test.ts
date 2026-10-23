@@ -49,6 +49,12 @@ import {
   RETRACTION_NOTICE_XML,
 } from './_comments-corrections-fixtures.js';
 import {
+  APOS_TITLE_XML,
+  R_AND_D_ABSTRACT_XML,
+  R_AND_D_AFFILIATION_XML,
+  R_AND_D_KEYWORD_XML,
+} from './_entity-fixtures.js';
+import {
   BDI,
   CONSORTIUM_INVESTIGATORS,
   CONSORTIUM_XML,
@@ -732,6 +738,117 @@ describe('parseFullArticle', () => {
   });
 });
 
+// ─── DataBankList (#257) ─────────────────────────────────────────────────────
+//
+// Through the production response handler: a single `DataBank` or
+// `AccessionNumber` collapses to a scalar unless its path is declared an
+// array, and an all-digit accession is coerced to a number unless its path is
+// declared verbatim.
+
+describe('dataBanks from DataBankList (#257)', () => {
+  /** JOURNAL_ARTICLE_XML with `banks` as its DataBankList, in DTD position. */
+  const withBanks = (banks: string) =>
+    JOURNAL_ARTICLE_XML.replace(
+      '<Language>eng</Language>',
+      `<Language>eng</Language><DataBankList CompleteYN="Y">${banks}</DataBankList>`,
+    );
+  const bank = (name: string, ...accessions: string[]) =>
+    `<DataBank><DataBankName>${name}</DataBankName>${
+      accessions.length
+        ? `<AccessionNumberList>${accessions.map((a) => `<AccessionNumber>${a}</AccessionNumber>`).join('')}</AccessionNumberList>`
+        : ''
+    }</DataBank>`;
+  const parse = (xml: string) => {
+    const [article] = parseArticleSet(parseArticleSetXml(articleSetXml(xml)));
+    if (!article) throw new Error('fixture did not parse');
+    return article;
+  };
+
+  it('reads one bank holding one accession (PMID 36857477)', () => {
+    expect(parse(withBanks(bank('ClinicalTrials.gov', 'NCT03951753'))).dataBanks).toStrictEqual([
+      { name: 'ClinicalTrials.gov', accessionNumbers: ['NCT03951753'] },
+    ]);
+  });
+
+  it("reads several banks, each with several accessions, in NCBI's order", () => {
+    const article = parse(
+      withBanks(
+        bank('GENBANK', 'AJ608289', 'AJ608290', 'AJ608291') +
+          bank('PDB', '9TUW (RP.012-bound PfRIPR)', '9X4O, DcPSI-6LHCI') +
+          bank('Dryad', '10.5061/dryad.8gtht7726'),
+      ),
+    );
+    expect(article.dataBanks).toStrictEqual([
+      { name: 'GENBANK', accessionNumbers: ['AJ608289', 'AJ608290', 'AJ608291'] },
+      { name: 'PDB', accessionNumbers: ['9TUW (RP.012-bound PfRIPR)', '9X4O, DcPSI-6LHCI'] },
+      { name: 'Dryad', accessionNumbers: ['10.5061/dryad.8gtht7726'] },
+    ]);
+  });
+
+  it('keeps every accession of a long list (PMID 15782199 lists 1,000)', () => {
+    const accessions = Array.from({ length: 1000 }, (_, i) => `BB${751502 + i}`);
+    const [only] = parse(withBanks(bank('GENBANK', ...accessions))).dataBanks ?? [];
+    expect(only?.accessionNumbers).toStrictEqual(accessions);
+  });
+
+  it('keeps an all-digit accession as NCBI wrote it', () => {
+    const article = parse(
+      withBanks(bank('OMIM', '300460', '0123', '1.50', '23000') + bank('OMIM', '162200')),
+    );
+    expect(article.dataBanks).toStrictEqual([
+      { name: 'OMIM', accessionNumbers: ['300460', '0123', '1.50', '23000'] },
+      { name: 'OMIM', accessionNumbers: ['162200'] },
+    ]);
+  });
+
+  it('omits accessionNumbers for a bank listed without any', () => {
+    expect(parse(withBanks(bank('figshare'))).dataBanks).toStrictEqual([{ name: 'figshare' }]);
+  });
+
+  it('has no dataBanks key on a record without a DataBankList, or on a Bookshelf record', () => {
+    expect(parse(JOURNAL_ARTICLE_XML)).not.toHaveProperty('dataBanks');
+    expect(parse(STATPEARLS_CHAPTER_XML)).not.toHaveProperty('dataBanks');
+  });
+});
+
+describe('ISSNLinking (#253)', () => {
+  // JOURNAL_ARTICLE_XML: `<ISSN IssnType="Electronic">2046-4924</ISSN>`, ISSN-L 1366-5278
+  const parse = (xml: string, includeIssnLinking?: boolean) => {
+    const [article] = parseArticleSet(
+      parseArticleSetXml(articleSetXml(xml)),
+      includeIssnLinking === undefined ? {} : { includeIssnLinking },
+    );
+    if (!article) throw new Error('fixture did not parse');
+    return article;
+  };
+
+  it('reads MedlineJournalInfo/ISSNLinking into journalInfo when asked', () => {
+    const { journalInfo } = parse(JOURNAL_ARTICLE_XML, true);
+    expect(journalInfo?.issnLinking).toBe('1366-5278');
+    expect(journalInfo?.eIssn).toBe('2046-4924');
+    expect(journalInfo?.issn).toBeUndefined();
+  });
+
+  it('leaves it off by default and when declined, so a record reads as it did', () => {
+    const asItWas = {
+      title: 'Health technology assessment (Winchester, England)',
+      isoAbbreviation: 'Health Technol Assess',
+      eIssn: '2046-4924',
+      volume: '30',
+      issue: '57',
+      pages: '1-32',
+      publicationDate: { year: '2026', month: 'Jul' },
+    };
+    expect(parse(JOURNAL_ARTICLE_XML).journalInfo).toStrictEqual(asItWas);
+    expect(parse(JOURNAL_ARTICLE_XML, false).journalInfo).toStrictEqual(asItWas);
+  });
+
+  it('omits it for a record that carries none', () => {
+    const noLinking = JOURNAL_ARTICLE_XML.replace('<ISSNLinking>1366-5278</ISSNLinking>', '');
+    expect(parse(noLinking, true).journalInfo).not.toHaveProperty('issnLinking');
+  });
+});
+
 describe('Bookshelf records (#114)', () => {
   const parseSet = (...records: string[]) =>
     parseArticleSet(parseArticleSetXml(articleSetXml(...records)));
@@ -1263,5 +1380,123 @@ describe('author name suffixes (#226)', () => {
     });
     expect(chapter.book?.editors?.[1]).not.toHaveProperty('suffix');
     expect(chapter.authors?.[0]).toMatchObject({ lastName: 'Petrucelli', suffix: 'Jr' });
+  });
+});
+
+describe('text NCBI double-encodes, decoded one layer (#255)', () => {
+  const parseOne = (xml: string) => {
+    const parsed = parseArticleSet(parseArticleSetXml(articleSetXml(xml)), {
+      includeInvestigators: true,
+    })[0];
+    if (!parsed) throw new Error('fixture did not parse');
+    return parsed;
+  };
+
+  it('reads R&D in an abstract that ships R&amp;amp;D (PMID 30893882)', () => {
+    expect(parseOne(R_AND_D_ABSTRACT_XML).abstractText).toBe(
+      'The amyloid hypothesis, currently the prevalent theory for AD, defends the deposition of β-amyloid protein (Aβ) aggregates as the trigger of a series of events leading to neuronal dysfunction and dementia. Hence, several research and development (R&D) programs have been led by the pharmaceutical industry in an effort to discover effective and safety anti-amyloid agents as disease modifying agents for AD.',
+    );
+  });
+
+  it('reads an apostrophe in a title and a less-than sign in an abstract (PMID 42138044)', () => {
+    const record = parseOne(APOS_TITLE_XML);
+    expect(record.title).toBe(
+      "Cervical Vestibular-Evoked Myogenic Potentials (cVEMPs) in Parkinson's Disease Patients: Prospective, Case-Control study.",
+    );
+    expect(record.abstractText).toContain(
+      'A statistically significant difference (P < 0.001) was found between the two groups',
+    );
+    // The section labels were double-encoded HTML; one decode leaves the tags as text.
+    expect(record.abstractText).toContain('remains limited.<b>Aim:</b> To elucidate');
+    expect(record.abstractText).not.toMatch(/&(?:lt|gt|apos);/);
+  });
+
+  it('reads R&D in a keyword and across labelled abstract sections (PMID 35945103)', () => {
+    const record = parseOne(R_AND_D_KEYWORD_XML);
+    expect(record.keywords).toEqual([
+      'ATMPs',
+      'Brazil',
+      'R&D',
+      'advanced therapy medicinal products',
+      'public funding',
+    ]);
+    expect(record.abstractText).toMatch(
+      /^BACKGROUND AIMS: .+ \(R&D\)\. Data on investment in R&D of ATMPs\n\nCONCLUSIONS: Despite the need to implement improvements in ATMP R&D financing policy/,
+    );
+    expect(record.abstractText).not.toContain('&amp;');
+  });
+
+  it('reads R&D in an affiliation and deduplicates on the decoded text (PMID 35796717)', () => {
+    expect(parseOne(R_AND_D_AFFILIATION_XML).affiliations).toEqual([
+      'MRC Metabolic Diseases Unit, Wellcome-MRC Institute of Metabolic Science, University of Cambridge, Cambridge, UK.',
+      'Department of Clinical Biochemistry, NIHR Cambridge Biomedical Research Centre, Cambridge, UK.',
+      'Biologics Engineering, R&D, AstraZeneca, Cambridge, UK.',
+      'Department of Biochemistry, University of Cambridge, 80 Tennis Court Road, Cambridge CB2 1GA, UK.',
+    ]);
+
+    // A co-author whose deposit encodes the same affiliation once shares its index.
+    const withCoauthor = parseOne(
+      R_AND_D_AFFILIATION_XML.replace(
+        '</AuthorList>',
+        '<Author ValidYN="Y"><LastName>Roth</LastName><ForeName>Regina</ForeName><Initials>R</Initials><AffiliationInfo><Affiliation>Biologics Engineering, R&amp;D, AstraZeneca, Cambridge, UK.</Affiliation></AffiliationInfo></Author></AuthorList>',
+      ),
+    );
+    expect(withCoauthor.affiliations).toHaveLength(4);
+    expect(withCoauthor.authors?.[1]?.affiliationIndices).toEqual([2, 3]);
+    expect(withCoauthor.authors?.[3]?.affiliationIndices).toEqual([2]);
+  });
+
+  it("decodes an investigator's affiliation into the shared list", () => {
+    const record = parseOne(
+      R_AND_D_AFFILIATION_XML.replace(
+        '</Article>',
+        '</Article><InvestigatorList><Investigator ValidYN="Y"><LastName>Jermutus</LastName><ForeName>Lutz</ForeName><Initials>L</Initials><AffiliationInfo><Affiliation>Biologics Engineering, R&amp;amp;D, AstraZeneca, Cambridge, UK.</Affiliation></AffiliationInfo></Investigator><Investigator ValidYN="Y"><LastName>Backmark</LastName><ForeName>Anna</ForeName><Initials>A</Initials><AffiliationInfo><Affiliation>Discovery Sciences, R&amp;amp;D, AstraZeneca, Gothenburg, Sweden.</Affiliation></AffiliationInfo></Investigator></InvestigatorList>',
+      ),
+    );
+    expect(record.investigators?.map((inv) => inv.affiliationIndices)).toEqual([[2], [4]]);
+    expect(record.affiliations?.[4]).toBe(
+      'Discovery Sciences, R&D, AstraZeneca, Gothenburg, Sweden.',
+    );
+  });
+
+  it('decodes one layer only: &amp;amp;lt; reaches the record as &lt;, a bare & stays', () => {
+    const record = parseOne(
+      R_AND_D_ABSTRACT_XML.replace(
+        "Targets for Alzheimer's Disease.",
+        'Targets &amp;amp;lt;AD&amp;amp;gt; at AT&amp;T &amp;#x3b3; &amp;amp;#x3b3;.',
+      ),
+    );
+    expect(record.title).toBe(
+      'BACE-1 and γ-Secretase as Therapeutic Targets &lt;AD&gt; at AT&T γ &#x3b3;.',
+    );
+  });
+
+  it('decodes a Bookshelf chapter title, a whole-book title, and a book keyword', () => {
+    const chapter = parseOne(
+      GENEREVIEWS_CHAPTER_XML.replace(
+        'Ovarian Cancer</ArticleTitle>',
+        'Ovarian Cancer: Q&amp;amp;A</ArticleTitle>',
+      ),
+    );
+    expect(chapter.title).toBe(
+      'BRCA1- and BRCA2-Associated Hereditary Breast and Ovarian Cancer: Q&A',
+    );
+
+    const book = parseOne(
+      ADA_WHOLE_BOOK_XML.replace(
+        'A Practical Guide to Hypoglycemia:',
+        'A Practical Guide to Hypoglycemia &amp;amp; Hyperglycemia:',
+      ),
+    );
+    expect(book.title).toMatch(/^A Practical Guide to Hypoglycemia & Hyperglycemia: New/);
+    expect(book.book?.title).toBe(book.title);
+
+    const lactmed = parseOne(
+      LACTMED_CHAPTER_XML.replace(
+        '<Keyword MajorTopicYN="N">carboplatin</Keyword>',
+        '<Keyword MajorTopicYN="N">carboplatin &amp;amp; breastfeeding</Keyword>',
+      ),
+    );
+    expect(lactmed.keywords?.[0]).toBe('carboplatin & breastfeeding');
   });
 });

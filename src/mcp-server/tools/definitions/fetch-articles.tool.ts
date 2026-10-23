@@ -1,7 +1,7 @@
 /**
  * @fileoverview PubMed fetch tool. Fetches full article metadata by PubMed IDs,
- * including abstracts, authors, journal info, MeSH terms, and linked retraction
- * and correction notices. A zero-padded PMID is fetched and matched as the PMID
+ * including abstracts, authors, journal info, MeSH terms, databank accessions,
+ * and linked retraction and correction notices. A zero-padded PMID is fetched and matched as the PMID
  * it spells; `ids` is accepted as an alias for `pmids`.
  * @module src/mcp-server/tools/definitions/fetch-articles.tool
  */
@@ -20,7 +20,12 @@ import {
 } from './_concepts.js';
 import { noticeLines, noticeLinks } from './_notices.js';
 import { normalizePmid, pmidStringSchema } from './_schemas.js';
-import { escapeMarkdownInline } from './_text.js';
+import {
+  escapeMarkdownBlock,
+  escapeMarkdownInline,
+  escapeMarkdownLineStart,
+  escapeMarkdownListItem,
+} from './_text.js';
 
 const AuthorSchema = z
   .object({
@@ -255,6 +260,28 @@ const GrantSchema = z
   })
   .describe('Grant record');
 
+const DataBankSchema = z
+  .object({
+    name: z
+      .string()
+      .describe(
+        'Databank or registry name, verbatim from NCBI `DataBankName` (e.g. "ClinicalTrials.gov", "GENBANK", "PDB", "Dryad", "OMIM").',
+      ),
+    accessionNumbers: z
+      .array(
+        z
+          .string()
+          .describe(
+            'One accession as NCBI writes it — free text, an all-digit OMIM number or a DOI included (e.g. "NCT03951753", "300460", "10.5061/dryad.8gtht7726")',
+          ),
+      )
+      .optional()
+      .describe(
+        "The record's accessions in this bank, from `AccessionNumberList`, in NCBI's order and uncapped. Absent when NCBI lists the bank without one.",
+      ),
+  })
+  .describe('One databank or registry the record links to, with its accessions there');
+
 const CommentsCorrectionSchema = z
   .object({
     refType: z
@@ -347,6 +374,12 @@ const FetchedArticleSchema = z
     keywords: z.array(z.string()).optional().describe('Keywords'),
     meshTerms: z.array(MeshTermSchema).optional().describe('MeSH terms'),
     grantList: z.array(GrantSchema).optional().describe('Grant information'),
+    dataBanks: z
+      .array(DataBankSchema)
+      .optional()
+      .describe(
+        "Trial registrations and data deposits the record lists, from NCBI's `DataBankList`, in NCBI's order and uncapped — a ClinicalTrials.gov NCT ID, GenBank and PDB accessions, Dryad and figshare DOIs. To find other PubMed records citing an accession, search `pubmed_search_articles` for `<accession>[si]` (e.g. `NCT03951753[si]`). Counted with the rest of the record under `maxResponseCharacters`. Absent when the record lists none, and never set on `book-chapter` or `book` records.",
+      ),
     articleDates: z
       .array(ArticleDateSchema)
       .optional()
@@ -384,7 +417,7 @@ const DeferredSchema = z
 
 export const fetchArticlesTool = tool('pubmed_fetch_articles', {
   description:
-    'Fetch full article metadata by PubMed IDs. Returns detailed article information including abstract, authors, journal, MeSH terms, and linked retraction, erratum, and comment notices; grants and the members of a collective author are opt-in (`includeGrants`, `includeInvestigators`). Set `maxResponseCharacters` to bound the whole response: articles past the ceiling are deferred whole and listed in `deferred.ids` for a follow-up call.',
+    'Fetch full article metadata by PubMed IDs. Returns detailed article information including abstract, authors, journal, MeSH terms, linked retraction, erratum, and comment notices, and databank accessions such as trial registration IDs; grants and the members of a collective author are opt-in (`includeGrants`, `includeInvestigators`). Set `maxResponseCharacters` to bound the whole response: articles past the ceiling are deferred whole and listed in `deferred.ids` for a follow-up call.',
   annotations: { readOnlyHint: true, openWorldHint: true },
   _meta: conceptMeta([SCHEMA_SCHOLARLY_ARTICLE, EDAM_DATA_RETRIEVAL, EDAM_PUBMED_ID]),
   sourceUrl:
@@ -590,28 +623,38 @@ export const fetchArticlesTool = tool('pubmed_fetch_articles', {
       if (a.affiliations?.length) {
         lines.push(`\n**Affiliations:**`);
         for (const [i, aff] of a.affiliations.entries()) {
-          lines.push(`- [${i}] ${aff}`);
+          lines.push(`- [${i}] ${escapeMarkdownInline(aff)}`);
         }
       }
 
+      // Every upstream value below is escaped on its own; the brackets, bold
+      // and separators around them are this server's. (#255)
       const ji = a.journalInfo;
       if (ji) {
         const parts: string[] = [];
-        if (ji.title) parts.push(ji.title);
+        const title = ji.title ? escapeMarkdownInline(ji.title) : undefined;
+        if (title) parts.push(title);
         if (ji.isoAbbreviation && ji.isoAbbreviation !== ji.title) {
-          parts.push(ji.title ? `(${ji.isoAbbreviation})` : ji.isoAbbreviation);
+          const iso = escapeMarkdownInline(ji.isoAbbreviation);
+          parts.push(title ? `(${iso})` : iso);
         }
         const pubDateStr = formatPublicationDate(ji.publicationDate);
-        if (pubDateStr) parts.push(pubDateStr);
-        if (ji.volume) parts.push(`**${ji.volume}**${ji.issue ? `(${ji.issue})` : ''}`);
-        if (ji.pages) parts.push(ji.pages);
+        if (pubDateStr) parts.push(escapeMarkdownInline(pubDateStr));
+        if (ji.volume) {
+          const issue = ji.issue ? `(${escapeMarkdownInline(ji.issue)})` : '';
+          parts.push(`**${escapeMarkdownInline(ji.volume)}**${issue}`);
+        }
+        if (ji.pages) parts.push(escapeMarkdownInline(ji.pages));
         if (ji.elocationId) {
+          const elocationId = escapeMarkdownInline(ji.elocationId);
           parts.push(
-            ji.elocationIdType ? `${ji.elocationIdType}: ${ji.elocationId}` : ji.elocationId,
+            ji.elocationIdType
+              ? `${escapeMarkdownInline(ji.elocationIdType)}: ${elocationId}`
+              : elocationId,
           );
         }
-        if (ji.issn) parts.push(`ISSN ${ji.issn}`);
-        if (ji.eIssn) parts.push(`eISSN ${ji.eIssn}`);
+        if (ji.issn) parts.push(`ISSN ${escapeMarkdownInline(ji.issn)}`);
+        if (ji.eIssn) parts.push(`eISSN ${escapeMarkdownInline(ji.eIssn)}`);
         if (parts.length) lines.push(`\n**Journal:** ${parts.join(', ')}`);
       }
 
@@ -623,10 +666,12 @@ export const fetchArticlesTool = tool('pubmed_fetch_articles', {
         const bookLines: string[] = [];
         // On a whole-book record the heading above already is the book title;
         // the medium marker then stands alone rather than repeating it.
+        const medium = bk.medium ? escapeMarkdownInline(bk.medium) : undefined;
         if (a.recordType !== 'book' && bk.title) {
-          bookLines.push(`**Book:** ${bk.medium ? `${bk.title} [${bk.medium}]` : bk.title}`);
-        } else if (bk.medium) {
-          bookLines.push(`**Medium:** ${bk.medium}`);
+          const bookTitle = escapeMarkdownInline(bk.title);
+          bookLines.push(`**Book:** ${medium ? `${bookTitle} [${medium}]` : bookTitle}`);
+        } else if (medium) {
+          bookLines.push(`**Medium:** ${medium}`);
         }
         if (bk.editors?.length) {
           bookLines.push('', `**Editors (${bk.editors.length}):**`);
@@ -634,8 +679,10 @@ export const fetchArticlesTool = tool('pubmed_fetch_articles', {
             bookLines.push(`- ${formatAuthor(ed)}`);
           }
         }
-        if (bk.publisher) bookLines.push(`**Publisher:** ${bk.publisher}`);
-        if (bk.publisherLocation) bookLines.push(`**Publisher Location:** ${bk.publisherLocation}`);
+        if (bk.publisher) bookLines.push(`**Publisher:** ${escapeMarkdownInline(bk.publisher)}`);
+        if (bk.publisherLocation) {
+          bookLines.push(`**Publisher Location:** ${escapeMarkdownInline(bk.publisherLocation)}`);
+        }
         // A book published over several years carries a closed range
         // (GeneReviews 1993–2026), one still being updated an open one
         // (Endotext 2000–); otherwise the single publication year. A publication
@@ -648,11 +695,14 @@ export const fetchArticlesTool = tool('pubmed_fetch_articles', {
           range && bk.pubDate && bk.pubDate !== bk.beginningDate
             ? `${bk.pubDate} (${range})`
             : (range ?? bk.pubDate ?? bk.beginningDate ?? bk.endingDate);
-        if (bookDate) bookLines.push(`**Published:** ${bookDate}`);
-        if (bk.edition) bookLines.push(`**Edition:** ${bk.edition}`);
-        if (bk.collectionTitle) bookLines.push(`**Collection:** ${bk.collectionTitle}`);
-        if (bk.isbns?.length) bookLines.push(`**ISBN:** ${bk.isbns.join(', ')}`);
-        if (bk.doi) bookLines.push(`**Book DOI:** ${bk.doi}`);
+        if (bookDate) bookLines.push(`**Published:** ${escapeMarkdownInline(bookDate)}`);
+        if (bk.edition) bookLines.push(`**Edition:** ${escapeMarkdownInline(bk.edition)}`);
+        if (bk.collectionTitle) {
+          bookLines.push(`**Collection:** ${escapeMarkdownInline(bk.collectionTitle)}`);
+        }
+        if (bk.isbns?.length)
+          bookLines.push(`**ISBN:** ${escapeMarkdownInline(bk.isbns.join(', '))}`);
+        if (bk.doi) bookLines.push(`**Book DOI:** ${escapeMarkdownInline(bk.doi)}`);
         if (bk.accession) {
           bookLines.push(`**Bookshelf:** https://www.ncbi.nlm.nih.gov/books/${bk.accession}/`);
         }
@@ -660,15 +710,19 @@ export const fetchArticlesTool = tool('pubmed_fetch_articles', {
       }
 
       lines.push(`**Record Type:** ${a.recordType}`);
-      if (a.publicationTypes?.length) lines.push(`**Type:** ${a.publicationTypes.join(', ')}`);
+      if (a.publicationTypes?.length) {
+        lines.push(`**Type:** ${escapeMarkdownInline(a.publicationTypes.join(', '))}`);
+      }
       if (a.pmid) lines.push(`**PMID:** ${a.pmid}`);
-      if (a.doi) lines.push(`**DOI:** ${a.doi}`);
+      if (a.doi) lines.push(`**DOI:** ${escapeMarkdownInline(a.doi)}`);
       if (a.pmcId) lines.push(`**PMCID:** ${a.pmcId}`);
       if (a.pubmedUrl) lines.push(`**PubMed:** ${a.pubmedUrl}`);
       if (a.pmcUrl) lines.push(`**PMC:** ${a.pmcUrl}`);
 
       if (a.articleDates?.length) {
-        lines.push(`**Article Dates:** ${a.articleDates.map(formatArticleDate).join('; ')}`);
+        lines.push(
+          `**Article Dates:** ${escapeMarkdownInline(a.articleDates.map(formatArticleDate).join('; '))}`,
+        );
       }
 
       // Ahead of the abstract, where PubMed itself shows "Retraction in" and
@@ -687,21 +741,31 @@ export const fetchArticlesTool = tool('pubmed_fetch_articles', {
         }
       }
 
-      if (a.abstractText) lines.push(`\n#### Abstract\n${a.abstractText}`);
-      if (a.keywords?.length) lines.push(`\n**Keywords:** ${a.keywords.join(', ')}`);
+      // The abstract is NCBI's plain text — labelled sections joined by blank
+      // lines, no Markdown structure of its own — so every line of it is prose
+      // and a `#`, `>` or `- ` opening one is escaped with the rest. (#255)
+      if (a.abstractText) {
+        lines.push(`\n#### Abstract\n${escapeMarkdownBlock(a.abstractText, 'plain')}`);
+      }
+      if (a.keywords?.length) {
+        lines.push(`\n**Keywords:** ${escapeMarkdownInline(a.keywords.join(', '))}`);
+      }
       if (a.meshTerms?.length) {
         lines.push(`\n#### MeSH Terms`);
         for (const m of a.meshTerms) {
+          // The descriptor opens the list item, so its line start is escaped too.
+          const descriptorName = m.descriptorName && escapeMarkdownListItem(m.descriptorName);
           const descriptor = m.descriptorUi
-            ? `${m.descriptorName} [${m.descriptorUi}]`
-            : m.descriptorName;
+            ? `${descriptorName} [${m.descriptorUi}]`
+            : descriptorName;
           const major = m.isMajorTopic ? ' (major)' : '';
           const qualifiers = m.qualifiers?.length
             ? ` (${m.qualifiers
                 .map((q) => {
+                  const qualifierName = escapeMarkdownInline(q.qualifierName);
                   const name = q.qualifierUi
-                    ? `${q.qualifierName} [${q.qualifierUi}]`
-                    : q.qualifierName;
+                    ? `${qualifierName} [${q.qualifierUi}]`
+                    : qualifierName;
                   return `${name}${q.isMajorTopic ? ' (major)' : ''}`;
                 })
                 .join(', ')})`
@@ -719,8 +783,22 @@ export const fetchArticlesTool = tool('pubmed_fetch_articles', {
             !g.grantId && g.acronym
               ? [g.agency, `(${g.acronym})`].filter(Boolean).join(' ')
               : g.agency;
-          const parts = [grantId, agency, g.country].filter(Boolean);
-          lines.push(`- ${parts.join(' — ')}`);
+          const parts = [grantId, agency, g.country].filter((part): part is string => !!part);
+          lines.push(`- ${escapeMarkdownLineStart(parts.map(escapeMarkdownInline).join(' — '))}`);
+        }
+      }
+      if (a.dataBanks?.length) {
+        lines.push(
+          `\n#### Data Banks`,
+          'Find other records citing an accession with `pubmed_search_articles` for `<accession>[si]`.',
+        );
+        for (const bank of a.dataBanks) {
+          const name = escapeMarkdownInline(bank.name);
+          lines.push(
+            bank.accessionNumbers?.length
+              ? `- **${name}:** ${bank.accessionNumbers.map(escapeMarkdownInline).join(', ')}`
+              : `- **${name}**`,
+          );
         }
       }
     }
@@ -738,20 +816,28 @@ type FormattedAuthor = {
   orcid?: string | undefined;
 };
 
+/**
+ * One author, investigator or editor line. The name — collective name, given
+ * and family names, suffix, initials — is escaped as one string so a delimiter
+ * in one part pairs with its partner in another the way it would on the
+ * rendered line, and at its line start, since it opens the list item; the
+ * `[aff …]` reference is this server's and stays raw. (#255)
+ */
 function formatAuthor(au: FormattedAuthor): string {
-  const parts: string[] = [];
-  if (au.collectiveName) parts.push(`${au.collectiveName} (collective)`);
+  const nameParts: string[] = [];
+  if (au.collectiveName) nameParts.push(`${au.collectiveName} (collective)`);
 
   const name = [au.firstName, au.lastName].filter(Boolean).join(' ');
-  if (name) parts.push(name);
-  else if (au.initials) parts.push(au.initials);
-  if (au.suffix) parts.push(au.suffix);
-  if (au.initials && name) parts.push(`(${au.initials})`);
+  if (name) nameParts.push(name);
+  else if (au.initials) nameParts.push(au.initials);
+  if (au.suffix) nameParts.push(au.suffix);
+  if (au.initials && name) nameParts.push(`(${au.initials})`);
 
+  const parts = nameParts.length > 0 ? [escapeMarkdownListItem(nameParts.join(' '))] : [];
   if (au.affiliationIndices?.length) {
     parts.push(`[aff ${au.affiliationIndices.join(',')}]`);
   }
-  if (au.orcid) parts.push(`· ORCID ${au.orcid}`);
+  if (au.orcid) parts.push(`· ORCID ${escapeMarkdownInline(au.orcid)}`);
   return parts.join(' ') || 'Unknown';
 }
 

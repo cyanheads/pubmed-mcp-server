@@ -242,6 +242,24 @@ describe('convertIdsTool', () => {
     expect(blocks[0]?.text).toContain('| PMC3531190 | 23193287 | PMC3531190 | - | - |');
   });
 
+  it('escapes the requested ID, DOI and error message as table cells (issue #255)', () => {
+    const text =
+      textBlocks(
+        convertIdsTool.format!({
+          records: [
+            { requestedId: '10.1000/a|b', doi: '10.1000/a|b', errmsg: 'invalid | *id* format' },
+          ],
+          totalConverted: 0,
+          totalSubmitted: 1,
+        }),
+      )[0]?.text ?? '';
+
+    // An unescaped `|` would end the cell and push every later value one column left.
+    expect(text).toContain(
+      '| 10.1000/a\\|b | - | - | 10.1000/a\\|b | invalid \\| \\*id\\* format |',
+    );
+  });
+
   describe('per-element identifier validation (issue #120)', () => {
     /** Every id that is one identifier, in a form its idType accepts. */
     const ACCEPTED: ReadonlyArray<[idType: 'pmid' | 'pmcid' | 'doi', id: string]> = [

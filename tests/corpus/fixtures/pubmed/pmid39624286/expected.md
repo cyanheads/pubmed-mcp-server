@@ -86,7 +86,7 @@ AU  - Raza, Hassan
 AU  - Hassan, Waqar Ul
 AU  - Niazi, Azmat Ullah Khan
 AU  - Mehmood, Muhammad Usman
-TI  - Securing consensus in fractional-order multi-agent systems: Algebraic approaches against Byzantine attacks.
+TI  - Securing consensus in fractional-order multi-agent systems: Algebraic approaches against Byzantine attacks
 JF  - Heliyon
 JO  - Heliyon
 PY  - 2024

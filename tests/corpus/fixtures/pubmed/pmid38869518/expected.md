@@ -61,6 +61,10 @@ Creatine is a natural nitrogenous organic acid that is integral to energy metabo
 #### Grants
 - A-1003 — Top Institute Food and Nutrition
 
+#### Data Banks
+Find other records citing an accession with `pubmed_search_articles` for `<accession>[si]`.
+- **ClinicalTrials.gov:** NCT02811835
+
 <!-- pubmed_format_citations {"pmids":["38869518"],"format":["apa","mla","bibtex","ris","vancouver"]} -->
 # PubMed Citations
 **Formatted:** 1/1
@@ -84,7 +88,7 @@ Post, Adrian, et al. "Creatine homeostasis and the kidney: comparison between ki
   volume   = {56},
   number   = {1},
   pages    = {42},
-  issn     = {1438-2199},
+  issn     = {0939-4451},
   doi      = {10.1007/s00726-024-03401-w},
   pmid     = {38869518},
   pmcid    = {PMC11176230},
@@ -108,14 +112,14 @@ AU  - Franssen, Casper F M
 AU  - Kema, Ido P
 AU  - Heiner-Fokkema, M Rebecca
 AU  - Bakker, Stephan J L
-TI  - Creatine homeostasis and the kidney: comparison between kidney transplant recipients and healthy controls.
+TI  - Creatine homeostasis and the kidney: comparison between kidney transplant recipients and healthy controls
 JF  - Amino acids
 JO  - Amino Acids
 PY  - 2024
 VL  - 56
 IS  - 1
 SP  - 42
-SN  - 1438-2199
+SN  - 0939-4451
 DO  - 10.1007/s00726-024-03401-w
 AN  - 38869518
 UR  - https://pubmed.ncbi.nlm.nih.gov/38869518/

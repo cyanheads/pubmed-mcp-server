@@ -61,6 +61,8 @@ const NCBI_ARRAY_JPATHS = new Set([
   'PubmedArticleSet.PubmedArticle',
   'PubmedArticleSet.PubmedArticle.MedlineCitation.Article.AuthorList.Author',
   'PubmedArticleSet.PubmedArticle.MedlineCitation.Article.AuthorList.Author.AffiliationInfo',
+  'PubmedArticleSet.PubmedArticle.MedlineCitation.Article.DataBankList.DataBank',
+  'PubmedArticleSet.PubmedArticle.MedlineCitation.Article.DataBankList.DataBank.AccessionNumberList.AccessionNumber',
   'PubmedArticleSet.PubmedArticle.MedlineCitation.Article.GrantList.Grant',
   'PubmedArticleSet.PubmedArticle.MedlineCitation.Article.PublicationTypeList.PublicationType',
   'PubmedArticleSet.PubmedArticle.MedlineCitation.CommentsCorrectionsList.CommentsCorrections',
@@ -514,23 +516,27 @@ export function flattenInlineMarkup(xml: string): string {
 }
 
 /**
- * Free-text elements of a linked notice, matched by path: an element named `Note`
- * elsewhere keeps the default coercion. (#178)
+ * Free-text elements matched by path — a linked notice's `RefSource` and `Note`
+ * (#178) and a databank's `AccessionNumber` (#257): an element of the same name
+ * elsewhere keeps the default coercion.
  */
 const VERBATIM_TEXT_JPATHS = new Set([
   'PubmedArticleSet.PubmedArticle.MedlineCitation.CommentsCorrectionsList.CommentsCorrections.RefSource',
   'PubmedArticleSet.PubmedArticle.MedlineCitation.CommentsCorrectionsList.CommentsCorrections.Note',
+  'PubmedArticleSet.PubmedArticle.MedlineCitation.Article.DataBankList.DataBank.AccessionNumberList.AccessionNumber',
 ]);
 
 /**
  * Keeps text that must survive exactly as NCBI wrote it out of fast-xml-parser's
- * numeric coercion: `Book/Isbn`, and a linked notice's `RefSource` and `Note`.
+ * numeric coercion: `Book/Isbn`, a linked notice's `RefSource` and `Note`, and a
+ * databank's `AccessionNumber`.
  *
  * An ISBN-10 can start with a zero (`0309605393`); coerced, it becomes the
  * number 309605393 and the leading digit is gone before any read site sees it,
  * so the record ships a wrong ISBN with no error anywhere (#114). A purely
- * numeric `RefSource` or `Note` loses its spelling the same way — `1.50` → `1.5`,
- * `007` → `7`, `0x1A` → `26` (#178). The processor's contract does the work:
+ * numeric `RefSource`, `Note`, or accession (an OMIM `300460`) loses its
+ * spelling the same way — `1.50` → `1.5`, `007` → `7`, `0x1A` → `26` (#178,
+ * #257). The processor's contract does the work:
  * returning `undefined` leaves the raw text alone, while returning the value
  * unchanged for every other tag keeps the existing coercion exactly as it was.
  * The flat parser keeps the default `jPath: true`, so the path arrives as a string.

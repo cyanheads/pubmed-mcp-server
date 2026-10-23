@@ -189,7 +189,7 @@ Comparability (tick one or both boxes, as appropriate)
 
 (1) Comparability of cohorts on the basis of the design or analysis controlled for confounders
   (a) The study controls for age, sex, and marital status (one star)
-  (b) The study controls for other factors (list) ___________ (one star)
+  (b) The study controls for other factors (list) \_\_\_\_\_\_\_\_\_\_\_ (one star)
   (c) Cohorts are not comparable on the basis of the design or analysis controlled for confounders
 
 Outcome
@@ -204,7 +204,7 @@ Outcome
   (a) Yes (one star)
   (b) No
 
-Indicate the median duration of follow-up and a brief rationale for the assessment above:____________________
+Indicate the median duration of follow-up and a brief rationale for the assessment above:\_\_\_\_\_\_\_\_\_\_\_\_\_\_\_\_\_\_\_\_
 
 (3) Adequacy of follow-up of cohorts
   (a) Complete follow-up—all subjects accounted for (one star)

@@ -77,8 +77,16 @@ import {
 } from '@/services/unpaywall/unpaywall-service.js';
 import { buildDeferralNotice, fitWholeItems } from './_budget.js';
 import { conceptMeta, EDAM_DATA_RETRIEVAL, SCHEMA_SCHOLARLY_ARTICLE } from './_concepts.js';
+import { outlineShares } from './_outline-shares.js';
 import { doiStringSchema, normalizePmid, pmcidStringSchema, pmidStringSchema } from './_schemas.js';
-import { escapeMarkdownInline, escapeMarkdownTableCell, sliceAtWordBoundary } from './_text.js';
+import {
+  escapeMarkdownBlock,
+  escapeMarkdownInline,
+  escapeMarkdownLineStart,
+  escapeMarkdownListItem,
+  escapeMarkdownTableCell,
+  sliceAtWordBoundary,
+} from './_text.js';
 import { hasVisibleText } from './_visible-text.js';
 
 /**
@@ -525,7 +533,12 @@ const SectionSchema = z
 
 const AuthorSchema = z
   .object({
-    collectiveName: z.string().optional().describe('Group name'),
+    collectiveName: z
+      .string()
+      .optional()
+      .describe(
+        "Group or consortium name, as the group's own name only: members a deposit nests inside it are not listed here or in `authors`. `pubmed_fetch_articles` with `includeInvestigators` returns a collective author's members from PubMed.",
+      ),
     givenNames: z.string().optional().describe('Given names'),
     lastName: z.string().optional().describe('Last name'),
     suffix: z
@@ -1302,12 +1315,13 @@ function fitSectionTree(
 
 /**
  * Shorten an ordered list of text fields so their combined length fits
- * `allowance`. Fields are filled in order, so earlier fields survive whole — the
- * section's own text before its subsections — and the first field that does not
- * fit is cut at the last word boundary inside what is left. Every field after
- * that cut is past it and returns empty, the way a top-level section past the
- * budget does, even when the cut left a few characters unspent: handing those
- * on would open the next subsection with a fragment of its first word. (#143)
+ * `allowance` — `truncate` mode's fill inside one section. Fields are filled in
+ * order, so earlier fields survive whole — the section's own text before its
+ * subsections — and the first field that does not fit is cut at the last word
+ * boundary inside what is left. Every field after that cut is past it and
+ * returns empty, the way a top-level section past the budget does, even when
+ * the cut left a few characters unspent: handing those on would open the next
+ * subsection with a fragment of its first word. (#143)
  *
  * No marker is appended, so the reported `returnedCharacters` is exact;
  * `format()` carries the human-visible note. Counts are measured off the
@@ -1327,35 +1341,44 @@ function fitFields(fields: string[], allowance: number): string[] {
 }
 
 /**
- * Split `total` evenly across sections, then hand the leftover from sections
- * that need less than their share back to the ones still capped, until the
- * budget is spent or every section holds all it can. Equal shares alone would
- * strand budget on short sections — a ten-section article with two one-line
- * sections would return well under what the caller asked for.
+ * The shortest excerpt `outline` mode cuts a part down to. A first sentence in
+ * PMC body sections runs about 100 characters at its shortest quartile, so an
+ * excerpt this long reads as a sentence or a whole clause rather than a fragment
+ * such as "Data available on". (#252)
  */
-function evenShares(caps: number[], total: number): number[] {
-  const allowances = caps.map(() => 0);
-  let remaining = total;
+const OUTLINE_MIN_EXCERPT_CHARACTERS = 100;
 
-  while (remaining > 0) {
-    const hungry = caps.reduce<number[]>((acc, cap, i) => {
-      if ((allowances[i] ?? 0) < cap) acc.push(i);
-      return acc;
-    }, []);
-    if (hungry.length === 0) break;
+/**
+ * The excerpt floor a request's `outline` budget applies: 100 characters, or
+ * `maxCharactersPerSection` when that is lower — a per-section cap is the
+ * excerpt the caller asked for, which the floor never empties. (#252)
+ */
+function outlineFloor(budget: BudgetOptions): number {
+  return Math.min(
+    OUTLINE_MIN_EXCERPT_CHARACTERS,
+    budget.maxCharactersPerSection ?? OUTLINE_MIN_EXCERPT_CHARACTERS,
+  );
+}
 
-    const share = Math.floor(remaining / hungry.length);
-    // Fewer characters left than sections still wanting them: hand out the
-    // remainder one character at a time so the budget is fully spent.
-    for (const i of hungry) {
-      const want = (caps[i] ?? 0) - (allowances[i] ?? 0);
-      const give = Math.min(share === 0 ? 1 : share, want, remaining);
-      allowances[i] = (allowances[i] ?? 0) + give;
-      remaining -= give;
-      if (remaining === 0) break;
-    }
-  }
-  return allowances;
+/**
+ * `outline` mode's fill inside one section: its own text and each subsection
+ * subtree split `allowance` by {@link outlineShares}, the way top-level
+ * sections split `maxCharacters`, and each subtree splits its share again one
+ * level down. Returns the shortened fields in {@link sectionTextFields} order
+ * for {@link fitSectionTree}. A cut ends at the last word boundary inside its
+ * share. (#252)
+ */
+function fitOutlineFields(section: ParsedSection, allowance: number, floor: number): string[] {
+  const subsections = section.subsections ?? [];
+  const [own = 0, ...subShares] = outlineShares(
+    [section.text.length, ...subsections.map(sectionCharacters)],
+    allowance,
+    floor,
+  );
+  return [
+    sliceAtWordBoundary(section.text, own),
+    ...subsections.flatMap((sub, i) => fitOutlineFields(sub, subShares[i] ?? 0, floor)),
+  ];
 }
 
 /**
@@ -1363,18 +1386,20 @@ function evenShares(caps: number[], total: number): number[] {
  *
  * `truncate` fills sections greedily in document order: early sections keep
  * their full text and sections reached after the budget is spent get nothing.
- * `outline` spreads `maxCharacters` across every section instead, so each
- * heading survives with an excerpt rather than the budget being consumed by the
- * first sections. `maxCharactersPerSection` caps each section under either mode.
+ * `outline` spreads `maxCharacters` across every section instead, by
+ * {@link outlineShares}, so each heading survives with an excerpt of at least
+ * the floor — or with none — rather than the budget being consumed by the first
+ * sections. `maxCharactersPerSection` caps each section under either mode.
  */
 function allotSectionBudgets(sizes: number[], budget: BudgetOptions): number[] {
   const perSection = budget.maxCharactersPerSection;
   const total = budget.maxCharacters;
 
   if (budget.overflowMode === 'outline' && total !== undefined) {
-    return evenShares(
+    return outlineShares(
       sizes.map((size) => Math.min(perSection ?? size, size)),
       total,
+      outlineFloor(budget),
     );
   }
 
@@ -1450,7 +1475,11 @@ function applyPmcBudget<
       maxCharacters: total,
     });
     sections.forEach((section, i) => {
-      const fitted = fitFields(sectionTextFields(section), allowances[i] ?? 0);
+      const allowance = allowances[i] ?? 0;
+      const fitted =
+        budget.overflowMode === 'outline'
+          ? fitOutlineFields(section, allowance, outlineFloor(budget))
+          : fitFields(sectionTextFields(section), allowance);
       const fit = fitSectionTree(section, fitted, { i: 0 }, budget.overflowMode);
       returnedCharacters += fit.entry.returnedCharacters;
       sectionReports.push(fit.entry);
@@ -1683,12 +1712,14 @@ function buildOverLimitNotice(overLimit: z.infer<typeof OverLimitSchema>): strin
 /**
  * The per-field lists of ids handed back across fields, in field order —
  * `` `pmcids`: PMC1; `dois`: 10.1/x `` — or `''` when `idType` covers them all.
+ * `content[]` passes `escapeIds` to escape the caller's ids for Markdown; a
+ * notice, which reaches `structuredContent`, keeps them as sent.
  */
-function idFieldLists(group: IdFields): string {
+function idFieldLists(group: IdFields, escapeIds = (ids: string) => ids): string {
   return (['pmcids', 'pmids', 'dois'] as const)
     .flatMap((field) => {
       const ids = group[field];
-      return ids?.length ? [`\`${field}\`: ${ids.join(', ')}`] : [];
+      return ids?.length ? [`\`${field}\`: ${escapeIds(ids.join(', '))}`] : [];
     })
     .join('; ');
 }
@@ -1781,8 +1812,15 @@ export const fetchFulltextTool = tool('pubmed_fetch_fulltext', {
 
   // Never advertised; rewritten to the canonical key before the schema parses.
   // Singular spellings sibling tools and this tool's own output use; a lone
-  // string under one becomes a one-element array. (#221)
-  inputAliases: { pmcid: 'pmcids', pmcId: 'pmcids', pmid: 'pmids', doi: 'dois' },
+  // string under one becomes a one-element array. (#221) `maxCharsPerArticle`
+  // names what `maxCharacters` is, the per-article body budget. (#258)
+  inputAliases: {
+    pmcid: 'pmcids',
+    pmcId: 'pmcids',
+    pmid: 'pmids',
+    doi: 'dois',
+    maxCharsPerArticle: 'maxCharacters',
+  },
 
   input: z
     .object({
@@ -1868,7 +1906,7 @@ export const fetchFulltextTool = tool('pubmed_fetch_fulltext', {
         .enum(['truncate', 'outline'])
         .default('truncate')
         .describe(
-          'How to spend `maxCharacters` across an article that exceeds it. truncate: fill sections in document order, so early sections stay whole, the section the budget runs out in is cut, and every section or subsection past that point is dropped (counted in `truncation.omittedSections`). outline: split the budget evenly so every section and subsection keeps its heading, and an excerpt as far as the budget reaches — a heading the budget left empty is marked as such in the rendered text. In both modes the body sections spend the budget first and back-matter sections share what the body, tables, and assets leave. Use it to survey what an article contains before requesting specific `sections`. Ignored when no budget is set, and identical for `source=unpaywall` bodies, which have no headings to preserve.',
+          'How to spend `maxCharacters` across an article that exceeds it. truncate: fill sections in document order, so early sections stay whole, the section the budget runs out in is cut, and every section or subsection past that point is dropped (counted in `truncation.omittedSections`). outline: every section and subsection keeps its heading, and the budget is split evenly at every level — across the top-level sections, then inside each one across its own text and each subsection — with what a short part does not need going to the rest. A part whose share would cut it to under 100 characters (or under `maxCharactersPerSection`, when that is lower) returns heading-only instead, its share going to the others, emptying the last such part first; a part that fits its share keeps all its text however short, and a cut excerpt ends at the last word boundary inside its share, so it can run somewhat under that floor. A heading the budget left empty is marked as such in the rendered text. In both modes the body sections spend the budget first and back-matter sections share what the body, tables, and assets leave. Use it to survey what an article contains before requesting specific `sections`. Ignored when no budget is set, and identical for `source=unpaywall` bodies, which have no headings to preserve.',
         ),
     })
     // Counted in each field's canonical form, the one its chain keys on, so the
@@ -2686,7 +2724,7 @@ export const fetchFulltextTool = tool('pubmed_fetch_fulltext', {
       lines.push(`\n**Unavailable (${result.unavailable.length}):**`);
       let anyUnqueried = false;
       for (const u of result.unavailable) {
-        lines.push(`- [${u.idType}] ${u.id} — ${u.reason}`);
+        lines.push(`- [${u.idType}] ${escapeMarkdownInline(u.id)} — ${u.reason}`);
         if (u.unqueriedTiers?.length) {
           anyUnqueried = true;
           lines.push(`  Not queried: ${formatUnqueriedTiers(u.unqueriedTiers, u.triedTiers)}`);
@@ -2860,11 +2898,12 @@ function groupIdsByField(callerIds: CallerId[]): IdGroup {
  * independently: a group carries `idType` or the per-field lists, never both.
  */
 function resendLines(group: IdGroup): string[] {
-  const fieldLists = idFieldLists(group);
+  // The ids are the caller's own spellings — a DOI can carry `*`, `_` or `<`. (#255)
+  const fieldLists = idFieldLists(group, escapeMarkdownInline);
   return [
     ...(group.idType
       ? [
-          `Re-call \`pubmed_fetch_fulltext\` with these ${group.idType} ids as \`${group.idType}s\`: ${group.ids.join(', ')}`,
+          `Re-call \`pubmed_fetch_fulltext\` with these ${group.idType} ids as \`${group.idType}s\`: ${escapeMarkdownInline(group.ids.join(', '))}`,
         ]
       : []),
     ...(fieldLists
@@ -3627,17 +3666,19 @@ function formatTruncation(t: z.infer<typeof TruncationSchema>, lines: string[]):
   ].filter((b): b is string => b !== undefined);
   if (budgets.length) lines.push(`Budget applied: ${budgets.join(', ')}`);
 
+  // The id, which opens the list item, and the dropped table and asset names are
+  // upstream strings, escaped at render time. (#255)
   for (const a of t.articles) {
     const tablesDropped =
       a.omittedTables === undefined
         ? ''
-        : `, ${a.omittedTables} table(s) dropped whole: ${(a.omittedTableNames ?? []).join(', ')}`;
+        : `, ${a.omittedTables} table(s) dropped whole: ${escapeMarkdownInline((a.omittedTableNames ?? []).join(', '))}`;
     const assetsDropped =
       a.omittedAssets === undefined
         ? ''
-        : `, ${a.omittedAssets} asset(s) dropped whole: ${(a.omittedAssetNames ?? []).join(', ')}`;
+        : `, ${a.omittedAssets} asset(s) dropped whole: ${escapeMarkdownInline((a.omittedAssetNames ?? []).join(', '))}`;
     lines.push(
-      `- ${a.id} (${a.source}): ${a.returnedCharacters} of ${a.originalCharacters} characters${tablesDropped}${assetsDropped}`,
+      `- ${escapeMarkdownListItem(a.id)} (${a.source}): ${a.returnedCharacters} of ${a.originalCharacters} characters${tablesDropped}${assetsDropped}`,
     );
     for (const s of a.sections ?? []) formatLedgerEntry(s, lines, t.mode, 1);
   }
@@ -3695,27 +3736,33 @@ function formatPmcArticle(
       : 'PMC (structured JATS)';
   lines.push(`**Source:** ${sourceLabel}`);
 
+  // Every upstream value below is escaped on its own — a list item's value with
+  // its line start too, since it opens the item's content; the bullets, bold and
+  // separators around them are this server's. (#255)
   if (a.authors?.length) {
     lines.push(`\n**Authors (${a.authors.length}):**`);
-    for (const au of a.authors) lines.push(`- ${formatPmcAuthor(au)}`);
+    for (const au of a.authors) lines.push(`- ${escapeMarkdownListItem(formatPmcAuthor(au))}`);
   }
 
   if (a.affiliations?.length) {
     lines.push(`\n**Affiliations:**`);
-    for (const aff of a.affiliations) lines.push(`- ${aff}`);
+    for (const aff of a.affiliations) lines.push(`- ${escapeMarkdownListItem(aff)}`);
   }
 
   if (a.journal) {
+    const j = a.journal;
     const parts: string[] = [];
-    if (a.journal.title) parts.push(a.journal.title);
-    if (a.journal.volume)
-      parts.push(`**${a.journal.volume}**${a.journal.issue ? `(${a.journal.issue})` : ''}`);
-    if (a.journal.pages) parts.push(a.journal.pages);
-    if (a.journal.elocationId) parts.push(a.journal.elocationId);
-    if (a.journal.issn) parts.push(`ISSN ${a.journal.issn}`);
+    if (j.title) parts.push(escapeMarkdownInline(j.title));
+    if (j.volume) {
+      const issue = j.issue ? `(${escapeMarkdownInline(j.issue)})` : '';
+      parts.push(`**${escapeMarkdownInline(j.volume)}**${issue}`);
+    }
+    if (j.pages) parts.push(escapeMarkdownInline(j.pages));
+    if (j.elocationId) parts.push(escapeMarkdownInline(j.elocationId));
+    if (j.issn) parts.push(`ISSN ${escapeMarkdownInline(j.issn)}`);
     if (parts.length) lines.push(`\n**Journal:** ${parts.join(', ')}`);
   }
-  if (a.articleType) lines.push(`**Type:** ${a.articleType}`);
+  if (a.articleType) lines.push(`**Type:** ${escapeMarkdownInline(a.articleType)}`);
   if (a.publicationDate) {
     const d = a.publicationDate;
     // JATS deposits often write `<month>7</month>`; the rendered date pads a
@@ -3723,17 +3770,25 @@ function formatPmcArticle(
     // parts stay as deposited. A named month (`Jul`) passes through. (#242)
     const pad = (part: string | undefined) => (part && /^\d$/.test(part) ? `0${part}` : part);
     const dateParts = [d.year, pad(d.month), pad(d.day)].filter(Boolean);
-    if (dateParts.length) lines.push(`**Published:** ${dateParts.join('-')}`);
+    if (dateParts.length) lines.push(`**Published:** ${escapeMarkdownInline(dateParts.join('-'))}`);
   }
-  if (a.pmcId) lines.push(`**PMCID:** ${a.pmcId}`);
-  if (a.epmcId) lines.push(`**EPMC ID:** ${a.epmcId}${a.epmcSource ? ` (${a.epmcSource})` : ''}`);
-  if (a.pmid) lines.push(`**PMID:** ${a.pmid}`);
-  if (a.doi) lines.push(`**DOI:** ${a.doi}`);
+  if (a.pmcId) lines.push(`**PMCID:** ${escapeMarkdownInline(a.pmcId)}`);
+  if (a.epmcId) {
+    const source = a.epmcSource ? ` (${escapeMarkdownInline(a.epmcSource)})` : '';
+    lines.push(`**EPMC ID:** ${escapeMarkdownInline(a.epmcId)}${source}`);
+  }
+  if (a.pmid) lines.push(`**PMID:** ${escapeMarkdownInline(a.pmid)}`);
+  if (a.doi) lines.push(`**DOI:** ${escapeMarkdownInline(a.doi)}`);
   if (a.pmcUrl) lines.push(`**PMC:** ${a.pmcUrl}`);
   if (a.pubmedUrl) lines.push(`**PubMed:** ${a.pubmedUrl}`);
-  if (a.keywords?.length) lines.push(`**Keywords:** ${a.keywords.join(', ')}`);
+  if (a.keywords?.length) {
+    lines.push(`**Keywords:** ${escapeMarkdownInline(a.keywords.join(', '))}`);
+  }
   if (truncation) lines.push(truncationNote(truncation));
-  if (a.abstract) lines.push(`\n#### Abstract\n${a.abstract}`);
+  // The JATS abstract carries the parser's line grammar — the list lines,
+  // bullet runs and box lines `abstractProse` lays out — so it is escaped
+  // around that structure, as a body section is. (#255)
+  if (a.abstract) lines.push(`\n#### Abstract\n${escapeMarkdownBlock(a.abstract, 'structured')}`);
 
   // `outline` mode keeps every section and subsection, so each one lines up
   // with its ledger entry by position. `truncate` mode drops the emptied ones —
@@ -3751,7 +3806,13 @@ function formatPmcArticle(
     lines.push(`\n#### References (${a.references.length})`);
     for (const ref of a.references) {
       const tag = [ref.label, ref.id].filter(Boolean).join(' ');
-      lines.push(`- ${tag ? `[${tag}] ` : ''}${ref.citation}`);
+      // The bracketed tag opens the item: a tag of `x` or a space would render
+      // as a task-list checkbox, so it is escaped as a line start. (#255)
+      lines.push(
+        tag
+          ? `- ${escapeMarkdownLineStart(`[${escapeMarkdownInline(tag)}]`)} ${escapeMarkdownInline(ref.citation)}`
+          : `- ${escapeMarkdownListItem(ref.citation)}`,
+      );
     }
   }
 }
@@ -3903,19 +3964,24 @@ function formatUnpaywallArticle(
   if (a.year !== undefined) lines.push(`**Year:** ${a.year}`);
   if (a.pmcId) lines.push(`**PMCID:** ${a.pmcId}`);
   if (a.pmid) lines.push(`**PMID:** ${a.pmid}`);
-  lines.push(`**DOI:** ${a.doi}`);
+  lines.push(`**DOI:** ${escapeMarkdownInline(a.doi)}`);
   if (a.pubmedUrl) lines.push(`**PubMed:** ${a.pubmedUrl}`);
   lines.push(`**OA Copy:** ${a.sourceUrl}`);
-  if (a.license) lines.push(`**License:** ${a.license}`);
-  if (a.hostType) lines.push(`**Host Type:** ${a.hostType}`);
-  if (a.version) lines.push(`**Version:** ${a.version}`);
+  if (a.license) lines.push(`**License:** ${escapeMarkdownInline(a.license)}`);
+  if (a.hostType) lines.push(`**Host Type:** ${escapeMarkdownInline(a.hostType)}`);
+  if (a.version) lines.push(`**Version:** ${escapeMarkdownInline(a.version)}`);
   if (a.wordCount !== undefined) lines.push(`**Word Count:** ${a.wordCount}`);
   if (a.totalPages !== undefined) lines.push(`**Pages:** ${a.totalPages}`);
   lines.push(
     `\n> Section structure is not guaranteed for this source. Treat the content as best-effort raw text. OA location metadata courtesy of Unpaywall (https://unpaywall.org).`,
   );
   if (truncation) lines.push(truncationNote(truncation));
-  lines.push(`\n#### Full Text\n${a.content}`);
+  // PDF text is prose with no Markdown of its own, so every line of it is
+  // escaped; HTML converted to Markdown is Markdown already and passes as it
+  // came. (#255)
+  const content =
+    a.contentFormat === 'pdf-text' ? escapeMarkdownBlock(a.content, 'plain') : a.content;
+  lines.push(`\n#### Full Text\n${content}`);
 }
 
 type FormattedPmcAuthor = {
@@ -3987,7 +4053,9 @@ function formatSection(
   ledger?: SectionLedgerEntry,
 ): void {
   lines.push(`\n${'#'.repeat(Math.min(depth, 6))} ${sectionHeading(section)}`);
-  if (section.text) lines.push(section.text);
+  // Escaped around the parser's lists, quotes and fences, which keep rendering;
+  // `structuredContent` keeps the plain text. (#255)
+  if (section.text) lines.push(escapeMarkdownBlock(section.text, 'structured'));
   else if (ledger && isBudgetEmptied(ledger)) {
     lines.push(emptiedSectionNote(ledger.originalCharacters));
   }
@@ -3997,12 +4065,14 @@ function formatSection(
 }
 
 /**
- * Strip absolute URLs from chain detail strings. Upstream errors (e.g.
- * `Fetch failed for <eutils URL>. Status: 400`) leak endpoint paths and query
- * strings without adding actionable signal — the status code is the useful
- * part. The raw detail is preserved in `structuredContent` for clients that
- * want it.
+ * A chain detail string as `content[]` renders it: absolute URLs stripped, then
+ * Markdown-escaped. Upstream errors (e.g. `Fetch failed for <eutils URL>.
+ * Status: 400`) leak endpoint paths and query strings without adding
+ * actionable signal — the status code is the useful part. The escape keeps the
+ * `<upstream>` placeholder from rendering as a raw HTML tag, which shows
+ * nothing, and the upstream text's own delimiters from pairing. (#255) The raw
+ * detail is preserved in `structuredContent` for clients that want it.
  */
 function sanitizeChainDetail(detail: string): string {
-  return detail.replace(/https?:\/\/\S+/g, '<upstream>');
+  return escapeMarkdownInline(detail.replace(/https?:\/\/\S+/g, '<upstream>'));
 }

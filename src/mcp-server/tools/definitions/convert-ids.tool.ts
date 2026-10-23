@@ -12,6 +12,7 @@ import { NCBI_ID_INPUT_ERRORS, NCBI_SERVICE_ERRORS } from '@/services/error-cont
 import { getNcbiService } from '@/services/ncbi/ncbi-service.js';
 import { conceptMeta, EDAM_ACCESSION, EDAM_ID_MAPPING } from './_concepts.js';
 import { doiStringSchema, normalizePmid, pmcidStringSchema, pmidStringSchema } from './_schemas.js';
+import { escapeMarkdownTableCell } from './_text.js';
 
 /**
  * NCBI's PMC ID Converter returns this exact wording for any non-PMC ID — even
@@ -189,9 +190,12 @@ export const convertIdsTool = tool('pubmed_convert_ids', {
       '| Requested ID | PMID | PMCID | DOI | Error |',
       '|:---|:---|:---|:---|:---|',
     ];
+    // The caller's spelling, the DOI and NCBI's error text are free text: a `|`
+    // in one would end its cell and shift the rest of the row. (#255)
+    const cell = (value: string | undefined) => (value ? escapeMarkdownTableCell(value) : '-');
     for (const r of result.records) {
       lines.push(
-        `| ${r.requestedId} | ${r.pmid ?? '-'} | ${r.pmcid ?? '-'} | ${r.doi ?? '-'} | ${r.errmsg ?? '-'} |`,
+        `| ${cell(r.requestedId)} | ${r.pmid ?? '-'} | ${r.pmcid ?? '-'} | ${cell(r.doi)} | ${cell(r.errmsg)} |`,
       );
     }
     return [{ type: 'text', text: lines.join('\n') }];

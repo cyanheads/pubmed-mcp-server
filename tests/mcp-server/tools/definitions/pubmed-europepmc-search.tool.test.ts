@@ -8,7 +8,7 @@ import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
 import { createMockContext, getEnrichment, runToolContract } from '@cyanheads/mcp-ts-core/testing';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
-import { textBlocks } from '../../../_helpers.js';
+import { bunMarkdown, renderedText, textBlocks } from '../../../_helpers.js';
 
 const mockSearch = vi.fn();
 const mockGetEpmc = vi.fn();
@@ -671,6 +671,54 @@ describe('pubmedEuropepmcSearchTool total match count in the header (issue #147)
   });
 });
 
+describe('pubmedEuropepmcSearchTool cursor echo (issue #255)', () => {
+  beforeEach(() => {
+    mockSearch.mockReset();
+    mockGetEpmc.mockReset();
+    mockGetEpmc.mockReturnValue({ search: mockSearch });
+  });
+
+  // Europe PMC cursors are opaque base64-like tokens a caller passes back
+  // verbatim; one carrying `*`, `_` or a backtick must read exactly both raw and
+  // rendered.
+  const cursorMark = 'AoJ*x_1_*';
+  const nextCursorMark = 'AoE`q*w*';
+
+  it('echoes both cursors exactly on the raw content[] text, structuredContent unchanged', async () => {
+    mockSearch.mockResolvedValue({
+      ...page(3, [], '(alphafold) AND (SRC:"PPR")'),
+      cursorMark,
+      nextCursorMark,
+    });
+
+    const result = await runToolContract(pubmedEuropepmcSearchTool, {
+      query: 'alphafold',
+      sources: ['PPR'],
+      cursorMark,
+    });
+
+    expect(result.structuredContent).toMatchObject({ cursorMark, nextCursorMark });
+    expect(contractText(result)).toContain(
+      `**Cursor:** \`${cursorMark}\` → \`\`${nextCursorMark}\`\` (next page)\n`,
+    );
+  });
+
+  it.runIf(bunMarkdown !== undefined)('renders both cursors exactly', () => {
+    const text = textBlocks(
+      pubmedEuropepmcSearchTool.format!({
+        hits: [],
+        cursorMark,
+        nextCursorMark,
+        searchUrl: 'https://europepmc.org/search?query=x',
+        totalCount: 3,
+      }),
+    )[0]?.text;
+    expect(renderedText(text ?? '')).toContain(
+      `Cursor: ${cursorMark} → ${nextCursorMark} (next page)`,
+    );
+  });
+});
+
 describe('pubmedEuropepmcSearchTool blank query rejection (issue #176)', () => {
   beforeEach(() => {
     mockSearch.mockReset();
@@ -909,6 +957,119 @@ describe('pubmedEuropepmcSearchTool entity-encoded title markup (issue #181)', (
     const text = contractText(result);
     expect(text).toContain(`#### ${title}`);
     expect(text).not.toMatch(/<\/?b>|\\</);
+  });
+});
+
+describe('pubmedEuropepmcSearchTool literal tag-shaped terms in PAT records (issue #256)', () => {
+  beforeEach(() => {
+    mockSearch.mockReset();
+    mockGetEpmc.mockReset();
+    mockGetEpmc.mockReturnValue({ search: mockSearch });
+  });
+
+  it('keeps `HuMab<CD20>` in the abstract snippet (PAT/US2011076273)', async () => {
+    // The opening of Europe PMC's core abstract for PAT/US2011076273, verbatim.
+    mockSearch.mockResolvedValue(
+      page(
+        1,
+        [
+          {
+            id: 'US2011076273',
+            source: 'PAT',
+            title: 'Highly Concentrated Pharmaceutical Formulations',
+            abstractText:
+              'The present invention relates to a highly concentrated, stable pharmaceutical formulation of a pharmaceutically active anti-CD20 antibody, such as e.g. Rituximab, Ocrelizumab, or HuMab<CD20>, or a mixture of such antibody molecules for subcutaneous injection.',
+          },
+        ],
+        'EXT_ID:US2011076273 AND SRC:PAT',
+      ),
+    );
+
+    const result = await runToolContract(pubmedEuropepmcSearchTool, {
+      query: 'EXT_ID:US2011076273',
+      sources: ['PAT'],
+      pageSize: 1,
+    });
+
+    expect(result.isError).toBeFalsy();
+    const { hits } = result.structuredContent as { hits: Array<{ abstractSnippet?: string }> };
+    expect(hits[0]?.abstractSnippet).toContain('Ocrelizumab, or HuMab<CD20>, or a mixture');
+    // Escaped in `content[]`, where a renderer would otherwise read `<CD20>`
+    // as a raw HTML tag and hide it. (#255)
+    expect(contractText(result)).toContain('Ocrelizumab, or HuMab\\<CD20>, or a mixture');
+  });
+});
+
+describe('pubmedEuropepmcSearchTool content[] escaping of the abstract snippet (issue #255)', () => {
+  beforeEach(() => {
+    mockSearch.mockReset();
+    mockGetEpmc.mockReset();
+    mockGetEpmc.mockReturnValue({ search: mockSearch });
+  });
+
+  it('escapes paired HGVS asterisks in the snippet and keeps the structured snippet plain', async () => {
+    const abstractText =
+      'Biallelic variants: [c.666delT, p.(F222Lfs*46); c.2289dupC, p.(V764Rfs*19)] in EPB41L3.';
+    mockSearch.mockResolvedValue(
+      page(
+        1,
+        [{ id: '39292993', source: 'MED', pmid: '39292993', title: 'EPB41L3', abstractText }],
+        'EXT_ID:39292993 AND SRC:MED',
+      ),
+    );
+
+    const result = await runToolContract(pubmedEuropepmcSearchTool, {
+      query: 'EXT_ID:39292993',
+      sources: ['MED'],
+      pageSize: 1,
+    });
+
+    expect(result.isError).toBeFalsy();
+    const { hits } = result.structuredContent as { hits: Array<{ abstractSnippet?: string }> };
+    expect(hits[0]?.abstractSnippet).toBe(abstractText);
+    expect(contractText(result)).toContain(
+      '\nBiallelic variants: [c.666delT, p.(F222Lfs\\*46); c.2289dupC, p.(V764Rfs\\*19)] in EPB41L3.',
+    );
+  });
+
+  it('escapes a block marker opening the snippet and an upstream DOI', async () => {
+    mockSearch.mockResolvedValue(
+      page(
+        1,
+        [
+          {
+            id: 'PPR1',
+            source: 'PPR',
+            doi: '10.1101/[x](y)',
+            title: 'A preprint',
+            abstractText: '# 3 cohorts were enrolled',
+          },
+        ],
+        'PPR1',
+      ),
+    );
+
+    const result = await runToolContract(pubmedEuropepmcSearchTool, { query: 'PPR1' });
+
+    const text = contractText(result);
+    expect(text).toContain('\n\\# 3 cohorts were enrolled');
+    expect(text).toContain('**DOI:** 10.1101/\\[x\\](y)');
+  });
+
+  it('sets the truncation note apart, so a backtick the cut left lone cannot pair with its code spans', async () => {
+    mockSearch.mockResolvedValue(
+      page(
+        1,
+        [{ id: 'PAT1', source: 'PAT', title: 't', abstractText: `The 5\` UTR ${'b'.repeat(900)}` }],
+        'foo',
+      ),
+    );
+
+    const result = await runToolContract(pubmedEuropepmcSearchTool, { query: 'foo' });
+
+    const text = contractText(result);
+    expect(text).toContain('The 5` UTR b');
+    expect(text).toMatch(/b…\n\n_Abstract truncated at 400 characters/);
   });
 });
 

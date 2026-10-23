@@ -97,7 +97,7 @@ Li, Haixia, et al. "MicroRNA-582-3p negatively regulates cell proliferation and 
   year     = {2019},
   volume   = {24},
   pages    = {66},
-  issn     = {1689-1392},
+  issn     = {1425-8153},
   doi      = {10.1186/s11658-019-0184-7},
   pmid     = {31844417},
   pmcid    = {PMC6894134},
@@ -114,13 +114,13 @@ AU  - Wang, Paoqiu
 AU  - Huang, Mao
 AU  - Xu, Ronghua
 AU  - Nie, Tian
-TI  - MicroRNA-582-3p negatively regulates cell proliferation and cell cycle progression in acute myeloid leukemia by targeting cyclin B2.
+TI  - MicroRNA-582-3p negatively regulates cell proliferation and cell cycle progression in acute myeloid leukemia by targeting cyclin B2
 JF  - Cellular & molecular biology letters
 JO  - Cell Mol Biol Lett
 PY  - 2019
 VL  - 24
 SP  - 66
-SN  - 1689-1392
+SN  - 1425-8153
 DO  - 10.1186/s11658-019-0184-7
 AN  - 31844417
 UR  - https://pubmed.ncbi.nlm.nih.gov/31844417/

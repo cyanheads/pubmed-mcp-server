@@ -83,7 +83,7 @@ Han, Huan, et al. "First report of furmonertinib as a first-line treatment in ad
   volume   = {102},
   number   = {52},
   pages    = {e36667},
-  issn     = {1536-5964},
+  issn     = {0025-7974},
   doi      = {10.1097/MD.0000000000036667},
   pmid     = {38206746},
   pmcid    = {PMC10754557},
@@ -103,14 +103,14 @@ AU  - Zhang, Jianwei
 AU  - Zhu, Hui
 AU  - Jiao, Shuyue
 AU  - Tang, Hong
-TI  - First report of furmonertinib as a first-line treatment in advanced lung adenocarcinoma patients harboring EGFR exon 20 insertion mutations after the kinase domain αC-helix: Two case reports and a literature review.
+TI  - First report of furmonertinib as a first-line treatment in advanced lung adenocarcinoma patients harboring EGFR exon 20 insertion mutations after the kinase domain αC-helix: Two case reports and a literature review
 JF  - Medicine
 JO  - Medicine (Baltimore)
 PY  - 2023
 VL  - 102
 IS  - 52
 SP  - e36667
-SN  - 1536-5964
+SN  - 0025-7974
 DO  - 10.1097/MD.0000000000036667
 AN  - 38206746
 UR  - https://pubmed.ncbi.nlm.nih.gov/38206746/

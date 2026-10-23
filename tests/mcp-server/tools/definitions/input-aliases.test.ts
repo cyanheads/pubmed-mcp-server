@@ -1,5 +1,5 @@
 /**
- * @fileoverview Declared `inputAliases` (issues #156, #190), driven through the framework's
+ * @fileoverview Declared `inputAliases` (issues #156, #190, #254, #258), driven through the framework's
  * real argument path. `runToolContract` calls `parseToolArguments` — the alias
  * rewrite and the strict Zod parse a `tools/call` goes through — so each case
  * exercises the declaration itself rather than a hand-built input. Upstream
@@ -8,7 +8,8 @@
  *
  * `pubmed_lookup_citation`'s `citation` alias is covered with its single-object
  * handling in `lookup-citation.tool.test.ts`. `pubmed_fetch_fulltext`'s singular
- * id keys (#221) run its PMC tier through the real JATS parser.
+ * id keys (#221) and `maxCharsPerArticle` (#258) run its PMC tier through the
+ * real JATS parser.
  * @module tests/mcp-server/tools/definitions/input-aliases.test
  */
 
@@ -163,6 +164,45 @@ describe('ids → pmids', () => {
   });
 });
 
+describe('styles → format (#254)', () => {
+  it.each([
+    [
+      ['apa', 'bibtex'],
+      ['apa', 'bibtex'],
+    ],
+    ['vancouver', ['vancouver']],
+  ] as const)('pubmed_format_citations resolves `styles`: %j as `format`', async (styles, keys) => {
+    const aliased = await callRaw(formatCitationsTool, { pmids: [PMID], styles });
+    const canonical = await callRaw(formatCitationsTool, { pmids: [PMID], format: styles });
+
+    expect(aliased.isError).toBeFalsy();
+    expect(mockEFetch).toHaveBeenCalledTimes(2);
+    const structured = aliased.structuredContent as {
+      citations: { citations: Record<string, string> }[];
+    };
+    expect(Object.keys(structured.citations[0]?.citations ?? {})).toEqual(keys);
+    for (const key of keys) expect(textOf(aliased)).toContain(`### ${key.toUpperCase()}`);
+    expect(aliased.structuredContent).toEqual(canonical.structuredContent);
+    expect(aliased.content).toEqual(canonical.content);
+  });
+
+  it('gives an invalid value under `styles` the accepted-values message `format` gives it', async () => {
+    const aliased = await callRaw(formatCitationsTool, { pmids: [PMID], styles: ['harvard'] });
+    const canonical = await callRaw(formatCitationsTool, { pmids: [PMID], format: ['harvard'] });
+    const firstLine = (result: typeof aliased) => textOf(result).split('\n')[0];
+
+    expect(aliased.isError).toBe(true);
+    expect(canonical.isError).toBe(true);
+    expect(firstLine(aliased)).toBe(firstLine(canonical));
+    expect(firstLine(aliased)).toContain(
+      'format: Invalid option: expected one of "apa"|"mla"|"bibtex"|"ris"|"vancouver"',
+    );
+    expect(textOf(aliased)).toContain('Validated styles as format.');
+    expect(textOf(aliased)).not.toContain('Unrecognized key: "styles"');
+    expect(mockEFetch).not.toHaveBeenCalled();
+  });
+});
+
 describe('limit → maxResults', () => {
   it('pubmed_search_articles resolves `limit` as `maxResults`', async () => {
     mockESearch.mockResolvedValue({ count: 40, idList: ['1', '2', '3'], retmax: 3, retstart: 0 });
@@ -276,6 +316,15 @@ describe('each alias is load-bearing', () => {
     ['pubmed_fetch_fulltext', fetchFulltextTool, { pmcId: 'PMC12924062' }, 'pmcId'],
     ['pubmed_fetch_fulltext', fetchFulltextTool, { pmid: '38395217' }, 'pmid'],
     ['pubmed_fetch_fulltext', fetchFulltextTool, { doi: '10.1093/nar/gks1195' }, 'doi'],
+    // #254
+    ['pubmed_format_citations', formatCitationsTool, { pmids: [PMID], styles: ['apa'] }, 'styles'],
+    // #258
+    [
+      'pubmed_fetch_fulltext',
+      fetchFulltextTool,
+      { pmcids: ['PMC8875423'], maxCharsPerArticle: 40000 },
+      'maxCharsPerArticle',
+    ],
   ] as const)(
     '%s rejects `%s` once its inputAliases entry is removed',
     async (_name, tool, args, key) => {
@@ -327,7 +376,7 @@ describe('E-utility and sibling names on pubmed_search_articles (#190)', () => {
     expect(result.isError).toBeFalsy();
     expect(mockESearch.mock.calls[0]?.[0]).toMatchObject({ term: 'ferroptosis' });
     expect(result.structuredContent).toMatchObject({ query: 'ferroptosis' });
-    expect(textOf(result)).toContain('**Query:** ferroptosis');
+    expect(textOf(result)).toContain('**Query:** `ferroptosis`');
   });
 
   it('resolves `retstart` as `offset`', async () => {
@@ -458,7 +507,7 @@ describe('sibling names on pubmed_find_related and pubmed_spell_check (#190)', (
       corrected: 'asthma',
       hasSuggestion: true,
     });
-    expect(textOf(result)).toContain('**Suggestion:** "asthma" (original: "asthmaa")');
+    expect(textOf(result)).toContain('**Suggestion:** `asthma` (original: `asthmaa`)');
   });
 });
 
@@ -515,6 +564,22 @@ describe('an alias sent with its target is still rejected (#190)', () => {
       'maxResults',
     ],
     ['pubmed_spell_check', spellCheckTool, { query: 'asthma', term: 'copd' }, 'term', 'query'],
+    // #254
+    [
+      'pubmed_format_citations',
+      formatCitationsTool,
+      { pmids: [PMID], format: 'apa', styles: ['bibtex'] },
+      'styles',
+      'format',
+    ],
+    // #258
+    [
+      'pubmed_fetch_fulltext',
+      fetchFulltextTool,
+      { pmcids: ['PMC8875423'], maxCharacters: 100, maxCharsPerArticle: 200 },
+      'maxCharsPerArticle',
+      'maxCharacters',
+    ],
   ] as const)('%s rejects `%s` beside its target', async (_name, tool, args, key, target) => {
     const result = await callRaw(tool, { ...args });
 
@@ -530,6 +595,8 @@ describe('an alias sent with its target is still rejected (#190)', () => {
     expect(mockEpmcSearch).not.toHaveBeenCalled();
     expect(mockELink).not.toHaveBeenCalled();
     expect(mockESpell).not.toHaveBeenCalled();
+    expect(mockEFetch).not.toHaveBeenCalled();
+    expect(mockIdConvert).not.toHaveBeenCalled();
   });
 });
 
@@ -571,6 +638,14 @@ describe("an aliased value meets its target's bounds (#190)", () => {
       'pageSize',
     ],
     ['pubmed_spell_check', spellCheckTool, { term: 'a' }, 'query', 'term'],
+    // #258
+    [
+      'pubmed_fetch_fulltext',
+      fetchFulltextTool,
+      { pmcids: ['PMC8875423'], maxCharsPerArticle: 0 },
+      'maxCharacters',
+      'maxCharsPerArticle',
+    ],
   ] as const)(
     '%s rejects an out-of-bounds `%s` with the target message and the rewrite named',
     async (_name, tool, args, target, alias) => {
@@ -585,11 +660,13 @@ describe("an aliased value meets its target's bounds (#190)", () => {
       expect(mockEpmcSearch).not.toHaveBeenCalled();
       expect(mockELink).not.toHaveBeenCalled();
       expect(mockESpell).not.toHaveBeenCalled();
+      expect(mockEFetch).not.toHaveBeenCalled();
+      expect(mockIdConvert).not.toHaveBeenCalled();
     },
   );
 });
 
-describe('singular id keys on pubmed_fetch_fulltext (#221)', () => {
+describe('singular id keys and maxCharsPerArticle on pubmed_fetch_fulltext (#221, #258)', () => {
   /**
    * Stub records keyed by PMC digits: the PMC ID Converter places the PMID and
    * DOI on its PMC record, and PMC EFetch serves its JATS. Only the DOI ↔ PMC
@@ -669,6 +746,34 @@ describe('singular id keys on pubmed_fetch_fulltext (#221)', () => {
         `Nested text of PMC${expected.eFetch}.`,
       );
       expect(textOf(aliased.result)).toContain(`**PMCID:** PMC${expected.eFetch}`);
+    },
+  );
+
+  it.each([
+    [10, true],
+    [40000, false],
+  ])(
+    'resolves `maxCharsPerArticle`: %d as `maxCharacters` (truncated: %s)',
+    async (budget, truncated) => {
+      const aliased = await observe({ pmcids: ['PMC8875423'], maxCharsPerArticle: budget });
+      const canonical = await observe({ pmcids: ['PMC8875423'], maxCharacters: budget });
+
+      expect(aliased.result.isError).toBeFalsy();
+      expect(aliased.upstream).toEqual(canonical.upstream);
+      expect(aliased.result.structuredContent).toEqual(canonical.result.structuredContent);
+      expect(aliased.result.content).toEqual(canonical.result.content);
+      const structured = aliased.result.structuredContent as {
+        truncation?: { maxCharacters?: number; returnedCharacters: number };
+        articles: { sections: { text: string }[] }[];
+      };
+      if (truncated) {
+        expect(structured.truncation).toMatchObject({ maxCharacters: 10 });
+        expect(structured.truncation?.returnedCharacters).toBeLessThanOrEqual(10);
+        expect(textOf(aliased.result)).toContain('maxCharacters');
+      } else {
+        expect(structured.truncation).toBeUndefined();
+        expect(structured.articles[0]?.sections[0]?.text).toBe('Body text of PMC8875423.');
+      }
     },
   );
 

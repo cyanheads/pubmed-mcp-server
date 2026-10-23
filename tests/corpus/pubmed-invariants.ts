@@ -31,6 +31,7 @@ export interface PubmedCorpusArticle {
     orcid?: string;
   }[];
   commentsCorrections?: { note?: string; pmid?: string; refSource: string; refType: string }[];
+  dataBanks?: { accessionNumbers?: string[]; name: string }[];
   doi?: string;
   grantList?: { acronym?: string; agency?: string; country?: string; grantId?: string }[];
   investigators?: {
@@ -146,6 +147,7 @@ function sourceParts(source: string) {
       .filter((e) => attr(e.attrs, 'ValidYN') !== 'N'),
     headings: elements(inner(citation, 'MeshHeadingList'), 'MeshHeading'),
     grants: elements(inner(article, 'GrantList'), 'Grant'),
+    dataBanks: elements(inner(article, 'DataBankList'), 'DataBank'),
     keywords: texts(inner(citation, 'KeywordList'), 'Keyword'),
     notices: elements(inner(citation, 'CommentsCorrectionsList'), 'CommentsCorrections').filter(
       (e) => attr(e.attrs, 'RefType') !== 'Cites',
@@ -206,8 +208,17 @@ function divergence(haystacks: readonly string[], needle: string): string {
 
 /** Source texts that must reach both surfaces of `pubmed_fetch_articles`, labelled. */
 function conservedTexts(source: string): { field: string; value: string }[] {
-  const { article, authors, authorList, investigators, grants, headings, keywords, notices } =
-    sourceParts(source);
+  const {
+    article,
+    authors,
+    authorList,
+    investigators,
+    grants,
+    dataBanks,
+    headings,
+    keywords,
+    notices,
+  } = sourceParts(source);
   const journal = inner(article, 'Journal');
   const out: { field: string; value: string }[] = [];
   const add = (field: string, values: string[]) => {
@@ -252,6 +263,11 @@ function conservedTexts(source: string): { field: string; value: string }[] {
       add(tag, texts(grant.inner, tag));
     }
   }
+  for (const bank of dataBanks) {
+    for (const tag of ['DataBankName', 'AccessionNumber']) {
+      add(tag, texts(bank.inner, tag));
+    }
+  }
   for (const notice of notices) {
     add('notice', [...texts(notice.inner, 'RefSource'), ...texts(notice.inner, 'Note')]);
   }
@@ -281,7 +297,8 @@ function sourceIds(source: string) {
  * (a volume, page or locator coerced to a number loses its leading zeros); each article
  * date; each MeSH heading with its qualifiers and major-topic flags — a heading is major
  * when PubMed stars the heading, its descriptor or any qualifier, as PubMed's `[majr]`
- * search reads it; each grant; each linked notice; publication types and keywords, in
+ * search reads it; each grant; each data bank with its accessions, verbatim; each linked
+ * notice; publication types and keywords, in
  * order.
  */
 function fieldProblems(source: string, article: PubmedCorpusArticle): string[] {
@@ -424,6 +441,17 @@ function fieldProblems(source: string, article: PubmedCorpusArticle): string[] {
     differs(`grant ${i} country`, textOf(grant.inner, 'Country'), got?.country);
   }
 
+  for (const [i, bank] of parts.dataBanks.entries()) {
+    const got = article.dataBanks?.[i];
+    differs(`data bank ${i} name`, textOf(bank.inner, 'DataBankName'), got?.name);
+    const accessions = texts(bank.inner, 'AccessionNumber');
+    differs(
+      `data bank ${i} accessions`,
+      accessions.length > 0 ? accessions : undefined,
+      got?.accessionNumbers,
+    );
+  }
+
   for (const [i, notice] of parts.notices.entries()) {
     const got = article.commentsCorrections?.[i];
     differs(`notice ${i} refType`, attr(notice.attrs, 'RefType'), got?.refType);
@@ -444,7 +472,7 @@ function fieldProblems(source: string, article: PubmedCorpusArticle): string[] {
 /**
  * What the per-field checks cannot see: entries the output holds beyond the source's,
  * affiliations lost in the deduplicated list, and `content[]` listing a different
- * number of authors, investigators, notices, MeSH terms or grants than
+ * number of authors, investigators, notices, MeSH terms, grants or data banks than
  * `structuredContent` returns.
  */
 function countProblems(source: string, article: PubmedCorpusArticle, text: string): string[] {
@@ -463,6 +491,7 @@ function countProblems(source: string, article: PubmedCorpusArticle, text: strin
     ],
     ['MeSH headings', parts.headings.length, article.meshTerms?.length ?? 0],
     ['grants', parts.grants.length, article.grantList?.length ?? 0],
+    ['data banks', parts.dataBanks.length, article.dataBanks?.length ?? 0],
     ['linked notices', parts.notices.length, article.commentsCorrections?.length ?? 0],
     [
       'article dates',
@@ -495,6 +524,7 @@ function countProblems(source: string, article: PubmedCorpusArticle, text: strin
     ],
     ['MeSH terms', bullets('MeSH Terms'), article.meshTerms?.length ?? 0],
     ['grants', bullets('Grants'), article.grantList?.length ?? 0],
+    ['data banks', bullets('Data Banks'), article.dataBanks?.length ?? 0],
   ];
   for (const [what, shown, returned] of rendered) {
     if (shown !== returned) {

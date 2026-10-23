@@ -9,7 +9,7 @@ import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
 import { createMockContext, getEnrichment, runToolContract } from '@cyanheads/mcp-ts-core/testing';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
-import { textBlocks } from '../../../_helpers.js';
+import { bunMarkdown, renderedHtml, renderedText, textBlocks } from '../../../_helpers.js';
 import {
   ADA_WHOLE_BOOK_XML,
   articleSetXml,
@@ -2178,5 +2178,171 @@ describe('fetchArticlesTool author name suffixes (issue #226)', () => {
       suffix: 'Jr',
     });
     expect(text).toContain('**Authors (3):**\n- Frenck Jr (RW) [aff 0]\n');
+  });
+});
+
+describe('fetchArticlesTool content[] escaping of the abstract and record fields (issue #255)', () => {
+  beforeEach(() => {
+    mockEFetch.mockReset();
+  });
+
+  /** PMID 39292993's abstract as NCBI serves it — HGVS `*` stop and frameshift notation. */
+  const HGVS_ABSTRACT =
+    'Exome sequencing identified biallelic variants in EPB41L3 (NM_012307.5) in all affected individuals: two nonsense [c.466C>T, p.(R156*); c.2776C>T, p.(R926*)] and three frameshift [c.666delT, p.(F222Lfs*46); c.2289dupC, p.(V764Rfs*19); c.948_949delTG, p.(A317Kfs*33)].';
+
+  const HGVS_RECORD_XML = `<PubmedArticle><MedlineCitation Status="MEDLINE" Owner="NLM"><PMID Version="1">39292993</PMID><Article PubModel="Print"><Journal><ISSN IssnType="Electronic">1460-2156</ISSN><JournalIssue CitedMedium="Internet"><Volume>147</Volume><Issue>12</Issue><PubDate><Year>2024</Year><Month>Dec</Month><Day>03</Day></PubDate></JournalIssue><Title>Brain : a journal of neurology</Title><ISOAbbreviation>Brain</ISOAbbreviation></Journal><ArticleTitle>Biallelic EPB41L3 variants underlie a developmental disorder with seizures and myelination defects.</ArticleTitle><Pagination><MedlinePgn>4033-4042</MedlinePgn></Pagination><Abstract><AbstractText>${HGVS_ABSTRACT}</AbstractText></Abstract></Article></MedlineCitation><PubmedData><ArticleIdList><ArticleId IdType="pubmed">39292993</ArticleId></ArticleIdList></PubmedData></PubmedArticle>`;
+
+  it('escapes the paired HGVS asterisks in content[] and keeps structuredContent plain (PMID 39292993)', async () => {
+    mockEFetch.mockResolvedValue({
+      PubmedArticleSet: parseArticleSetXml(articleSetXml(HGVS_RECORD_XML)),
+    });
+    const result = await runToolContract(fetchArticlesTool, { pmids: ['39292993'] });
+
+    expect(result.isError).toBeFalsy();
+    const structured = result.structuredContent as { articles: { abstractText?: string }[] };
+    expect(structured.articles[0]?.abstractText).toBe(HGVS_ABSTRACT);
+
+    const text = textBlocks(result.content as never)[0]?.text ?? '';
+    expect(text).toContain(
+      'p.(F222Lfs\\*46); c.2289dupC, p.(V764Rfs\\*19); c.948_949delTG, p.(A317Kfs\\*33)',
+    );
+    expect(text).toContain('[c.466C>T, p.(R156\\*); c.2776C>T, p.(R926\\*)]');
+    // An intraword underscore and the reference sequence carry no escape.
+    expect(text).toContain('(NM_012307.5)');
+    expect(text).not.toContain('p.(F222Lfs*46)');
+  });
+
+  it('escapes block markers opening an abstract line, which carries no structure of its own', () => {
+    const abstractText = '# 1 Background\n\n- 5 mg daily\n\n> 18 years\n\n1. First result';
+    const text =
+      textBlocks(
+        fetchArticlesTool.format!({
+          articles: [{ recordType: 'journal-article' as const, pmid: '42', abstractText }],
+          totalReturned: 1,
+        }),
+      )[0]?.text ?? '';
+
+    expect(text).toContain(
+      '#### Abstract\n\\# 1 Background\n\n\\- 5 mg daily\n\n\\> 18 years\n\n1\\. First result',
+    );
+  });
+
+  it('escapes every other upstream string the record renders', () => {
+    const text =
+      textBlocks(
+        fetchArticlesTool.format!({
+          articles: [
+            {
+              recordType: 'book-chapter' as const,
+              pmid: '42',
+              title: 'Plain title',
+              authors: [
+                { collectiveName: '*Study* Group <b>' },
+                { firstName: 'Ann_', lastName: '_Lee', initials: 'A*', suffix: '*Jr' },
+              ],
+              investigators: [{ firstName: 'Bo', lastName: '[Kim](https://evil.test)' }],
+              affiliations: ['Dept of *Genetics* <i>Lab</i>'],
+              journalInfo: {
+                title: 'J *Bold* Res',
+                isoAbbreviation: 'J _Bold_ Res',
+                volume: '1*2*',
+                issue: '[3](x)',
+                pages: 'e1~2~',
+                elocationId: '10.1/_ab_',
+                elocationIdType: 'doi',
+                publicationDate: { medlineDate: '2024 *Jan*' },
+              },
+              book: {
+                title: 'Book *One*',
+                medium: '`Internet`',
+                editors: [{ firstName: 'Ed', lastName: '*Smith*' }],
+                publisher: 'Pub <b>Co</b>',
+                publisherLocation: 'City [WA](x)',
+                collectionTitle: '_Series_ Title',
+                edition: '*2nd*',
+              },
+              publicationTypes: ['*Review*'],
+              doi: '10.1000/[abc](def)',
+              keywords: ['*alpha*', 'TP53_mutant'],
+              meshTerms: [
+                {
+                  descriptorName: '*Neoplasms*',
+                  descriptorUi: 'D009369',
+                  isMajorTopic: false,
+                  qualifiers: [
+                    { qualifierName: '_genetics_', qualifierUi: 'Q000235', isMajorTopic: false },
+                  ],
+                },
+              ],
+              grantList: [{ grantId: 'R01 *A*', agency: 'NIH <i>NCI</i>', country: '[US](x)' }],
+            },
+          ],
+          totalReturned: 1,
+        }),
+      )[0]?.text ?? '';
+
+    expect(text).toContain('- \\*Study\\* Group \\<b> (collective)');
+    expect(text).toContain('- Ann\\_ \\_Lee \\*Jr (A\\*)');
+    expect(text).toContain('- Bo \\[Kim\\](https://evil.test)');
+    expect(text).toContain('- [0] Dept of \\*Genetics\\* \\<i>Lab\\</i>');
+    expect(text).toContain(
+      '**Journal:** J \\*Bold\\* Res, (J \\_Bold\\_ Res), 2024 \\*Jan\\*, **1\\*2\\***(\\[3\\](x)), e1\\~2\\~, doi: 10.1/\\_ab\\_',
+    );
+    expect(text).toContain('**Book:** Book \\*One\\* [\\`Internet\\`]');
+    expect(text).toContain('- Ed \\*Smith\\*');
+    expect(text).toContain('**Publisher:** Pub \\<b>Co\\</b>');
+    expect(text).toContain('**Publisher Location:** City \\[WA\\](x)');
+    expect(text).toContain('**Edition:** \\*2nd\\*');
+    expect(text).toContain('**Collection:** \\_Series\\_ Title');
+    expect(text).toContain('**Type:** \\*Review\\*');
+    expect(text).toContain('**DOI:** 10.1000/\\[abc\\](def)');
+    expect(text).toContain('**Keywords:** \\*alpha\\*, TP53_mutant');
+    expect(text).toContain('- \\*Neoplasms\\* [D009369] (\\_genetics\\_ [Q000235])');
+    expect(text).toContain('- R01 \\*A\\* — NIH \\<i>NCI\\</i> — \\[US\\](x)');
+  });
+
+  describe('a list item value opening like a block construct', () => {
+    const article = {
+      recordType: 'book-chapter' as const,
+      pmid: '42',
+      title: 'Plain title',
+      authors: [{ collectiveName: '# Writing Group' }, { lastName: '> Quoted' }],
+      investigators: [{ firstName: '1.', lastName: 'Numbered' }],
+      book: { title: 'Book', editors: [{ lastName: '- Dash' }] },
+      meshTerms: [{ descriptorName: '+ Plus', descriptorUi: 'D000001', isMajorTopic: false }],
+      grantList: [{ grantId: '1) R01', agency: 'NIH' }],
+    };
+    const format = () =>
+      textBlocks(fetchArticlesTool.format!({ articles: [article], totalReturned: 1 }))[0]?.text ??
+      '';
+
+    it('escapes the marker opening each author, investigator, editor, MeSH and grant item', () => {
+      const text = format();
+
+      expect(text).toContain('\n- \\# Writing Group (collective)\n');
+      expect(text).toContain('\n- \\> Quoted\n');
+      expect(text).toContain('\n- 1\\. Numbered\n');
+      expect(text).toContain('\n- \\- Dash\n');
+      expect(text).toContain('\n- \\+ Plus [D000001]\n');
+      expect(text).toContain('\n- 1\\) R01 — NIH');
+    });
+
+    it.runIf(bunMarkdown !== undefined)('renders each item as one plain list item', () => {
+      const html = renderedHtml(format());
+
+      expect(html).not.toMatch(/<(?:h1|blockquote|ol)[\s>]/);
+      expect(html.split('<ul').length - 1).toBe(5);
+      const visible = renderedText(format());
+      for (const value of [
+        '# Writing Group (collective)',
+        '> Quoted',
+        '1. Numbered',
+        '- Dash',
+        '+ Plus [D000001]',
+        '1) R01 — NIH',
+      ]) {
+        expect(visible).toContain(value);
+      }
+    });
   });
 });
