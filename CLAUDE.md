@@ -392,6 +392,7 @@ Directory-based, grouped by minor series via the `.x` semver-wildcard convention
 bun publish --access public
 
 docker buildx build --platform linux/amd64,linux/arm64 \
+  --build-arg APP_VERSION=<version> \
   -t ghcr.io/cyanheads/pubmed-mcp-server:<version> \
   -t ghcr.io/cyanheads/pubmed-mcp-server:latest \
   --push .
