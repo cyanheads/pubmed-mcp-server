@@ -43,6 +43,20 @@ const FORMATTING_TAG_NAMES = [
 const FORMATTING_TAG_NAME_SET: ReadonlySet<string> = new Set(FORMATTING_TAG_NAMES);
 const FORMATTING_TAG_ALTERNATION = FORMATTING_TAG_NAMES.join('|');
 /**
+ * Names a bare raw tag is stripped under with no closing partner: the formatting
+ * names, plus HTML void and optional-close elements, which are never closed
+ * (`<br>`, `<p>` with no `</p>`). (#256)
+ */
+const UNPAIRED_TAG_NAME_SET: ReadonlySet<string> = new Set([
+  ...FORMATTING_TAG_NAMES,
+  'br',
+  'hr',
+  'img',
+  'li',
+  'p',
+  'wbr',
+]);
+/**
  * A markup tag, in one of two forms, recognized in a single left-to-right pass.
  *
  * Raw: `<`, an optional `/`, a tag name that starts with a letter, then either
@@ -52,12 +66,12 @@ const FORMATTING_TAG_ALTERNATION = FORMATTING_TAG_NAMES.join('|');
  * PubMed's legacy `<or= 20 or > 20` (≤) is not read as a tag that deletes the
  * text up to the next `>` (#195); and a body free of `<` stops a match opened on
  * a stray `<` from spanning the next real tag (`n<N ... <bold>` keeps its text,
- * #94). The remaining gap is a stray `<letter …>` pair — `a<b and c>d` still
- * strips to `a d`, and `HuMab<CD20>` loses `<CD20>`. Closing it would take a
- * tag-name allowlist that silently drops unknown JATS elements, so the looser
- * shape is deliberate. The name class excludes the delimiter the body must
- * start with, so a failed match costs only the characters up to the next angle
- * bracket and the scan stays linear.
+ * #94). A match is not always markup: {@link toDisplayText} keeps a bare
+ * `<NAME>` that nothing marks as a tag (`HuMab<CD20>`, #256). The remaining gap
+ * is a stray `<letter …>` pair with a body — `a<b and c>d` still strips to
+ * `a d`, as a tag with attributes would. The name class excludes the delimiter
+ * the body must start with, so a failed match costs only the characters up to
+ * the next angle bracket and the scan stays linear.
  *
  * Entity-encoded: a bare formatting tag as Europe PMC escapes it in PubMed
  * titles (`&lt;i&gt;`, `&lt;/sup&gt;`). Only these names, with nothing else
@@ -82,13 +96,31 @@ const SOFT_HYPHEN_RE = /­/g;
 const WHITESPACE_RE = /\s+/g;
 
 /**
- * Replacement for one {@link MARKUP_TAG_RE} match: a bare formatting tag, raw or
- * encoded, is removed outright; any other raw tag becomes a space so the words
- * on either side of a structural boundary stay apart. A formatting tag that
- * sits between a sentence's closing punctuation and the next word also becomes
- * a space: abstracts set headings in bold or italic with no whitespace around
- * them (`children.<b>Aim.</b> The`, `<i>Objective.</i>Quantitative`), and
- * joining there fuses the sentences.
+ * Lowercased names of every closing tag in `text`: the `</name…>` matches of
+ * {@link MARKUP_TAG_RE}, so exactly the closing tags the strip removes. One
+ * linear scan.
+ */
+function closingTagNames(text: string): ReadonlySet<string> {
+  const names = new Set<string>();
+  for (const [tag, rawName] of text.matchAll(MARKUP_TAG_RE)) {
+    if (rawName !== undefined && tag[1] === '/') names.add(rawName.toLowerCase());
+  }
+  return names;
+}
+
+/**
+ * Replacement for one {@link MARKUP_TAG_RE} match. A raw tag is markup when it
+ * is a closing tag, has a body (attributes, a `/`), carries an
+ * {@link UNPAIRED_TAG_NAME_SET} name, or has a `</name>` partner somewhere in
+ * the string; any other bare `<NAME>` is literal notation and stays as written
+ * (`HuMab<CD20>`, #256). Of the markup, a bare formatting tag, raw or encoded,
+ * is removed outright; any other raw tag becomes a space so the words on either
+ * side of a structural boundary stay apart. A formatting tag that sits between a
+ * sentence's closing punctuation and the next word also becomes a space:
+ * abstracts set headings in bold or italic with no whitespace around them
+ * (`children.<b>Aim.</b> The`, `<i>Objective.</i>Quantitative`), and joining
+ * there fuses the sentences. `closingNames` is computed on first use, so a
+ * string with no bare unknown tag never pays for it.
  */
 function replaceMarkupTag(
   tag: string,
@@ -96,7 +128,12 @@ function replaceMarkupTag(
   rawBody: string | undefined,
   offset: number,
   text: string,
+  closingNames: () => ReadonlySet<string>,
 ): string {
+  if (rawName !== undefined && rawBody === undefined && tag[1] !== '/') {
+    const name = rawName.toLowerCase();
+    if (!UNPAIRED_TAG_NAME_SET.has(name) && !closingNames().has(name)) return tag;
+  }
   const formatting =
     rawName === undefined ||
     (rawBody === undefined && FORMATTING_TAG_NAME_SET.has(rawName.toLowerCase()));
@@ -155,12 +192,21 @@ export function decodeHtmlEntities(text: string): string {
  * the resulting whitespace. Tags are stripped in one pass before decoding, so a
  * raw `<bold>` and an encoded `&lt;i&gt;` are removed while an escaped
  * `&lt;gene&gt;` survives as literal text — and nothing a removal joins or a
- * decode produces is scanned again (`&lt;&lt;i&gt;i&gt;` reads `<i>`). Used for
- * Europe PMC titles, authors, journals, and abstracts before truncation, so the
- * character budget is spent on text rather than markup.
+ * decode produces is scanned again (`&lt;&lt;i&gt;i&gt;` reads `<i>`). A raw
+ * bare `<NAME>` that nothing marks as markup survives too (`HuMab<CD20>`; see
+ * {@link replaceMarkupTag}). Used for Europe PMC titles, authors, journals, and
+ * abstracts before truncation, so the character budget is spent on text rather
+ * than markup.
  */
 export function toDisplayText(text: string): string {
-  return decodeHtmlEntities(text.replace(MARKUP_TAG_RE, replaceMarkupTag))
+  let closing: ReadonlySet<string> | undefined;
+  const closingNames = () => (closing ??= closingTagNames(text));
+  const stripped = text.replace(
+    MARKUP_TAG_RE,
+    (tag: string, rawName: string | undefined, rawBody: string | undefined, offset: number) =>
+      replaceMarkupTag(tag, rawName, rawBody, offset, text, closingNames),
+  );
+  return decodeHtmlEntities(stripped)
     .replace(SOFT_HYPHEN_RE, '')
     .replace(WHITESPACE_RE, ' ')
     .trim();

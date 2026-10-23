@@ -91,14 +91,11 @@ describe('toDisplayText', () => {
     });
 
     it('documents the accepted limitation: a tagless `<letter … >` pair still strips', () => {
-      // `a<b and c>d` is indistinguishable from a tag by shape alone. Closing this
-      // would take a tag-name allowlist, which would silently drop unknown JATS
-      // elements — the pattern deliberately errs toward leaving markup visible
-      // rather than deleting text, so this case is a known residual gap.
+      // `a<b and c>d` is indistinguishable from a tag with attributes by shape
+      // alone, so this case is a known residual gap.
       expect(toDisplayText('a<b and c>d')).toBe('a d');
-      // A tag-shaped term in raw prose is the same gap: no shape rule tells it
-      // from an unknown JATS element.
-      expect(toDisplayText('HuMab<CD20> antibody')).toBe('HuMab antibody');
+      // A bare tag-shaped term with no closing partner is kept (#256).
+      expect(toDisplayText('HuMab<CD20> antibody')).toBe('HuMab<CD20> antibody');
     });
   });
 
@@ -238,6 +235,60 @@ describe('toDisplayText', () => {
     });
   });
 
+  describe('a bare tag-shaped term with no closing partner (#256)', () => {
+    it('keeps a literal antibody identifier (PAT/US2011076273)', () => {
+      expect(
+        toDisplayText(
+          'such as e.g. Rituximab, Ocrelizumab, or HuMab<CD20>, or a mixture of such antibody molecules',
+        ),
+      ).toBe(
+        'such as e.g. Rituximab, Ocrelizumab, or HuMab<CD20>, or a mixture of such antibody molecules',
+      );
+      expect(toDisplayText('tuned <LLMs> and <CD20>')).toBe('tuned <LLMs> and <CD20>');
+    });
+
+    it.each([
+      ['an unknown element closed later', 'a<CD20>x</CD20>b', 'a x b'],
+      ['a partner in another case', 'a<Foo>x</foo>b', 'a x b'],
+      ['a partner before the opener', 'a</sec>b<sec>c', 'a b c'],
+      ['one partner for several openers', '<x>a<x>b</x>', 'a b'],
+      ['a closing partner with a body', 'a<CD20>x</CD20 >b', 'a x b'],
+    ])('strips a bare tag whose `</name>` is in the string: %s', (_label, input, expected) => {
+      expect(toDisplayText(input)).toBe(expected);
+    });
+
+    it.each([
+      ['br', 'line<br>break', 'line break'],
+      ['hr', 'a<hr>b', 'a b'],
+      ['img', 'a<img>b', 'a b'],
+      ['wbr', 'long<wbr>word', 'long word'],
+      ['p', '<p>First paragraph', 'First paragraph'],
+      ['P', 'a<P>b', 'a b'],
+      ['li', '<li>item one<li>item two', 'item one item two'],
+      ['i', 'Effects of <i>Bacillus', 'Effects of Bacillus'],
+      ['SUP', 'x<SUP>2', 'x2'],
+    ])('strips an unpaired bare `<%s>`, a void or formatting name', (_name, input, expected) => {
+      expect(toDisplayText(input)).toBe(expected);
+    });
+
+    it.each([
+      ['a closing tag', 'HuMab</CD20> antibody', 'HuMab antibody'],
+      ['attributes, unclosed', '<span data-teams="true">Preprint title', 'Preprint title'],
+      ['a self-closing slash', 'a<CD20/>b', 'a b'],
+      ['a trailing space', 'a<CD20 >b', 'a b'],
+    ])('strips an unpaired tag with %s', (_label, input, expected) => {
+      expect(toDisplayText(input)).toBe(expected);
+    });
+
+    it('keeps an opener whose only partner names another element', () => {
+      expect(toDisplayText('HuMab<CD20> x</CD19> y')).toBe('HuMab<CD20> x y');
+    });
+
+    it('does not count an entity-encoded closing tag as a partner', () => {
+      expect(toDisplayText('HuMab<CD20> and &lt;/CD20&gt;')).toBe('HuMab<CD20> and </CD20>');
+    });
+  });
+
   describe('linear time on adversarial input (#181, #195)', () => {
     /** CPU time of `run`, in ms — this thread's user + system time, not wall clock. */
     const cpuMs = (run: () => void): number => {
@@ -247,13 +298,13 @@ describe('toDisplayText', () => {
       return (user + system) / 1000;
     };
 
-    /** Fastest of five measurements of ten calls each — the least noisy reading of the work. */
-    const fastestMs = (input: string): number => {
+    /** Fastest of five measurements of `calls` calls each — the least noisy reading of the work. */
+    const fastestMs = (input: string, calls = 10): number => {
       toDisplayText(input);
       return Math.min(
         ...Array.from({ length: 5 }, () =>
           cpuMs(() => {
-            for (let i = 0; i < 10; i++) toDisplayText(input);
+            for (let i = 0; i < calls; i++) toDisplayText(input);
           }),
         ),
       );
@@ -273,6 +324,14 @@ describe('toDisplayText', () => {
       ['`<` then 10^5 letters', `<${'a'.repeat(100_000)}`, `<${'a'.repeat(100_000)}`],
       ['`.<i>`', '.<i>'.repeat(100_000), '.'.repeat(100_000)],
       ['`.` then 10^5 `<i>`', `.${'<i>'.repeat(100_000)}a`, '. a'],
+      ['`</a` (#256)', '</a'.repeat(100_000), '</a'.repeat(100_000)],
+      [
+        '`<a`, then as many `>` (#256)',
+        `${'<a'.repeat(100_000)}${'>'.repeat(100_000)}`,
+        `${'<a'.repeat(100_000)}${'>'.repeat(100_000)}`,
+      ],
+      ['`<a>`, never closed (#256)', '<a>'.repeat(100_000), '<a>'.repeat(100_000)],
+      ['`<a>`, closed once at the end (#256)', `${'<a>'.repeat(100_000)}</a>`, ''],
     ])('handles 10^5 repetitions of %s within a CPU bound', (_label, input, expected) => {
       let output = '';
       const elapsed = cpuMs(() => {
@@ -301,6 +360,28 @@ describe('toDisplayText', () => {
       expect((t80k ?? 0) / Math.max(t5k ?? 0, 0.001)).toBeLessThan(64);
       expect(t20k).toBeLessThan(400);
       expect(t80k).toBeLessThan(400);
+    });
+
+    it.each<[string, (n: number) => string]>([
+      ['`</a` (#256)', (n) => fill('</a', n)],
+      ['`<a>`, never closed (#256)', (n) => fill('<a>', n)],
+      ['`<a>`, closed once at the end (#256)', (n) => `${fill('<a>', n - 4)}</a>`],
+      ['`<a`, then as many `>` (#256)', (n) => `${'<a'.repeat(n / 4)}${'>'.repeat(n / 2)}`],
+      ['`<CD20> x ` (#256)', (n) => fill('<CD20> x ', n)],
+      ['a digit run', (n) => '1'.repeat(n)],
+      ['one long line ending in a break', (n) => `${'§1 x'.repeat(n / 4)}\ny`],
+      ['line breaks throughout', (n) => '  \r\n'.repeat(n / 4)],
+    ])('scales linearly from 5k to 320k characters of %s', (_label, build) => {
+      // Doubling from 5k, each size checked against the absolute bound before the
+      // next runs. Two calls per measurement keep seven sizes inside the test timeout.
+      const times: number[] = [];
+      for (let n = 5_000; n <= 320_000; n *= 2) {
+        const ms = fastestMs(build(n), 2);
+        expect(ms).toBeLessThan(400);
+        times.push(ms);
+      }
+      // Linear work grows 64× across the span; quadratic grows 4096×.
+      expect((times.at(-1) ?? 0) / Math.max(times[0] ?? 0, 0.05)).toBeLessThan(256);
     });
 
     it('scales linearly on `<` followed only by letters', () => {
