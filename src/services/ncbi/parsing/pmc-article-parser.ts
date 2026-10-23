@@ -171,9 +171,30 @@ function isAuthorContrib(contrib: JatsNode): boolean {
 }
 
 /**
+ * What a `<collab>` holds besides its name: the member list consortium deposits
+ * nest inside it (6,349 `<contrib>`s in PMC8084355), footnote markers and notes
+ * (`COV-BOOST study group<xref>‡</xref>`), and the contact, affiliation, and role
+ * elements JATS allows there. Read as name text, any of them runs into it. (#251)
+ */
+const COLLAB_NON_NAME_TAGS: ReadonlySet<string> = new Set([
+  'address',
+  'aff',
+  'aff-alternatives',
+  'author-comment',
+  'bio',
+  'contrib-group',
+  'email',
+  'fn',
+  'role',
+  'xref',
+]);
+
+/**
  * Extract authors from a single `<contrib-group>` node. Non-author contributors
  * are skipped. A name part the deposit lacks is omitted; a `<suffix>` is kept
- * verbatim (`IV`, never rewritten to `4th`). (#226)
+ * verbatim (`IV`, never rewritten to `4th`). (#226) A `<collab>` contributes its
+ * own name only — its nested members and footnote markers are left out, and a
+ * collab with no name of its own yields no author. (#251)
  */
 export function extractJatsAuthors(contribGroup: JatsNode | undefined): ParsedPmcAuthor[] {
   if (!contribGroup) return [];
@@ -184,7 +205,7 @@ export function extractJatsAuthors(contribGroup: JatsNode | undefined): ParsedPm
 
     const collab = findOne(contrib, 'collab');
     if (collab) {
-      const collectiveName = textContent(collab);
+      const collectiveName = textContentExcluding(collab, COLLAB_NON_NAME_TAGS);
       if (collectiveName) authors.push({ collectiveName });
       continue;
     }
@@ -948,10 +969,28 @@ function flattenSec(sec: JatsNode): string[] {
  * whose meaning lives in its line breaks and column spacing — {@link textContent}
  * collapses both. Only the surrounding whitespace is trimmed, which is the XML
  * indentation the element was serialized with rather than content. (#130)
+ *
+ * The fence is one backtick longer than the longest backtick run in the content,
+ * and never shorter than three: a fence closes only on a run at least as long
+ * as the one that opened it, so no line of the content can close it early and
+ * spill the rest of the block out as prose. (#255)
  */
 function renderPreformat(preformat: JatsNode): string {
   const raw = rawTextContent(preformat).trim();
-  return raw ? `\`\`\`\n${raw}\n\`\`\`` : '';
+  if (!raw) return '';
+  const fence = '`'.repeat(Math.max(3, longestBacktickRun(raw) + 1));
+  return `${fence}\n${raw}\n${fence}`;
+}
+
+/** Length of the longest run of consecutive backticks in `text`. */
+function longestBacktickRun(text: string): number {
+  let longest = 0;
+  let run = 0;
+  for (let i = 0; i < text.length; i++) {
+    run = text.charCodeAt(i) === 0x60 ? run + 1 : 0;
+    if (run > longest) longest = run;
+  }
+  return longest;
 }
 
 /** Children of a `<disp-formula>` that are not its fallback text. */
@@ -1612,7 +1651,8 @@ const PUB_ID_LABELS: Readonly<Record<string, string>> = {
 
 /**
  * Render one `<person-group>` child — a `<name>`, `<collab>`, or `<etal>`. A
- * name reads `Surname Given`, then any `<suffix>` verbatim (`Miller ER III`).
+ * name reads `Surname Given`, then any `<suffix>` verbatim (`Miller ER III`); a
+ * collab reads its own name, without nested members or footnote markers. (#251)
  */
 function renderCitationName(node: JatsNode): string {
   const tag = tagNameOf(node);
@@ -1624,7 +1664,7 @@ function renderCitationName(node: JatsNode): string {
     const suffix = textContent(findOne(node, 'suffix'));
     return suffix ? `${name} ${suffix}` : name;
   }
-  if (tag === 'collab') return textContent(node);
+  if (tag === 'collab') return textContentExcluding(node, COLLAB_NON_NAME_TAGS);
   if (tag === 'etal') return 'et al.';
   return '';
 }
@@ -1717,7 +1757,8 @@ interface CitationPart extends CitationRun {
  * Render one child element of a `<mixed-citation>` or name wrapper. `before` is
  * the end of the citation text written so far ({@link ID_PREFIX_WINDOW}), which
  * a `<pub-id>` reads for a literal prefix already naming its type. An `<etal>` reads as its own text, or as
- * `et al.` when it is empty — as nearly every deposit leaves it.
+ * `et al.` when it is empty — as nearly every deposit leaves it. A `<collab>` reads its own name,
+ * without nested members or footnote markers. (#251)
  */
 function renderCitationPart(child: JatsNode, tag: string, before: string): CitationPart {
   if (tag === 'pub-id') {
@@ -1730,7 +1771,7 @@ function renderCitationPart(child: JatsNode, tag: string, before: string): Citat
     return { text: value, labeled: false, suppliedEtal: false };
   }
   if (NAME_WRAPPER_TAGS.has(tag)) return { ...renderCitationRun(child, true), labeled: false };
-  const text = rawTextContent(child);
+  const text = rawTextContent(child, tag === 'collab' ? COLLAB_NON_NAME_TAGS : undefined);
   if (tag === 'etal' && !text) return { text: SUPPLIED_ETAL, labeled: false, suppliedEtal: true };
   return { text, labeled: false, suppliedEtal: false };
 }

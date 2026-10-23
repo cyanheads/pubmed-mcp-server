@@ -633,10 +633,15 @@ function readText(
  * its text a space; a boundary the source already spaced is left as it is, and
  * nothing is added at the edges of the node read. Use it when the caller assembles several
  * fragments itself and needs to collapse once over the joined result;
- * {@link textContent} is the normalizing form for everything else.
+ * {@link textContent} is the normalizing form for everything else. The subtree
+ * of any element named in `excludedTags` is left out, as in
+ * {@link textContentExcluding}.
  */
-export function rawTextContent(input: JatsNode | JatsNodeList | undefined): string {
-  return input ? readText(input) : '';
+export function rawTextContent(
+  input: JatsNode | JatsNodeList | undefined,
+  excludedTags?: ReadonlySet<string>,
+): string {
+  return input ? readText(input, excludedTags) : '';
 }
 
 /**

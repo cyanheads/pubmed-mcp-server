@@ -427,6 +427,15 @@ describe('extractBodySections', () => {
     expect(sections[0]?.text).toContain('CME  Infectious');
   });
 
+  it('fences a preformat one backtick past its longest backtick run, so no content line closes it (#255)', () => {
+    const fenced = (content: string) =>
+      extractBodySections(el('body', [el('preformat', [t(content)])]))[0]?.text;
+
+    expect(fenced('x = `a`; y = ``b``')).toBe('```\nx = `a`; y = ``b``\n```');
+    expect(fenced('before\n```\nafter')).toBe('````\nbefore\n```\nafter\n````');
+    expect(fenced('a ````` b ``` c')).toBe('``````\na ````` b ``` c\n``````');
+  });
+
   it('titles a body-level def-list section with the def-list own title (#148)', () => {
     // PMC13546078's <body> opens with its abbreviations <def-list>, before any
     // <sec>. The title used to be rendered as the first line of an untitled
@@ -4671,6 +4680,33 @@ describe('reference, abstract, formula and prose rendering run in linear time (#
   );
 });
 
+describe('preformat fence sizing runs in linear time (#255)', () => {
+  /** Fastest of five readings of one render of a `<preformat>` holding `content`. */
+  const fastestMs = (content: string): number => {
+    const body = el('body', [el('preformat', [t(content)])]);
+    const render = () => extractBodySections(body)[0]?.text ?? '';
+    if (render().length < content.trim().length) throw new Error('preformat did not render whole');
+    return Math.min(...Array.from({ length: 5 }, () => cpuMs(() => render())));
+  };
+
+  it.each([
+    ['a backtick run', (n: number) => '`'.repeat(n)],
+    ['runs of every length up to the line', (n: number) => '`x``x```x'.repeat(n / 9)],
+    ['one long line ending in a break', (n: number) => `${'§1 x'.repeat(n / 4)}\ny`],
+    ['line breaks throughout', (n: number) => `x${'  \r\n'.repeat(n / 4)}x`],
+  ])('scales from 5k to 320k characters of %s', (_label, build) => {
+    // Doubling from 5k, each size checked against the absolute bound before the next runs.
+    const times: number[] = [];
+    for (let n = 5_000; n <= 320_000; n *= 2) {
+      const ms = fastestMs(build(n));
+      expect(ms).toBeLessThan(200);
+      times.push(ms);
+    }
+    // Linear work grows 64x across the span; quadratic grows 4,096x.
+    expect((times.at(-1) ?? 0) / Math.max(times[0] ?? 0, 0.05)).toBeLessThan(256);
+  });
+});
+
 // ─── Author name suffixes (#226) ────────────────────────────────────────────
 
 describe('JATS <suffix> on a name (#226)', () => {
@@ -4717,5 +4753,136 @@ describe('JATS <suffix> on a name (#226)', () => {
     expect(parsed.references).toStrictEqual([
       { id: 'CR92', citation: 'Appel LJ, Miller ER III Ann Intern Med 2020' },
     ]);
+  });
+});
+
+describe('a <collab> name beside nested members and footnote markers (#251)', () => {
+  /** A member `<contrib>` as consortium deposits nest them, with an optional affiliation marker. */
+  const member = (surname: string, given: string, affXref = '') =>
+    `<contrib contrib-type="author"><name name-style="western"><surname>${surname}</surname><given-names>${given}</given-names></name>${affXref}</contrib>`;
+
+  /** The authors of an article whose one `<contrib-group>` holds `contribs`. */
+  const authorsOf = (contribs: string) =>
+    parsePmcArticle(jatsArticle(articleXml(`<contrib-group>${contribs}</contrib-group>`))).authors;
+
+  it.each([
+    [
+      'a nested member list, with the footnote marker after the collab (PMC8084355)',
+      `<contrib contrib-type="author"><collab>RECOVERY Collaborative Group<contrib-group>${member('Abani', 'Obbina')}${member('Abbas', 'Ali')}</contrib-group></collab><xref rid="fn1" ref-type="fn">†</xref></contrib>`,
+      'RECOVERY Collaborative Group',
+    ],
+    [
+      'a footnote marker inside the collab, before its members (PMC8639161)',
+      `<contrib contrib-type="author"><collab>COV-BOOST study group<xref rid="fn3" ref-type="fn">‡</xref><contrib-group>${member('Riordan', 'Andrew')}${member('Ustianowski', 'Andrew')}</contrib-group></collab></contrib>`,
+      'COV-BOOST study group',
+    ],
+    [
+      'members carrying affiliation markers (PMC8688480)',
+      `<contrib contrib-type="author"><collab>International Parkinson’s Disease Genomics Consortium (IPDGC)<contrib-group>${member('Noyce', 'Alastair J.', '<xref ref-type="aff" rid="Aff8">8</xref><xref ref-type="aff" rid="Aff9">9</xref>')}${member('Kaiyrzhanov', 'Rauan', '<xref ref-type="aff" rid="Aff10">10</xref>')}</contrib-group></collab></contrib>`,
+      'International Parkinson’s Disease Genomics Consortium (IPDGC)',
+    ],
+    [
+      'a plain collab with a collab-type (PMC12958241)',
+      '<contrib contrib-type="author"><collab collab-type="authors">NBCA Consortium</collab></contrib>',
+      'NBCA Consortium',
+    ],
+    [
+      'inline markup inside the name',
+      '<contrib contrib-type="author"><collab>The <named-content content-type="study">ABC-2</named-content> <italic>Study</italic> Group</collab></contrib>',
+      'The ABC-2 Study Group',
+    ],
+    [
+      'a footnote inside the collab',
+      '<contrib contrib-type="author"><collab>ABC Study Group<fn id="f1"><p>Members are listed in the appendix</p></fn></collab></contrib>',
+      'ABC Study Group',
+    ],
+    [
+      'a contact email and affiliation inside the collab',
+      '<contrib contrib-type="author"><collab>DEF Investigators<email>def@example.org</email><aff>Example University</aff></collab></contrib>',
+      'DEF Investigators',
+    ],
+  ])('reads the collab’s own name: %s', (_label, contrib, collectiveName) => {
+    expect(authorsOf(contrib)).toStrictEqual([{ collectiveName }]);
+  });
+
+  it('yields no author for a collab whose only content is its members', () => {
+    expect(
+      authorsOf(
+        `<contrib contrib-type="author"><collab> <contrib-group>${member('Abani', 'Obbina')}</contrib-group></collab></contrib>`,
+      ),
+    ).toBeUndefined();
+  });
+
+  it('keeps named authors beside the collab and the group’s affiliations, and lets no member through', () => {
+    const parsed = parsePmcArticle(
+      jatsArticle(
+        articleXml(
+          '<contrib-group>' +
+            '<contrib contrib-type="author"><name><surname>Horby</surname><given-names>Peter W</given-names></name><xref ref-type="aff" rid="aff1">a</xref></contrib>' +
+            `<contrib contrib-type="author"><collab>RECOVERY Collaborative Group<contrib-group>${member('Abani', 'Obbina')}` +
+            // A member who is a group in turn, with members and an affiliation of its own.
+            `<contrib contrib-type="author"><collab>Writing Committee<contrib-group>${member('Landray', 'Martin J')}</contrib-group></collab><aff id="m1">Member-only Institute</aff></contrib>` +
+            '</contrib-group></collab></contrib>' +
+            '<contrib contrib-type="author"><name><surname>Landray</surname><given-names>Martin J</given-names></name></contrib>' +
+            '<aff id="aff1">Nuffield Department of Medicine, University of Oxford, Oxford, UK</aff>' +
+            '</contrib-group>',
+        ),
+      ),
+    );
+    expect(parsed.authors).toStrictEqual([
+      { lastName: 'Horby', givenNames: 'Peter W' },
+      { collectiveName: 'RECOVERY Collaborative Group' },
+      { lastName: 'Landray', givenNames: 'Martin J' },
+    ]);
+    expect(parsed.affiliations).toStrictEqual([
+      'Nuffield Department of Medicine, University of Oxford, Oxford, UK',
+    ]);
+  });
+
+  describe('in a reference', () => {
+    /** The citation of the one `<ref>` an article's `<back>` holds. */
+    const citationOf = (ref: string) =>
+      extractReferences(
+        jatsArticle(
+          `<article><front><article-meta><article-id pub-id-type="pmcid">PMC1</article-id></article-meta></front><back><ref-list><ref id="r1">${ref}</ref></ref-list></back></article>`,
+        ),
+      )[0]?.citation;
+    const RECOVERY = `RECOVERY Collaborative Group<xref rid="fn1" ref-type="fn">†</xref><contrib-group>${member('Abani', 'Obbina')}${member('Abbas', 'Ali')}</contrib-group>`;
+    const TAIL = 'Dexamethasone in Hospitalized Patients with Covid-19';
+
+    it.each([
+      [
+        'an <element-citation> <person-group>',
+        `<element-citation><person-group person-group-type="author"><collab>${RECOVERY}</collab><etal/></person-group><article-title>${TAIL}</article-title><source>N Engl J Med</source><year>2021</year></element-citation>`,
+        `RECOVERY Collaborative Group, et al. ${TAIL} N Engl J Med 2021`,
+      ],
+      [
+        'a <mixed-citation> <person-group>',
+        `<mixed-citation><person-group person-group-type="author"><collab>${RECOVERY}</collab></person-group>. <article-title>${TAIL}</article-title>. <source>N Engl J Med</source>. <year>2021</year>.</mixed-citation>`,
+        `RECOVERY Collaborative Group. ${TAIL}. N Engl J Med. 2021.`,
+      ],
+      [
+        'a <mixed-citation> after named authors',
+        `<mixed-citation><person-group person-group-type="author"><name><surname>Horby</surname><given-names>P</given-names></name></person-group>; <collab>${RECOVERY}</collab>. <article-title>${TAIL}</article-title>.</mixed-citation>`,
+        `Horby P; RECOVERY Collaborative Group. ${TAIL}.`,
+      ],
+    ])('cites the collab’s own name in %s', (_label, ref, citation) => {
+      expect(citationOf(ref)).toBe(citation);
+    });
+
+    it.each([
+      [
+        'an <element-citation>',
+        '<element-citation><person-group person-group-type="author"><collab>The <named-content content-type="study">ABC-2</named-content> <italic>Study</italic> Group</collab></person-group><source>Lancet</source></element-citation>',
+        'The ABC-2 Study Group Lancet',
+      ],
+      [
+        'a <mixed-citation>',
+        '<mixed-citation><collab>The <named-content content-type="study">ABC-2</named-content> <italic>Study</italic> Group</collab>. <source>Lancet</source>.</mixed-citation>',
+        'The ABC-2 Study Group. Lancet.',
+      ],
+    ])('keeps inline markup inside a reference collab name in %s', (_label, ref, citation) => {
+      expect(citationOf(ref)).toBe(citation);
+    });
   });
 });
