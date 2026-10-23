@@ -29,7 +29,7 @@
 
 ## Overview
 
-Biomedical literature from PubMed, PubMed Central, and Europe PMC. Search it, fetch metadata and full text, resolve identifiers and partial citations, format references, and ground queries in MeSH vocabulary.
+Biomedical literature from PubMed, PubMed Central, and Europe PMC. Search it, fetch metadata and full text, resolve identifiers and partial citations, format references, and ground queries in MeSH vocabulary. Runs as a stdio process, a local Streamable HTTP server, or the public hosted endpoint above.
 
 ### Tools
 
