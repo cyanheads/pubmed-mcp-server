@@ -169,6 +169,7 @@ pubmed-mcp-server/
 │   │           ├── _budget.ts
 │   │           ├── _concepts.ts
 │   │           ├── _notices.ts
+│   │           ├── _outline-shares.ts
 │   │           ├── _schemas.ts
 │   │           ├── _text.ts
 │   │           ├── _visible-text.ts
@@ -326,6 +327,7 @@ pubmed-mcp-server/
 │   │           ├── _budget.test.ts
 │   │           ├── _fuzz-helpers.ts
 │   │           ├── _mesh-esummary-fixtures.ts
+│   │           ├── _outline-shares.test.ts
 │   │           ├── _schemas.test.ts
 │   │           ├── _text.test.ts
 │   │           ├── _visible-text.test.ts
@@ -366,6 +368,7 @@ pubmed-mcp-server/
 │   │   │   ├── parsing/
 │   │   │   │   ├── _book-fixtures.ts
 │   │   │   │   ├── _comments-corrections-fixtures.ts
+│   │   │   │   ├── _entity-fixtures.ts
 │   │   │   │   ├── _investigator-fixtures.ts
 │   │   │   │   ├── _pagination-fixtures.ts
 │   │   │   │   ├── _suffix-fixtures.ts

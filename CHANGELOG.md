@@ -2,6 +2,10 @@
 
 All notable changes to this project. Each entry links to its full per-version file in [changelog/](changelog/).
 
+## [2.10.23](changelog/2.10.x/2.10.23.md) — 2026-10-23
+
+Markdown-safe content[] across the tools, dataBanks on pubmed_fetch_articles, fairer full-text outline budgets, and citation, spell-check, consortium-author, and Europe PMC fixes.
+
 ## [2.10.22](changelog/2.10.x/2.10.22.md) — 2026-10-12
 
 Author name suffixes carry through records, citations, and full text; citation formatting, full-text cleanup, in-place spell-check corrections, and Europe PMC sort errors are fixed.
