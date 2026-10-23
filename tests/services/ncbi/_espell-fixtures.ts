@@ -1,6 +1,7 @@
 /**
  * @fileoverview ESpell responses captured from NCBI (`espell.fcgi?db=pubmed`,
- * 2026-10-12), keyed by the `term` sent. Each body is byte-for-byte what NCBI
+ * 2026-10-12; field-tag and single-letter terms 2026-10-22), keyed by the
+ * `term` sent. Each body is byte-for-byte what NCBI
  * returned; only the shared prolog and DOCTYPE are factored into
  * {@link espellBody}. `<CorrectedQuery>` is ESpell's lowercased, punctuation-
  * and digit-stripped rewrite; `<SpelledQuery>` interleaves the caller's text
@@ -51,6 +52,32 @@ const ESPELL_RESULTS: Readonly<Record<string, string>> = {
     '<eSpellResult>\n\t<Database>pubmed</Database>\n\t<Query>ALZHIEMER DISEESE</Query>\n\t<CorrectedQuery>alzheimer disease</CorrectedQuery>\n\t<SpelledQuery><Original></Original><Replaced>alzheimer</Replaced><Original> </Original><Replaced>disease</Replaced></SpelledQuery>\n\t<ERROR/>\n</eSpellResult>\n',
   'raloxifen breast cancr':
     '<eSpellResult>\n\t<Database>pubmed</Database>\n\t<Query>raloxifen breast cancr</Query>\n\t<CorrectedQuery>tamoxifen breast cancer</CorrectedQuery>\n\t<SpelledQuery><Original></Original><Replaced>tamoxifen</Replaced><Original> breast </Original><Replaced>cancer</Replaced></SpelledQuery>\n\t<ERROR/>\n</eSpellResult>\n',
+  'risk[tiab] AND alzhiemer':
+    '<eSpellResult>\n\t<Database>pubmed</Database>\n\t<Query>risk[tiab] AND alzhiemer</Query>\n\t<CorrectedQuery>risk tia and alzheimer</CorrectedQuery>\n\t<SpelledQuery><Original>risk[</Original><Replaced>tia</Replaced><Original>] AND </Original><Replaced>alzheimer</Replaced></SpelledQuery>\n\t<ERROR/>\n</eSpellResult>\n',
+  'smith j[au] AND diabetis':
+    '<eSpellResult>\n\t<Database>pubmed</Database>\n\t<Query>smith j[au] AND diabetis</Query>\n\t<CorrectedQuery>smith j ar and diabetes</CorrectedQuery>\n\t<SpelledQuery><Original>smith j[</Original><Replaced>ar</Replaced><Original>] AND </Original><Replaced>diabetes</Replaced></SpelledQuery>\n\t<ERROR/>\n</eSpellResult>\n',
+  'dementia[mh] AND alzhiemer':
+    '<eSpellResult>\n\t<Database>pubmed</Database>\n\t<Query>dementia[mh] AND alzhiemer</Query>\n\t<CorrectedQuery>dementia m and alzheimer</CorrectedQuery>\n\t<SpelledQuery><Original>dementia[</Original><Replaced>m</Replaced><Original>] AND </Original><Replaced>alzheimer</Replaced></SpelledQuery>\n\t<ERROR/>\n</eSpellResult>\n',
+  'alzheimer disease[MeSH Terms] AND treatmnt':
+    '<eSpellResult>\n\t<Database>pubmed</Database>\n\t<Query>alzheimer disease[MeSH Terms] AND treatmnt</Query>\n\t<CorrectedQuery>alzheimer disease mesh tems and treatment</CorrectedQuery>\n\t<SpelledQuery><Original>alzheimer disease[MeSH </Original><Replaced>tems</Replaced><Original>] AND </Original><Replaced>treatment</Replaced></SpelledQuery>\n\t<ERROR/>\n</eSpellResult>\n',
+  '"heart attack"[tiab] AND treatmnt':
+    '<eSpellResult>\n\t<Database>pubmed</Database>\n\t<Query>&quot;heart attack&quot;[tiab] AND treatmnt</Query>\n\t<CorrectedQuery>heart attack tia and treatment</CorrectedQuery>\n\t<SpelledQuery><Original>&quot;heart attack&quot;[</Original><Replaced>tia</Replaced><Original>] AND </Original><Replaced>treatment</Replaced></SpelledQuery>\n\t<ERROR/>\n</eSpellResult>\n',
+  'risk[tiab] AND smith j[au] AND alzhiemer':
+    '<eSpellResult>\n\t<Database>pubmed</Database>\n\t<Query>risk[tiab] AND smith j[au] AND alzhiemer</Query>\n\t<CorrectedQuery>risk tia and smith j au and alzheimer</CorrectedQuery>\n\t<SpelledQuery><Original>risk[</Original><Replaced>tia</Replaced><Original>] AND smith j[au] AND </Original><Replaced>alzheimer</Replaced></SpelledQuery>\n\t<ERROR/>\n</eSpellResult>\n',
+  'q fever outbreak':
+    '<eSpellResult>\n\t<Database>pubmed</Database>\n\t<Query>q fever outbreak</Query>\n\t<CorrectedQuery>c fever outbreaks</CorrectedQuery>\n\t<SpelledQuery><Original></Original><Replaced>c</Replaced><Original> fever </Original><Replaced>outbreaks</Replaced></SpelledQuery>\n\t<ERROR/>\n</eSpellResult>\n',
+  'smith q AND diabetis':
+    '<eSpellResult>\n\t<Database>pubmed</Database>\n\t<Query>smith q AND diabetis</Query>\n\t<CorrectedQuery>smith t and diabetes</CorrectedQuery>\n\t<SpelledQuery><Original>smith </Original><Replaced>t</Replaced><Original> AND </Original><Replaced>diabetes</Replaced></SpelledQuery>\n\t<ERROR/>\n</eSpellResult>\n',
+  'breast cancer n women':
+    '<eSpellResult>\n\t<Database>pubmed</Database>\n\t<Query>breast cancer n women</Query>\n\t<CorrectedQuery>breast cancer in women</CorrectedQuery>\n\t<SpelledQuery><Original>breast cancer </Original><Replaced>in</Replaced><Original> women</Original></SpelledQuery>\n\t<ERROR/>\n</eSpellResult>\n',
+  'cancr AND 2020:2024[dp]':
+    '<eSpellResult>\n\t<Database>pubmed</Database>\n\t<Query>cancr AND 2020:2024[dp]</Query>\n\t<CorrectedQuery>cancer and dp</CorrectedQuery>\n\t<SpelledQuery><Original></Original><Replaced>cancer</Replaced><Original> AND </Original><Replaced>dp</Replaced><Original>:2024[dp]</Original></SpelledQuery>\n\t<ERROR/>\n</eSpellResult>\n',
+  '2020/01/01[dp] AND cancr':
+    '<eSpellResult>\n\t<Database>pubmed</Database>\n\t<Query>2020/01/01[dp] AND cancr</Query>\n\t<CorrectedQuery>d and cancer</CorrectedQuery>\n\t<SpelledQuery><Original></Original><Replaced>d</Replaced><Original>/</Original><Replaced>and</Replaced><Original>/</Original><Replaced>cancer</Replaced><Original>[dp] AND cancr</Original></SpelledQuery>\n\t<ERROR/>\n</eSpellResult>\n',
+  'diabetis[tiab]':
+    '<eSpellResult>\n\t<Database>pubmed</Database>\n\t<Query>diabetis[tiab]</Query>\n\t<CorrectedQuery>diabetes diab</CorrectedQuery>\n\t<SpelledQuery><Original></Original><Replaced>diabetes</Replaced><Original>[</Original><Replaced>diab</Replaced><Original>]</Original></SpelledQuery>\n\t<ERROR/>\n</eSpellResult>\n',
+  'neoplasm[mh] AND humen[mh]':
+    '<eSpellResult>\n\t<Database>pubmed</Database>\n\t<Query>neoplasm[mh] AND humen[mh]</Query>\n\t<CorrectedQuery>neoplasms mh and human mh</CorrectedQuery>\n\t<SpelledQuery><Original></Original><Replaced>neoplasms</Replaced><Original>[mh] AND </Original><Replaced>human</Replaced><Original>[mh]</Original></SpelledQuery>\n\t<ERROR/>\n</eSpellResult>\n',
 };
 
 /** Wrap an `<eSpellResult>` element in the prolog and DOCTYPE NCBI sends with it. */

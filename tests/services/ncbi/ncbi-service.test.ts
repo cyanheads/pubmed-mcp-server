@@ -255,6 +255,29 @@ describe('NcbiService', () => {
         // passes the rules ships as ESpell wrote it.
         ['ALZHIEMER DISEESE', 'ALZHIEMER DISEESE', false],
         ['raloxifen breast cancr', 'tamoxifen breast cancer', true],
+        // Field tags stay as written, and the rebuild continues past them; a
+        // letter swapped for another letter is no spelling evidence. (#250)
+        ['risk[tiab] AND alzhiemer', 'risk[tiab] AND alzheimer', true],
+        ['smith j[au] AND diabetis', 'smith j[au] AND diabetes', true],
+        ['dementia[mh] AND alzhiemer', 'dementia[mh] AND alzheimer', true],
+        [
+          'alzheimer disease[MeSH Terms] AND treatmnt',
+          'alzheimer disease[MeSH Terms] AND treatment',
+          true,
+        ],
+        ['"heart attack"[tiab] AND treatmnt', '"heart attack"[tiab] AND treatment', true],
+        [
+          'risk[tiab] AND smith j[au] AND alzhiemer',
+          'risk[tiab] AND smith j[au] AND alzheimer',
+          true,
+        ],
+        ['q fever outbreak', 'q fever outbreaks', true],
+        ['smith q AND diabetis', 'smith q AND diabetes', true],
+        ['breast cancer n women', 'breast cancer in women', true],
+        ['cancr AND 2020:2024[dp]', 'cancer AND 2020:2024[dp]', true],
+        ['2020/01/01[dp] AND cancr', '2020/01/01[dp] AND cancr', false],
+        ['diabetis[tiab]', 'diabetes[tiab]', true],
+        ['neoplasm[mh] AND humen[mh]', 'neoplasms[mh] AND human[mh]', true],
       ];
 
       it.each(CAPTURED)('%j → %j', async (term, corrected, hasSuggestion) => {
@@ -340,6 +363,71 @@ describe('NcbiService', () => {
           hasSuggestion: true,
         });
       });
+
+      describe('field tags and single letters (#250)', () => {
+        it('keeps a span that takes in a tag bracket, and applies the next replacement', async () => {
+          const body = spelled(
+            'cancr[tiab] tumr',
+            '<Original></Original><Replaced>cancer</Replaced><Original>tiab] </Original><Replaced>tumor</Replaced>',
+          );
+          expect(await spell(body, 'cancr[tiab] tumr')).toEqual({
+            original: 'cancr[tiab] tumr',
+            corrected: 'cancr[tiab] tumor',
+            hasSuggestion: true,
+          });
+        });
+
+        it('keeps a tag span whatever the replacement, rather than stopping', async () => {
+          // `tuberculosis` is far more than two edits from `tiab`, which would stop
+          // the rebuild outside a tag; inside one the span is kept and the rebuild
+          // goes on to the next replacement.
+          const body = spelled(
+            'risk[tiab] AND cancr',
+            '<Original>risk[</Original><Replaced>tuberculosis</Replaced><Original>] AND </Original><Replaced>cancer</Replaced>',
+          );
+          expect(await spell(body, 'risk[tiab] AND cancr')).toEqual({
+            original: 'risk[tiab] AND cancr',
+            corrected: 'risk[tiab] AND cancer',
+            hasSuggestion: true,
+          });
+        });
+
+        it('reports no suggestion when the only replacement is inside a tag', async () => {
+          const body = spelled(
+            'dementia[tiab]',
+            '<Original>dementia[</Original><Replaced>tia</Replaced><Original>]</Original>',
+          );
+          expect(await spell(body, 'dementia[tiab]')).toEqual({
+            original: 'dementia[tiab]',
+            corrected: 'dementia[tiab]',
+            hasSuggestion: false,
+          });
+        });
+
+        it('reads an unclosed `[` as no tag', async () => {
+          const body = spelled(
+            'risk[tiab AND alzhiemer',
+            '<Original>risk[</Original><Replaced>tia</Replaced><Original> AND </Original><Replaced>alzheimer</Replaced>',
+          );
+          expect(await spell(body, 'risk[tiab AND alzhiemer')).toEqual({
+            original: 'risk[tiab AND alzhiemer',
+            corrected: 'risk[tia AND alzheimer',
+            hasSuggestion: true,
+          });
+        });
+
+        it('keeps an uppercase letter replaced by another letter', async () => {
+          const body = spelled(
+            'Q fever outbrek',
+            '<Original></Original><Replaced>c</Replaced><Original> fever </Original><Replaced>outbreak</Replaced>',
+          );
+          expect(await spell(body, 'Q fever outbrek')).toEqual({
+            original: 'Q fever outbrek',
+            corrected: 'Q fever outbreak',
+            hasSuggestion: true,
+          });
+        });
+      });
     });
 
     it('returns an all-numeric term as a string on both fields (#108)', async () => {
@@ -396,15 +484,14 @@ describe('NcbiService', () => {
       return (user + system) / 1000;
     };
 
-    /** Fastest of five measurements of five calls each — the least noisy reading of the work. */
+    /**
+     * Fastest of three single-call measurements after one warm-up call — the least noisy reading
+     * of the work that keeps the 320k step inside the suite's per-test timeout under full load.
+     */
     const fastestMs = ([query, segments]: [string, SpelledSegment[]]): number => {
       rebuildSpelledQuery(query, segments);
       return Math.min(
-        ...Array.from({ length: 5 }, () =>
-          cpuMs(() => {
-            for (let i = 0; i < 5; i++) rebuildSpelledQuery(query, segments);
-          }),
-        ),
+        ...Array.from({ length: 3 }, () => cpuMs(() => rebuildSpelledQuery(query, segments))),
       );
     };
 
@@ -444,12 +531,45 @@ describe('NcbiService', () => {
         'a span of uppercase letters and digits',
         (n) => [`${'AB1'.repeat(Math.floor(n / 3))}`, [original(''), replaced('ab')]],
       ],
+      [
+        'a field tag after every word, each rewritten by ESpell (#250)',
+        (n) => {
+          const words = Math.floor(n / 12);
+          return [
+            'cancr[tiab] '.repeat(words),
+            Array.from({ length: words }, (_, i) => [
+              original(i === 0 ? '' : ' '),
+              replaced('cancer'),
+              original('['),
+              replaced('tia'),
+              original(']'),
+            ]).flat(),
+          ];
+        },
+      ],
+      [
+        'one span across many field tags (#250)',
+        (n) => [`x${'[a]'.repeat(Math.floor(n / 3))}`, [original(''), replaced('y')]],
+      ],
+      [
+        'brackets with no closing partner (#250)',
+        (n) => [`${'['.repeat(n - 1)}a`, [original('['.repeat(n - 1)), replaced('b')]],
+      ],
+      [
+        'one long line ending in a break',
+        (n) => [`${'§1 x'.repeat(n / 4)}\ny`, [original(''), replaced('q')]],
+      ],
+      ['line breaks throughout', (n) => ['  \r\n'.repeat(n / 4), [original(''), replaced('q')]]],
     ])('scales linearly from 5k to 320k characters: %s', (_label, build) => {
-      const t5k = fastestMs(build(5_000));
-      const t320k = fastestMs(build(320_000));
+      // Doubling from 5k, each size checked against the absolute bound before the next runs.
+      const times: number[] = [];
+      for (let n = 5_000; n <= 320_000; n *= 2) {
+        const ms = fastestMs(build(n));
+        expect(ms).toBeLessThan(400);
+        times.push(ms);
+      }
       // Linear work grows 64× across the span; quadratic grows 4096×.
-      expect(t320k / Math.max(t5k, 0.05)).toBeLessThan(256);
-      expect(t320k).toBeLessThan(400);
+      expect((times.at(-1) ?? 0) / Math.max(times[0] ?? 0, 0.05)).toBeLessThan(256);
     });
   });
 

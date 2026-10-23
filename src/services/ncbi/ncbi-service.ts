@@ -190,14 +190,35 @@ function withinEdits(a: string, b: string, k: number): boolean {
  * it, keep the span as written, or stop replacing. A span with no ASCII letter
  * means ESpell dropped a token (`1918`, `19`, `β`), and every later replacement
  * lands one span early — as it does past a split acronym (`PCR` → `pc r`), which
- * the edit-distance bound catches on the next span.
+ * the edit-distance bound catches on the next span. A single letter replaced by
+ * another (`q fever` → `c fever`, the initial in `smith q` → `smith t`) carries
+ * no spelling evidence, and any one-letter replacement is within two edits of a
+ * one-letter span, so it is kept; one grown into a word (`n` → `in`) still
+ * applies. (#250)
  */
 function judgeReplacement(span: string, replacement: string): 'apply' | 'keep' | 'stop' {
   if (!/[A-Za-z]/.test(span) || replacement === '') return 'stop';
   if (/[\d\u0080-￿]/.test(span)) return 'keep';
   if (span.toLowerCase() === replacement.toLowerCase()) return 'keep';
   if (!/[a-z]/.test(span) && (span.match(/[A-Z]/g)?.length ?? 0) >= 2) return 'keep';
+  if (span.length === 1 && replacement.length === 1) return 'keep';
   return withinEdits(span.toLowerCase(), replacement.toLowerCase(), 2) ? 'apply' : 'stop';
+}
+
+/**
+ * Every field tag in `query` — a `[`, the next `]`, and the text between — as
+ * `[start, end)` offsets in order. An unclosed `[` opens no tag. One forward
+ * scan: each `indexOf` starts past the last bracket found.
+ */
+function fieldTagRanges(query: string): [start: number, end: number][] {
+  const ranges: [number, number][] = [];
+  for (let open = query.indexOf('['); open >= 0; ) {
+    const close = query.indexOf(']', open + 1);
+    if (close < 0) break;
+    ranges.push([open, close + 1]);
+    open = query.indexOf('[', close + 1);
+  }
+  return ranges;
 }
 
 /**
@@ -205,11 +226,14 @@ function judgeReplacement(span: string, replacement: string): 'apply' | 'keep' |
  * lowercases the query and drops digits, field tags, and operator casing, so it
  * cannot be re-run as written. `<SpelledQuery>` interleaves the caller's text
  * verbatim (`Original`) with replacements (`Replaced`); the caller's text between
- * two `Original`s is the span the `Replaced` between them stands for. Spans that
- * hold a digit or non-ASCII character, are all uppercase, or differ only in case
- * keep their text; the first span that can't be placed or judged ends the
- * rebuild, and the caller's text runs unchanged from there. Linear in the query
- * and the segments. (#241)
+ * two `Original`s is the span the `Replaced` between them stands for. A span
+ * that overlaps a field tag keeps its text and the rebuild continues past it:
+ * ESpell rewrites tag text it doesn't recognize (`risk[tiab] AND alzhiemer` →
+ * `risk[tia] AND alzheimer`), and PubMed then ignores the tag (#250). Spans
+ * that hold a digit or non-ASCII character, are all uppercase, differ only in
+ * case, or are one letter replaced by one letter also keep their text; the first
+ * span that can't be placed or judged ends the rebuild, and the caller's text
+ * runs unchanged from there. Linear in the query and the segments. (#241)
  *
  * @internal exported for direct unit tests
  */
@@ -223,11 +247,24 @@ export function rebuildSpelledQuery(
   let pending: string | undefined;
   const finish = () => ({ corrected: corrected + query.slice(cursor), hasSuggestion });
 
+  const tags = fieldTagRanges(query);
+  let tagIndex = 0;
+  /**
+   * Whether `query[start, end)` overlaps a field tag. Spans arrive in query
+   * order, so a tag that ends at or before `start` can't touch a later span and
+   * the index only moves forward.
+   */
+  const overlapsTag = (start: number, end: number): boolean => {
+    let tag = tags[tagIndex];
+    while (tag && tag[1] <= start) tag = tags[++tagIndex];
+    return tag !== undefined && tag[0] < end;
+  };
+
   /** Settle the pending replacement against `query[cursor, end)`; false stops the rebuild. */
   const settle = (end: number): boolean => {
     if (pending === undefined) return true;
     const span = query.slice(cursor, end);
-    const verdict = judgeReplacement(span, pending);
+    const verdict = overlapsTag(cursor, end) ? 'keep' : judgeReplacement(span, pending);
     if (verdict === 'stop') return false;
     corrected += verdict === 'apply' ? pending : span;
     hasSuggestion ||= verdict === 'apply';
