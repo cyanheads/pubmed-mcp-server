@@ -1,6 +1,6 @@
 # pubmed-mcp-server - Directory Structure
 
-Generated on: 2026-10-12 17:55:48
+Generated on: 2026-10-25 08:54:44
 
 ```text
 pubmed-mcp-server/
@@ -27,6 +27,7 @@ pubmed-mcp-server/
 │   ├── 2.0.x/
 │   ├── 2.1.x/
 │   ├── 2.10.x/
+│   ├── 2.11.x/
 │   ├── 2.2.x/
 │   ├── 2.3.x/
 │   ├── 2.4.x/
@@ -175,6 +176,7 @@ pubmed-mcp-server/
 │   │           ├── _visible-text.ts
 │   │           ├── convert-ids.tool.ts
 │   │           ├── fetch-articles.tool.ts
+│   │           ├── fetch-citation-metrics.tool.ts
 │   │           ├── fetch-fulltext.tool.ts
 │   │           ├── find-related.tool.ts
 │   │           ├── format-citations.tool.ts
@@ -190,6 +192,10 @@ pubmed-mcp-server/
 │   │   │   ├── europe-pmc-service.ts
 │   │   │   ├── request-queue.ts
 │   │   │   └── types.ts
+│   │   ├── icite/
+│   │   │   ├── api-client.ts
+│   │   │   ├── icite-service.ts
+│   │   │   └── types.ts
 │   │   ├── ncbi/
 │   │   │   ├── formatting/
 │   │   │   │   └── citation-formatter.ts
@@ -202,6 +208,7 @@ pubmed-mcp-server/
 │   │   │   │   ├── text-helpers.ts
 │   │   │   │   └── xml-helpers.ts
 │   │   │   ├── api-client.ts
+│   │   │   ├── field-tags.ts
 │   │   │   ├── ncbi-service.ts
 │   │   │   ├── request-queue.ts
 │   │   │   ├── response-handler.ts
@@ -214,7 +221,8 @@ pubmed-mcp-server/
 │   │   │   ├── types.ts
 │   │   │   └── unpaywall-service.ts
 │   │   ├── error-contracts.ts
-│   │   └── fetch-redaction.ts
+│   │   ├── fetch-redaction.ts
+│   │   └── markdown-escape.ts
 │   └── index.ts
 ├── tests/
 │   ├── config/
@@ -336,6 +344,7 @@ pubmed-mcp-server/
 │   │           ├── europepmc-search-failures.test.ts
 │   │           ├── fetch-articles.record-fields.test.ts
 │   │           ├── fetch-articles.tool.test.ts
+│   │           ├── fetch-citation-metrics.tool.test.ts
 │   │           ├── fetch-fulltext-jats-sections.test.ts
 │   │           ├── fetch-fulltext-jats-text.test.ts
 │   │           ├── fetch-fulltext-routing.test.ts
@@ -360,7 +369,13 @@ pubmed-mcp-server/
 │   ├── services/
 │   │   ├── europe-pmc/
 │   │   │   ├── europe-pmc-abstract.test.ts
-│   │   │   └── europe-pmc-service.test.ts
+│   │   │   ├── europe-pmc-service.test.ts
+│   │   │   └── types.test.ts
+│   │   ├── icite/
+│   │   │   ├── fixtures/
+│   │   │   │   └── pubs-sample.json
+│   │   │   ├── _icite-fixtures.ts
+│   │   │   └── icite-service.test.ts
 │   │   ├── ncbi/
 │   │   │   ├── formatting/
 │   │   │   │   ├── citation-formatter.edge.test.ts
@@ -382,6 +397,7 @@ pubmed-mcp-server/
 │   │   │   ├── api-client.test.ts
 │   │   │   ├── ecitmatch-truncation.test.ts
 │   │   │   ├── efetch-timeout-retry.test.ts
+│   │   │   ├── field-tags.test.ts
 │   │   │   ├── idconvert-http-400.test.ts
 │   │   │   ├── ncbi-service.test.ts
 │   │   │   ├── rate-limit-cooldown.test.ts
@@ -394,6 +410,7 @@ pubmed-mcp-server/
 │   │   ├── unpaywall/
 │   │   │   └── unpaywall-service.test.ts
 │   │   ├── error-contracts.test.ts
+│   │   ├── markdown-escape.test.ts
 │   │   └── retry-gate.test.ts
 │   ├── tools/
 │   ├── _helpers.ts

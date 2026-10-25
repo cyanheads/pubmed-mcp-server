@@ -2,6 +2,10 @@
 
 All notable changes to this project. Each entry links to its full per-version file in [changelog/](changelog/).
 
+## [2.11.0](changelog/2.11.x/2.11.0.md) — 2026-10-25
+
+New pubmed_fetch_citation_metrics tool for NIH iCite metrics, sectionCap disclosure for maxSections, license metadata on PMC and Europe PMC results, Europe PMC full text gated on open access, and fixes to query encoding, Markdown escaping, and entity decoding.
+
 ## [2.10.23](changelog/2.10.x/2.10.23.md) — 2026-10-23
 
 Markdown-safe content[] across the tools, dataBanks on pubmed_fetch_articles, fairer full-text outline budgets, and citation, spell-check, consortium-author, and Europe PMC fixes.
