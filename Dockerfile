@@ -121,7 +121,7 @@ ENV NODE_ENV=production
 # OCI image metadata (https://github.com/opencontainers/image-spec/blob/main/annotations.md)
 ARG APP_VERSION
 LABEL org.opencontainers.image.title="@cyanheads/pubmed-mcp-server"
-LABEL org.opencontainers.image.description="MCP server for PubMed/NCBI E-utilities. Search articles, fetch metadata, generate citations, explore MeSH terms, and discover related research."
+LABEL org.opencontainers.image.description="MCP server for PubMed/NCBI E-utilities. Search articles, fetch metadata, generate citations, fetch citation metrics, explore MeSH terms, and discover related research."
 LABEL org.opencontainers.image.licenses="Apache-2.0"
 LABEL org.opencontainers.image.version="${APP_VERSION}"
 LABEL org.opencontainers.image.source="https://github.com/cyanheads/pubmed-mcp-server"

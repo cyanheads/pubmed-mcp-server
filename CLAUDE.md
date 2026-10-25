@@ -260,8 +260,9 @@ src/
       types.ts                          # NCBI/PubMed domain types
       parsing/                          # XML parsers (article, esummary, PMC)
       formatting/                       # Citation formatter (APA, MLA, BibTeX, RIS, Vancouver)
+    icite/                              # NIH iCite service (citation metrics for pubmed_fetch_citation_metrics)
   mcp-server/
-    tools/definitions/                  # 11 tool definitions (*.tool.ts)
+    tools/definitions/                  # 12 tool definitions (*.tool.ts)
     resources/definitions/              # database-info.resource.ts
     prompts/definitions/                # research-plan.prompt.ts
 ```

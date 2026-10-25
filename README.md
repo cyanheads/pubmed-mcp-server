@@ -1,7 +1,7 @@
 <div align="center">
   <h1>@cyanheads/pubmed-mcp-server</h1>
   <p><b>Search PubMed/Europe PMC, fetch articles and full text (PMC/EPMC/Unpaywall), citations, MeSH terms via MCP. STDIO or Streamable HTTP.</b>
-  <div>11 Tools • 1 Resource • 1 Prompt</div>
+  <div>12 Tools • 1 Resource • 1 Prompt</div>
   </p>
 </div>
 
@@ -40,6 +40,7 @@ Biomedical literature from PubMed, PubMed Central, and Europe PMC. Search it, fe
 | `pubmed_fetch_fulltext` | Fetch full text by PMID, PMCID, or DOI, falling back from PMC to Europe PMC to Unpaywall |
 | `pubmed_europepmc_search` | Search Europe PMC for preprints, patents, Agricola, and open-access records PubMed doesn't carry |
 | `pubmed_europepmc_fetch` | Fetch complete Europe PMC records, including the untruncated abstract, as `records: [{ source, epmcId }]` |
+| `pubmed_fetch_citation_metrics` | Fetch NIH iCite citation metrics by PMID: Relative Citation Ratio, NIH percentile, citation counts and rates |
 | `pubmed_format_citations` | Format citations in APA 7th, MLA 9th, BibTeX, RIS, or Vancouver (ICMJE/NLM), with linked retraction and correction notices |
 | `pubmed_find_related` | Find similar articles, citing articles, or references for a PMID |
 | `pubmed_spell_check` | Correct a misspelled PubMed query via NCBI ESpell |
@@ -84,7 +85,8 @@ Biomedical literature from PubMed, PubMed Central, and Europe PMC. Search it, fe
 
 - `pmcids`, `pmids`, and `dois` in any mix, up to 50 distinct identifiers per call: the first 10 are fetched and the rest returned in `overLimit` for a follow-up call. Each is tried against PMC, then Europe PMC, then Unpaywall (needs `UNPAYWALL_EMAIL`); an article several of them name is fetched and returned once, and `viaSource` names the tier that answered
 - `source: "pmc"` returns sections (the body, then back matter such as acknowledgments, declarations, and appendices), tables, and figures; `source: "unpaywall"` returns a best-effort HTML or PDF text body
-- Misses carry a typed `reason` and `triedTiers`; `sections`, `maxCharacters`, `overflowMode`, and `maxResponseCharacters` bound the response, and `truncation` reports what was cut
+- Europe PMC full text is fetched for records Europe PMC marks open access, preprints included; articles carry the `licenses` their PMC JATS states
+- Misses carry a typed `reason` and `triedTiers`; `sections`, `maxSections`, `maxCharacters`, `overflowMode`, and `maxResponseCharacters` bound the response, `truncation` reports what was cut, and `sectionCap` names the sections `maxSections` cut
 
 ---
 
@@ -93,14 +95,24 @@ Biomedical literature from PubMed, PubMed Central, and Europe PMC. Search it, fe
 - Adds preprints (`PPR`), patents (`PAT`), and Agricola (`AGR`) to `MED` and `PMC`; defaults to `MED`, `PMC`, `PPR`
 - Cursor pagination via `cursorMark` / `nextCursorMark`, up to 100 per page; abstracts arrive as 400-character snippets
 - Optional `sort` of comma-separated `<field> asc|desc` keys; `relevance` is the default order, and a sort Europe PMC cannot use fails as `europepmc_invalid_input`
+- Hits carry `license` and `hasFullTextXml`
 - Not registered when `EUROPEPMC_ENABLED=false`
 
 ---
 
 ### `pubmed_europepmc_fetch` <sub>tool</sub>
 
-- Up to 25 records per call as `records: [{ source, epmcId }]`, each pair copied from a search hit, with the full abstract; unresolved ids land in `notFound`; opt-in `maxResponseCharacters` defers overflow to `deferred.records`
+- Up to 25 records per call as `records: [{ source, epmcId }]`, each pair copied from a search hit, with the full abstract, `license`, and `hasFullTextXml`; unresolved ids land in `notFound`; opt-in `maxResponseCharacters` defers overflow to `deferred.records`
 - Not registered when `EUROPEPMC_ENABLED=false`
+
+---
+
+### `pubmed_fetch_citation_metrics` <sub>tool</sub>
+
+- Up to 1,000 PMIDs per call; the first 200 distinct are fetched and the rest returned in `overLimit`, PMIDs NIH iCite has no record for in `unavailablePmids`
+- Relative Citation Ratio (with a provisional flag), NIH percentile, citation count and rates, Approximate Potential to Translate, MeSH category shares, and clinical citations
+- iCite does not flag retractions; check `pubmed_fetch_articles` for notices
+- Source: [NIH iCite](https://icite.od.nih.gov/)
 
 ---
 
@@ -123,6 +135,7 @@ Biomedical literature from PubMed, PubMed Central, and Europe PMC. Search it, fe
 ### `pubmed_spell_check` <sub>tool</sub>
 
 - Returns `original`, `corrected`, and `hasSuggestion`; corrections land in place, so field tags, operators, spacing, and gene symbols stay as written, and a single letter such as an author initial is never swapped for another
+- Values of indexed field tags (`aged[mh]`, `zhang y[au]`, `free full text[sb]`) are kept as written; free-text fields (`[tiab]`, `[ti]`, `[tw]`) are still corrected
 - Run it after a zero-hit or thin search, then retry `pubmed_search_articles` with `corrected`
 
 ---
@@ -174,7 +187,7 @@ PubMed-specific:
 
 Agent-friendly output:
 
-- Provenance on every response: source labels, license fields, best-effort warnings on Unpaywall results, and effective-query echo on searches, so agents can judge what to trust
+- Provenance in responses: source labels, license fields on full-text and Europe PMC results, best-effort warnings on Unpaywall results, and effective-query echo on searches, so agents can judge what to trust
 - Graceful partial failure: batch tools return per-item success/error rows instead of failing the request, with structured status codes and actionable next-step text
 - Discriminated output contracts: `source: "pmc" | "unpaywall"`, typed `unavailable` reasons, `viaSource` and `triedTiers` fields, so callers branch on data, not string parsing
 
@@ -343,7 +356,7 @@ See [`.env.example`](./.env.example) for every server setting and the common fra
 
 | Directory | Purpose |
 |:---|:---|
-| `src/mcp-server/tools` | Tool definitions (`*.tool.ts`). Eleven tools across PubMed, PMC, and Europe PMC. |
+| `src/mcp-server/tools` | Tool definitions (`*.tool.ts`). Twelve tools across PubMed, PMC, Europe PMC, and NIH iCite. |
 | `src/mcp-server/resources` | Resource definitions. Database info resource. |
 | `src/mcp-server/prompts` | Prompt definitions. Research plan prompt. |
 | `src/services/ncbi` | NCBI E-utilities service layer — API client, queue, parser, formatter. |

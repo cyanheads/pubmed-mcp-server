@@ -47,8 +47,8 @@ an existing section instead if preferred.
 E-utilities API, complementing `paperscraperMCP` (which scrapes publications
 from multiple sources) with a native, schema-validated E-utilities integration:
 
-- **11 tools** covering ESearch, EFetch, ESummary, ELink, ESpell, ECitMatch,
-  the PMC ID Converter, and Europe PMC search and record fetch, plus a
+- **12 tools** covering ESearch, EFetch, ESummary, ELink, ESpell, ECitMatch,
+  the PMC ID Converter, Europe PMC search and record fetch, and NIH iCite citation metrics, plus a
   resource over EInfo
 - **Full-text retrieval** from PubMed Central with section filtering
 - **MeSH vocabulary lookup** (tree numbers, scope notes, entry terms) —
@@ -101,7 +101,7 @@ Externally-maintained MCP servers that align with the MCPmed mission but are hos
 
 | Repository | Description | Language | License |
 |------------|-------------|----------|---------|
-| **[cyanheads/pubmed-mcp-server](https://github.com/cyanheads/pubmed-mcp-server)** | MCP server for the NCBI E-utilities API. Eleven tools covering PubMed search, article fetch, full text (PMC, with Europe PMC and Unpaywall fallbacks), related-article discovery, spell check, MeSH vocabulary lookup, citation formatting (APA/MLA/BibTeX/RIS/Vancouver), ECitMatch, ID conversion (DOI/PMID/PMCID), and Europe PMC search and record fetch. Tool definitions carry ontology-backed concept tags (Schema.org, EDAM) via `_meta`. stdio and Streamable HTTP transports. Published on npm and GHCR. | TypeScript | Apache 2.0 |
+| **[cyanheads/pubmed-mcp-server](https://github.com/cyanheads/pubmed-mcp-server)** | MCP server for the NCBI E-utilities API. Twelve tools covering PubMed search, article fetch, full text (PMC, with Europe PMC and Unpaywall fallbacks), related-article discovery, spell check, MeSH vocabulary lookup, citation formatting (APA/MLA/BibTeX/RIS/Vancouver), ECitMatch, ID conversion (DOI/PMID/PMCID), Europe PMC search and record fetch, and NIH iCite citation metrics. Tool definitions carry ontology-backed concept tags (Schema.org, EDAM) via `_meta`. stdio and Streamable HTTP transports. Published on npm and GHCR. | TypeScript | Apache 2.0 |
 ```
 
 ---
