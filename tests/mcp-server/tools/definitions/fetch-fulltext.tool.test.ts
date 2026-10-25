@@ -3,6 +3,7 @@
  * @module tests/mcp-server/tools/definitions/fetch-fulltext.tool.test
  */
 
+import { readFileSync } from 'node:fs';
 import { type ContentBlock, z } from '@cyanheads/mcp-ts-core';
 import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
 import { createMockContext, getEnrichment, runToolContract } from '@cyanheads/mcp-ts-core/testing';
@@ -10,7 +11,13 @@ import { XMLParser } from 'fast-xml-parser';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { ORDERED_XML_PARSER_OPTIONS } from '@/services/ncbi/parsing/ordered-xml-parser-options.js';
 
-import { bunMarkdown, renderedHtml, renderedText, textBlocks } from '../../../_helpers.js';
+import {
+  bunMarkdown,
+  readCommonMark,
+  renderedHtml,
+  renderedText,
+  textBlocks,
+} from '../../../_helpers.js';
 
 /** Reader-side view of a body section at any nesting level. */
 interface DeepSection {
@@ -61,6 +68,37 @@ const { fetchFulltextTool, buildFulltextDescription } = await import(
 const { parsePmcArticle: realParsePmcArticle } = await vi.importActual<
   typeof import('@/services/ncbi/parsing/pmc-article-parser.js')
 >('@/services/ncbi/parsing/pmc-article-parser.js');
+
+/** The `<article>` node the ordered parser makes of `xml`, wrapped in a `<pmc-articleset>` or not. */
+function pmcArticleNode(xml: string): Record<string, unknown> {
+  const nodes = new XMLParser(ORDERED_XML_PARSER_OPTIONS).parse(xml) as Record<string, unknown>[];
+  const set = nodes.find((n) => 'pmc-articleset' in n)?.['pmc-articleset'] as
+    | Record<string, unknown>[]
+    | undefined;
+  const node = (set ?? nodes).find((n) => 'article' in n);
+  if (!node) throw new Error('fixture has no <article>');
+  return node;
+}
+
+/**
+ * PMC10455816 as the corpus captured it: six body sections, then eight
+ * back-matter sections, five tables and six assets. (#268, #271)
+ */
+const PMC10455816_NODE = pmcArticleNode(
+  readFileSync(
+    new URL('../../../corpus/fixtures/pmc/pmc10455816/source.xml', import.meta.url),
+    'utf8',
+  ),
+);
+
+/**
+ * What a Europe PMC search hit carries when Europe PMC serves `fullTextXML`
+ * for it: open access, with the id the XML is requested under. (#267)
+ */
+function openAccess(fullTextId: string) {
+  return { isOpenAccess: 'Y', fullTextIdList: { fullTextId: [fullTextId] } };
+}
+const OA_PMC42 = openAccess('PMC42');
 
 /**
  * Configure `mockEFetch` to dispatch by `db` — mirrors production:
@@ -140,7 +178,7 @@ describe('fetchFulltextTool', () => {
       expect(result.structuredContent).toMatchObject({
         error: { code: JsonRpcErrorCode.InvalidParams, data: { reason: 'invalid_arguments' } },
       });
-      expect(textBlocks(result.content as ContentBlock[])[0]?.text).toContain(
+      expect(readCommonMark(textBlocks(result.content as ContentBlock[])[0]?.text ?? '')).toContain(
         'Provide at least one of `pmcids`, `pmids`, or `dois`.',
       );
       expect(mockIdConvert).not.toHaveBeenCalled();
@@ -623,12 +661,22 @@ describe('fetchFulltextTool', () => {
 
     it('recovers a PMID via Europe PMC fullTextXML when PMC misses it', async () => {
       // PMID had no PMC counterpart per the ID Converter, but the same article
-      // surfaces in EPMC under SRC:MED with a `pmcid` — EPMC's fullTextXML is
-      // PMC-keyed, so the chain looks up the JATS via that PMC ID.
+      // surfaces in EPMC under SRC:MED as an open-access record whose
+      // `fullTextIdList` names its PMC ID, so the chain requests the JATS under it.
       withEpmcMock();
       mockIdConvert.mockResolvedValue([{ 'requested-id': '42', pmid: '42' }]);
       mockEpmcSearch.mockResolvedValue({
-        hits: [{ id: '42', source: 'MED', pmid: '42', pmcid: 'PMC42', doi: '10.1/x' }],
+        hits: [
+          {
+            id: '42',
+            source: 'MED',
+            pmid: '42',
+            pmcid: 'PMC42',
+            doi: '10.1/x',
+            isOpenAccess: 'Y',
+            fullTextIdList: { fullTextId: ['PMC42'] },
+          },
+        ],
         hitCount: 1,
         cursorMark: '*',
       });
@@ -664,7 +712,7 @@ describe('fetchFulltextTool', () => {
       expect(result.unavailable).toBeUndefined();
     });
 
-    it('skips fullTextXML for preprint hits with no PMC counterpart', async () => {
+    it('skips fullTextXML for a preprint hit Europe PMC does not mark open access', async () => {
       withEpmcMock();
       mockGetUnpaywallService.mockReturnValue({
         resolve: mockUnpaywallResolve,
@@ -673,8 +721,20 @@ describe('fetchFulltextTool', () => {
       mockIdConvert.mockResolvedValue([
         { 'requested-id': '10.21203/x', errmsg: 'Identifier not found in PMC' },
       ]);
+      // Europe PMC lists a full-text id on some records outside its open-access
+      // subset, and fullTextXML answers those with HTTP 500: the id alone is not
+      // enough to request it.
       mockEpmcSearch.mockResolvedValue({
-        hits: [{ id: 'PPR42', source: 'PPR', doi: '10.21203/x' }],
+        hits: [
+          {
+            id: 'PPR42',
+            source: 'PPR',
+            doi: '10.21203/x',
+            isOpenAccess: 'N',
+            inEPMC: 'Y',
+            fullTextIdList: { fullTextId: ['PPR42'] },
+          },
+        ],
         hitCount: 1,
         cursorMark: '*',
       });
@@ -684,7 +744,6 @@ describe('fetchFulltextTool', () => {
       const input = fetchFulltextTool.input.parse({ dois: ['10.21203/x'] });
       const result = await fetchFulltextTool.handler(input, ctx);
 
-      // No PMC ID on the PPR hit → fullTextXML is never called.
       expect(mockEpmcFullTextXml).not.toHaveBeenCalled();
       expect(result.totalReturned).toBe(0);
       expect(result.unavailable).toEqual([
@@ -697,7 +756,8 @@ describe('fetchFulltextTool', () => {
             {
               tier: 'europepmc',
               outcome: 'no-fulltext',
-              detail: 'EPMC source PPR has no PMC counterpart',
+              detail:
+                'EPMC does not mark this record open access; fullTextXML covers its open-access subset only',
             },
             { tier: 'unpaywall', outcome: 'no-oa', detail: 'no oa' },
           ],
@@ -705,10 +765,157 @@ describe('fetchFulltextTool', () => {
       ]);
     });
 
+    it('requests an open-access preprint under its full-text id and returns it with no pmcId (#267)', async () => {
+      withEpmcMock();
+      mockIdConvert.mockResolvedValue([
+        { 'requested-id': '10.21203/rs.3.rs-11130366/v1', errmsg: 'Identifier not found in PMC' },
+      ]);
+      // PPR1325930 as Europe PMC's `core` search returns it: open access, not
+      // in PMC, no PMCID, keyed in `fullTextIdList` by its own accession.
+      mockEpmcSearch.mockResolvedValue({
+        hits: [
+          {
+            id: 'PPR1325930',
+            source: 'PPR',
+            doi: '10.21203/rs.3.rs-11130366/v1',
+            isOpenAccess: 'Y',
+            inPMC: 'N',
+            inEPMC: 'Y',
+            fullTextIdList: { fullTextId: ['PPR1325930'] },
+          },
+        ],
+        hitCount: 1,
+        cursorMark: '*',
+      });
+      mockEpmcFullTextXml.mockResolvedValue({
+        kind: 'found',
+        xml: '<article/>',
+        epmcId: 'PPR1325930',
+        source: 'PPR',
+      });
+      mockEpmcParseFullTextXml.mockReturnValue({ article: [{ body: [] }] });
+      // The parser reads no PMCID from a preprint's JATS and returns empty strings.
+      mockParsePmcArticle.mockReturnValue({
+        pmcId: '',
+        pmcUrl: 'https://www.ncbi.nlm.nih.gov/pmc/articles//',
+        title: 'A preprint Europe PMC serves',
+        sections: [{ title: 'Introduction', text: 'Body.' }],
+      });
+
+      const result = await runToolContract(fetchFulltextTool, {
+        dois: ['10.21203/rs.3.rs-11130366/v1'],
+      });
+
+      expect(mockEpmcFullTextXml).toHaveBeenCalledWith(
+        'PPR1325930',
+        'PPR',
+        expect.any(AbortSignal),
+      );
+      const parsed = fetchFulltextTool.output.parse(result.structuredContent);
+      expect(parsed.totalReturned).toBe(1);
+      expect(parsed.unavailable).toBeUndefined();
+      const article = parsed.articles[0];
+      expect(article).toMatchObject({
+        source: 'pmc',
+        viaSource: 'europepmc',
+        epmcId: 'PPR1325930',
+        epmcSource: 'PPR',
+        doi: '10.21203/rs.3.rs-11130366/v1',
+      });
+      expect(article && 'pmcId' in article).toBe(false);
+      expect(article && 'pmcUrl' in article).toBe(false);
+      const text = textBlocks(result.content)
+        .map((b) => b.text)
+        .join('\n');
+      // The whole identifier block: no PMCID or PMC link line between its lines.
+      expect(readCommonMark(text).split('\n\n')).toContain(
+        [
+          '⟨strong⟩Source:⟨/strong⟩ Europe PMC (structured JATS, source: PPR)',
+          '⟨strong⟩EPMC ID:⟨/strong⟩ PPR1325930 (PPR)',
+          '⟨strong⟩DOI:⟨/strong⟩ 10.21203/rs.3.rs-11130366/v1',
+        ].join('\n'),
+      );
+    });
+
+    it('makes no fullTextXML request for a PMC-backed hit Europe PMC does not mark open access (#267)', async () => {
+      withEpmcMock();
+      mockIdConvert.mockResolvedValue([{ 'requested-id': '42684012', pmid: '42684012' }]);
+      mockEpmcSearch.mockResolvedValue({
+        hits: [
+          {
+            id: '42684012',
+            source: 'MED',
+            pmid: '42684012',
+            pmcid: 'PMC13536919',
+            doi: '10.1016/x',
+            isOpenAccess: 'N',
+            inPMC: 'Y',
+            inEPMC: 'Y',
+            fullTextIdList: { fullTextId: ['PMC13536919'] },
+          },
+        ],
+        hitCount: 1,
+        cursorMark: '*',
+      });
+
+      const ctx = createMockContext({ errors: fetchFulltextTool.errors });
+      const input = fetchFulltextTool.input.parse({ pmids: ['42684012'] });
+      const result = await fetchFulltextTool.handler(input, ctx);
+
+      expect(mockEpmcFullTextXml).not.toHaveBeenCalled();
+      expect(result.unavailable).toEqual([
+        {
+          id: '42684012',
+          idType: 'pmid',
+          reason: 'no-epmc-fulltext',
+          triedTiers: [
+            { tier: 'pmc', outcome: 'not-attempted', detail: 'PMID has no PMC counterpart' },
+            {
+              tier: 'europepmc',
+              outcome: 'no-fulltext',
+              detail:
+                'EPMC does not mark this record open access; fullTextXML covers its open-access subset only',
+            },
+            { tier: 'unpaywall', outcome: 'not-attempted', detail: 'UNPAYWALL_EMAIL is not set' },
+          ],
+          unqueriedTiers: ['unpaywall'],
+        },
+      ]);
+    });
+
+    it('makes no fullTextXML request for an open-access hit that lists no full-text id', async () => {
+      withEpmcMock();
+      mockIdConvert.mockResolvedValue([{ 'requested-id': '42', pmid: '42' }]);
+      mockEpmcSearch.mockResolvedValue({
+        hits: [{ id: '42', source: 'MED', pmid: '42', pmcid: 'PMC42', isOpenAccess: 'Y' }],
+        hitCount: 1,
+        cursorMark: '*',
+      });
+
+      const ctx = createMockContext({ errors: fetchFulltextTool.errors });
+      const input = fetchFulltextTool.input.parse({ pmids: ['42'] });
+      const result = await fetchFulltextTool.handler(input, ctx);
+
+      expect(mockEpmcFullTextXml).not.toHaveBeenCalled();
+      expect(result.unavailable?.[0]?.triedTiers).toContainEqual({
+        tier: 'europepmc',
+        outcome: 'no-fulltext',
+        detail: 'EPMC lists no full-text id for this open-access record',
+      });
+    });
+
     it('removes EPMC-recovered PMCIDs from the unavailable list', async () => {
       withEpmcMock();
       mockEpmcSearch.mockResolvedValue({
-        hits: [{ id: 'PMC9999', source: 'PMC', pmcid: 'PMC9999', doi: '10.1/x' }],
+        hits: [
+          {
+            id: 'PMC9999',
+            source: 'PMC',
+            pmcid: 'PMC9999',
+            doi: '10.1/x',
+            ...openAccess('PMC9999'),
+          },
+        ],
         hitCount: 1,
         cursorMark: '*',
       });
@@ -821,7 +1028,7 @@ describe('fetchFulltextTool', () => {
       // PMC EFetch returns no articles so the converter-resolved PMCID misses.
       mockEFetch.mockResolvedValue([{ 'pmc-articleset': [] }]);
       mockEpmcSearch.mockResolvedValue({
-        hits: [{ id: '42', source: 'MED', pmid: '42', pmcid: 'PMC42', doi: '10.1/x' }],
+        hits: [{ id: '42', source: 'MED', pmid: '42', pmcid: 'PMC42', doi: '10.1/x', ...OA_PMC42 }],
         hitCount: 1,
         cursorMark: '*',
       });
@@ -911,7 +1118,16 @@ describe('fetchFulltextTool', () => {
       ]);
       mockEFetchBy({ pmc: [{ 'pmc-articleset': [] }] });
       mockEpmcSearch.mockResolvedValue({
-        hits: [{ id: '40058719', source: 'MED', pmid: '40058719', pmcid: 'PMC123', doi: '10.1/x' }],
+        hits: [
+          {
+            id: '40058719',
+            source: 'MED',
+            pmid: '40058719',
+            pmcid: 'PMC123',
+            doi: '10.1/x',
+            ...openAccess('PMC123'),
+          },
+        ],
         hitCount: 1,
         cursorMark: '*',
       });
@@ -1098,7 +1314,16 @@ describe('fetchFulltextTool', () => {
       ]);
       mockEFetchBy({ pmc: [{ 'pmc-articleset': [] }] });
       mockEpmcSearch.mockResolvedValue({
-        hits: [{ id: '40058719', source: 'MED', pmid: '40058719', pmcid: 'PMC123', doi: '10.1/x' }],
+        hits: [
+          {
+            id: '40058719',
+            source: 'MED',
+            pmid: '40058719',
+            pmcid: 'PMC123',
+            doi: '10.1/x',
+            ...openAccess('PMC123'),
+          },
+        ],
         hitCount: 1,
         cursorMark: '*',
       });
@@ -1920,7 +2145,8 @@ describe('fetchFulltextTool', () => {
         expect(text).toContain(
           'pmc:service-error (Fetch failed for \\<upstream> Status: 400 \\*retry\\* later)',
         );
-        expect(text).toContain('- [doi] 10.1000/a_b_\\*c\\* — not-found');
+        // The id shares its entry's paragraph, so its non-intraword `_` is escaped too. (#261)
+        expect(text).toContain('- [doi] 10.1000/a_b\\_\\*c\\* — not-found');
         expect(text).toContain(
           'Not queried: Unpaywall (UNPAYWALL_EMAIL is not set — see \\<upstream>)',
         );
@@ -2044,16 +2270,16 @@ describe('fetchFulltextTool', () => {
     });
 
     it('recovers a DOI via Europe PMC fullTextXML', async () => {
-      // EPMC's fullTextXML endpoint is PMC-keyed, so EPMC recovery for a DOI
-      // requires a hit with a PMC counterpart (`pmcid`). Preprints (`PPR`) and
-      // MED-only records have no PMC ID and never return JATS via EPMC.
+      // EPMC recovery for a DOI requires an open-access hit that lists a
+      // full-text id — here its PMC ID; an open-access preprint's is its own
+      // accession (#267).
       withEpmcAndUnpaywall();
       // The converter can't place this DOI in PMC, so it falls to EPMC-by-DOI.
       mockIdConvert.mockResolvedValue([
         { 'requested-id': '10.1/x', errmsg: 'Identifier not found in PMC' },
       ]);
       mockEpmcSearch.mockResolvedValue({
-        hits: [{ id: '42', source: 'MED', pmid: '42', pmcid: 'PMC42', doi: '10.1/x' }],
+        hits: [{ id: '42', source: 'MED', pmid: '42', pmcid: 'PMC42', doi: '10.1/x', ...OA_PMC42 }],
         hitCount: 1,
         cursorMark: '*',
       });
@@ -2493,7 +2719,7 @@ describe('fetchFulltextTool', () => {
       });
       mockIdConvert.mockResolvedValue([{ 'requested-id': '42', pmid: '42' }]);
       mockEpmcSearch.mockResolvedValue({
-        hits: [{ id: '42', source: 'MED', pmid: '42', pmcid: 'PMC42', doi: '10.1/x' }],
+        hits: [{ id: '42', source: 'MED', pmid: '42', pmcid: 'PMC42', doi: '10.1/x', ...OA_PMC42 }],
         hitCount: 1,
         cursorMark: '*',
       });
@@ -2537,7 +2763,7 @@ describe('fetchFulltextTool', () => {
       });
       mockIdConvert.mockResolvedValue([{ 'requested-id': '42', pmid: '42' }]);
       mockEpmcSearch.mockResolvedValue({
-        hits: [{ id: '42', source: 'MED', pmid: '42', pmcid: 'PMC42', doi: '10.1/x' }],
+        hits: [{ id: '42', source: 'MED', pmid: '42', pmcid: 'PMC42', doi: '10.1/x', ...OA_PMC42 }],
         hitCount: 1,
         cursorMark: '*',
       });
@@ -2673,6 +2899,7 @@ describe('fetchFulltextTool', () => {
             pmid: '19052211',
             pmcid: 'PMC2600426',
             doi: '10.1523/jneurosci.3043-08.2008',
+            ...openAccess('PMC2600426'),
           },
         ],
         hitCount: 1,
@@ -2752,7 +2979,16 @@ describe('fetchFulltextTool', () => {
       mockIdConvert.mockResolvedValue([{ 'requested-id': '42', pmid: '42' }]);
       mockEFetchBy({ pubmedDois: { '42': '10.1000/example' } });
       mockEpmcSearch.mockResolvedValue({
-        hits: [{ id: '42', source: 'MED', pmid: '42', pmcid: 'PMC42', doi: '10.1000/example' }],
+        hits: [
+          {
+            id: '42',
+            source: 'MED',
+            pmid: '42',
+            pmcid: 'PMC42',
+            doi: '10.1000/example',
+            ...OA_PMC42,
+          },
+        ],
         hitCount: 1,
         cursorMark: '*',
       });
@@ -2818,6 +3054,7 @@ describe('fetchFulltextTool', () => {
             pmid: '19052211',
             pmcid: 'PMC2600426',
             doi: '10.1523/jneurosci.3043-08.2008',
+            ...openAccess('PMC2600426'),
           },
         ],
         hitCount: 1,
@@ -2962,7 +3199,11 @@ describe('fetchFulltextTool', () => {
         const [id, doi] = query.includes(RECOVERED)
           ? [RECOVERED, RECOVERED_DOI]
           : [FAILED, FAILED_DOI];
-        return { hits: [{ id, source: 'MED', pmcid: id, doi }], hitCount: 1, cursorMark: '*' };
+        return {
+          hits: [{ id, source: 'MED', pmcid: id, doi, ...openAccess(id) }],
+          hitCount: 1,
+          cursorMark: '*',
+        };
       });
       mockEpmcFullTextXml.mockResolvedValue({ kind: 'not-available', reason: 'no XML' });
       mockUnpaywallResolve.mockImplementation(async (doi: string) => ({
@@ -3320,7 +3561,7 @@ describe('fetchFulltextTool', () => {
       });
       mockIdConvert.mockResolvedValue([{ 'requested-id': '42', pmid: '42' }]);
       mockEpmcSearch.mockResolvedValue({
-        hits: [{ id: '42', source: 'MED', pmid: '42', pmcid: 'PMC42' }],
+        hits: [{ id: '42', source: 'MED', pmid: '42', pmcid: 'PMC42', ...OA_PMC42 }],
         hitCount: 1,
         cursorMark: '*',
       });
@@ -5110,6 +5351,16 @@ describe('fetchFulltextTool per-call fetch limit (issue #222)', () => {
     expect(text).toContain(out.notice);
   });
 
+  it('names a single identifier past the limit in the singular', async () => {
+    const pmids = range(1, 11).map(pmidOf);
+    const { out } = await call({ pmids });
+
+    expect(out.overLimit).toEqual({ limit: 10, idType: 'pmid', ids: [pmids[10]] });
+    expect(out.notice).toBe(
+      `This call fetched the first 10 distinct identifiers; 1 more was not fetched: ${pmids[10]}. Re-call pubmed_fetch_fulltext with those ids under \`pmids\`, at most 10 per call, to retrieve them.`,
+    );
+  });
+
   it('fetches every PMC ID, every PMID, and the first DOI of 4 + 5 + 5, listing the last 4 DOIs', async () => {
     const pmcids = range(1, 4).map(pmcOf);
     const pmids = range(5, 5).map(pmidOf);
@@ -6089,7 +6340,7 @@ describe('fetchFulltextTool JATS tables (issue #111)', () => {
     });
     mockIdConvert.mockResolvedValue([{ 'requested-id': '42', pmid: '42' }]);
     mockEpmcSearch.mockResolvedValue({
-      hits: [{ id: '42', source: 'MED', pmid: '42', pmcid: 'PMC42', doi: '10.1/x' }],
+      hits: [{ id: '42', source: 'MED', pmid: '42', pmcid: 'PMC42', doi: '10.1/x', ...OA_PMC42 }],
       hitCount: 1,
       cursorMark: '*',
     });
@@ -6267,7 +6518,8 @@ describe('fetchFulltextTool nested sections filter (issue #126)', () => {
     const call = await runToolContract(fetchFulltextTool, {
       pmcids: ['PMC9575052'],
       sections: ['Demographics'],
-      maxCharacters: 10,
+      // Room for the first word: an allowance short of it returns no text. (#271)
+      maxCharacters: 15,
     });
     const structured = call.structuredContent as {
       articles: { sections: DeepSection[] }[];
@@ -6276,8 +6528,8 @@ describe('fetchFulltextTool nested sections filter (issue #126)', () => {
 
     // The breadcrumb contributes nothing; only 'Demographics body.' (18) counts.
     expect(structured.truncation?.originalCharacters).toBe(18);
-    expect(structured.truncation?.returnedCharacters).toBe(10);
-    expect(structured.articles[0]?.sections[0]?.subsections?.[0]?.text).toBe('Demographi');
+    expect(structured.truncation?.returnedCharacters).toBe(12);
+    expect(structured.articles[0]?.sections[0]?.subsections?.[0]?.text).toBe('Demographics');
   });
 
   it('states the matching scope on the sections input description', () => {
@@ -6937,7 +7189,7 @@ describe('fetchFulltextTool JATS assets (issue #130)', () => {
     });
     mockIdConvert.mockResolvedValue([{ 'requested-id': '42', pmid: '42' }]);
     mockEpmcSearch.mockResolvedValue({
-      hits: [{ id: '42', source: 'MED', pmid: '42', pmcid: 'PMC42', doi: '10.1/x' }],
+      hits: [{ id: '42', source: 'MED', pmid: '42', pmcid: 'PMC42', doi: '10.1/x', ...OA_PMC42 }],
       hitCount: 1,
       cursorMark: '*',
     });
@@ -6984,7 +7236,7 @@ describe('fetchFulltextTool JATS assets (issue #130)', () => {
     });
     mockIdConvert.mockResolvedValue([{ 'requested-id': '42', pmid: '42' }]);
     mockEpmcSearch.mockResolvedValue({
-      hits: [{ id: '42', source: 'MED', pmid: '42', pmcid: 'PMC42', doi: '10.1/x' }],
+      hits: [{ id: '42', source: 'MED', pmid: '42', pmcid: 'PMC42', doi: '10.1/x', ...OA_PMC42 }],
       hitCount: 1,
       cursorMark: '*',
     });
@@ -7572,6 +7824,215 @@ describe('fetchFulltextTool word-boundary cuts and subsection budgets (issue #14
     ]);
   });
 
+  describe('an allowance too small for the first word (issue #271)', () => {
+    /** Stage one article with body sections and, optionally, back matter. */
+    function stageWithBack(sections: unknown[], backSections?: unknown[]) {
+      mockParsePmcArticle.mockReturnValue({
+        pmcId: 'PMC13546078',
+        pmcUrl: 'https://www.ncbi.nlm.nih.gov/pmc/articles/PMC13546078/',
+        title: 'Bariatric surgery versus GLP-1 receptor agonists',
+        sections,
+        ...(backSections && { backSections }),
+      });
+      mockEFetch.mockResolvedValue([{ 'pmc-articleset': [{ article: [] }] }]);
+    }
+
+    it('drops a back-matter section the body cut left a few characters for, rather than returning a letter of it', async () => {
+      mockParsePmcArticle.mockImplementation(realParsePmcArticle);
+      mockEFetch.mockResolvedValue([{ 'pmc-articleset': [PMC10455816_NODE] }]);
+      const whole = await run({ pmcids: ['PMC10455816'] });
+      const intro = sectionsOf(whole.result)[0]?.text ?? '';
+
+      const { result, text } = await run({
+        pmcids: ['PMC10455816'],
+        maxCharacters: 3263,
+        includeTables: false,
+        includeAssets: false,
+      });
+
+      const returned = sectionsOf(result);
+      expect(returned.map((s) => s.title)).toEqual(['1. Introduction']);
+      const cut = returned[0]?.text ?? '';
+      // The intro cut ends on a whole word, a few characters under the allowance.
+      expect(cut.length).toBeLessThan(3263);
+      expect(intro.startsWith(cut)).toBe(true);
+      expect(intro.charAt(cut.length)).toMatch(/\s/);
+      const ledger = result.truncation?.articles[0]?.sections ?? [];
+      expect(ledger.find((s) => s.title === 'Acknowledgments')).toEqual({
+        title: 'Acknowledgments',
+        originalCharacters: 211,
+        returnedCharacters: 0,
+        truncated: true,
+      });
+      expect(ledger).toHaveLength(14);
+      expect(ledger.slice(1).filter((s) => s.returnedCharacters !== 0)).toEqual([]);
+      expect(result.truncation?.omittedSections).toBe(13);
+      expect(result.truncation?.returnedCharacters).toBe(cut.length);
+      expect(text).not.toContain('#### Acknowledgments');
+      expect(text).toContain(
+        '  - Acknowledgments — 0 of 211 characters (truncated: true) — dropped\n',
+      );
+    });
+
+    it('drops leftover-fed back matter, a later body section, and a subsection whose allowance cannot hold their first word', async () => {
+      stageWithBack(
+        [{ title: 'Introduction', text: 'alpha beta gamma' }],
+        [{ title: 'Acknowledgments', text: 'Thanks to all.' }],
+      );
+      const back = await run({ pmcids: ['PMC13546078'], maxCharacters: 14 });
+      // The body cut keeps "alpha beta" and leaves 4 characters for the back matter.
+      expect(sectionsOf(back.result)).toEqual([{ title: 'Introduction', text: 'alpha beta' }]);
+      expect(back.result.truncation?.articles[0]?.sections?.[1]).toEqual({
+        title: 'Acknowledgments',
+        originalCharacters: 14,
+        returnedCharacters: 0,
+        truncated: true,
+      });
+      expect(back.result.truncation?.omittedSections).toBe(1);
+
+      stageWithBack([
+        { title: 'Introduction', text: 'Obesity' },
+        { title: 'Methods', text: 'We searched three databases.' },
+      ]);
+      const body = await run({ pmcids: ['PMC13546078'], maxCharacters: 8 });
+      expect(sectionsOf(body.result)).toEqual([{ title: 'Introduction', text: 'Obesity' }]);
+      expect(body.result.truncation?.omittedSections).toBe(1);
+
+      stageWithBack([
+        {
+          title: 'Methods',
+          text: 'alpha beta',
+          subsections: [{ title: 'Design', text: 'Randomized trial.' }],
+        },
+      ]);
+      const nested = await run({ pmcids: ['PMC13546078'], maxCharacters: 12 });
+      expect(sectionsOf(nested.result)).toEqual([{ title: 'Methods', text: 'alpha beta' }]);
+      expect(nested.result.truncation?.articles[0]?.sections?.[0]?.subsections).toEqual([
+        { title: 'Design', originalCharacters: 17, returnedCharacters: 0, truncated: true },
+      ]);
+      expect(nested.result.truncation?.omittedSections).toBe(1);
+    });
+
+    it('returns an outline excerpt heading-only rather than cut inside its first word', async () => {
+      stageWithBack([
+        { title: 'Introduction', text: 'Obesity is common.' },
+        { title: 'Methods', text: 'We searched three databases.' },
+      ]);
+      const { result } = await run({
+        pmcids: ['PMC13546078'],
+        maxCharacters: 100,
+        maxCharactersPerSection: 5,
+        overflowMode: 'outline',
+      });
+      // Five characters hold "We" but not "Obesity".
+      expect(sectionsOf(result).map((s) => s.text)).toEqual(['', 'We']);
+      expect(result.truncation?.articles[0]?.sections?.[0]).toEqual({
+        title: 'Introduction',
+        originalCharacters: 18,
+        returnedCharacters: 0,
+        truncated: true,
+      });
+    });
+
+    it('still hard-cuts a section that is one token longer than its allowance', async () => {
+      // Characterization: a sequence or URL has no boundary to back off to.
+      stageWithBack(
+        [{ title: 'Introduction', text: 'alpha beta gamma' }],
+        [{ title: 'Sequence', text: 'ACGT'.repeat(10) }],
+      );
+      const { result } = await run({ pmcids: ['PMC13546078'], maxCharacters: 14 });
+      expect(sectionsOf(result)).toEqual([
+        { title: 'Introduction', text: 'alpha beta' },
+        { title: 'Sequence', text: 'ACGT' },
+      ]);
+    });
+
+    /**
+     * Each shape opens with two non-whitespace characters, so a one-character
+     * allowance hard-cuts it, and none holds a later word, so the cut scans the
+     * whole rest of the field and keeps the hard-cut prefix `kept` at every size.
+     * A backtracking later-word pattern is quadratic on these: `.*\s\S` on the
+     * first three, `\s+\S` on the two whitespace runs.
+     */
+    it.each<[string, (n: number) => string, string]>([
+      ['one unbroken token', (n) => 'A'.repeat(n), 'A'],
+      ['a whitespace run after the first word', (n) => `aa${' '.repeat(n - 2)}`, 'a'],
+      ['one long line ending in a break', (n) => `${'A'.repeat(n - 1)}\n`, 'A'],
+      ['line breaks throughout', (n) => `aa${'\r\n'.repeat((n - 2) / 2)}`, 'a'],
+    ])(
+      'decides a first-word cut in linear time from 5k to 320k characters of %s',
+      async (_label, build, kept) => {
+        /** CPU time of one handler call, in ms — this thread's user + system time, not wall clock. */
+        const cpuMs = async (input: ReturnType<typeof fetchFulltextTool.input.parse>) => {
+          const start = process.threadCpuUsage();
+          await fetchFulltextTool.handler(
+            input,
+            createMockContext({ errors: fetchFulltextTool.errors }),
+          );
+          const { user, system } = process.threadCpuUsage(start);
+          return (user + system) / 1000;
+        };
+        const input = fetchFulltextTool.input.parse({ pmcids: ['PMC13546078'], maxCharacters: 1 });
+        // Doubling from 5k, each size checked against the absolute bound before the next runs.
+        const times: number[] = [];
+        for (let n = 5_000; n <= 320_000; n *= 2) {
+          const text = build(n);
+          expect(text).toHaveLength(n);
+          stageWithBack([{ title: 'Introduction', text }]);
+          // The outcome at this size; the call also warms the handler up for the timed runs.
+          const { result } = await run({ pmcids: ['PMC13546078'], maxCharacters: 1 });
+          expect(sectionsOf(result)).toEqual([{ title: 'Introduction', text: kept }]);
+          expect(result.truncation?.returnedCharacters).toBe(kept.length);
+          const runs = [await cpuMs(input), await cpuMs(input), await cpuMs(input)];
+          const ms = Math.min(...runs);
+          expect(ms).toBeLessThan(400);
+          times.push(ms);
+        }
+        // Linear work grows 64× across the span; quadratic grows 4096×.
+        expect((times.at(-1) ?? 0) / Math.max(times[0] ?? 0, 0.05)).toBeLessThan(256);
+      },
+    );
+
+    it('returns a budget that lands on a word boundary exactly as before', async () => {
+      // Characterization: no allowance is left over, so nothing reaches the back matter.
+      stageWithBack(
+        [{ title: 'Introduction', text: 'alpha beta gamma' }],
+        [{ title: 'Acknowledgments', text: 'Thanks to all.' }],
+      );
+      const { result } = await run({ pmcids: ['PMC13546078'], maxCharacters: 10 });
+      expect(sectionsOf(result)).toEqual([{ title: 'Introduction', text: 'alpha beta' }]);
+      expect(result.truncation).toEqual({
+        mode: 'truncate',
+        maxCharacters: 10,
+        originalCharacters: 30,
+        returnedCharacters: 10,
+        omittedSections: 1,
+        articles: [
+          {
+            id: 'PMC13546078',
+            source: 'pmc',
+            originalCharacters: 30,
+            returnedCharacters: 10,
+            sections: [
+              {
+                title: 'Introduction',
+                originalCharacters: 16,
+                returnedCharacters: 10,
+                truncated: true,
+              },
+              {
+                title: 'Acknowledgments',
+                originalCharacters: 14,
+                returnedCharacters: 0,
+                truncated: true,
+              },
+            ],
+          },
+        ],
+      });
+    });
+  });
+
   it('rejects a zero, negative, or fractional character budget', () => {
     // Characterization: the invalid-input boundary of both body budgets.
     for (const v of [0, -1, 1.5]) {
@@ -7682,7 +8143,9 @@ describe('fetchFulltextTool outline allotment at every level (issue #252)', () =
           {
             label: '2.1',
             title: 'Design',
-            text: 'A'.repeat(300),
+            // Two words, so the fold below makes this prose whose 167-character
+            // share ends on a word boundary. (#271)
+            text: `${'A'.repeat(167)} ${'A'.repeat(132)}`,
             // Past the schema's depth, so it folds into Design's text before the
             // budget sees it — one part of Methods, cut like any other.
             subsections: [{ label: '2.1.1', title: 'Sampling', text: 'B'.repeat(300) }],
@@ -8191,7 +8654,7 @@ describe('fetchFulltextTool blank section selectors (issue #186)', () => {
           },
         },
       });
-      const rendered = text(result);
+      const rendered = readCommonMark(text(result));
       for (const field of fields) expect(rendered).toContain(`\`${field}\``);
       expect(rendered).toContain(`Recovery: ${BLANK_FILTER?.recovery}`);
       expect(mockEFetch).not.toHaveBeenCalled();
@@ -8770,7 +9233,7 @@ describe('fetchFulltextTool back matter (issue #206)', () => {
         mockIdConvert.mockResolvedValue([{ 'requested-id': '42', pmid: '42' }]);
         mockEFetchBy({ pubmedDois: {} });
         mockEpmcSearch.mockResolvedValue({
-          hits: [{ id: '42', source: 'MED', pmid: '42', pmcid: 'PMC42' }],
+          hits: [{ id: '42', source: 'MED', pmid: '42', pmcid: 'PMC42', ...OA_PMC42 }],
           hitCount: 1,
           cursorMark: '*',
         });
@@ -8912,7 +9375,15 @@ describe('fetchFulltextTool author name suffixes (issue #226)', () => {
     mockIdConvert.mockResolvedValue([{ 'requested-id': '41790057', pmid: '41790057' }]);
     mockEFetchBy({ pubmedDois: {} });
     mockEpmcSearch.mockResolvedValue({
-      hits: [{ id: '41790057', source: 'MED', pmid: '41790057', pmcid: 'PMC13052355' }],
+      hits: [
+        {
+          id: '41790057',
+          source: 'MED',
+          pmid: '41790057',
+          pmcid: 'PMC13052355',
+          ...openAccess('PMC13052355'),
+        },
+      ],
       hitCount: 1,
       cursorMark: '*',
     });
@@ -9014,7 +9485,15 @@ describe('fetchFulltextTool a collective author with a nested member list (issue
     mockIdConvert.mockResolvedValue([{ 'requested-id': '33933206', pmid: '33933206' }]);
     mockEFetchBy({ pubmedDois: {} });
     mockEpmcSearch.mockResolvedValue({
-      hits: [{ id: '33933206', source: 'MED', pmid: '33933206', pmcid: 'PMC8084355' }],
+      hits: [
+        {
+          id: '33933206',
+          source: 'MED',
+          pmid: '33933206',
+          pmcid: 'PMC8084355',
+          ...openAccess('PMC8084355'),
+        },
+      ],
       hitCount: 1,
       cursorMark: '*',
     });
@@ -9037,5 +9516,724 @@ describe('fetchFulltextTool a collective author with a nested member list (issue
     expect(structured.articles[0]?.authors).toStrictEqual([
       { collectiveName: 'RECOVERY Collaborative Group' },
     ]);
+  });
+});
+
+describe('fetchFulltextTool license statements (issue #269)', () => {
+  beforeEach(() => {
+    mockEFetch.mockReset();
+    mockIdConvert.mockReset();
+    mockParsePmcArticle.mockReset();
+    mockGetUnpaywallService.mockReset();
+    mockGetEpmcService.mockReset();
+    mockEpmcSearch.mockReset();
+    mockEpmcFullTextXml.mockReset();
+    mockEpmcParseFullTextXml.mockReset();
+    mockGetUnpaywallService.mockReturnValue(undefined);
+    mockGetEpmcService.mockReturnValue(undefined);
+    mockParsePmcArticle.mockImplementation(realParsePmcArticle);
+  });
+
+  const XLINK = 'xmlns:xlink="http://www.w3.org/1999/xlink"';
+  const ALI = 'xmlns:ali="http://www.niso.org/schemas/ali/1.0/"';
+  const CC_BY_HTTPS = 'https://creativecommons.org/licenses/by/4.0/';
+  const CC_BY_HTTP = 'http://creativecommons.org/licenses/by/4.0/';
+  const CC_TEXT =
+    'This is an open access article distributed under the terms of the Creative Commons Attribution Licence.';
+  const GOV_TEXT =
+    'The author(s) is/are employees of the US Government and therefore domestic copyright protection in USA does not apply to this work.';
+
+  /** PMC6354903's permissions: a CC BY license under two URLs, then a text-only notice. */
+  const TWO_LICENSES = `<permissions><copyright-statement>Copyright: © 2018 Yakubu A et al.</copyright-statement><license ${XLINK} xlink:href="${CC_BY_HTTP}"><ali:license_ref ${ALI}>${CC_BY_HTTPS}</ali:license_ref><license-p>${CC_TEXT}</license-p></license><license><license-p>${GOV_TEXT}</license-p></license></permissions>`;
+
+  /** An article carrying `meta` in its article-meta, with a body long enough to budget. */
+  const jats = (pmcid: string, meta: string) =>
+    '<article article-type="research-article"><front><article-meta>' +
+    `<article-id pub-id-type="pmcid">${pmcid}</article-id>` +
+    '<title-group><article-title>A licensed article</article-title></title-group>' +
+    `${meta}</article-meta></front><body><sec><title>Introduction</title><p>${'Body text. '.repeat(40)}</p></sec></body></article>`;
+
+  /** The `<article>` node the ordered parser makes of `xml`. */
+  function articleNode(xml: string) {
+    const nodes = new XMLParser(ORDERED_XML_PARSER_OPTIONS).parse(xml) as Record<string, unknown>[];
+    const node = nodes.find((n) => 'article' in n);
+    if (!node) throw new Error('fixture has no <article>');
+    return node;
+  }
+
+  const servePmc = (xml: string) =>
+    mockEFetch.mockResolvedValue([{ 'pmc-articleset': [articleNode(xml)] }]);
+
+  const textOf = (call: { content: ContentBlock[] }) =>
+    textBlocks(call.content)
+      .map((b) => b.text)
+      .join('\n');
+
+  it('returns every article-meta license on the PMC tier, in order, on both surfaces', async () => {
+    servePmc(jats('PMC6354903', TWO_LICENSES));
+    const call = await runToolContract(fetchFulltextTool, { pmcids: ['PMC6354903'] });
+
+    const article = fetchFulltextTool.output.parse(call.structuredContent).articles[0];
+    if (article?.source !== 'pmc') throw new Error('expected a pmc article');
+    expect(article.viaSource).toBe('pmc');
+    expect(article.licenses).toStrictEqual([
+      { text: CC_TEXT, urls: [CC_BY_HTTP, CC_BY_HTTPS] },
+      { text: GOV_TEXT },
+    ]);
+    const paragraphs = readCommonMark(textOf(call)).split('\n\n');
+    expect(paragraphs).toContain(
+      `⟨strong⟩License 1 of 2:⟨/strong⟩ ⟨a⟩${CC_BY_HTTP}⟨/a⟩, ⟨a⟩${CC_BY_HTTPS}⟨/a⟩\n${CC_TEXT}`,
+    );
+    expect(paragraphs).toContain(`⟨strong⟩License 2 of 2:⟨/strong⟩\n${GOV_TEXT}`);
+  });
+
+  it('returns the license on the Europe PMC tier for an open-access preprint (PPR1325930)', async () => {
+    const doi = '10.21203/rs.3.rs-11130366/v1';
+    const xml = jats(
+      '',
+      `<permissions><license><ali:license_ref ${ALI}>${CC_BY_HTTPS}</ali:license_ref><license-p>This work is licensed under a <ext-link ${XLINK} ext-link-type="uri" xlink:href="${CC_BY_HTTPS}">CC BY 4.0 International license</ext-link>.</license-p></license></permissions>`,
+    );
+    mockGetEpmcService.mockReturnValue({
+      search: mockEpmcSearch,
+      fullTextXml: mockEpmcFullTextXml,
+      parseFullTextXml: mockEpmcParseFullTextXml,
+    });
+    mockIdConvert.mockResolvedValue([
+      { 'requested-id': doi, errmsg: 'Identifier not found in PMC' },
+    ]);
+    mockEpmcSearch.mockResolvedValue({
+      hits: [{ id: 'PPR1325930', source: 'PPR', doi, ...openAccess('PPR1325930') }],
+      hitCount: 1,
+      cursorMark: '*',
+    });
+    mockEpmcFullTextXml.mockResolvedValue({
+      kind: 'found',
+      xml,
+      epmcId: 'PPR1325930',
+      source: 'PPR',
+    });
+    mockEpmcParseFullTextXml.mockReturnValue(articleNode(xml));
+    const call = await runToolContract(fetchFulltextTool, { dois: [doi] });
+
+    const article = fetchFulltextTool.output.parse(call.structuredContent).articles[0];
+    if (article?.source !== 'pmc') throw new Error('expected a pmc article');
+    expect(article).toMatchObject({ viaSource: 'europepmc', epmcId: 'PPR1325930' });
+    expect(article.licenses).toStrictEqual([
+      {
+        text: 'This work is licensed under a CC BY 4.0 International license.',
+        urls: [CC_BY_HTTPS],
+      },
+    ]);
+    expect(readCommonMark(textOf(call)).split('\n\n')).toContain(
+      `⟨strong⟩License:⟨/strong⟩ ⟨a⟩${CC_BY_HTTPS}⟨/a⟩\nThis work is licensed under a CC BY 4.0 International license.`,
+    );
+  });
+
+  it('carries no licenses field and renders no license line for an article that deposits none', async () => {
+    servePmc(
+      jats('PMC7', '<permissions><copyright-statement>© 2024</copyright-statement></permissions>'),
+    );
+    const call = await runToolContract(fetchFulltextTool, { pmcids: ['PMC7'] });
+
+    const article = fetchFulltextTool.output.parse(call.structuredContent).articles[0];
+    expect(article && 'licenses' in article).toBe(false);
+    // No license line in any spelling: bold or plain, numbered or not.
+    expect(textOf(call)).not.toMatch(/License/);
+  });
+
+  it('keeps a paragraph break, escapes the text, and links only http(s) URLs in content[]', async () => {
+    servePmc(
+      jats(
+        'PMC8',
+        `<permissions><license ${XLINK} xlink:href="https://example.org/licence_(v2)"><ali:license_ref ${ALI}>see licence.txt</ali:license_ref><license-p>Reuse *with* &lt;b&gt;credit&lt;/b&gt;.</license-p><license-p>1. Second paragraph.</license-p></license></permissions>`,
+      ),
+    );
+    const call = await runToolContract(fetchFulltextTool, { pmcids: ['PMC8'] });
+
+    const article = fetchFulltextTool.output.parse(call.structuredContent).articles[0];
+    if (article?.source !== 'pmc') throw new Error('expected a pmc article');
+    expect(article.licenses).toStrictEqual([
+      {
+        text: 'Reuse *with* <b>credit</b>.\n\n1. Second paragraph.',
+        urls: ['https://example.org/licence_(v2)', 'see licence.txt'],
+      },
+    ]);
+    const paragraphs = readCommonMark(textOf(call)).split('\n\n');
+    expect(paragraphs).toContain(
+      '⟨strong⟩License:⟨/strong⟩ ⟨a⟩https://example.org/licence_(v2)⟨/a⟩, see licence.txt\nReuse *with* <b>credit</b>.',
+    );
+    expect(paragraphs).toContain('1. Second paragraph.');
+  });
+
+  it('counts licenses toward maxResponseCharacters but never toward maxCharacters', async () => {
+    servePmc(jats('PMC6354903', TWO_LICENSES));
+    const full = await runToolContract(fetchFulltextTool, { pmcids: ['PMC6354903'] });
+    const article = fetchFulltextTool.output.parse(full.structuredContent).articles[0];
+    if (article?.source !== 'pmc') throw new Error('expected a pmc article');
+    const recordCharacters = JSON.stringify(article).length;
+    const { licenses: _, ...unlicensed } = article;
+
+    const deferred = await runToolContract(fetchFulltextTool, {
+      pmcids: ['PMC6354903'],
+      maxResponseCharacters: JSON.stringify(unlicensed).length,
+    });
+    expect(fetchFulltextTool.output.parse(deferred.structuredContent).deferred).toMatchObject({
+      ids: ['PMC6354903'],
+      nextDeferredCharacters: recordCharacters,
+    });
+
+    const budgeted = await runToolContract(fetchFulltextTool, {
+      pmcids: ['PMC6354903'],
+      maxCharacters: 100,
+    });
+    servePmc(jats('PMC6354903', ''));
+    const budgetedUnlicensed = await runToolContract(fetchFulltextTool, {
+      pmcids: ['PMC6354903'],
+      maxCharacters: 100,
+    });
+    const truncationOf = (call: { structuredContent?: unknown }) =>
+      fetchFulltextTool.output.parse(call.structuredContent).truncation;
+    expect(truncationOf(budgeted)).toBeDefined();
+    expect(truncationOf(budgeted)).toStrictEqual(truncationOf(budgetedUnlicensed));
+  });
+});
+
+describe('fetchFulltextTool sections past maxSections (issue #268)', () => {
+  beforeEach(() => {
+    mockEFetch.mockReset();
+    mockIdConvert.mockReset();
+    mockParsePmcArticle.mockReset();
+    mockGetUnpaywallService.mockReset();
+    mockGetEpmcService.mockReset();
+    mockEpmcSearch.mockReset();
+    mockEpmcFullTextXml.mockReset();
+    mockEpmcParseFullTextXml.mockReset();
+    mockGetUnpaywallService.mockReturnValue(undefined);
+    mockGetEpmcService.mockReturnValue(undefined);
+    mockParsePmcArticle.mockImplementation(realParsePmcArticle);
+  });
+
+  /** A three-section article, small enough to sit under a response ceiling beside it. */
+  const PMC1 = pmcArticleNode(
+    '<article><front><article-meta><article-id pub-id-type="pmcid">PMC1</article-id>' +
+      '<title-group><article-title>Short record</article-title></title-group></article-meta></front>' +
+      '<body><sec><title>Background</title><p>Why.</p></sec><sec><title>Methods</title><p>How.</p></sec>' +
+      '<sec><title>Results</title><p>What.</p></sec></body></article>',
+  );
+
+  const BODY_TITLES = [
+    '1. Introduction',
+    '2. Methodology',
+    '3. Results',
+    '4. Exploring FPs, FNs, and TNs',
+    '5. Discussion',
+    '6. Conclusions',
+  ];
+  const BACK_TITLES = [
+    'Acknowledgments',
+    'Footnotes',
+    'Author Contributions',
+    'Institutional Review Board Statement',
+    'Informed Consent Statement',
+    'Data Availability Statement',
+    'Conflicts of Interest',
+    'Abbreviations',
+  ];
+  const ALL_TITLES = [...BODY_TITLES, ...BACK_TITLES];
+
+  const servePmc = (...articles: Record<string, unknown>[]) =>
+    mockEFetch.mockResolvedValue([{ 'pmc-articleset': articles }]);
+
+  /** PMC misses PMID 37629222; Europe PMC finds it open access and serves the fixture. */
+  function serveEpmc() {
+    mockGetEpmcService.mockReturnValue({
+      search: mockEpmcSearch,
+      fullTextXml: mockEpmcFullTextXml,
+      parseFullTextXml: mockEpmcParseFullTextXml,
+    });
+    mockIdConvert.mockResolvedValue([{ 'requested-id': '37629222', pmid: '37629222' }]);
+    mockEpmcSearch.mockResolvedValue({
+      hits: [
+        {
+          id: '37629222',
+          source: 'MED',
+          pmid: '37629222',
+          pmcid: 'PMC10455816',
+          ...openAccess('PMC10455816'),
+        },
+      ],
+      hitCount: 1,
+      cursorMark: '*',
+    });
+    mockEpmcFullTextXml.mockResolvedValue({
+      kind: 'found',
+      xml: '<article/>',
+      epmcId: 'PMC10455816',
+      source: 'MED',
+    });
+    mockEpmcParseFullTextXml.mockReturnValue(PMC10455816_NODE);
+  }
+
+  async function call(input: Record<string, unknown>) {
+    const result = await runToolContract(fetchFulltextTool, input);
+    expect(result.isError).toBeFalsy();
+    const out = fetchFulltextTool.output
+      .extend({ notice: z.string().optional(), truncated: z.boolean().optional() })
+      .parse(result.structuredContent);
+    const text = textBlocks(result.content as ContentBlock[])
+      .map((block) => block.text)
+      .join('\n');
+    return { result, out, text };
+  }
+
+  const titlesOf = (out: Awaited<ReturnType<typeof call>>['out']) =>
+    out.articles.map((a) => (a.source === 'pmc' ? a.sections.map((s) => s.title) : []));
+
+  /** The rendered `sectionCap` block: its headline through the last omitted heading. */
+  const capBlock = (text: string): string | undefined => {
+    const start = text.indexOf('**Section cap');
+    if (start === -1) return;
+    const end = text.indexOf('\n\n', start);
+    return end === -1 ? text.slice(start) : text.slice(start, end);
+  };
+
+  it('returns the response byte-identical without maxSections and under a cap that drops nothing', async () => {
+    // Characterization: a cap at or above the article's top-level count is invisible.
+    servePmc(PMC10455816_NODE);
+    const uncapped = await runToolContract(fetchFulltextTool, { pmcids: ['PMC10455816'] });
+    const atCount = await runToolContract(fetchFulltextTool, {
+      pmcids: ['PMC10455816'],
+      maxSections: ALL_TITLES.length,
+    });
+    const above = await runToolContract(fetchFulltextTool, {
+      pmcids: ['PMC10455816'],
+      maxSections: 50,
+    });
+
+    expect(atCount).toStrictEqual(uncapped);
+    expect(above).toStrictEqual(uncapped);
+    const structured = uncapped.structuredContent as Record<string, unknown>;
+    expect(Object.keys(structured).sort()).toEqual(['articles', 'totalReturned']);
+  });
+
+  it('lists the top-level sections a cap of 1 left out, in order, on both surfaces', async () => {
+    servePmc(PMC10455816_NODE);
+    const { out, text } = await call({ pmcids: ['PMC10455816'], maxSections: 1 });
+
+    expect(titlesOf(out)).toEqual([['1. Introduction']]);
+    expect(out.sectionCap).toStrictEqual({
+      maxSections: 1,
+      articles: [
+        { id: 'PMC10455816', omittedSections: ALL_TITLES.slice(1).map((title) => ({ title })) },
+      ],
+    });
+    expect(out.truncated).toBe(true);
+    expect(out.truncation).toBeUndefined();
+    expect(out.notice).toBe(
+      '`maxSections` (1) kept the first 1 of 14 top-level sections of PMC10455816 and left out 13: 2. Methodology, 3. Results, 4. Exploring FPs, FNs, and TNs, 5. Discussion, 6. Conclusions, Acknowledgments, Footnotes, Author Contributions, Institutional Review Board Statement, Informed Consent Statement, Data Availability Statement, Conflicts of Interest, Abbreviations. Re-call with `sections` set to the titles you need, or with a larger `maxSections`, to retrieve them; `sectionCap` lists them per article.',
+    );
+
+    const block = capBlock(text);
+    expect(block).toBe(
+      [
+        '**Section cap (maxSections 1):** 13 top-level section(s) left out across 1 article(s)',
+        '- PMC10455816: first 1 of 14 top-level sections kept; left out:',
+        '  - 2\\. Methodology',
+        '  - 3\\. Results',
+        '  - 4\\. Exploring FPs, FNs, and TNs',
+        '  - 5\\. Discussion',
+        '  - 6\\. Conclusions',
+        ...BACK_TITLES.map((title) => `  - ${title}`),
+      ].join('\n'),
+    );
+    // Each heading reads back as the body writes it, not as a nested ordered list.
+    const readBack = readCommonMark(block ?? '');
+    expect(readBack).not.toContain('⟨ordered_list_open⟩');
+    for (const title of ALL_TITLES.slice(1)) expect(readBack).toContain(title);
+    expect(readCommonMark(text).split('\n\n')).toContain('1. Introduction');
+  });
+
+  it('counts the cut after the sections filter: a filtered-out section is never listed', async () => {
+    servePmc(PMC10455816_NODE);
+    const { out } = await call({
+      pmcids: ['PMC10455816'],
+      sections: ['Statement'],
+      maxSections: 1,
+    });
+
+    expect(titlesOf(out)).toEqual([['Institutional Review Board Statement']]);
+    expect(out.sectionCap?.articles).toStrictEqual([
+      {
+        id: 'PMC10455816',
+        omittedSections: [
+          { title: 'Informed Consent Statement' },
+          { title: 'Data Availability Statement' },
+        ],
+      },
+    ]);
+  });
+
+  it('keeps truncation over the kept sections and sectionCap over the cut ones, with no heading in both', async () => {
+    servePmc(PMC10455816_NODE);
+    const { out, text } = await call({
+      pmcids: ['PMC10455816'],
+      maxSections: 2,
+      maxCharacters: 300,
+    });
+
+    const ledger = out.truncation?.articles[0]?.sections?.map((s) => s.title);
+    expect(ledger).toEqual(['1. Introduction', '2. Methodology']);
+    const omitted = out.sectionCap?.articles[0]?.omittedSections.map((s) => s.title);
+    expect(omitted).toEqual(ALL_TITLES.slice(2));
+    expect(omitted?.filter((t) => ledger?.includes(t))).toEqual([]);
+    expect(out.truncated).toBe(true);
+    // Both notices, the budget's first.
+    expect(out.notice).toMatch(
+      /^Full text was shortened .* to retrieve more\. `maxSections` \(2\) kept the first 2 of 14 top-level sections of PMC10455816 and left out 12: /,
+    );
+    const truncatedAt = text.indexOf('**Truncated');
+    expect(truncatedAt).toBeGreaterThanOrEqual(0);
+    expect(text.indexOf('**Section cap')).toBeGreaterThan(truncatedAt);
+  });
+
+  it('discloses a Europe PMC-served article the same way', async () => {
+    serveEpmc();
+    const { out, text } = await call({ pmids: ['37629222'], maxSections: 13 });
+
+    const article = out.articles[0];
+    expect(article?.source === 'pmc' && article.viaSource).toBe('europepmc');
+    expect(out.sectionCap).toStrictEqual({
+      maxSections: 13,
+      articles: [{ id: 'PMC10455816', omittedSections: [{ title: 'Abbreviations' }] }],
+    });
+    expect(out.truncated).toBe(true);
+    expect(capBlock(text)).toBe(
+      [
+        '**Section cap (maxSections 13):** 1 top-level section(s) left out across 1 article(s)',
+        '- PMC10455816: first 13 of 14 top-level sections kept; left out:',
+        '  - Abbreviations',
+      ].join('\n'),
+    );
+  });
+
+  it('adds no Europe PMC entry, notice, or truncated flag under a cap that drops nothing', async () => {
+    serveEpmc();
+    const capped = await runToolContract(fetchFulltextTool, {
+      pmids: ['37629222'],
+      maxSections: 14,
+    });
+    serveEpmc();
+    const uncapped = await runToolContract(fetchFulltextTool, { pmids: ['37629222'] });
+    expect(capped).toStrictEqual(uncapped);
+  });
+
+  it('lists every capped article in routing order and takes a deferred article out with it', async () => {
+    servePmc(PMC10455816_NODE, PMC1);
+    const both = await call({ pmcids: ['PMC1', 'PMC10455816'], maxSections: 1 });
+    expect(both.out.sectionCap?.articles.map((a) => a.id)).toEqual(['PMC1', 'PMC10455816']);
+    expect(both.out.sectionCap?.articles[0]?.omittedSections).toStrictEqual([
+      { title: 'Methods' },
+      { title: 'Results' },
+    ]);
+    expect(capBlock(both.text)).toMatch(
+      /^\*\*Section cap \(maxSections 1\):\*\* 15 top-level section\(s\) left out across 2 article\(s\)\n- PMC1: first 1 of 3 top-level sections kept; left out:\n {2}- Methods\n {2}- Results\n- PMC10455816: first 1 of 14 /,
+    );
+    expect(both.out.notice).toContain(
+      '`maxSections` (1) kept the first 1 of 3 top-level sections of PMC1 and left out 2: Methods, Results; the first 1 of 14 top-level sections of PMC10455816 and left out 13: 2. Methodology,',
+    );
+
+    const firstSize = JSON.stringify(both.out.articles[0]).length;
+    const deferred = await call({
+      pmcids: ['PMC1', 'PMC10455816'],
+      maxSections: 1,
+      maxResponseCharacters: firstSize,
+    });
+    expect(deferred.out.deferred?.ids).toEqual(['PMC10455816']);
+    expect(deferred.out.sectionCap).toStrictEqual({
+      maxSections: 1,
+      articles: [{ id: 'PMC1', omittedSections: [{ title: 'Methods' }, { title: 'Results' }] }],
+    });
+    expect(deferred.out.notice).toContain(
+      '`maxSections` (1) kept the first 1 of 3 top-level sections of PMC1 and left out 2: Methods, Results. Re-call',
+    );
+    expect(deferred.out.notice).not.toContain('PMC10455816 and left out');
+    expect(capBlock(deferred.text)).toBe(
+      [
+        '**Section cap (maxSections 1):** 2 top-level section(s) left out across 1 article(s)',
+        '- PMC1: first 1 of 3 top-level sections kept; left out:',
+        '  - Methods',
+        '  - Results',
+      ].join('\n'),
+    );
+  });
+
+  it('drops sectionCap entirely when its only capped article is deferred', async () => {
+    servePmc(PMC10455816_NODE, PMC1);
+    const sized = await call({ pmcids: ['PMC1', 'PMC10455816'], maxSections: 3 });
+    expect(sized.out.sectionCap?.articles.map((a) => a.id)).toEqual(['PMC10455816']);
+
+    const deferred = await call({
+      pmcids: ['PMC1', 'PMC10455816'],
+      maxSections: 3,
+      maxResponseCharacters: JSON.stringify(sized.out.articles[0]).length,
+    });
+    expect(deferred.out.deferred?.ids).toEqual(['PMC10455816']);
+    expect(deferred.out.sectionCap).toBeUndefined();
+    expect(deferred.out.notice).not.toContain('`maxSections`');
+    expect(capBlock(deferred.text)).toBeUndefined();
+  });
+
+  it('names untitled and labelled sections as the body headings do, escaped', async () => {
+    mockParsePmcArticle.mockReturnValue({
+      pmcId: 'PMC2',
+      pmcUrl: 'https://www.ncbi.nlm.nih.gov/pmc/articles/PMC2/',
+      title: 'Unusual headings',
+      sections: [
+        { title: 'Kept', text: 'Kept text.' },
+        { text: 'An untitled opening block.' },
+        { label: 'S1', text: 'Label-only narrative.' },
+        { label: '3', title: '*Results* [raw]', text: 'Results text.' },
+      ],
+    });
+    servePmc({ article: [] });
+    const { out, text } = await call({ pmcids: ['PMC2'], maxSections: 1 });
+
+    expect(out.sectionCap?.articles[0]?.omittedSections).toStrictEqual([
+      {},
+      { label: 'S1' },
+      { label: '3', title: '*Results* [raw]' },
+    ]);
+    expect(capBlock(text)).toBe(
+      [
+        '**Section cap (maxSections 1):** 3 top-level section(s) left out across 1 article(s)',
+        '- PMC2: first 1 of 4 top-level sections kept; left out:',
+        '  - untitled section',
+        '  - S1',
+        '  - 3 \\*Results\\* \\[raw\\]',
+      ].join('\n'),
+    );
+    expect(out.notice).toContain('left out 3: untitled section, S1, *Results* [raw].');
+  });
+
+  it('describes sectionCap as an envelope field the response ceiling does not count', () => {
+    const schema = z.toJSONSchema(fetchFulltextTool.input) as {
+      properties: Record<string, { description?: string }>;
+    };
+    expect(schema.properties.maxSections?.description).toContain('`sectionCap`');
+    expect(schema.properties.maxResponseCharacters?.description).toContain('`sectionCap`');
+  });
+});
+
+describe('fetchFulltextTool values sharing a paragraph (issue #261)', () => {
+  type FulltextOutput = Parameters<NonNullable<typeof fetchFulltextTool.format>>[0];
+  const render = (result: FulltextOutput) =>
+    textBlocks(fetchFulltextTool.format!(result))[0]?.text ?? '';
+  const paragraphs = (result: FulltextOutput) => readCommonMark(render(result)).split('\n\n');
+
+  /** One lone delimiter in each of several values that share a paragraph. */
+  const pmcArticle: FulltextOutput['articles'][number] = {
+    source: 'pmc',
+    viaSource: 'pmc',
+    pmcId: 'PMC1',
+    pmcUrl: 'https://www.ncbi.nlm.nih.gov/pmc/articles/PMC1/',
+    pmid: '1',
+    pubmedUrl: 'https://pubmed.ncbi.nlm.nih.gov/1/',
+    title: 'HLA-B*57:01 carriers',
+    journal: {
+      title: 'J Allergy*',
+      volume: '12*',
+      issue: '3',
+      pages: '_12',
+      elocationId: 'e1`',
+      issn: '1234`',
+    },
+    articleType: 'HLA-B*57',
+    publicationDate: { year: '2024' },
+    doi: '10.1/x_',
+    licenses: [{ urls: ['https://x.org/a`b'], text: 'Use it ` freely.' }],
+    sections: [{ title: 'Body', text: 'Body.' }],
+    tables: [
+      {
+        label: 'Table 1',
+        caption: 'Doses',
+        sectionTitle: 'Results*',
+        id: 'T_',
+        rows: [
+          ['a', 'b'],
+          ['1', '2'],
+        ],
+        headerRowCount: 1,
+      },
+    ],
+    assets: [
+      {
+        assetType: 'figure',
+        label: 'Fig 1',
+        caption: 'Cap',
+        sectionTitle: 'Methods*',
+        id: 'F1',
+        href: 'f1.jpg*',
+      },
+    ],
+    references: [{ label: '1*', citation: 'Smith J*. Title.' }],
+  };
+
+  /** No journal line: the meta lines follow the affiliation list directly. */
+  const noJournalArticle: FulltextOutput['articles'][number] = {
+    source: 'pmc',
+    viaSource: 'europepmc',
+    pmcId: 'PMC2',
+    epmcId: 'PPR2',
+    epmcSource: 'P*R*',
+    title: 'Second',
+    affiliations: ['Univ A*'],
+    articleType: 'Review*',
+    doi: '10.1/b*',
+    sections: [],
+  };
+
+  const result: FulltextOutput = {
+    articles: [pmcArticle, noJournalArticle],
+    totalReturned: 2,
+    unavailable: [
+      {
+        id: '10.1/a*b',
+        idType: 'doi',
+        reason: 'no-oa',
+        triedTiers: [{ tier: 'unpaywall', outcome: 'no-oa', detail: 'Copy*' }],
+      },
+    ],
+    truncation: {
+      mode: 'truncate',
+      maxCharacters: 5,
+      originalCharacters: 50,
+      returnedCharacters: 5,
+      omittedSections: 0,
+      omittedTables: 1,
+      articles: [
+        {
+          id: '10.1/a*b',
+          source: 'pmc',
+          originalCharacters: 50,
+          returnedCharacters: 5,
+          omittedTables: 1,
+          omittedTableNames: ['Table 1*'],
+          sections: [
+            {
+              title: '1. Introduction',
+              originalCharacters: 10,
+              returnedCharacters: 0,
+              truncated: true,
+            },
+          ],
+        },
+      ],
+    },
+  };
+
+  it('renders every character of the journal and identifier lines, and leaves structuredContent alone', () => {
+    const snapshot = JSON.stringify(result);
+    expect(paragraphs(result)).toContain(
+      [
+        '⟨strong⟩Journal:⟨/strong⟩ J Allergy*, ⟨strong⟩12*⟨/strong⟩(3), _12, e1`, ISSN 1234`',
+        '⟨strong⟩Type:⟨/strong⟩ HLA-B*57',
+        '⟨strong⟩Published:⟨/strong⟩ 2024',
+        '⟨strong⟩PMCID:⟨/strong⟩ PMC1',
+        '⟨strong⟩PMID:⟨/strong⟩ 1',
+        '⟨strong⟩DOI:⟨/strong⟩ 10.1/x_',
+        '⟨strong⟩PMC:⟨/strong⟩ https://www.ncbi.nlm.nih.gov/pmc/articles/PMC1/',
+        '⟨strong⟩PubMed:⟨/strong⟩ https://pubmed.ncbi.nlm.nih.gov/1/',
+      ].join('\n'),
+    );
+    expect(JSON.stringify(result)).toBe(snapshot);
+  });
+
+  it('keeps the per-value test in a heading, where a lone delimiter stays raw', () => {
+    expect(render(result).split('\n')).toContain('### HLA-B*57:01 carriers');
+  });
+
+  it('opens the meta lines in a paragraph of their own when no journal line precedes them', () => {
+    const text = render(result);
+    expect(text).toContain('- Univ A*\n\n**Type:** Review\\*');
+    const read = paragraphs(result);
+    expect(read).toContain('Univ A*');
+    expect(read).toContain(
+      [
+        '⟨strong⟩Type:⟨/strong⟩ Review*',
+        '⟨strong⟩PMCID:⟨/strong⟩ PMC2',
+        '⟨strong⟩EPMC ID:⟨/strong⟩ PPR2 (P*R*)',
+        '⟨strong⟩DOI:⟨/strong⟩ 10.1/b*',
+      ].join('\n'),
+    );
+    expect(read).toContain('⟨strong⟩Source:⟨/strong⟩ Europe PMC (structured JATS, source: P*R*)');
+  });
+
+  it('renders every character of the table and asset meta lines inside their italics', () => {
+    const read = paragraphs(result);
+    expect(read).toContain('⟨em⟩Section: Results* · id: T_ · header rows: 1⟨/em⟩');
+    expect(read).toContain('⟨em⟩figure · Section: Methods* · id: F1 · file: f1.jpg*⟨/em⟩');
+  });
+
+  it('renders every character of a tagged reference and of a license URL and its text', () => {
+    const read = paragraphs(result);
+    expect(read).toContain('[1*] Smith J*. Title.');
+    expect(read).toContain('⟨strong⟩License:⟨/strong⟩ ⟨a⟩https://x.org/a`b⟨/a⟩\nUse it ` freely.');
+  });
+
+  it('renders every character of an unavailable entry and its chain', () => {
+    expect(paragraphs(result)).toContain('[doi] 10.1/a*b — no-oa\nchain: unpaywall:no-oa (Copy*)');
+  });
+
+  it('renders every character of the truncation ledger, and a numbered section title as text', () => {
+    const read = paragraphs(result);
+    expect(read).toContain(
+      '10.1/a*b (pmc): 5 of 50 characters, 1 table(s) dropped whole: Table 1*',
+    );
+    expect(read).toContain('1. Introduction — 0 of 10 characters (truncated: true) — dropped');
+    expect(read).not.toContain('⟨ordered_list_open⟩');
+    expect(render(result)).toContain(
+      '  - 1\\. Introduction — 0 of 10 characters (truncated: true) — dropped',
+    );
+  });
+
+  describe('an Unpaywall article', () => {
+    const unpaywall = (sourceUrl: string): FulltextOutput => ({
+      articles: [
+        {
+          source: 'unpaywall',
+          viaSource: 'unpaywall',
+          contentFormat: 'html-markdown',
+          doi: '10.1/u_',
+          sourceUrl,
+          title: 'T',
+          journalName: 'J Allergy*',
+          license: 'cc*',
+          hostType: 'repository',
+          version: 'v1',
+          content: 'Body',
+        },
+      ],
+      totalReturned: 1,
+    });
+
+    it('renders every character of its meta lines, an OA URL holding a delimiter as an autolink', () => {
+      expect(paragraphs(unpaywall('https://web.archive.org/web/2020*/x.pdf'))).toContain(
+        [
+          '⟨strong⟩Source:⟨/strong⟩ Unpaywall (HTML → Markdown, best-effort)',
+          '⟨strong⟩Journal:⟨/strong⟩ J Allergy*',
+          '⟨strong⟩DOI:⟨/strong⟩ 10.1/u_',
+          '⟨strong⟩OA Copy:⟨/strong⟩ ⟨a⟩https://web.archive.org/web/2020*/x.pdf⟨/a⟩',
+          '⟨strong⟩License:⟨/strong⟩ cc*',
+          '⟨strong⟩Host Type:⟨/strong⟩ repository',
+          '⟨strong⟩Version:⟨/strong⟩ v1',
+        ].join('\n'),
+      );
+    });
+
+    it('keeps an OA URL with no delimiter as raw text', () => {
+      expect(render(unpaywall('https://repo.example.org/paper_1.pdf'))).toContain(
+        '**OA Copy:** https://repo.example.org/paper_1.pdf\n',
+      );
+    });
   });
 });

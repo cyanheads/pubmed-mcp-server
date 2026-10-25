@@ -76,11 +76,22 @@ type ConverterEntry = { pmid?: number; pmcid?: string; doi?: string } | null;
 
 interface EpmcHit {
   doi?: string;
+  fullTextIdList?: { fullTextId: string[] };
   id: string;
+  isOpenAccess?: 'Y' | 'N';
   pmcid?: string;
   pmid?: string;
   source: string;
   title?: string;
+}
+
+/**
+ * What a Europe PMC hit carries when Europe PMC serves `fullTextXML` for it:
+ * open access, with the id the XML is requested under. A hit without it is
+ * never requested. (#267)
+ */
+function openAccess(fullTextId: string): Pick<EpmcHit, 'fullTextIdList' | 'isOpenAccess'> {
+  return { isOpenAccess: 'Y', fullTextIdList: { fullTextId: [fullTextId] } };
 }
 
 type OaContent = { kind: 'pdf'; body: Uint8Array } | { kind: 'html'; body: string };
@@ -567,7 +578,13 @@ describe('pmcids routing', () => {
 
   it('dispatches each PMC ID once however many spellings name it', async () => {
     const pmcid = 'PMC9000001';
-    epmcHits.set(`PMCID:${pmcid}`, { id: pmcid, source: 'PMC', pmcid, doi: '10.9000/one' });
+    epmcHits.set(`PMCID:${pmcid}`, {
+      id: pmcid,
+      source: 'PMC',
+      pmcid,
+      doi: '10.9000/one',
+      ...openAccess(pmcid),
+    });
     epmcFullText.set(pmcid, jats(pmcid, 'Served by Europe PMC'));
     const { result } = await fetchFulltext({ pmcids: ['PMC9000001', 'pmc9000001', '9000001'] });
 
@@ -605,7 +622,13 @@ describe('pmcids routing', () => {
 
   it('sends a zero-padded PMC ID that misses PMC on to Europe PMC in its canonical form (#170)', async () => {
     const pmcid = 'PMC9000001';
-    epmcHits.set(`PMCID:${pmcid}`, { id: pmcid, source: 'PMC', pmcid, doi: '10.9000/one' });
+    epmcHits.set(`PMCID:${pmcid}`, {
+      id: pmcid,
+      source: 'PMC',
+      pmcid,
+      doi: '10.9000/one',
+      ...openAccess(pmcid),
+    });
     epmcFullText.set(pmcid, jats(pmcid, 'Served by Europe PMC'));
     const { result, text } = await fetchFulltext({ pmcids: ['PMC09000001'] });
 
@@ -670,7 +693,7 @@ function serveDnaInEpmc(pmcid?: string) {
     pmid: DNA.pmid,
     doi: DNA.doi,
     title: 'Molecular structure of nucleic acids',
-    ...(pmcid && { pmcid }),
+    ...(pmcid && { pmcid, ...openAccess(pmcid) }),
   };
   epmcHits.set(`EXT_ID:${DNA.pmid} AND SRC:MED`, hit);
   epmcHits.set(`DOI:"${DNA.doi}"`, hit);
@@ -757,7 +780,8 @@ describe('pmcids, pmids, and dois together (#192)', () => {
       {
         tier: 'europepmc',
         outcome: 'no-fulltext',
-        detail: 'EPMC source MED has no PMC counterpart',
+        detail:
+          'EPMC does not mark this record open access; fullTextXML covers its open-access subset only',
       },
       { tier: 'unpaywall', outcome: 'no-oa', detail: 'DOI unknown to Unpaywall' },
     ];
@@ -830,6 +854,7 @@ describe('pmcids, pmids, and dois together (#192)', () => {
       pmid: String(GENBANK.pmid),
       pmcid: GENBANK.pmcid,
       doi: GENBANK.doi,
+      ...openAccess(GENBANK.pmcid),
     });
     const { result, text } = await fetchFulltext({ pmcids: [GENBANK.pmcid], dois: [alias] });
 
@@ -941,7 +966,8 @@ describe('pmcids, pmids, and dois together (#192)', () => {
     const epmcNoFulltext = {
       tier: 'europepmc',
       outcome: 'no-fulltext',
-      detail: 'EPMC source MED has no PMC counterpart',
+      detail:
+        'EPMC does not mark this record open access; fullTextXML covers its open-access subset only',
     };
     expect(result.unavailable).toEqual([
       {
@@ -1206,6 +1232,7 @@ describe('articles in routing order (#235)', () => {
       pmid: String(GENBANK.pmid),
       pmcid: GENBANK.pmcid,
       doi: GENBANK.doi,
+      ...openAccess(GENBANK.pmcid),
     });
     pmcAnswersReversed = true;
 
@@ -1329,6 +1356,15 @@ describe('Unpaywall article metadata', () => {
     expect(text).toContain('### Global genomics & heart failure.');
   });
 
+  it("reads the Europe PMC title's extra entity layer once, as the other title paths do (#272)", async () => {
+    servePreprint({ epmcTitle: 'Parkinson&amp;apos;s disease and &amp;amp;lt; sleep' });
+    const { result, text } = await fetchFulltext({ dois: [PREPRINT_DOI] });
+
+    // One decode past the strip's own, never to a fixed point.
+    expect(unpaywallArticle(result).title).toBe("Parkinson's disease and &lt; sleep");
+    expect(text.split('\n')).toContain("### Parkinson's disease and \\&lt; sleep");
+  });
+
   it('prefers the Unpaywall title over the HTML page title (#144)', async () => {
     servePreprint({
       record: preprintRecord({ title: PREPRINT_TITLE }, false),
@@ -1435,6 +1471,71 @@ describe('Unpaywall article metadata', () => {
   });
 });
 
+// ─── #267: Europe PMC full text follows open-access status ──────────────────
+
+describe('Europe PMC full-text availability (#267)', () => {
+  /** PPR1325930's JATS carries no PMCID, as a preprint's does not. */
+  const PPR_JATS = `<article article-type="preprint"><front><article-meta>
+<article-id pub-id-type="doi">10.21203/rs.3.rs-11130366/v1</article-id>
+<title-group><article-title>An open-access preprint</article-title></title-group>
+</article-meta></front><body><sec><title>Introduction</title><p>Preprint body.</p></sec></body></article>`;
+
+  it('requests an open-access preprint under its own accession and returns it with no pmcId', async () => {
+    const doi = '10.21203/rs.3.rs-11130366/v1';
+    converter.set(doi, { doi });
+    epmcHits.set(`DOI:"${doi}"`, {
+      id: 'PPR1325930',
+      source: 'PPR',
+      doi,
+      ...openAccess('PPR1325930'),
+    });
+    epmcFullText.set('PPR1325930', PPR_JATS);
+    const { result, text } = await fetchFulltext({ dois: [doi] });
+
+    expect(fullTextXmlRequests().map((u) => u.pathname)).toEqual([
+      '/europepmc/webservices/rest/PPR1325930/fullTextXML',
+    ]);
+    const article = pmcArticle(result);
+    expect(article).toMatchObject({
+      viaSource: 'europepmc',
+      epmcId: 'PPR1325930',
+      epmcSource: 'PPR',
+      title: 'An open-access preprint',
+    });
+    expect(article).not.toHaveProperty('pmcId');
+    expect(result.unavailable).toBeUndefined();
+    expect(text).toContain('\n**EPMC ID:** PPR1325930 (PPR)\n');
+  });
+
+  it('never requests a PMC-backed record Europe PMC does not mark open access', async () => {
+    const pmcid = 'PMC13536919';
+    epmcHits.set(`PMCID:${pmcid}`, {
+      id: '42684012',
+      source: 'MED',
+      pmid: '42684012',
+      pmcid,
+      isOpenAccess: 'N',
+      fullTextIdList: { fullTextId: [pmcid] },
+    });
+    // Served if asked: only the gate keeps the request from going out.
+    epmcFullText.set(pmcid, jats(pmcid, 'Not open access'));
+    const { result } = await fetchFulltext({ pmcids: [pmcid] });
+
+    expect(fullTextXmlRequests()).toEqual([]);
+    expect(result.articles).toEqual([]);
+    expect(result.unavailable?.[0]?.triedTiers).toEqual([
+      { tier: 'pmc', outcome: 'miss' },
+      {
+        tier: 'europepmc',
+        outcome: 'no-fulltext',
+        detail:
+          'EPMC does not mark this record open access; fullTextXML covers its open-access subset only',
+      },
+      { tier: 'unpaywall', outcome: 'no-doi' },
+    ]);
+  });
+});
+
 // ─── #168: tier failures stay on the chain ───────────────────────────────────
 
 describe('Europe PMC and Unpaywall failures', () => {
@@ -1457,7 +1558,13 @@ describe('Europe PMC and Unpaywall failures', () => {
 
   it('fold a failed Europe PMC fullTextXML fetch and an Unpaywall content failure into the chain (#168)', async () => {
     const pmcid = 'PMC9200001';
-    epmcHits.set(`PMCID:${pmcid}`, { id: pmcid, source: 'PMC', pmcid, doi: PREPRINT_DOI });
+    epmcHits.set(`PMCID:${pmcid}`, {
+      id: pmcid,
+      source: 'PMC',
+      pmcid,
+      doi: PREPRINT_DOI,
+      ...openAccess(pmcid),
+    });
     failing.add(`https://www.ebi.ac.uk/europepmc/webservices/rest/${pmcid}/fullTextXML`);
     unpaywallRecords.set(PREPRINT_DOI, preprintRecord());
     failing.add('https://www.medrxiv.org/');

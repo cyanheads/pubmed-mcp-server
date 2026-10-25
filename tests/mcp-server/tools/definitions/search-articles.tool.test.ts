@@ -9,14 +9,20 @@ import { createMockContext, getEnrichment, runToolContract } from '@cyanheads/mc
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { toJSONSchema } from 'zod/v4/core';
 
+import { NcbiResponseHandler } from '@/services/ncbi/response-handler.js';
 import type { ParsedBriefSummary } from '@/services/ncbi/types.js';
 
-import { bunMarkdown, renderedText, textBlocks } from '../../../_helpers.js';
+import { bunMarkdown, readCommonMark, renderedText, textBlocks } from '../../../_helpers.js';
 import {
   BOOK_ESUMMARY_XML,
   CHAPTER_DATES_ESUMMARY_XML,
   parseESummaryXml,
 } from '../../../services/ncbi/parsing/_book-fixtures.js';
+import {
+  APOS_TITLE_ESUMMARY_XML,
+  FIELD_AND_PHRASE_ESEARCH_XML,
+  QUOTED_PHRASE_AMP_ESEARCH_XML,
+} from '../../../services/ncbi/parsing/_entity-fixtures.js';
 
 const mockESearch = vi.fn();
 const mockESummary = vi.fn();
@@ -32,7 +38,7 @@ const { extractBriefSummaries: realExtractBriefSummaries } = await vi.importActu
   typeof import('@/services/ncbi/parsing/esummary-parser.js')
 >('@/services/ncbi/parsing/esummary-parser.js');
 
-const { searchArticlesTool } = await import(
+const { searchArticlesTool, withoutFormattingTags } = await import(
   '@/mcp-server/tools/definitions/search-articles.tool.js'
 );
 
@@ -41,6 +47,37 @@ const contractText = (result: Awaited<ReturnType<typeof runToolContract>>) =>
   textBlocks(result.content as ContentBlock[])
     .map((b) => b.text)
     .join('\n');
+
+/**
+ * An ESearch body as the NCBI service hands it to the tool: parsed by the
+ * production response handler, so its single entity decode has run, with each
+ * diagnostic member a string array.
+ */
+function eSearchResultOf(xml: string) {
+  const { eSearchResult } = new NcbiResponseHandler().parseAndHandleResponse<{
+    eSearchResult: Record<string, unknown>;
+  }>(xml, 'esearch', { retmode: 'xml' });
+  const list = (value: unknown) =>
+    value === undefined
+      ? undefined
+      : Object.fromEntries(
+          Object.entries(value as Record<string, unknown>).map(([key, entry]) => [
+            key,
+            (Array.isArray(entry) ? entry : [entry]).map(String),
+          ]),
+        );
+  const errorList = list(eSearchResult.ErrorList);
+  const warningList = list(eSearchResult.WarningList);
+  return {
+    count: Number(eSearchResult.Count),
+    retmax: Number(eSearchResult.RetMax),
+    retstart: Number(eSearchResult.RetStart),
+    idList: [],
+    queryTranslation: eSearchResult.QueryTranslation,
+    ...(errorList && { errorList }),
+    ...(warningList && { warningList }),
+  };
+}
 
 describe('searchArticlesTool', () => {
   beforeEach(() => {
@@ -392,7 +429,7 @@ describe('searchArticlesTool', () => {
               data: { reason: 'invalid_date_range', retryable: false, fields: [...fields] },
             },
           });
-          const text = contractText(result);
+          const text = readCommonMark(contractText(result));
           for (const field of fields) expect(text).toContain(`\`${field}\``);
           expect(text).toMatch(message);
           expect(text).toMatch(/Recovery:/);
@@ -597,6 +634,46 @@ describe('searchArticlesTool', () => {
     });
   });
 
+  describe('species filter (issue #270)', () => {
+    // PubMed's documented species filters: Humans is `humans[mh]`, Other Animals
+    // is `"animals"[mh:noexp]`. An exploded `animals[MeSH Terms]` takes in the
+    // Humans heading below it, so it would admit human-only studies.
+    it.each([
+      ['humans', 'cancer AND humans[MeSH Terms]'],
+      ['animals', 'cancer AND "animals"[mh:noexp]'],
+    ] as const)(
+      'sends species %s as its PubMed filter clause on both surfaces',
+      async (species, term) => {
+        mockESearch.mockResolvedValue({ count: 1, idList: ['1'], retmax: 20, retstart: 0 });
+        const result = await runToolContract(searchArticlesTool, { query: 'cancer', species });
+
+        expect(mockESearch.mock.calls[0]?.[0]?.term).toBe(term);
+        expect(result.structuredContent).toMatchObject({
+          effectiveQuery: term,
+          appliedFilters: { species },
+        });
+        expect(
+          new URL((result.structuredContent as { searchUrl: string }).searchUrl).searchParams.get(
+            'term',
+          ),
+        ).toBe(term);
+        const text = readCommonMark(contractText(result));
+        expect(text).toContain(`⟨strong⟩Effective Query:⟨/strong⟩ ⟨code_inline:${term}⟩`);
+        expect(text).toContain(`⟨strong⟩Species:⟨/strong⟩ ${species}`);
+      },
+    );
+
+    it('names both clauses and the MEDLINE-indexing limit in the species descriptions', () => {
+      const input = searchArticlesTool.input.shape.species.description ?? '';
+      expect(input).toContain('`humans[MeSH Terms]`');
+      expect(input).toContain('`"animals"[mh:noexp]`');
+      expect(input).toMatch(/MEDLINE species indexing/);
+      expect(searchArticlesTool.enrichment?.appliedFilters.shape.species.description).toContain(
+        '`"animals"[mh:noexp]`',
+      );
+    });
+  });
+
   it('clamps history-backed summary fetches to the returned PMID page', async () => {
     mockESearch.mockResolvedValue({
       count: 10,
@@ -705,7 +782,7 @@ describe('searchArticlesTool', () => {
           data: { reason: 'blank_query', retryable: false },
         },
       });
-      expect(contractText(result)).toContain('`query`');
+      expect(readCommonMark(contractText(result))).toContain('`query`');
       expect(mockESearch).not.toHaveBeenCalled();
     });
 
@@ -915,7 +992,9 @@ describe('searchArticlesTool', () => {
       expect(getEnrichment(result.ctx).appliedFilters).toEqual(filters);
     });
 
-    it('sends a markup-wrapped filter value as its text', async () => {
+    // `<b>` and `<i>` are inline formatting tags with no attributes, the one
+    // markup removed from what is sent; anything else is sent as written. (#260)
+    it('removes inline formatting tags from a filter value', async () => {
       const result = await search({ author: '<b>Smith J</b>', meshTerms: ['<i>Asthma</i>'] });
 
       expect(result.term).toBe('asthma AND Smith J[Author] AND ("Asthma"[MeSH Terms])');
@@ -1055,7 +1134,7 @@ describe('searchArticlesTool', () => {
             data: { reason: 'blank_filter', retryable: false, fields },
           },
         });
-        const text = contractText(result);
+        const text = readCommonMark(contractText(result));
         for (const field of fields) expect(text).toContain(`\`${field}\``);
         expect(text).toMatch(/Recovery:/);
         expect(mockESearch).not.toHaveBeenCalled();
@@ -1103,6 +1182,142 @@ describe('searchArticlesTool', () => {
         expect(description, field).toMatch(/rejected/i);
         expect(description, field).toMatch(/parentheses, brackets, or double quotes/i);
       }
+    });
+  });
+
+  describe('query and filter values reach ESearch as written (issue #260)', () => {
+    beforeEach(() => {
+      mockESearch.mockResolvedValue({ count: 1, idList: ['1'], retmax: 20, retstart: 0 });
+    });
+
+    /** The term ESearch was called with, the enrichment, and the searchUrl's decoded term. */
+    const sent = async (input: { query: string } & Record<string, unknown>) => {
+      const result = await runToolContract(searchArticlesTool, input);
+      const structured = result.structuredContent as {
+        effectiveQuery: string;
+        appliedFilters: Record<string, unknown>;
+        searchUrl: string;
+      };
+      return {
+        term: mockESearch.mock.calls[0]?.[0]?.term as string,
+        effectiveQuery: structured.effectiveQuery,
+        appliedFilters: structured.appliedFilters,
+        urlTerm: new URL(structured.searchUrl).searchParams.get('term'),
+        text: readCommonMark(contractText(result)),
+      };
+    };
+
+    // The sanitizer HTML-encoded `&`, `<`, and `>` and deleted text from a `<`
+    // up to the next `>`, so PubMed ran `R&amp;D[tiab]` (9 hits, against 1,886
+    // as written) and `c.1A&gt;G` (0, against 123).
+    it.each([
+      ['an ampersand', 'R&D[tiab] AND pharmaceutical[tiab]'],
+      ['a greater-than sign', 'c.1A>G'],
+      ['a less-than sign in a phrase', '"p<0.05"[tiab]'],
+      ['a less-than sign before a letter', 'smith<j'],
+      ['a less-than and a greater-than sign around text', 'a<b and c>d'],
+      ['an HTML entity', 'caf&eacute;'],
+      ['a formatting tag with attributes and its closer', '<i class="a">x</i>'],
+      ['a script element beside a term', 'cancer AND <script>x</script>'],
+    ])('sends a query holding %s as written', async (_label, query) => {
+      const result = await sent({ query });
+
+      expect(result.term).toBe(query);
+      expect(result.effectiveQuery).toBe(query);
+      expect(result.urlTerm).toBe(query);
+      expect(result.appliedFilters).toEqual({});
+    });
+
+    // A formatting tag with attributes is not a pasted title's italics, so it
+    // and the closer that pairs with it reach PubMed as written; a bare tag
+    // inside it is still removed. The pairing rules are tabled at
+    // `withoutFormattingTags`; these prove the query and a filter use it.
+    it('keeps an attribute-bearing tag and its closer in the query and removes a bare one inside', async () => {
+      const result = await sent({ query: '<i class="a"><i>x</i></i>[tiab]' });
+
+      expect(result.term).toBe('<i class="a">x</i>[tiab]');
+      expect(result.effectiveQuery).toBe('<i class="a">x</i>[tiab]');
+      expect(result.urlTerm).toBe('<i class="a">x</i>[tiab]');
+    });
+
+    it('keeps an attribute-bearing tag and its closer in a filter value', async () => {
+      const result = await sent({ query: 'asthma', journal: '<i class="a">Lancet</i>' });
+
+      expect(result.term).toBe('asthma AND "<i class="a">Lancet</i>"[Journal]');
+      expect(result.appliedFilters).toEqual({ journal: '<i class="a">Lancet</i>' });
+    });
+
+    // PubMed searches markup as text: `<i>Staphylococcus aureus</i>[tiab]`
+    // matches 3 records as written and 152,258 without the tags.
+    it.each([
+      [
+        'italics around a tagged phrase',
+        '<i>Staphylococcus aureus</i>[tiab]',
+        'Staphylococcus aureus[tiab]',
+      ],
+      [
+        'every formatting tag, any case',
+        '<EM>a</EM> <Strong>b</Strong> <u>c</u> <B>d</b>',
+        'a b c d',
+      ],
+      ['a formatting tag beside an ampersand', '<i>R&D</i>[tiab]', 'R&D[tiab]'],
+    ])('removes %s and sends the rest as written', async (_label, query, term) => {
+      const result = await sent({ query });
+
+      expect(result.term).toBe(term);
+      expect(result.effectiveQuery).toBe(term);
+      expect(result.urlTerm).toBe(term);
+      expect(result.text).toContain(`⟨strong⟩Effective Query:⟨/strong⟩ ⟨code_inline:${term}⟩`);
+    });
+
+    it.each([
+      [
+        'journal',
+        { query: 'brain', journal: 'Brain & development' },
+        'brain AND "Brain & development"[Journal]',
+        { journal: 'Brain & development' },
+      ],
+      [
+        'author',
+        { query: 'asthma', author: 'smith<j' },
+        'asthma AND smith<j[Author]',
+        { author: 'smith<j' },
+      ],
+      [
+        'meshTerms element',
+        { query: 'asthma', meshTerms: ['<i>Asthma</i>', 'T-Lymphocytes & B-Lymphocytes'] },
+        'asthma AND ("Asthma"[MeSH Terms] AND "T-Lymphocytes & B-Lymphocytes"[MeSH Terms])',
+        { meshTerms: ['Asthma', 'T-Lymphocytes & B-Lymphocytes'] },
+      ],
+      [
+        'publicationTypes element',
+        { query: 'asthma', publicationTypes: ['Review <b>x</b> & y'] },
+        'asthma AND ("Review x & y"[Publication Type])',
+        { publicationTypes: ['Review x & y'] },
+      ],
+      [
+        'language',
+        { query: 'asthma', language: 'eng>' },
+        'asthma AND eng>[Language]',
+        { language: 'eng>' },
+      ],
+    ])(
+      'sends a %s value as written inside its clause',
+      async (_label, input, term, appliedFilters) => {
+        const result = await sent(input);
+
+        expect(result.term).toBe(term);
+        expect(result.effectiveQuery).toBe(term);
+        expect(result.urlTerm).toBe(term);
+        expect(result.appliedFilters).toEqual(appliedFilters);
+      },
+    );
+
+    it('describes effectiveQuery as what was sent, not a sanitized copy', () => {
+      const description = searchArticlesTool.enrichment?.effectiveQuery.description ?? '';
+      expect(description).not.toMatch(/sanitized/i);
+      expect(description).toMatch(/as written/);
+      expect(description).toContain('`<i>`');
     });
   });
 
@@ -1285,6 +1500,68 @@ describe('searchArticlesTool', () => {
     });
   });
 
+  describe('unmatched-phrase notice quotes the clause as the caller wrote it (issue #273)', () => {
+    /** The notice on both surfaces: structuredContent's string and content[]'s CommonMark reading. */
+    const noticeOf = async (query: string) => {
+      const result = await runToolContract(searchArticlesTool, { query });
+      return {
+        notice: (result.structuredContent as { notice?: string }).notice ?? '',
+        text: readCommonMark(contractText(result)),
+      };
+    };
+
+    it('decodes the `&` ESearch double-encodes in QuotedPhraseNotFound, on both surfaces', async () => {
+      mockESearch.mockResolvedValue(eSearchResultOf(QUOTED_PHRASE_AMP_ESEARCH_XML));
+      const { notice, text } = await noticeOf('"zzqxw & yyqzv"[tiab] AND cancer');
+
+      expect(notice).toContain('PubMed matched nothing for `"zzqxw & yyqzv"[tiab]`, so');
+      expect(text).toContain('PubMed matched nothing for ⟨code_inline:"zzqxw & yyqzv"[tiab]⟩, so');
+    });
+
+    it('decodes a double-encoded `<` and `>` too, and leaves a FieldNotFound value as sent', async () => {
+      mockESearch.mockResolvedValue(eSearchResultOf(FIELD_AND_PHRASE_ESEARCH_XML));
+      const { notice, text } = await noticeOf(
+        'cancer AND tumor[zz&field] AND "a<b zzqxw > c"[tiab]',
+      );
+
+      expect(notice).toContain('field tag(s) `zz&field` and');
+      expect(notice).toContain('matched nothing for `"a<b zzqxw > c"[tiab]`, so');
+      expect(text).toContain('⟨code_inline:zz&field⟩');
+      expect(text).toContain('⟨code_inline:"a<b zzqxw > c"[tiab]⟩');
+    });
+
+    it('decodes one layer, never to a fixed point, and only in QuotedPhraseNotFound', async () => {
+      // A caller who wrote `&amp;` in the phrase and the field tag: ESearch
+      // ships the phrase as `&amp;amp;amp;` and the tag as `&amp;amp;`.
+      mockESearch.mockResolvedValue({
+        count: 0,
+        idList: [],
+        retmax: 0,
+        retstart: 0,
+        errorList: { FieldNotFound: ['zz&amp;field'] },
+        warningList: { QuotedPhraseNotFound: ['"zz &amp;amp; yy"[tiab]'] },
+      });
+      const { notice } = await noticeOf('cancer[zz&amp;field] AND "zz &amp; yy"[tiab]');
+
+      expect(notice).toContain('field tag(s) `zz&amp;field` and');
+      expect(notice).toContain('matched nothing for `"zz &amp; yy"[tiab]`, so');
+    });
+
+    it('fences a clause holding a backtick so it reads back whole', async () => {
+      mockESearch.mockResolvedValue({
+        count: 0,
+        idList: [],
+        retmax: 0,
+        retstart: 0,
+        warningList: { QuotedPhraseNotFound: ['"5` UTR"[tiab]'] },
+      });
+      const { notice, text } = await noticeOf('"5` UTR"[tiab]');
+
+      expect(notice).toContain('matched nothing for ``"5` UTR"[tiab]``, so');
+      expect(text).toContain('matched nothing for ⟨code_inline:"5` UTR"[tiab]⟩, so');
+    });
+  });
+
   describe('notice composition across signals (issues #95, #96, #97)', () => {
     it('composes a partial dateRange with an ignored field tag on a hit-bearing page', async () => {
       mockESearch.mockResolvedValue({
@@ -1414,7 +1691,7 @@ describe('searchArticlesTool', () => {
         '## PubMed Search Results',
         '**Query:** `cancer`',
         '**Returned:** 2 of 2 | **Offset:** 0',
-        '**Search URL:** https://pubmed.ncbi.nlm.nih.gov/?term=cancer',
+        '**Search URL:** <https://pubmed.ncbi.nlm.nih.gov/?term=cancer>',
         '',
         '**PMIDs:** 111, 222',
       ].join('\n'),
@@ -1445,6 +1722,76 @@ describe('searchArticlesTool', () => {
       )[0]?.text;
       expect(renderedText(text ?? '')).toContain(`Query: ${query} Returned: 0 of 0`);
     });
+  });
+
+  describe('caller echoes the server renders itself (issue #263)', () => {
+    const input = {
+      query: 'HLA-B*57 `x` carriers',
+      maxResults: 1,
+      author: 'Lee _K',
+      journal: '<i class="x">J_ Med</i>',
+      meshTerms: ['HLA-B*57', 'Drug*Hypersensitivity'],
+      publicationTypes: ['Review`s'],
+      language: 'eng~',
+    };
+    const effectiveQuery =
+      'HLA-B*57 `x` carriers AND ("Review`s"[Publication Type]) AND Lee _K[Author] AND "<i class="x">J_ Med</i>"[Journal] AND ("HLA-B*57"[MeSH Terms] AND "Drug*Hypersensitivity"[MeSH Terms]) AND eng~[Language]';
+
+    const run = async () => {
+      mockESearch.mockResolvedValue({ count: 1, idList: ['1'], retmax: 1, retstart: 0 });
+      const result = await runToolContract(searchArticlesTool, input);
+      return { result, raw: contractText(result), text: readCommonMark(contractText(result)) };
+    };
+
+    it('renders the effective query as a code span that reads back exactly', async () => {
+      const { result, raw, text } = await run();
+
+      expect((result.structuredContent as { effectiveQuery: string }).effectiveQuery).toBe(
+        effectiveQuery,
+      );
+      expect(raw).toContain(`**Effective Query:** \`\`${effectiveQuery}\`\`\n`);
+      expect(text).toContain(`⟨strong⟩Effective Query:⟨/strong⟩ ⟨code_inline:${effectiveQuery}⟩`);
+    });
+
+    it('renders each applied-filter value as its own code span', async () => {
+      const { text } = await run();
+
+      expect(text).toContain('⟨strong⟩Publication types:⟨/strong⟩ ⟨code_inline:Review`s⟩');
+      expect(text).toContain('⟨strong⟩Author:⟨/strong⟩ ⟨code_inline:Lee _K⟩');
+      expect(text).toContain('⟨strong⟩Journal:⟨/strong⟩ ⟨code_inline:<i class="x">J_ Med</i>⟩');
+      expect(text).toContain(
+        '⟨strong⟩MeSH terms:⟨/strong⟩ ⟨code_inline:HLA-B*57⟩, ⟨code_inline:Drug*Hypersensitivity⟩',
+      );
+      expect(text).toContain('⟨strong⟩Language:⟨/strong⟩ ⟨code_inline:eng~⟩');
+    });
+
+    it('renders the Search URL as an autolink, never backslash-escaped', async () => {
+      const { result, raw, text } = await run();
+      const { searchUrl } = result.structuredContent as { searchUrl: string };
+
+      expect(searchUrl).toContain('HLA-B*57');
+      expect(raw).toContain(`**Search URL:** <${searchUrl}>\n`);
+      const urlLine = text.split('\n').find((line) => line.startsWith('⟨strong⟩Search URL:'));
+      expect(urlLine).toMatch(/^⟨strong⟩Search URL:⟨\/strong⟩ ⟨a⟩[^⟨]+⟨\/a⟩$/);
+    });
+  });
+
+  it('returns the title NCBI double-encodes in ESummary decoded on both surfaces (issue #262)', async () => {
+    mockExtractBriefSummaries.mockImplementation(realExtractBriefSummaries);
+    mockESearch.mockResolvedValue({ count: 1, idList: ['42138044'], retmax: 20, retstart: 0 });
+    mockESummary.mockResolvedValue(parseESummaryXml(APOS_TITLE_ESUMMARY_XML));
+
+    const result = await runToolContract(searchArticlesTool, {
+      query: '42138044[pmid]',
+      summaryCount: 1,
+    });
+
+    const title =
+      "Cervical Vestibular-Evoked Myogenic Potentials (cVEMPs) in Parkinson's Disease Patients: Prospective, Case-Control study.";
+    expect(
+      (result.structuredContent as { summaries: ParsedBriefSummary[] }).summaries[0]?.title,
+    ).toBe(title);
+    expect(contractText(result)).toContain(`\n#### ${title}\n`);
   });
 
   describe('count-split note (issue #44)', () => {
@@ -1660,6 +2007,48 @@ describe('searchArticlesTool format() escaping of the other summary fields (issu
     expect(text).toContain('**Published:** 2026 \\*Mar\\*');
     expect(text).toContain('**DOI:** 10.1000/\\[abc\\](def)');
   });
+
+  it('keeps every lone delimiter visible across the lines of one summary (issue #261)', () => {
+    const text =
+      textBlocks(
+        searchArticlesTool.format!({
+          query: 'cancer',
+          offset: 0,
+          pmids: ['42'],
+          summaries: [
+            {
+              pmid: '42',
+              title: 'HLA-B*57:01 carriers',
+              authors: 'Smith J*, Lee _K',
+              editors: ['Doe A~'],
+              source: 'J_ Med*',
+              bookTitle: '5` UTR',
+              publisherName: '3` end',
+              docType: 'chapter~',
+              pubDate: '2026 Mar',
+              doi: '10.1/x_',
+            },
+          ],
+          searchUrl: 'https://pubmed.ncbi.nlm.nih.gov/?term=cancer',
+          totalCount: 1,
+        }),
+      )[0]?.text ?? '';
+
+    // The heading is one inline run: its lone `*` stays raw.
+    expect(text).toContain('\n#### HLA-B*57:01 carriers\n');
+    expect(readCommonMark(text.slice(text.indexOf('**PMID:**')))).toBe(
+      [
+        '⟨strong⟩PMID:⟨/strong⟩ 42',
+        '⟨strong⟩Authors:⟨/strong⟩ Smith J*, Lee _K',
+        '⟨strong⟩Editors:⟨/strong⟩ Doe A~',
+        '⟨strong⟩Source:⟨/strong⟩ J_ Med*',
+        '⟨strong⟩Book:⟨/strong⟩ 5` UTR — 3` end',
+        '⟨strong⟩Doc Type:⟨/strong⟩ chapter~',
+        '⟨strong⟩Published:⟨/strong⟩ 2026 Mar',
+        '⟨strong⟩DOI:⟨/strong⟩ 10.1/x_',
+      ].join('\n'),
+    );
+  });
 });
 
 describe('searchArticlesTool Bookshelf summaries (issue #114)', () => {
@@ -1829,8 +2218,10 @@ describe('searchArticlesTool total match count in the header (issue #147)', () =
 
     const text = contractText(result);
     expect(text).toContain('**Returned:** 1 of 5 | **Offset:** 0');
-    expect(text).toContain('**Effective Query:** alphafold protein structure AND Smith J[Author]');
-    expect(text).toContain('- **Author:** Smith J');
+    expect(readCommonMark(text)).toContain(
+      '⟨strong⟩Effective Query:⟨/strong⟩ ⟨code_inline:alphafold protein structure AND Smith J[Author]⟩',
+    );
+    expect(text).toContain('- **Author:** `Smith J`');
   });
 });
 
@@ -2313,11 +2704,106 @@ describe('searchArticlesTool against a failing NCBI backend (issue #174)', () =>
       const { hint } = (
         result.structuredContent as { error: { data: { recovery: { hint: string } } } }
       ).error.data.recovery;
-      const text = contractText(result);
+      const text = readCommonMark(contractText(result));
       expect(text).toContain(message);
       expect(text).toContain(hint);
       expect(text).toContain('reason ncbi_rate_limited');
       expect(fetchSpy).toHaveBeenCalledTimes(fetches);
     },
   );
+});
+
+describe('withoutFormattingTags — which tags are removed (issue #260)', () => {
+  // A bare opener (`<i>`) is removed and so is the closer that pairs with it; an
+  // opener with attributes and its closer are kept; a closer with nothing of its
+  // name open is removed. Pairing runs per tag name, innermost first.
+  it.each([
+    ['a bare pair', '<i>x</i>', 'x'],
+    ['an attribute-bearing pair', '<i class="a">x</i>', '<i class="a">x</i>'],
+    ['an attribute-bearing pair, any case', '<I CLASS="a">x</i>', '<I CLASS="a">x</i>'],
+    [
+      'a bare pair inside an attribute-bearing one',
+      '<i class="a"><i>x</i></i>',
+      '<i class="a">x</i>',
+    ],
+    [
+      'an attribute-bearing pair inside a bare one',
+      '<i><i class="a">x</i></i>',
+      '<i class="a">x</i>',
+    ],
+    ['a bare tag of another name inside', '<i class="a"><b>x</i></b>', '<i class="a">x</i>'],
+    [
+      'a stray closer after an attribute-bearing pair',
+      '<b id="1">x</b> y</b>',
+      '<b id="1">x</b> y',
+    ],
+    ['a closer of another name only', '<i class="a">x</b>', '<i class="a">x'],
+    ['a closer before its opener', '</u>x<u title="t">', 'x<u title="t">'],
+    ['an unclosed attribute-bearing opener', '<em lang="la">x', '<em lang="la">x'],
+    ['bare closers with nothing open', 'x</strong></i>', 'x'],
+  ])('%s', (_label, text, expected) => {
+    expect(withoutFormattingTags(text)).toBe(expected);
+  });
+});
+
+describe('withoutFormattingTags — linear time on adversarial input (issue #260)', () => {
+  /** CPU time of `run`, in ms — this thread's user + system time, not wall clock. */
+  const cpuMs = (run: () => void): number => {
+    const start = process.threadCpuUsage();
+    run();
+    const { user, system } = process.threadCpuUsage(start);
+    return (user + system) / 1000;
+  };
+
+  /** Fastest of three single-call measurements after one warm-up call. */
+  const fastestMs = (text: string): number => {
+    withoutFormattingTags(text);
+    return Math.min(...Array.from({ length: 3 }, () => cpuMs(() => withoutFormattingTags(text))));
+  };
+
+  /** The text is sent unchanged: it holds no complete formatting tag, or only kept ones. */
+  const unchanged = (text: string) => text;
+  const removed = () => '';
+
+  it.each<[string, (n: number) => string, (text: string, n: number) => string]>([
+    ['an opener with no closing bracket, repeated', (n) => '<i'.repeat(n / 2), unchanged],
+    [
+      'a closer prefix that never completes, repeated',
+      (n) => '</stron'.repeat(Math.floor(n / 7)),
+      unchanged,
+    ],
+    ['nested openers', (n) => `${'<a'.repeat(n / 4)}${'>'.repeat(n / 2)}`, unchanged],
+    ['a formatting tag at every position', (n) => '<i>'.repeat(Math.floor(n / 3)), removed],
+    [
+      'an attribute-bearing opener, repeated',
+      (n) => '<i class="a">'.repeat(Math.floor(n / 13)),
+      unchanged,
+    ],
+    ['a closer with nothing open, repeated', (n) => '</i>'.repeat(n / 4), removed],
+    [
+      'attribute-bearing and bare openers, then their closers',
+      (n) =>
+        `${'<i class="a"><i>'.repeat(Math.floor(n / 32))}${'</i></i>'.repeat(Math.floor(n / 16))}`,
+      // Each kept opener keeps one closer; the bare openers' closers and the
+      // closers left over once nothing is open are removed.
+      (_text, n) =>
+        `${'<i class="a">'.repeat(Math.floor(n / 32))}${'</i>'.repeat(Math.floor(n / 32))}`,
+    ],
+    ['an attribute-bearing opener that never closes', (n) => '<i a'.repeat(n / 4), unchanged],
+    ['one long line ending in a break', (n) => `${'§1 x'.repeat(n / 4)}\ny`, unchanged],
+    ['line breaks throughout', (n) => '  \r\n'.repeat(n / 4), unchanged],
+  ])('scales linearly from 5k to 320k characters: %s', (_label, build, sent) => {
+    // Doubling from 5k, each size checked against the outcome and the absolute
+    // bound before the next runs.
+    const times: number[] = [];
+    for (let n = 5_000; n <= 320_000; n *= 2) {
+      const text = build(n);
+      expect(withoutFormattingTags(text)).toBe(sent(text, n));
+      const ms = fastestMs(text);
+      expect(ms).toBeLessThan(200);
+      times.push(ms);
+    }
+    // Linear work grows 64× across the span; quadratic grows 4096×.
+    expect((times.at(-1) ?? 0) / Math.max(times[0] ?? 0, 0.05)).toBeLessThan(256);
+  });
 });

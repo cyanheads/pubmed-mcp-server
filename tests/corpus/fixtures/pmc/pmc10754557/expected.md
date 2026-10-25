@@ -32,6 +32,9 @@
 **PubMed:** https://pubmed.ncbi.nlm.nih.gov/38206746/
 **Keywords:** EGFR ex20ins mutation, EGFR TKIs, first-line, furmonertinib, lung adenocarcinoma
 
+**License:** [https://creativecommons.org/licenses/by/4.0/](<https://creativecommons.org/licenses/by/4.0/>)
+This is an open access article distributed under the Creative Commons Attribution License 4.0 (CCBY), which permits unrestricted use, distribution, and reproduction in any medium, provided the original work is properly cited.
+
 #### Abstract
 Rationale: Many studies have shown that first- and second-generation epidermal growth factor receptor tyrosine kinase inhibitors are less effective in patients with epidermal growth factor receptor (EGFR) exon 20 insertion (ex20ins) mutations. The efficacy of third-generation epidermal growth factor receptor tyrosine kinase inhibitors is still under investigation. Although new targeted tyrosine kinase inhibitors and monoclonal antibody-based agents have made significant advances in the treatment of epidermal growth factor receptor exon 20 insertion (EGFR ex20ins) mutation, the efficacy of these novel agents is not quite satisfactory. Platinum- and pemetrexed-based chemotherapy remains the standard first-line treatment for patients harboring EGFR ex20ins mutation.
 

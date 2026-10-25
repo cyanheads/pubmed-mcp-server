@@ -20,7 +20,7 @@ import { XMLParser } from 'fast-xml-parser';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { ORDERED_XML_PARSER_OPTIONS } from '@/services/ncbi/parsing/ordered-xml-parser-options.js';
 
-import { textBlocks } from '../../../_helpers.js';
+import { readCommonMark, textBlocks } from '../../../_helpers.js';
 import {
   articleSetXml,
   JOURNAL_ARTICLE_XML,
@@ -51,8 +51,15 @@ vi.mock('@/services/europe-pmc/europe-pmc-service.js', () => ({
 vi.mock('@/services/openalex/openalex-service.js', () => ({
   getOpenAlexServiceOptional: () => undefined,
 }));
+const mockIciteFetchRecords = vi.fn();
+vi.mock('@/services/icite/icite-service.js', () => ({
+  getIciteService: () => ({ fetchRecords: mockIciteFetchRecords }),
+}));
 
 const { fetchArticlesTool } = await import('@/mcp-server/tools/definitions/fetch-articles.tool.js');
+const { fetchCitationMetricsTool } = await import(
+  '@/mcp-server/tools/definitions/fetch-citation-metrics.tool.js'
+);
 const { formatCitationsTool } = await import(
   '@/mcp-server/tools/definitions/format-citations.tool.js'
 );
@@ -124,6 +131,7 @@ beforeEach(() => {
   mockESpell.mockReset();
   mockIdConvert.mockReset();
   mockEpmcSearch.mockReset();
+  mockIciteFetchRecords.mockReset();
   mockEFetch.mockResolvedValue({
     PubmedArticleSet: parseArticleSetXml(articleSetXml(JOURNAL_ARTICLE_XML)),
   });
@@ -147,6 +155,18 @@ describe('ids → pmids', () => {
     expect(mockEFetch.mock.calls[0]?.[0]).toMatchObject({ db: 'pubmed', id: PMID });
     expect(result.structuredContent).toMatchObject({ totalSubmitted: 1, totalFormatted: 1 });
     expect(textOf(result)).toContain(`## PMID ${PMID}`);
+  });
+
+  it('pubmed_fetch_citation_metrics resolves `ids` as `pmids`', async () => {
+    mockIciteFetchRecords.mockResolvedValue([{ pmid: PMID, citationCount: 7 }]);
+    const result = await callRaw(fetchCitationMetricsTool, { ids: [PMID] });
+
+    expect(result.isError).toBeFalsy();
+    expect(mockIciteFetchRecords.mock.calls[0]?.[0]).toEqual([PMID]);
+    expect(result.structuredContent).toMatchObject({
+      records: [{ pmid: PMID, citationCount: 7 }],
+    });
+    expect(textOf(result)).toContain(`### PMID ${PMID}`);
   });
 
   it('rejects a call carrying both the alias and the canonical key, naming the alias', async () => {
@@ -194,7 +214,7 @@ describe('styles → format (#254)', () => {
     expect(aliased.isError).toBe(true);
     expect(canonical.isError).toBe(true);
     expect(firstLine(aliased)).toBe(firstLine(canonical));
-    expect(firstLine(aliased)).toContain(
+    expect(readCommonMark(firstLine(aliased) ?? '')).toContain(
       'format: Invalid option: expected one of "apa"|"mla"|"bibtex"|"ris"|"vancouver"',
     );
     expect(textOf(aliased)).toContain('Validated styles as format.');
@@ -271,6 +291,7 @@ describe('each alias is load-bearing', () => {
   it.each([
     ['pubmed_fetch_articles', fetchArticlesTool, { ids: [PMID] }, 'ids'],
     ['pubmed_format_citations', formatCitationsTool, { ids: [PMID] }, 'ids'],
+    ['pubmed_fetch_citation_metrics', fetchCitationMetricsTool, { ids: [PMID] }, 'ids'],
     ['pubmed_search_articles', searchArticlesTool, { query: 'asthma', limit: 3 }, 'limit'],
     ['pubmed_find_related', findRelatedTool, { pmid: '10', limit: 2 }, 'limit'],
     ['pubmed_lookup_mesh', lookupMeshTool, { query: 'asthma', limit: 2 }, 'limit'],

@@ -27,8 +27,10 @@ import {
   EUROPEPMC_ALL_SOURCES,
   EUROPEPMC_DEFAULT_SOURCES,
   type EuropePmcSource,
+  epmcFullTextId,
+  epmcJournal,
 } from '@/services/europe-pmc/types.js';
-import { toDisplayText } from '@/services/ncbi/parsing/text-helpers.js';
+import { europePmcTitleText, toDisplayText } from '@/services/ncbi/parsing/text-helpers.js';
 import {
   conceptMeta,
   EDAM_DATABASE_SEARCH,
@@ -39,6 +41,7 @@ import { europePmcSourceInputSchema } from './_schemas.js';
 import {
   escapeMarkdownBlock,
   escapeMarkdownInline,
+  escapeMarkdownInParagraph,
   markdownCodeSpan,
   sliceCodeUnits,
 } from './_text.js';
@@ -107,7 +110,7 @@ export const pubmedEuropepmcSearchTool = tool('pubmed_europepmc_search', {
       .string()
       .default('*')
       .describe(
-        "Pagination cursor. Use `*` (default) for the first page; pass the previous response's `nextCursorMark` verbatim for subsequent pages. A whitespace-only cursor, invisible characters included, is rejected before the request, and a cursor Europe PMC cannot read fails with `europepmc_invalid_input` once a retry of it fails again while the first page of the same query is served.",
+        "Pagination cursor. Use `*` (default) for the first page; pass the previous response's `nextCursorMark` verbatim for subsequent pages. Under relevance ranking (no `sort`), a record can reappear on the next page, so de-duplicate hits by `epmcId` across pages. A whitespace-only cursor, invisible characters included, is rejected before the request, and a cursor Europe PMC cannot read fails with `europepmc_invalid_input` once a retry of it fails again while the first page of the same query is served.",
       ),
     sources: z
       .array(europePmcSourceInputSchema)
@@ -120,7 +123,7 @@ export const pubmedEuropepmcSearchTool = tool('pubmed_europepmc_search', {
       .enum(['core', 'lite'])
       .default('core')
       .describe(
-        '`core` returns abstract, IDs, dates, license; `lite` is a smaller payload with IDs and titles only.',
+        '`core` returns abstract, IDs, dates, license; `lite` is a smaller payload with the same IDs, title, authors, journal, and dates, but no abstract or license.',
       ),
     sort: z
       .string()
@@ -141,7 +144,7 @@ export const pubmedEuropepmcSearchTool = tool('pubmed_europepmc_search', {
             epmcId: z
               .string()
               .describe(
-                "Europe PMC's internal record id. Pass it with this hit's `source` to `pubmed_europepmc_fetch` as `records: [{ source, epmcId }]` for the complete record. Europe PMC's `fullTextXML` is keyed on `pmcId`, not on this id, so records without a PMC counterpart have no full text to fetch.",
+                "Europe PMC's internal record id. Pass it with this hit's `source` to `pubmed_europepmc_fetch` as `records: [{ source, epmcId }]` for the complete record. `pubmed_fetch_fulltext` takes this hit's `pmcId`, `pmid`, or `doi`, not this id.",
               ),
             title: z
               .string()
@@ -159,7 +162,7 @@ export const pubmedEuropepmcSearchTool = tool('pubmed_europepmc_search', {
               .string()
               .optional()
               .describe(
-                'Journal title as display-ready plain text — JATS/HTML markup stripped and HTML entities decoded.',
+                'Journal name as Europe PMC reports it — its MEDLINE abbreviation where it records one (e.g. `Otolaryngol Pol`), else the full journal title — the same for `resultType` `core` and `lite`. Display-ready plain text — JATS/HTML markup stripped and HTML entities decoded. Absent when Europe PMC carries no journal, as for preprints.',
               ),
             pubYear: z.string().optional().describe('Publication year'),
             firstPublicationDate: z
@@ -182,7 +185,13 @@ export const pubmedEuropepmcSearchTool = tool('pubmed_europepmc_search', {
               .boolean()
               .optional()
               .describe(
-                'Whether Europe PMC publishes a fullTextXML for this record. Derived from `inPMC` — only records with a PMC counterpart have JATS via EPMC; preprints (`PPR`) and MED-only records return false.',
+                'Whether Europe PMC publishes a fullTextXML for this record: true when Europe PMC marks it open access and lists a full-text id for it, open-access preprints (`PPR`) included; false otherwise. Absent when Europe PMC reports no open-access status.',
+              ),
+            license: z
+              .string()
+              .optional()
+              .describe(
+                'License Europe PMC records for this record, verbatim (e.g. `cc by`, `cc by-nc-nd`, `cc0`). Relayed as Europe PMC states it, never interpreted. Absent when Europe PMC supplies none, and on every `resultType: "lite"` result.',
               ),
             abstractSnippet: z
               .string()
@@ -230,7 +239,9 @@ export const pubmedEuropepmcSearchTool = tool('pubmed_europepmc_search', {
   // content[] trailer presentation for the enrichment block. structuredContent always
   // carries the full structured value; this only shapes the human-facing trailer line.
   enrichmentTrailer: {
-    query: { label: 'Effective Query' },
+    // A code span, so the query reads back exactly as Europe PMC ran it, raw
+    // and rendered. (#263)
+    query: { render: (query) => `**Effective Query:** ${markdownCodeSpan(query)}` },
     appliedSources: {
       render: (sources) => `**Sources:** ${sources.join(', ')}`,
     },
@@ -291,10 +302,13 @@ export const pubmedEuropepmcSearchTool = tool('pubmed_europepmc_search', {
       // Title, authors, and journal arrive on the same footing as the abstract —
       // raw JSON strings no XML parser has touched — so they take the same
       // single-pass normalization. Title is the confirmed live vector:
-      // preprints carry italicized species and gene names. (#102)
-      const title = h.title ? toDisplayText(h.title) : '';
+      // preprints carry italicized species and gene names. (#102) The title
+      // alone carries NCBI's residual entity layer as well. (#272)
+      const title = h.title ? europePmcTitleText(h.title) : '';
       const authors = h.authorString ? toDisplayText(h.authorString) : '';
-      const journal = h.journalTitle ? toDisplayText(h.journalTitle) : '';
+      // `lite` and `core` results keep the journal in different fields. (#274)
+      const journalName = epmcJournal(h);
+      const journal = journalName ? toDisplayText(journalName) : '';
       return {
         source: h.source as 'MED' | 'PMC' | 'PPR' | 'PAT' | 'AGR',
         epmcId: h.id,
@@ -307,7 +321,8 @@ export const pubmedEuropepmcSearchTool = tool('pubmed_europepmc_search', {
         ...(h.pmcid && { pmcId: h.pmcid }),
         ...(h.doi && { doi: h.doi }),
         ...(h.isOpenAccess !== undefined && { isOpenAccess: h.isOpenAccess === 'Y' }),
-        ...(h.inPMC !== undefined && { hasFullTextXml: h.inPMC === 'Y' }),
+        ...(h.isOpenAccess !== undefined && { hasFullTextXml: epmcFullTextId(h) !== undefined }),
+        ...(h.license && { license: h.license }),
         ...(abstract && {
           abstractSnippet: truncated
             ? `${sliceCodeUnits(abstract, ABSTRACT_SNIPPET_LIMIT)}…`
@@ -365,30 +380,35 @@ export const pubmedEuropepmcSearchTool = tool('pubmed_europepmc_search', {
       // Opaque cursors a caller passes back verbatim: code spans, so each reads
       // exactly raw and rendered. (#255)
       `**Cursor:** ${markdownCodeSpan(result.cursorMark)}${result.nextCursorMark ? ` → ${markdownCodeSpan(result.nextCursorMark)} (next page)` : ' (final page)'}`,
-      `**Search URL:** ${result.searchUrl}`,
+      // An autolink, so no character of the encoded query is read as Markdown
+      // and none is backslash-escaped. (#263)
+      `**Search URL:** <${result.searchUrl}>`,
     ];
 
     if (result.hits.length > 0) {
       lines.push('\n### Hits');
       for (const h of result.hits) {
         // Escaping is render-time only — the structuredContent values above stay
-        // plain text; only these interpolations are neutralized. (#102)
+        // plain text; only these interpolations are neutralized. (#102) The
+        // heading is one inline run; the lines under it share one paragraph,
+        // where a lone delimiter in one value pairs with one in another. (#261)
         lines.push(`\n#### ${escapeMarkdownInline(h.title ?? h.epmcId)}`);
-        lines.push(`**Source:** ${h.source} | **EPMC ID:** ${escapeMarkdownInline(h.epmcId)}`);
-        if (h.authors) lines.push(`**Authors:** ${escapeMarkdownInline(h.authors)}`);
-        if (h.journal) lines.push(`**Journal:** ${escapeMarkdownInline(h.journal)}`);
+        lines.push(`**Source:** ${h.source} | **EPMC ID:** ${escapeMarkdownInParagraph(h.epmcId)}`);
+        if (h.authors) lines.push(`**Authors:** ${escapeMarkdownInParagraph(h.authors)}`);
+        if (h.journal) lines.push(`**Journal:** ${escapeMarkdownInParagraph(h.journal)}`);
         if (h.firstPublicationDate) {
-          lines.push(`**Published:** ${escapeMarkdownInline(h.firstPublicationDate)}`);
+          lines.push(`**Published:** ${escapeMarkdownInParagraph(h.firstPublicationDate)}`);
         }
-        if (h.pubYear) lines.push(`**Year:** ${escapeMarkdownInline(h.pubYear)}`);
-        if (h.pmid) lines.push(`**PMID:** ${escapeMarkdownInline(h.pmid)}`);
-        if (h.pmcId) lines.push(`**PMCID:** ${escapeMarkdownInline(h.pmcId)}`);
-        if (h.doi) lines.push(`**DOI:** ${escapeMarkdownInline(h.doi)}`);
+        if (h.pubYear) lines.push(`**Year:** ${escapeMarkdownInParagraph(h.pubYear)}`);
+        if (h.pmid) lines.push(`**PMID:** ${escapeMarkdownInParagraph(h.pmid)}`);
+        if (h.pmcId) lines.push(`**PMCID:** ${escapeMarkdownInParagraph(h.pmcId)}`);
+        if (h.doi) lines.push(`**DOI:** ${escapeMarkdownInParagraph(h.doi)}`);
         if (h.isOpenAccess !== undefined)
           lines.push(`**Open Access:** ${h.isOpenAccess ? 'yes' : 'no'}`);
         if (h.hasFullTextXml !== undefined) {
           lines.push(`**Full-text XML in EPMC:** ${h.hasFullTextXml ? 'yes' : 'no'}`);
         }
+        if (h.license) lines.push(`**License:** ${escapeMarkdownInParagraph(h.license)}`);
         if (typeof h.citedByCount === 'number') lines.push(`**Cited by:** ${h.citedByCount}`);
         lines.push(`**URL:** ${h.epmcUrl}`);
         if (h.abstractSnippet) {

@@ -8,7 +8,13 @@ import { createMockContext, getEnrichment, runToolContract } from '@cyanheads/mc
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { toJSONSchema } from 'zod/v4/core';
 
-import { bunMarkdown, renderedHtml, renderedText, textBlocks } from '../../../_helpers.js';
+import {
+  bunMarkdown,
+  readCommonMark,
+  renderedHtml,
+  renderedText,
+  textBlocks,
+} from '../../../_helpers.js';
 import {
   ADA_WHOLE_BOOK_XML,
   articleSetXml,
@@ -662,6 +668,45 @@ describe('formatCitationsTool', () => {
         .join('\n');
       const vancouverLine = text.split('### VANCOUVER\n')[1]?.split('\n')[0];
       expect(vancouverLine).toContain('Paramedic \\*opioid\\* analgesia');
+    });
+
+    it('carries APA and MLA as one escaped Markdown string on both surfaces (#263)', async () => {
+      mockEFetch.mockResolvedValue({
+        PubmedArticleSet: parseArticleSetXml(
+          articleSetXml(
+            JOURNAL_ARTICLE_XML.replace(
+              'Paramedic analgesia',
+              'Paramedic HLA-B*57 and *15 analgesia',
+            ),
+          ),
+        ),
+      });
+      const result = await runToolContract(formatCitationsTool, {
+        pmids: ['42474064'],
+        format: ['apa', 'mla'],
+      });
+      const { apa, mla } =
+        (result.structuredContent as { citations: { citations: Record<string, string> }[] })
+          .citations[0]?.citations ?? {};
+      expect(apa).toContain('Paramedic HLA-B\\*57 and \\*15 analgesia');
+      expect(mla).toContain('Paramedic HLA-B\\*57 and \\*15 analgesia');
+
+      const text = textBlocks(result.content as ContentBlock[])
+        .map((b) => b.text)
+        .join('\n');
+      expect(text).toContain(`### APA\n${apa}\n`);
+      expect(text).toContain(`### MLA\n${mla}`);
+      for (const style of ['APA', 'MLA']) {
+        const line = text.split(`### ${style}\n`)[1]?.split('\n')[0] ?? '';
+        expect(readCommonMark(line)).toContain('Paramedic HLA-B*57 and *15 analgesia');
+      }
+    });
+
+    it('states in the output schema that APA and MLA are Markdown with record text escaped', () => {
+      const description = JSON.stringify(toJSONSchema(formatCitationsTool.output));
+      expect(description).toContain(
+        'APA and MLA are Markdown — the journal, volume and book title in *italics*, every other character of the record escaped',
+      );
     });
 
     it.runIf(bunMarkdown !== undefined)('renders every character of each style', () => {

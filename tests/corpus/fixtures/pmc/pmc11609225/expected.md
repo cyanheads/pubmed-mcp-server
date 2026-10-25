@@ -30,6 +30,9 @@
 **PubMed:** https://pubmed.ncbi.nlm.nih.gov/39624286/
 **Keywords:** Fractional-order systems, Nonlinear dynamics, Byzantine attacks, Leader-following consensus, Fractional-order Lyapunov approach
 
+**License:** [https://creativecommons.org/licenses/by/4.0/](<https://creativecommons.org/licenses/by/4.0/>)
+This is an open access article under the CC BY license (http://creativecommons.org/licenses/by/4.0/).
+
 #### Abstract
 This paper investigates the behavior of fractional-order nonlinear multi-agent systems subjected to Byzantine assaults, specifically focusing on the manipulations of both sensors and actuators. We employ weighted graphs, both directed and undirected, to illustrate the system's topology. Our methodology combines algebraic graph theory with fractional-order Lyapunov techniques to develop algebraic requirements for leader-following consensus, providing a robust framework for analyzing consensus dynamics in these complex systems. We present quantitative results demonstrating the effectiveness of our approach, including two numerical examples that validate the proposed requirements for consensus evaluation. Notably, our work highlights the novelty of using fractional-order systems to enhance resilience against adversarial conditions, contributing significantly to the field of multi-agent systems. By clarifying key terms and streamlining our language, we ensure accessibility for a broader audience while emphasizing the implications of our findings for real-world applications.
 

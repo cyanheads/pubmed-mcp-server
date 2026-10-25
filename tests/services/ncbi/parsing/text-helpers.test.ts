@@ -4,7 +4,14 @@
  */
 
 import { describe, expect, it } from 'vitest';
-import { decodeHtmlEntities, toDisplayText } from '@/services/ncbi/parsing/text-helpers.js';
+import {
+  decodeHtmlEntities,
+  europePmcTitleText,
+  stripEncodedMarkupTags,
+  toDisplayText,
+} from '@/services/ncbi/parsing/text-helpers.js';
+
+import { EPMC_APOS_TITLE_HIT } from './_entity-fixtures.js';
 
 describe('decodeHtmlEntities', () => {
   it('decodes the core named XML entities', () => {
@@ -34,6 +41,28 @@ describe('decodeHtmlEntities', () => {
   it('leaves unknown named entities and malformed references intact', () => {
     expect(decodeHtmlEntities('&notarealentity;')).toBe('&notarealentity;');
     expect(decodeHtmlEntities('&#xZZ;')).toBe('&#xZZ;');
+  });
+});
+
+describe('europePmcTitleText (#272)', () => {
+  it('decodes the layer NCBI double-encoded in a PubMed title Europe PMC relays (MED/42138044)', () => {
+    expect(europePmcTitleText(EPMC_APOS_TITLE_HIT.title)).toBe(
+      "Cervical Vestibular-Evoked Myogenic Potentials (cVEMPs) in Parkinson's Disease Patients: Prospective, Case-Control study.",
+    );
+  });
+
+  it('decodes one layer more than toDisplayText, never to a fixed point', () => {
+    expect(europePmcTitleText('a &amp;amp;lt; b')).toBe('a &lt; b');
+    expect(europePmcTitleText('Assay of &amp;lt;i&amp;gt; markers')).toBe('Assay of <i> markers');
+  });
+
+  it.each([
+    ['plain text', "What Counts as 'Real' in Healthcare Interaction?"],
+    ['an entity Europe PMC encoded once', 'R&amp;D at AT&T, P &lt; 0.05'],
+    ['entity-encoded title markup', '&lt;b&gt;Molecular mechanism of ferroptosis&lt;/b&gt;.'],
+    ['raw markup and notation', '<i>PIP2;1</i> where P<0.001 and IL-6 > baseline'],
+  ])('reads a title with no residual layer as toDisplayText does: %s', (_label, title) => {
+    expect(europePmcTitleText(title)).toBe(toDisplayText(title));
   });
 });
 
@@ -289,6 +318,48 @@ describe('toDisplayText', () => {
     });
   });
 
+  describe('entity-encoded void and paragraph tags (#262)', () => {
+    it('strips the encoded markup of a Europe PMC abstract (MED/42515993)', () => {
+      // Europe PMC's JSON carries the record's double-encoded HTML one layer down.
+      expect(
+        toDisplayText(
+          '&lt;p&gt;&lt;strong&gt;Introduction:&lt;/strong&gt; Pollen monitoring plays an important role in modern allergy care.&lt;br /&gt;Quantitatively determining airborne pollen concentrations serves as a clinically relevant&lt;br /&gt;tool for diagnosis.&lt;br /&gt;&lt;strong&gt;Aim:&lt;/strong&gt; The study.&lt;/p&gt;',
+        ),
+      ).toBe(
+        'Introduction: Pollen monitoring plays an important role in modern allergy care. Quantitatively determining airborne pollen concentrations serves as a clinically relevant tool for diagnosis. Aim: The study.',
+      );
+    });
+
+    it.each([
+      ['br', 'line&lt;br&gt;break'],
+      ['br /', 'line&lt;br /&gt;break'],
+      ['br/', 'line&lt;br/&gt;break'],
+      ['/br', 'line&lt;/br&gt;break'],
+      ['BR /', 'line&LT;BR /&GT;break'],
+      ['hr', 'line&lt;hr&gt;break'],
+      ['img /', 'line&lt;img /&gt;break'],
+      ['li', 'line&lt;li&gt;break'],
+      ['/li', 'line&lt;/li&gt;break'],
+      ['p', 'line&lt;p&gt;break'],
+      ['/p', 'line&lt;/p&gt;break'],
+      ['wbr', 'line&lt;wbr&gt;break'],
+      ['b /', 'line&lt;b /&gt;break'],
+    ])('turns an encoded `<%s>` into a space', (_name, input) => {
+      expect(toDisplayText(input)).toBe('line break');
+    });
+
+    it.each([
+      ['an element outside the set', 'the &lt;pre&gt; block', 'the <pre> block'],
+      ['a name the set only prefixes', 'a &lt;bra&gt; b', 'a <bra> b'],
+      ['attributes', 'the &lt;p class="x"&gt; tag', 'the <p class="x"> tag'],
+      ['a body that is not a lone slash', 'a &lt;br x/&gt; b', 'a <br x/> b'],
+      ['no closing semicolon', 'medicine.&lt;/p&gt.', 'medicine.</p&gt.'],
+      ['a second encoded layer', 'a &amp;lt;br /&amp;gt; b', 'a &lt;br /&gt; b'],
+    ])('keeps encoded text that is not one of those tags: %s', (_label, input, expected) => {
+      expect(toDisplayText(input)).toBe(expected);
+    });
+  });
+
   describe('linear time on adversarial input (#181, #195)', () => {
     /** CPU time of `run`, in ms — this thread's user + system time, not wall clock. */
     const cpuMs = (run: () => void): number => {
@@ -389,5 +460,163 @@ describe('toDisplayText', () => {
       expect((t80k ?? 0) / Math.max(t5k ?? 0, 0.001)).toBeLessThan(64);
       expect(t80k).toBeLessThan(400);
     });
+  });
+});
+
+describe('stripEncodedMarkupTags (#262)', () => {
+  it('strips the encoded tags of an EFetch abstract and leaves its entities for the decode', () => {
+    expect(
+      stripEncodedMarkupTags(
+        '&lt;b&gt;Introduction:&lt;/b&gt; Postural stability remains limited.&lt;b&gt;Aim:&lt;/b&gt; To elucidate (P &lt; 0.001) a clinically relevant&lt;br /&gt;tool.',
+      ),
+    ).toBe(
+      'Introduction: Postural stability remains limited. Aim: To elucidate (P &lt; 0.001) a clinically relevant tool.',
+    );
+  });
+
+  it('leaves raw tags alone: they were single-encoded in the XML, so they are text', () => {
+    expect(stripEncodedMarkupTags('<b>Aim:</b> HuMab<CD20> a<br />b')).toBe(
+      '<b>Aim:</b> HuMab<CD20> a<br />b',
+    );
+  });
+
+  it('adds no space beside whitespace or at either end, and keeps every line break', () => {
+    expect(stripEncodedMarkupTags('&lt;p&gt;a.&lt;/p&gt;&lt;p&gt;b&lt;br /&gt;')).toBe('a. b');
+    expect(stripEncodedMarkupTags('a.&lt;/p&gt;\n\n&lt;p&gt;b')).toBe('a.\n\nb');
+    expect(stripEncodedMarkupTags('a &lt;br /&gt;b')).toBe('a b');
+    expect(stripEncodedMarkupTags('a&lt;br /&gt;&lt;/b&gt; b')).toBe('a b');
+  });
+
+  it('keeps whitespace it did not produce, and a string with no encoded tag, byte for byte', () => {
+    expect(stripEncodedMarkupTags('a  b\n\nc ')).toBe('a  b\n\nc ');
+    expect(stripEncodedMarkupTags(' &lt;CD20&gt; P &lt; 0.001 &amp;lt;br&amp;gt; ')).toBe(
+      ' &lt;CD20&gt; P &lt; 0.001 &amp;lt;br&amp;gt; ',
+    );
+  });
+
+  it('joins where a formatting tag splits a word and keeps the break after a sentence', () => {
+    expect(stripEncodedMarkupTags('D&lt;sub&gt;2&lt;/sub&gt;O')).toBe('D2O');
+    expect(stripEncodedMarkupTags('children.&lt;b&gt;Aim.&lt;/b&gt; The')).toBe(
+      'children. Aim. The',
+    );
+  });
+});
+
+describe('the encoded-tag strip runs in linear time (#262)', () => {
+  /** CPU time of `run`, in ms — this thread's user + system time, not wall clock. */
+  const cpuMs = (run: () => void): number => {
+    const start = process.threadCpuUsage();
+    run();
+    const { user, system } = process.threadCpuUsage(start);
+    return (user + system) / 1000;
+  };
+
+  /** `unit` repeated as many whole times as fit in `length` characters. */
+  const units = (unit: string, length: number) => unit.repeat(Math.floor(length / unit.length));
+
+  /**
+   * Each row's builder takes the size and returns the input, what
+   * `stripEncodedMarkupTags` must return for it, and what `toDisplayText` must.
+   */
+  it.each<[string, (n: number) => [string, string, string]]>([
+    [
+      '`&lt;br` with no `&gt;`',
+      (n) => [units('&lt;br', n), units('&lt;br', n), '<br'.repeat(Math.floor(n / 6))],
+    ],
+    ['`&lt;br /&gt;` back to back', (n) => [units('&lt;br /&gt;', n), '', '']],
+    [
+      '`&lt;b&gt;` after a period',
+      (n) => [units('.&lt;b&gt;', n), '.'.repeat(n / 10), '.'.repeat(n / 10)],
+    ],
+    ['a period, then only `&lt;b&gt;`', (n) => [`.${units('&lt;b&gt;', n - 2)}a`, '. a', '. a']],
+    [
+      '`&lt;br` then one long space run',
+      (n) => [`&lt;br${' '.repeat(n - 6)}`, `&lt;br${' '.repeat(n - 6)}`, '<br'],
+    ],
+    [
+      'one long line ending in a break',
+      (n) => [
+        `${'§1 x'.repeat(n / 4)}\ny`,
+        `${'§1 x'.repeat(n / 4)}\ny`,
+        `${'§1 x'.repeat(n / 4)} y`,
+      ],
+    ],
+    [
+      'line breaks throughout',
+      (n) => [
+        'x  \r\n'.repeat(n / 5),
+        'x  \r\n'.repeat(n / 5),
+        Array.from({ length: n / 5 }, () => 'x').join(' '),
+      ],
+    ],
+  ])('scales linearly from 5k to 320k characters of %s', (_label, build) => {
+    for (const [strip, outcome] of [
+      [stripEncodedMarkupTags, 1],
+      [toDisplayText, 2],
+    ] as const) {
+      // Doubling from 5k, each size's result and absolute bound checked before the
+      // next runs; the fastest of three readings per size.
+      const times: number[] = [];
+      for (let n = 5_000; n <= 320_000; n *= 2) {
+        const built = build(n);
+        const input = built[0];
+        expect(strip(input)).toBe(built[outcome]);
+        const ms = Math.min(...Array.from({ length: 3 }, () => cpuMs(() => strip(input))));
+        expect(ms).toBeLessThan(400);
+        times.push(ms);
+      }
+      // Linear work grows 64× across the span; quadratic grows 4096×.
+      expect((times.at(-1) ?? 0) / Math.max(times[0] ?? 0, 0.05)).toBeLessThan(256);
+    }
+  });
+});
+
+describe('the Europe PMC title decode runs in linear time (#272)', () => {
+  /** CPU time of `run`, in ms — this thread's user + system time, not wall clock. */
+  const cpuMs = (run: () => void): number => {
+    const start = process.threadCpuUsage();
+    run();
+    const { user, system } = process.threadCpuUsage(start);
+    return (user + system) / 1000;
+  };
+
+  /** Each row's builder takes the size and returns the input and the title it must read as. */
+  it.each<[string, (n: number) => [string, string]]>([
+    [
+      '`&amp;amp;` back to back',
+      (n) => ['&amp;amp;'.repeat(Math.floor(n / 9)), '&'.repeat(Math.floor(n / 9))],
+    ],
+    [
+      '`&` then one long letter run with no `;`',
+      (n) => [`&${'a'.repeat(n - 1)}`, `&${'a'.repeat(n - 1)}`],
+    ],
+    [
+      '`&#x` then one long hex run with no `;`',
+      (n) => [`&#x${'1'.repeat(n - 3)}`, `&#x${'1'.repeat(n - 3)}`],
+    ],
+    ['`&a` with no `;`', (n) => ['&a'.repeat(n / 2), '&a'.repeat(n / 2)]],
+    [
+      'one long line ending in a break',
+      (n) => [`${'§1 x'.repeat(n / 4)}\ny`, `${'§1 x'.repeat(n / 4)} y`],
+    ],
+    [
+      'line breaks throughout',
+      (n) => ['x  \r\n'.repeat(n / 5), Array.from({ length: n / 5 }, () => 'x').join(' ')],
+    ],
+  ])('scales linearly from 5k to 320k characters of %s', (_label, build) => {
+    // Doubling from 5k, each size's title and absolute bound checked before the
+    // next runs; the fastest of three readings per size.
+    const times: number[] = [];
+    for (let n = 5_000; n <= 320_000; n *= 2) {
+      const [input, title] = build(n);
+      expect(europePmcTitleText(input)).toBe(title);
+      const ms = Math.min(
+        ...Array.from({ length: 3 }, () => cpuMs(() => europePmcTitleText(input))),
+      );
+      expect(ms).toBeLessThan(400);
+      times.push(ms);
+    }
+    // Linear work grows 64× across the span; quadratic grows 4096×.
+    expect((times.at(-1) ?? 0) / Math.max(times[0] ?? 0, 0.05)).toBeLessThan(256);
   });
 });

@@ -5,6 +5,7 @@
  * @module src/services/ncbi/formatting/citation-formatter
  */
 
+import { type MarkdownPiece, renderMarkdownLine } from '@/services/markdown-escape.js';
 import type {
   ParsedArticle,
   ParsedArticleAuthor,
@@ -573,6 +574,33 @@ function collapseWhitespace(text: string): string {
   return text.replace(/\s+/g, ' ').trim();
 }
 
+/** One space-separated part of an APA or MLA citation: a piece, or pieces written together. */
+type CitationPart = MarkdownPiece | MarkdownPiece[];
+
+/** `pieces` with `separator` between each pair. */
+function joinPieces(pieces: readonly MarkdownPiece[], separator: string): MarkdownPiece[] {
+  return pieces.flatMap((piece, i) => (i === 0 ? [piece] : [separator, piece]));
+}
+
+/**
+ * The APA or MLA citation `parts` spell, joined by spaces, as one Markdown
+ * string: the formatter's own italics written `*…*`, URLs as they are, and the
+ * record's text escaped as prose, so a renderer shows every character it
+ * carries. Pairing is judged across the whole citation — a `*` in a title pairs
+ * with one in an author name — and a `*` inside the italics is always escaped,
+ * since it would pair with the formatter's. A citation with nothing to escape,
+ * such as a title with one `*`, is exactly the parts joined. Whitespace
+ * collapses as {@link collapseWhitespace} collapses it. (#263)
+ */
+function renderCitation(parts: readonly CitationPart[]): string {
+  return renderMarkdownLine(
+    parts.flatMap((part, i) => {
+      const pieces = Array.isArray(part) ? part : [part];
+      return i === 0 ? pieces : [' ', ...pieces];
+    }),
+  );
+}
+
 /**
  * PubMed `PublicationType` → BibTeX entry type. Defaults to `article`.
  * Book records never reach this map — they dispatch on `recordType` instead,
@@ -787,7 +815,7 @@ function formatEditorsApa(editors: ParsedBookEditor[]): string {
  */
 function formatApaBook(article: BookRecord): string {
   const { book } = article;
-  const parts: string[] = [];
+  const parts: CitationPart[] = [];
 
   const authorStr = article.authors?.length ? formatAuthorsApa(article.authors) : '';
   /** The record's own title, which stands in the author position when set. */
@@ -812,23 +840,25 @@ function formatApaBook(article: BookRecord): string {
       parts.push(`${stripTrailingPeriod(article.title)}.`);
     const editorStr = book.editors?.length ? formatEditorsApa(book.editors) : '';
     const editorLabel = (book.editors?.length ?? 0) > 1 ? 'Eds.' : 'Ed.';
-    const container = book.title ? `*${stripTrailingPeriod(book.title)}*` : '';
-    if (container) {
+    if (book.title) {
+      const container = { italic: stripTrailingPeriod(book.title) };
       parts.push(
-        editorStr ? `In ${editorStr} (${editorLabel}), ${container}.` : `In ${container}.`,
+        editorStr
+          ? [`In ${editorStr} (${editorLabel}), `, container, '.']
+          : ['In ', container, '.'],
       );
     }
   } else if (book.title && !titleLedTheReference) {
-    parts.push(`*${stripTrailingPeriod(book.title)}*.`);
+    parts.push([{ italic: stripTrailingPeriod(book.title) }, '.']);
   }
 
   // A publisher already ending in a period (`MDText.com, Inc.`) gains no second one
   if (book.publisher) parts.push(terminate(book.publisher));
 
   const url = bookAccessUrl(article);
-  if (url) parts.push(url);
+  if (url) parts.push({ verbatim: url });
 
-  return collapseWhitespace(parts.join(' '));
+  return renderCitation(parts);
 }
 
 /**
@@ -847,7 +877,7 @@ function formatApaBook(article: BookRecord): string {
  */
 export function formatApa(article: ParsedArticle): string {
   if (isBookRecord(article)) return formatApaBook(article);
-  const parts: string[] = [];
+  const parts: CitationPart[] = [];
 
   // Authors — ensure trailing period (individual author initials end with '.',
   // but collective names do not, which would otherwise produce "Name (Year).")
@@ -878,27 +908,27 @@ export function formatApa(article: ParsedArticle): string {
   const journal = article.journalInfo;
   if (journal?.title) {
     const name = citedJournalName(journal.title, journal.isoAbbreviation);
-    let journalPart = `*${titleCaseJournal(name, APA_MINOR_WORDS)}*`;
+    const journalPart: MarkdownPiece[] = [{ italic: titleCaseJournal(name, APA_MINOR_WORDS) }];
     if (journal.volume) {
-      journalPart += `, *${journal.volume}*`;
+      journalPart.push(', ', { italic: journal.volume });
       if (journal.issue) {
-        journalPart += `(${journal.issue})`;
+        journalPart.push(`(${journal.issue})`);
       }
     }
     // APA 7 p. 294-295: an article number takes the page range's place
     const number = articleNumber(journal);
     if (number) {
-      journalPart += `, Article ${number}`;
+      journalPart.push(`, Article ${number}`);
     } else if (journal.pages) {
-      journalPart += `, ${expandPageRanges(journal.pages, '\u{2013}')}`;
+      journalPart.push(`, ${expandPageRanges(journal.pages, '\u{2013}')}`);
     }
-    journalPart += '.';
+    journalPart.push('.');
     parts.push(journalPart);
   }
 
   // DOI — no trailing period after DOI URL
   if (article.doi) {
-    parts.push(`https://doi.org/${article.doi}`);
+    parts.push({ verbatim: `https://doi.org/${article.doi}` });
   }
 
   // APA 7 notes a retraction after the DOI. Its own form names the notice's
@@ -911,7 +941,7 @@ export function formatApa(article: ParsedArticle): string {
     parts.push(`(Retraction published ${retractions.join('; ')})`);
   }
 
-  return collapseWhitespace(parts.join(' '));
+  return renderCitation(parts);
 }
 
 // ---------------------------------------------------------------------------
@@ -939,7 +969,7 @@ function formatEditorsMla(editors: ParsedBookEditor[]): string {
  */
 function formatMlaBook(article: BookRecord): string {
   const { book } = article;
-  const parts: string[] = [];
+  const parts: CitationPart[] = [];
 
   const authorStr = article.authors?.length ? formatAuthorsMla(article.authors) : '';
   if (authorStr) parts.push(terminate(authorStr));
@@ -948,8 +978,8 @@ function formatMlaBook(article: BookRecord): string {
     parts.push(`"${stripTrailingPeriod(article.title)}."`);
   }
 
-  const detailParts: string[] = [];
-  if (book.title) detailParts.push(`*${stripTrailingPeriod(book.title)}*`);
+  const detailParts: MarkdownPiece[] = [];
+  if (book.title) detailParts.push({ italic: stripTrailingPeriod(book.title) });
   const editorStr = book.editors?.length ? formatEditorsMla(book.editors) : '';
   if (editorStr) detailParts.push(`edited by ${editorStr}`);
   if (book.edition) detailParts.push(book.edition);
@@ -957,9 +987,13 @@ function formatMlaBook(article: BookRecord): string {
   const ownDate = chapterDate(article);
   const date = ownDate ? formatDateMla(ownDate) : getYear(article);
   if (date !== 'n.d.') detailParts.push(date);
-  if (detailParts.length) parts.push(terminate(detailParts.join(', ')));
+  if (detailParts.length) {
+    const last = detailParts.at(-1);
+    const terminated = typeof last === 'string' && last.endsWith('.');
+    parts.push([...joinPieces(detailParts, ', '), ...(terminated ? [] : ['.'])]);
+  }
 
-  return collapseWhitespace(parts.join(' '));
+  return renderCitation(parts);
 }
 
 /**
@@ -973,7 +1007,7 @@ function formatMlaBook(article: BookRecord): string {
  */
 export function formatMla(article: ParsedArticle): string {
   if (isBookRecord(article)) return formatMlaBook(article);
-  const parts: string[] = [];
+  const parts: CitationPart[] = [];
 
   // Authors
   const authorStr = article.authors?.length ? formatAuthorsMla(article.authors) : '';
@@ -992,9 +1026,9 @@ export function formatMla(article: ParsedArticle): string {
   // Journal and publication details
   const journal = article.journalInfo;
   if (journal?.title) {
-    const detailParts: string[] = [];
+    const detailParts: MarkdownPiece[] = [];
     const name = citedJournalName(journal.title, journal.isoAbbreviation);
-    detailParts.push(`*${titleCaseJournal(name, MLA_MINOR_WORDS)}*`);
+    detailParts.push({ italic: titleCaseJournal(name, MLA_MINOR_WORDS) });
 
     if (journal.volume) {
       detailParts.push(`vol. ${journal.volume}`);
@@ -1019,15 +1053,15 @@ export function formatMla(article: ParsedArticle): string {
       detailParts.push(`${isRange ? 'pp.' : 'p.'} ${journal.pages}`);
     }
 
-    parts.push(`${detailParts.join(', ')}.`);
+    parts.push([...joinPieces(detailParts, ', '), '.']);
   }
 
   // DOI
   if (article.doi) {
-    parts.push(`https://doi.org/${article.doi}.`);
+    parts.push([{ verbatim: `https://doi.org/${article.doi}` }, '.']);
   }
 
-  return collapseWhitespace(parts.join(' '));
+  return renderCitation(parts);
 }
 
 // ---------------------------------------------------------------------------

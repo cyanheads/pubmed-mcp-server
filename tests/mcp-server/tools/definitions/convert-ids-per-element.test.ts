@@ -16,7 +16,7 @@ import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
 import { createMockContext, runToolContract } from '@cyanheads/mcp-ts-core/testing';
 import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 
-import { textBlocks } from '../../../_helpers.js';
+import { readCommonMark, textBlocks } from '../../../_helpers.js';
 
 vi.mock('@cyanheads/mcp-ts-core/utils', async () => {
   const actual = await vi.importActual<typeof import('@cyanheads/mcp-ts-core/utils')>(
@@ -251,9 +251,11 @@ describe('pubmed_convert_ids throttled by the ID Converter', () => {
     expect(hint).toContain('HTTP date');
     expect(hint).not.toMatch(/NCBI's ceiling|number of seconds in `retryAfter`/);
 
-    const text = textBlocks(result.content)
-      .map((b) => b.text)
-      .join('\n');
+    const text = readCommonMark(
+      textBlocks(result.content)
+        .map((b) => b.text)
+        .join('\n'),
+    );
     expect(text).toContain(`Recovery: ${hint}`);
     expect(text).toContain('reason ncbi_rate_limited');
     expect(converterRequests()).toHaveLength(1);

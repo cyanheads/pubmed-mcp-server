@@ -4,7 +4,7 @@
  * so it can report the query it sent), injects the optional contact email, and
  * exposes single-attempt search, fullTextXML, and citation-link calls.
  * Classifies each endpoint's HTTP failures — a failed search as
- * `europepmc_unreachable`, a missing fullTextXML as `not-available` — while
+ * `europepmc_unreachable`, a fullTextXML 404 as `not-available` — while
  * retry logic lives in `EuropePmcService`.
  * @module src/services/europe-pmc/api-client
  */
@@ -104,14 +104,19 @@ export class EuropePmcApiClient {
   }
 
   /**
-   * Fetch the JATS full-text XML for an EPMC record by its internal id.
-   * Returns `{ kind: 'not-available' }` for 404 — EPMC has the record but
-   * doesn't publish a full-text XML for it (very common for preprints).
+   * Fetch the JATS full-text XML for an EPMC record by one of its
+   * `fullTextIdList` ids — a PMCID, or a preprint's own accession.
+   *
+   * Europe PMC publishes this XML for its open-access subset only, and answers
+   * any other id — a record outside that subset, an unknown id — with HTTP 500,
+   * which reads as a transient outage and is retried. So callers request only
+   * the id `epmcFullTextId()` returns. A 404 is still read as
+   * `{ kind: 'not-available' }`.
    *
    * `fetchWithTimeout` throws a status-mapped `McpError` on any non-2xx rather
    * than resolving with the `Response` (`expectedStatuses` only lowers the log
    * severity), so the 404 arrives here as `McpError(NotFound)` and must be
-   * converted in the catch block. Every other failure keeps throwing. (#90)
+   * converted in the catch block. Every other failure keeps throwing. (#90, #267)
    */
   async fullTextXml(epmcId: string, signal?: AbortSignal): Promise<EuropePmcFullTextFetchResult> {
     const url = `${EUROPEPMC_API_BASE}/${encodeURIComponent(epmcId)}/fullTextXML`;

@@ -13,7 +13,7 @@ import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
 import { runToolContract } from '@cyanheads/mcp-ts-core/testing';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
-import { textBlocks } from '../../../_helpers.js';
+import { readCommonMark, textBlocks } from '../../../_helpers.js';
 
 vi.mock('@cyanheads/mcp-ts-core/utils', async () => {
   const actual = await vi.importActual<typeof import('@cyanheads/mcp-ts-core/utils')>(
@@ -87,11 +87,12 @@ type ErrorEnvelope = {
   data?: { reason?: string; retryAfter?: string; recovery?: { hint: string } };
 };
 
+/** The error envelope, and the `content[]` text as a CommonMark parse reads it back. */
 function errorOf(result: Awaited<ReturnType<typeof runToolContract>>) {
   expect(result.isError).toBe(true);
   const error = (result.structuredContent as { error: ErrorEnvelope }).error;
   const [block] = textBlocks(result.content);
-  return { error, text: block?.text ?? '' };
+  return { error, text: readCommonMark(block?.text ?? '') };
 }
 
 const search = (input: Record<string, unknown>) =>
@@ -438,9 +439,9 @@ describe('pubmed_europepmc_search single-source query (#175)', () => {
       expect(new URL(structured.searchUrl).searchParams.get('query')).toBe(expected);
       expect(structured.hits.map((h) => h.epmcId)).toEqual(['32669217']);
 
-      const text = allText(result);
-      expect(text).toContain(`**Effective Query:** ${expected}`);
-      expect(text).toContain(`**Search URL:** ${structured.searchUrl}`);
+      const lines = allText(result).split('\n');
+      expect(lines).toContain(`**Effective Query:** \`${expected}\``);
+      expect(lines).toContain(`**Search URL:** <${structured.searchUrl}>`);
       expect(fetchSpy).toHaveBeenCalledTimes(1);
     },
   );

@@ -277,7 +277,32 @@ describe('NcbiService', () => {
         ['cancr AND 2020:2024[dp]', 'cancer AND 2020:2024[dp]', true],
         ['2020/01/01[dp] AND cancr', '2020/01/01[dp] AND cancr', false],
         ['diabetis[tiab]', 'diabetes[tiab]', true],
-        ['neoplasm[mh] AND humen[mh]', 'neoplasms[mh] AND human[mh]', true],
+        // The value of an indexed field stays as written: ESpell's dictionary is
+        // not the field's index, so it rewrites valid values (`aged` → `age`,
+        // `zhang` → `jhang`) into ones the field doesn't hold, and a typo'd
+        // value (`humen[mh]`) is left for PubMed to report as unmatched. A
+        // free-text field (`[tiab]`) is corrected as before. (#259)
+        ['neoplasm[mh] AND humen[mh]', 'neoplasm[mh] AND humen[mh]', false],
+        ['cancr AND free full text[sb]', 'cancer AND free full text[sb]', true],
+        ['cancr AND "free full text"[sb]', 'cancer AND "free full text"[sb]', true],
+        ['cancr AND "pubmed books"[sb]', 'cancer AND "pubmed books"[sb]', true],
+        [
+          'cancr AND randomized controlled trial[pt]',
+          'cancer AND randomized controlled trial[pt]',
+          true,
+        ],
+        ['cancr AND lancet[ta]', 'cancer AND lancet[ta]', true],
+        ['cancr AND aged[mh]', 'cancer AND aged[mh]', true],
+        ['cancr AND aged[MeSH Terms]', 'cancer AND aged[MeSH Terms]', true],
+        ['cancr AND eng[la]', 'cancer AND eng[la]', true],
+        ['cancr AND zhang y[au]', 'cancer AND zhang y[au]', true],
+        ['cancr AND [sb]', 'cancer AND [sb]', true],
+        ['cancr AND diabetis[tiab]', 'cancer AND diabetes[tiab]', true],
+        [
+          'asthma AND smith j[Author] AND englsh[Language]',
+          'asthma AND smith j[Author] AND englsh[Language]',
+          false,
+        ],
       ];
 
       it.each(CAPTURED)('%j → %j', async (term, corrected, hasSuggestion) => {
@@ -428,6 +453,160 @@ describe('NcbiService', () => {
           });
         });
       });
+
+      describe('the value of an indexed field tag (#259)', () => {
+        /**
+         * `query` with ESpell replacing each `[word, replacement]` pair in turn,
+         * the caller's text between them as `<Original>`s — ESpell's own shape.
+         */
+        const replacing = (query: string, pairs: [word: string, replacement: string][]) => {
+          let segments = '';
+          let cursor = 0;
+          for (const [word, replacement] of pairs) {
+            const at = query.indexOf(word, cursor);
+            segments += `<Original>${query.slice(cursor, at)}</Original><Replaced>${replacement}</Replaced>`;
+            cursor = at + word.length;
+          }
+          const rest = query.slice(cursor);
+          return spelled(query, rest ? `${segments}<Original>${rest}</Original>` : segments);
+        };
+
+        it.each<[string, string, [string, string][], string, boolean]>([
+          [
+            'an OR before the value',
+            'cancr OR aged[mh]',
+            [
+              ['cancr', 'cancer'],
+              ['aged', 'age'],
+            ],
+            'cancer OR aged[mh]',
+            true,
+          ],
+          [
+            'a NOT before the value',
+            'cancr NOT aged[mh]',
+            [
+              ['cancr', 'cancer'],
+              ['aged', 'age'],
+            ],
+            'cancer NOT aged[mh]',
+            true,
+          ],
+          [
+            'a parenthesis before the value',
+            '(cancr) zhang y[au]',
+            [
+              ['cancr', 'cancer'],
+              ['zhang', 'jhang'],
+            ],
+            '(cancer) zhang y[au]',
+            true,
+          ],
+          [
+            'a parenthesis after the value',
+            'cancr AND (zhang y[au])',
+            [
+              ['cancr', 'cancer'],
+              ['zhang', 'jhang'],
+            ],
+            'cancer AND (zhang y[au])',
+            true,
+          ],
+          [
+            'a field tag ending the clause before',
+            'cancr[tiab] zhang y[au]',
+            [
+              ['cancr', 'cancer'],
+              ['tiab', 'tia'],
+              ['zhang', 'jhang'],
+            ],
+            'cancer[tiab] zhang y[au]',
+            true,
+          ],
+          [
+            'a search modifier on the tag',
+            'cancr AND aged[mh:noexp]',
+            [
+              ['cancr', 'cancer'],
+              ['aged', 'age'],
+            ],
+            'cancer AND aged[mh:noexp]',
+            true,
+          ],
+          [
+            'several indexed values with words to correct between them',
+            'zhang y[au] AND cancr AND aged[mh] AND tumr',
+            [
+              ['zhang', 'jhang'],
+              ['cancr', 'cancer'],
+              ['aged', 'age'],
+              ['tumr', 'tumor'],
+            ],
+            'zhang y[au] AND cancer AND aged[mh] AND tumor',
+            true,
+          ],
+          [
+            'a quoted value holding a parenthesis',
+            'cancr AND "pubmed (books)"[sb]',
+            [
+              ['cancr', 'cancer'],
+              ['books', 'hooks'],
+            ],
+            'cancer AND "pubmed (books)"[sb]',
+            true,
+          ],
+          // A word in the same unquoted run as the value is part of it. (non-goal)
+          [
+            'a misspelled word in the same unquoted run',
+            'cancr AND smokng free full text[sb]',
+            [
+              ['cancr', 'cancer'],
+              ['smokng', 'smoking'],
+              ['free', 'fred'],
+            ],
+            'cancer AND smokng free full text[sb]',
+            true,
+          ],
+          // PubMed's operators are uppercase; a lowercase `and` is a word of the run.
+          [
+            'a lowercase and',
+            'cancr and aged[mh]',
+            [
+              ['cancr', 'cancer'],
+              ['aged', 'age'],
+            ],
+            'cancr and aged[mh]',
+            false,
+          ],
+          // A bracket that is not a PubMed field tag protects only itself.
+          [
+            'a bracket that is not a field tag',
+            'zhang y[xyz] AND cancr',
+            [
+              ['zhang', 'jhang'],
+              ['cancr', 'cancer'],
+            ],
+            'jhang y[xyz] AND cancer',
+            true,
+          ],
+          [
+            'a free-text tag by its long name',
+            'cancr AND diabetis[Title/Abstract]',
+            [
+              ['cancr', 'cancer'],
+              ['diabetis', 'diabetes'],
+            ],
+            'cancer AND diabetes[Title/Abstract]',
+            true,
+          ],
+        ])('bounds the value at %s', async (_label, query, pairs, corrected, hasSuggestion) => {
+          expect(await spell(replacing(query, pairs), query)).toEqual({
+            original: query,
+            corrected,
+            hasSuggestion,
+          });
+        });
+      });
     });
 
     it('returns an all-numeric term as a string on both fields (#108)', async () => {
@@ -571,6 +750,78 @@ describe('NcbiService', () => {
       // Linear work grows 64× across the span; quadratic grows 4096×.
       expect((times.at(-1) ?? 0) / Math.max(times[0] ?? 0, 0.05)).toBeLessThan(256);
     });
+
+    // Each query's replaced word lies inside the value of an indexed field, so
+    // at every size the rebuild keeps the query as written (#259).
+    it.each<[string, (n: number) => [string, SpelledSegment[]]]>([
+      [
+        'an indexed tag after every word, each value rewritten by ESpell',
+        (n) => {
+          const words = Math.floor(n / 10);
+          return [
+            'zhang[au] '.repeat(words),
+            [
+              original(''),
+              ...Array.from({ length: words }, () => [replaced('jhang'), original('[au] ')]).flat(),
+            ],
+          ];
+        },
+      ],
+      [
+        'an operator before every word ahead of one indexed value',
+        (n) => {
+          const before = 'ab AND '.repeat(Math.floor(n / 7));
+          return [`${before}ab[au]`, [original(before), replaced('ac'), original('[au]')]];
+        },
+      ],
+      [
+        'operator prefixes that never complete',
+        (n) => {
+          const rest = `${' AN'.repeat(Math.floor(n / 3))}[au]`;
+          return [`ab${rest}`, [original(''), replaced('ac'), original(rest)]];
+        },
+      ],
+      [
+        'quotes with no partner before a quoted indexed value',
+        (n) => {
+          const quotes = '"'.repeat(n - 6);
+          return [`${quotes}ab"[sb]`, [original(quotes), replaced('ac'), original('"[sb]')]];
+        },
+      ],
+      [
+        'whitespace with no operator before an indexed tag',
+        (n) => {
+          const rest = `${' '.repeat(n)}[mh]`;
+          return [`ab${rest}`, [original(''), replaced('ac'), original(rest)]];
+        },
+      ],
+      [
+        'one long bracket naming a tag and a modifier',
+        (n) => {
+          const rest = `[mh${' '.repeat(n)}:noexp]`;
+          return [`ab${rest}`, [original(''), replaced('ac'), original(rest)]];
+        },
+      ],
+    ])(
+      'keeps an indexed value as written from 5k to 320k characters: %s (#259)',
+      (_label, build) => {
+        // Doubling from 5k, each size checked against the outcome and the absolute
+        // bound before the next runs.
+        const times: number[] = [];
+        for (let n = 5_000; n <= 320_000; n *= 2) {
+          const [query, segments] = build(n);
+          expect(rebuildSpelledQuery(query, segments)).toEqual({
+            corrected: query,
+            hasSuggestion: false,
+          });
+          const ms = fastestMs([query, segments]);
+          expect(ms).toBeLessThan(400);
+          times.push(ms);
+        }
+        // Linear work grows 64× across the span; quadratic grows 4096×.
+        expect((times.at(-1) ?? 0) / Math.max(times[0] ?? 0, 0.05)).toBeLessThan(256);
+      },
+    );
   });
 
   describe('eSummary', () => {

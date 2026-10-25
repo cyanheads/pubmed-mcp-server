@@ -2004,6 +2004,7 @@ export function parsePmcArticle(articleNode: JatsNode): ParsedPmcArticle {
   const publicationDate = extractPubDate(articleMeta);
   const abstract = extractAbstract(articleMeta);
   const keywords = extractKeywords(articleMeta);
+  const licenses = extractLicenses(articleMeta);
   const sections = extractBodySections(body);
   const backSections = extractBackSections(back);
   const references = extractReferences(articleNode);
@@ -2024,6 +2025,7 @@ export function parsePmcArticle(articleNode: JatsNode): ParsedPmcArticle {
     ...(publicationDate && { publicationDate }),
     ...(abstract && { abstract }),
     ...(keywords.length > 0 && { keywords }),
+    ...(licenses.length > 0 && { licenses }),
     sections,
     ...(backSections.length > 0 && { backSections }),
     ...(references.length > 0 && { references }),
@@ -2033,6 +2035,37 @@ export function parsePmcArticle(articleNode: JatsNode): ParsedPmcArticle {
     pmcUrl: `https://www.ncbi.nlm.nih.gov/pmc/articles/${normalizedPmcId}/`,
     ...(pmid && { pubmedUrl: `https://pubmed.ncbi.nlm.nih.gov/${pmid}/` }),
   };
+}
+
+/**
+ * The article's own reuse statements: one entry per `<license>` in its
+ * `<article-meta>` `<permissions>`, in document order. A figure's or a table's
+ * `<permissions>` sits elsewhere and never contributes. `text` is the
+ * `<license-p>` paragraphs as plain text, a blank line between them; `urls`
+ * are the distinct `@xlink:href`, then `ali:license_ref` values, as deposited.
+ * A link inside the text stays in the text. A `<license>` with neither is
+ * skipped. `<copyright-statement>` and `license-type` are not read. (#269)
+ */
+function extractLicenses(
+  articleMeta: JatsNode | undefined,
+): NonNullable<ParsedPmcArticle['licenses']> {
+  const licenses: NonNullable<ParsedPmcArticle['licenses']> = [];
+  for (const license of findAll(findOne(articleMeta, 'permissions'), 'license')) {
+    const text = findAll(license, 'license-p')
+      .map((p) => textContent(p))
+      .filter(Boolean)
+      .join('\n\n');
+    const urls = [
+      ...new Set(
+        [attrOf(license, 'xlink:href'), ...findAll(license, 'ali:license_ref').map(textContent)]
+          .map((url) => url?.trim())
+          .filter((url): url is string => !!url),
+      ),
+    ];
+    if (!text && urls.length === 0) continue;
+    licenses.push({ ...(text && { text }), ...(urls.length > 0 && { urls }) });
+  }
+  return licenses;
 }
 
 /** Collect authors across every `<contrib-group>` under `<article-meta>`. */

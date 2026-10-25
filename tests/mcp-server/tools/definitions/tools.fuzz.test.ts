@@ -1,5 +1,5 @@
 /**
- * @fileoverview Property-based fuzz coverage for all 9 PubMed tools. Generates
+ * @fileoverview Property-based fuzz coverage for 10 PubMed tools. Generates
  * valid inputs from each tool's Zod schema plus adversarial-shape inputs, then
  * asserts the standard `FuzzReport` invariants — no crashes or hangs on any
  * input the schema accepts, no stack-trace / path leaks in what a client sees of
@@ -9,7 +9,8 @@
  * so every tool's handler runs through to completion. `UnpaywallService` is
  * stubbed to `undefined` so `fetch_fulltext`'s fallback path is disabled —
  * fuzzed PMIDs without PMC entries become `unavailable` rows, which still
- * validates the output schema.
+ * validates the output schema. `IciteService` answers every PMID it is sent
+ * with a scored record, so `fetch_citation_metrics` renders full records.
  *
  * Seed pinned at 42 for reproducibility. Per-tool runs use `numRuns: 50` and
  * `numAdversarial: 100`; the whole suite is sized to fit comfortably under the
@@ -21,6 +22,7 @@
 import { createMockContext } from '@cyanheads/mcp-ts-core/testing';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { hasVisibleText } from '@/mcp-server/tools/definitions/_visible-text.js';
+import type { IciteRecord } from '@/services/icite/types.js';
 import {
   createMockNcbiService,
   FUZZ_OPTIONS,
@@ -38,8 +40,28 @@ vi.mock('@/services/unpaywall/unpaywall-service.js', () => ({
   getUnpaywallService: () => undefined,
 }));
 
+/** A scored iCite record for every PMID sent, as the service returns them. */
+const mockFetchRecords = vi.fn(
+  async (pmids: readonly string[]): Promise<IciteRecord[]> =>
+    pmids.map((pmid) => ({
+      pmid,
+      title: `Record ${pmid}`,
+      year: 2020,
+      citationCount: 3,
+      relativeCitationRatio: 1.2,
+      rcrProvisional: false,
+    })),
+);
+
+vi.mock('@/services/icite/icite-service.js', () => ({
+  getIciteService: () => ({ fetchRecords: mockFetchRecords }),
+}));
+
 const { convertIdsTool } = await import('@/mcp-server/tools/definitions/convert-ids.tool.js');
 const { fetchArticlesTool } = await import('@/mcp-server/tools/definitions/fetch-articles.tool.js');
+const { fetchCitationMetricsTool } = await import(
+  '@/mcp-server/tools/definitions/fetch-citation-metrics.tool.js'
+);
 const { fetchFulltextTool } = await import('@/mcp-server/tools/definitions/fetch-fulltext.tool.js');
 const { findRelatedTool } = await import('@/mcp-server/tools/definitions/find-related.tool.js');
 const { formatCitationsTool } = await import(
@@ -62,9 +84,15 @@ beforeEach(() => {
 /**
  * No crash, hang, leak or pollution — and every phase actually drove the
  * handler. A phase whose every input the schema rejected would report clean
- * while asserting nothing about the tool.
+ * while asserting nothing about the tool. `adversarialReachesHandler: false` is
+ * for a tool whose only input is a digit-string list: no adversarial value
+ * parses, so that phase is the schema's alone and the caller probes the
+ * handler's own edge inputs directly.
  */
-function assertClean(report: Awaited<ReturnType<typeof fuzzToolStrict>>): void {
+function assertClean(
+  report: Awaited<ReturnType<typeof fuzzToolStrict>>,
+  { adversarialReachesHandler = true } = {},
+): void {
   expect(report.crashes, JSON.stringify(report.crashes, null, 2)).toHaveLength(0);
   expect(report.leaks, JSON.stringify(report.leaks, null, 2)).toHaveLength(0);
   expect(report.prototypePollution).toBe(false);
@@ -72,7 +100,11 @@ function assertClean(report: Awaited<ReturnType<typeof fuzzToolStrict>>): void {
     report.valid.completed,
     'no generated input ran the handler to valid output',
   ).toBeGreaterThan(0);
-  expect(report.adversarial.handled, 'no adversarial input reached the handler').toBeGreaterThan(0);
+  if (adversarialReachesHandler) {
+    expect(report.adversarial.handled, 'no adversarial input reached the handler').toBeGreaterThan(
+      0,
+    );
+  }
   expect(report.abortedHandled, 'the aborted-signal probe never reached the handler').toBe(true);
 }
 
@@ -160,6 +192,30 @@ describe('Tool fuzz coverage', () => {
     // phase is only worth anything while generated input still reaches the
     // resolution chain.
     expect(mockNcbi.idConvert).toHaveBeenCalled();
+  });
+
+  it('pubmed_fetch_citation_metrics survives fuzz', async () => {
+    mockFetchRecords.mockClear();
+    const report = await fuzzToolStrict(fetchCitationMetricsTool, FUZZ_OPTIONS);
+    assertClean(report, { adversarialReachesHandler: false });
+    // Generated PMIDs that iCite cannot read (`0`, past its range) are never
+    // sent; the phase only covers the record path while some still are.
+    expect(mockFetchRecords).toHaveBeenCalled();
+
+    // The digit strings an adversarial phase would aim at the handler: zero,
+    // padded, past iCite's range, past the safe-integer range, and repeats.
+    const edges = ['0', '0000', '00023456789', '23456789', '1000000001', '9'.repeat(40)];
+    const ctx = createMockContext({ errors: fetchCitationMetricsTool.errors });
+    const result = await fetchCitationMetricsTool.handler(
+      fetchCitationMetricsTool.input.parse({ pmids: edges }),
+      ctx,
+    );
+    expect(fetchCitationMetricsTool.output.parse(result).records.map((r) => r.pmid)).toEqual([
+      '23456789',
+    ]);
+    // `0000` is `0` again, so it takes no entry of its own.
+    expect(result.unavailablePmids).toEqual(['0', '1000000001', '9'.repeat(40)]);
+    expect(mockFetchRecords).toHaveBeenLastCalledWith(['23456789'], ctx);
   });
 
   it('pubmed_find_related survives fuzz', async () => {

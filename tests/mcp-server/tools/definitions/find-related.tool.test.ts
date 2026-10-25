@@ -14,13 +14,14 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 
 import type { ESummaryResult, ParsedBriefSummary } from '@/services/ncbi/types.js';
 
-import { textBlocks } from '../../../_helpers.js';
+import { readCommonMark, textBlocks } from '../../../_helpers.js';
 import {
   BOOK_ESUMMARY_V1_XML,
   BOOK_ESUMMARY_XML,
   CHAPTER_DATES_ESUMMARY_XML,
   parseESummaryXml,
 } from '../../../services/ncbi/parsing/_book-fixtures.js';
+import { APOS_TITLE_ESUMMARY_XML } from '../../../services/ncbi/parsing/_entity-fixtures.js';
 
 const mockELink = vi.fn();
 const mockESummary = vi.fn();
@@ -2241,5 +2242,50 @@ describe('findRelatedTool content[] escaping of the row lines (issue #255)', () 
     expect(text).toContain('\n  \\# Not a heading\n');
     expect(text).toContain('\n  J \\*Bold\\* Res, 2021 \\*Jan\\*');
     expect(text).toContain('\n  \\> Lancet, Book \\[1\\](x) — Pub \\_A\\_, \\`chapter\\`, 1993');
+  });
+
+  it('keeps a lone delimiter in each value visible across the row, authors italics included (#261)', async () => {
+    mockExtractBriefSummaries.mockResolvedValue([
+      {
+        pmid: '111',
+        title: 'HLA-B*57:01 carriers',
+        authors: 'Smith J*, Doe A',
+        source: 'J Allergy*',
+        docType: 'citation',
+        pubDate: '2021',
+      },
+      {
+        pmid: '222',
+        title: '5` UTR of Lee _K',
+        authors: 'Lee _K',
+        source: 'J_ Med 3` end',
+        docType: 'citation',
+        pubDate: '~2020',
+      },
+    ]);
+    const result = await runToolContract(findRelatedTool, { pmid: '34265844' });
+    const { articles } = result.structuredContent as { articles: { title?: string }[] };
+    expect(articles[0]?.title).toBe('HLA-B*57:01 carriers');
+
+    const rows = readCommonMark(contractText(result));
+    expect(rows).toContain(
+      '⟨strong⟩⟨a⟩PMID 111⟨/a⟩⟨/strong⟩\nHLA-B*57:01 carriers\n⟨em⟩Smith J*, Doe A⟨/em⟩\nJ Allergy*, 2021\n\n⟨list_item_close⟩',
+    );
+    expect(rows).toContain(
+      '⟨strong⟩⟨a⟩PMID 222⟨/a⟩⟨/strong⟩\n5` UTR of Lee _K\n⟨em⟩Lee _K⟨/em⟩\nJ_ Med 3` end, ~2020\n\n⟨list_item_close⟩',
+    );
+  });
+
+  it('decodes the residual entity in an ESummary title, as pubmed_fetch_articles does (#262)', async () => {
+    mockELink.mockResolvedValue(eLinkResponse(['42138044']));
+    mockESummary.mockResolvedValue(parseESummaryXml(APOS_TITLE_ESUMMARY_XML));
+    mockExtractBriefSummaries.mockImplementation(realExtractBriefSummaries);
+    const result = await runToolContract(findRelatedTool, { pmid: '42138050' });
+
+    const title =
+      "Cervical Vestibular-Evoked Myogenic Potentials (cVEMPs) in Parkinson's Disease Patients: Prospective, Case-Control study.";
+    const { articles } = result.structuredContent as { articles: { title?: string }[] };
+    expect(articles[0]?.title).toBe(title);
+    expect(readCommonMark(contractText(result))).toContain(`\n${title}\n`);
   });
 });

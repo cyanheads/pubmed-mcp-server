@@ -10,7 +10,7 @@ import {
   CITATION_NOTICE_TYPES,
   type CitationNoticeType,
 } from '@/services/ncbi/formatting/citation-formatter.js';
-import { escapeMarkdownInline } from './_text.js';
+import { escapeMarkdownInParagraph } from './_text.js';
 
 /** One NCBI comments-and-corrections link as a tool's output carries it. */
 interface NoticeLink {
@@ -48,10 +48,11 @@ export function noticeLines(
   );
   return [
     retracted ? '**Retracted:** NCBI links a retraction notice to this article.' : '**Notices:**',
+    // The source and the note share the item's paragraph. (#261)
     ...notices.map((notice) => {
       const pmid = notice.pmid ? ` — PMID ${notice.pmid}` : '';
-      const note = notice.note ? ` — Note: ${escapeMarkdownInline(notice.note)}` : '';
-      return `- **${notice.refType}:** ${escapeMarkdownInline(notice.refSource)}${pmid}${note}`;
+      const note = notice.note ? ` — Note: ${escapeMarkdownInParagraph(notice.note)}` : '';
+      return `- **${notice.refType}:** ${escapeMarkdownInParagraph(notice.refSource)}${pmid}${note}`;
     }),
   ];
 }

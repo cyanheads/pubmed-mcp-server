@@ -4886,3 +4886,103 @@ describe('a <collab> name beside nested members and footnote markers (#251)', ()
     });
   });
 });
+
+describe('article-meta license statements (#269)', () => {
+  const XLINK = 'xmlns:xlink="http://www.w3.org/1999/xlink"';
+  const ALI = 'xmlns:ali="http://www.niso.org/schemas/ali/1.0/"';
+  const CC_BY_HTTPS = 'https://creativecommons.org/licenses/by/4.0/';
+  const CC_BY_HTTP = 'http://creativecommons.org/licenses/by/4.0/';
+  const BODY = '<sec><title>Results</title><p>Body text.</p></sec>';
+
+  /** The licenses an article reads with `permissions` as its `<article-meta>` permissions. */
+  const licensesOf = (permissions: string, body = BODY) =>
+    parsePmcArticle(jatsArticle(articleXml(permissions, body))).licenses;
+
+  it('reports no licenses for an article whose article-meta deposits none', () => {
+    for (const meta of [
+      '',
+      '<permissions><copyright-statement>© 2024 The Authors.</copyright-statement></permissions>',
+    ]) {
+      const parsed = parsePmcArticle(jatsArticle(articleXml(meta, BODY)));
+      expect(parsed).not.toHaveProperty('licenses');
+    }
+  });
+
+  it('reads the license text and its ali:license_ref, leaving the inline ext-link in the text (PMC10455816)', () => {
+    expect(
+      licensesOf(
+        `<permissions><copyright-statement>© 2023 by the authors.</copyright-statement><copyright-year>2023</copyright-year><license><ali:license_ref ${ALI} specific-use="textmining" content-type="ccbylicense">${CC_BY_HTTPS}</ali:license_ref><license-p>Licensee MDPI, Basel, Switzerland. This article is an open access article distributed under the terms and conditions of the Creative Commons Attribution (CC BY) license (<ext-link ${XLINK} ext-link-type="uri" xlink:href="${CC_BY_HTTPS}">${CC_BY_HTTPS}</ext-link>).</license-p></license></permissions>`,
+      ),
+    ).toEqual([
+      {
+        text: `Licensee MDPI, Basel, Switzerland. This article is an open access article distributed under the terms and conditions of the Creative Commons Attribution (CC BY) license (${CC_BY_HTTPS}).`,
+        urls: [CC_BY_HTTPS],
+      },
+    ]);
+  });
+
+  it('keeps every license in document order, the xlink:href before the ali:license_ref (PMC6354903)', () => {
+    expect(
+      licensesOf(
+        `<permissions><copyright-statement>Copyright: © 2018 Yakubu A et al.</copyright-statement><license ${XLINK} xlink:href="${CC_BY_HTTP}"><ali:license_ref ${ALI} specific-use="textmining" content-type="ccbylicense">${CC_BY_HTTPS}</ali:license_ref><license-p>This is an open access article distributed under the terms of the Creative Commons Attribution Licence.</license-p></license><license><license-p>The author(s) is/are employees of the US Government and therefore domestic copyright protection in USA does not apply to this work.</license-p></license></permissions>`,
+      ),
+    ).toEqual([
+      {
+        text: 'This is an open access article distributed under the terms of the Creative Commons Attribution Licence.',
+        urls: [CC_BY_HTTP, CC_BY_HTTPS],
+      },
+      {
+        text: 'The author(s) is/are employees of the US Government and therefore domestic copyright protection in USA does not apply to this work.',
+      },
+    ]);
+  });
+
+  it('reads a text-only license with no urls (PMC5959047)', () => {
+    expect(
+      licensesOf(
+        '<permissions><license><license-p>This file is available for text mining. It may also be used consistent with the principles of fair use under the copyright law.</license-p></license></permissions>',
+      ),
+    ).toEqual([
+      {
+        text: 'This file is available for text mining. It may also be used consistent with the principles of fair use under the copyright law.',
+      },
+    ]);
+  });
+
+  it('lists a url the xlink:href and an ali:license_ref both carry once, and a url-only license with no text', () => {
+    expect(
+      licensesOf(
+        `<permissions><license ${XLINK} xlink:href="${CC_BY_HTTPS}"><ali:license_ref ${ALI}>${CC_BY_HTTPS}</ali:license_ref><ali:license_ref ${ALI}>${CC_BY_HTTP}</ali:license_ref></license></permissions>`,
+      ),
+    ).toEqual([{ urls: [CC_BY_HTTPS, CC_BY_HTTP] }]);
+  });
+
+  it('separates the paragraphs of a license with a blank line', () => {
+    expect(
+      licensesOf(
+        '<permissions><license><license-p>First <italic>paragraph</italic>.</license-p><license-p>Second paragraph.</license-p></license></permissions>',
+      ),
+    ).toEqual([{ text: 'First paragraph.\n\nSecond paragraph.' }]);
+  });
+
+  it('skips a license that deposits neither text nor a url', () => {
+    expect(
+      licensesOf(
+        `<permissions><license><license-p> </license-p></license><license ${XLINK} xlink:href="${CC_BY_HTTPS}"/></permissions>`,
+      ),
+    ).toEqual([{ urls: [CC_BY_HTTPS] }]);
+  });
+
+  it('never reads a figure’s or a table’s permissions as the article’s', () => {
+    const permissions = `<permissions><license ${XLINK} xlink:href="${CC_BY_HTTP}"><license-p>Reproduced with permission.</license-p></license></permissions>`;
+    const parsed = parsePmcArticle(
+      jatsArticle(
+        articleXml(
+          '',
+          `<sec><title>Results</title><p>Body text.</p><fig id="F1"><label>Figure 1</label><caption><p>A figure.</p></caption>${permissions}<graphic ${XLINK} xlink:href="f1.jpg"/></fig><table-wrap id="T1"><label>Table 1</label><caption><p>A table.</p></caption><table><tr><td>1</td></tr></table>${permissions}</table-wrap></sec>`,
+        ),
+      ),
+    );
+    expect(parsed).not.toHaveProperty('licenses');
+  });
+});

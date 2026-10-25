@@ -9,7 +9,13 @@ import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
 import { createMockContext, getEnrichment, runToolContract } from '@cyanheads/mcp-ts-core/testing';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
-import { bunMarkdown, renderedHtml, renderedText, textBlocks } from '../../../_helpers.js';
+import {
+  bunMarkdown,
+  readCommonMark,
+  renderedHtml,
+  renderedText,
+  textBlocks,
+} from '../../../_helpers.js';
 import {
   ADA_WHOLE_BOOK_XML,
   articleSetXml,
@@ -2299,6 +2305,82 @@ describe('fetchArticlesTool content[] escaping of the abstract and record fields
     expect(text).toContain('**Keywords:** \\*alpha\\*, TP53_mutant');
     expect(text).toContain('- \\*Neoplasms\\* [D009369] (\\_genetics\\_ [Q000235])');
     expect(text).toContain('- R01 \\*A\\* — NIH \\<i>NCI\\</i> — \\[US\\](x)');
+  });
+
+  it('keeps a lone delimiter in each value of a multi-value paragraph visible (#261)', () => {
+    const text =
+      textBlocks(
+        fetchArticlesTool.format!({
+          articles: [
+            {
+              recordType: 'book-chapter' as const,
+              pmid: '42',
+              title: 'HLA-B*57:01 carriers',
+              journalInfo: {
+                title: 'J Allergy*',
+                isoAbbreviation: 'J_ All',
+                volume: '5`',
+                issue: '~3',
+                pages: '1*',
+                publicationDate: { year: '2024' },
+              },
+              book: {
+                title: 'Book*',
+                medium: 'Internet`',
+                publisher: 'Pub_ Co',
+                publisherLocation: 'City*',
+                edition: '2~',
+                collectionTitle: '_Series',
+                isbns: ['97*8'],
+                doi: '10.1/a`',
+              },
+              publicationTypes: ['Review*'],
+              doi: '10.1000/x_',
+              commentsCorrections: [{ refType: 'ErratumIn', refSource: 'J Med*', note: 'p*' }],
+              meshTerms: [
+                {
+                  descriptorName: 'Neoplasms*',
+                  descriptorUi: 'D009369',
+                  isMajorTopic: false,
+                  qualifiers: [{ qualifierName: 'genetics*', isMajorTopic: false }],
+                },
+              ],
+              grantList: [{ grantId: 'R01*', agency: 'NIH_', country: 'US`' }],
+              dataBanks: [{ name: 'GenBank*', accessionNumbers: ['AB_', 'CD*'] }],
+            },
+          ],
+          totalReturned: 1,
+        }),
+      )[0]?.text ?? '';
+    // The title heading is its value's whole inline run: its lone `*` stays raw.
+    expect(text).toContain('\n### HLA-B*57:01 carriers\n');
+    // Every other value reads back whole: the notice under the title and its
+    // entry in the full list, the journal line, the book paragraph, and each
+    // list item.
+    const list = (item: string) =>
+      `⟨bullet_list_open⟩\n\n⟨list_item_open⟩\n\n${item}\n\n⟨list_item_close⟩\n\n⟨bullet_list_close⟩`;
+    const heading = (name: string) => `⟨heading_open⟩\n\n${name}\n\n⟨heading_close⟩`;
+    const erratum = '⟨strong⟩ErratumIn:⟨/strong⟩ J Med* — Note: p*';
+    expect(readCommonMark(text)).toBe(
+      [
+        heading('PubMed Articles'),
+        '⟨strong⟩Articles Returned:⟨/strong⟩ 1',
+        heading('HLA-B*57:01 carriers'),
+        '⟨strong⟩Notices:⟨/strong⟩',
+        list(erratum),
+        '⟨strong⟩Journal:⟨/strong⟩ J Allergy*, (J_ All), 2024, ⟨strong⟩5`⟨/strong⟩(~3), 1*',
+        '⟨strong⟩Book:⟨/strong⟩ Book* [Internet`]\n⟨strong⟩Publisher:⟨/strong⟩ Pub_ Co\n⟨strong⟩Publisher Location:⟨/strong⟩ City*\n⟨strong⟩Edition:⟨/strong⟩ 2~\n⟨strong⟩Collection:⟨/strong⟩ _Series\n⟨strong⟩ISBN:⟨/strong⟩ 97*8\n⟨strong⟩Book DOI:⟨/strong⟩ 10.1/a`\n⟨strong⟩Record Type:⟨/strong⟩ book-chapter\n⟨strong⟩Type:⟨/strong⟩ Review*\n⟨strong⟩PMID:⟨/strong⟩ 42\n⟨strong⟩DOI:⟨/strong⟩ 10.1000/x_',
+        heading('Comments and Corrections (1)'),
+        list(erratum),
+        heading('MeSH Terms'),
+        list('Neoplasms* [D009369] (genetics*)'),
+        heading('Grants'),
+        list('R01* — NIH_ — US`'),
+        heading('Data Banks'),
+        'Find other records citing an accession with ⟨code_inline:pubmed_search_articles⟩ for ⟨code_inline:<accession>[si]⟩.',
+        list('⟨strong⟩GenBank*:⟨/strong⟩ AB_, CD*'),
+      ].join('\n\n'),
+    );
   });
 
   describe('a list item value opening like a block construct', () => {

@@ -10,6 +10,7 @@ import { researchPlanPrompt } from './mcp-server/prompts/definitions/research-pl
 import { databaseInfoResource } from './mcp-server/resources/definitions/database-info.resource.js';
 import { convertIdsTool } from './mcp-server/tools/definitions/convert-ids.tool.js';
 import { fetchArticlesTool } from './mcp-server/tools/definitions/fetch-articles.tool.js';
+import { fetchCitationMetricsTool } from './mcp-server/tools/definitions/fetch-citation-metrics.tool.js';
 import { fetchFulltextTool } from './mcp-server/tools/definitions/fetch-fulltext.tool.js';
 import { findRelatedTool } from './mcp-server/tools/definitions/find-related.tool.js';
 import { formatCitationsTool } from './mcp-server/tools/definitions/format-citations.tool.js';
@@ -20,6 +21,7 @@ import { pubmedEuropepmcSearchTool } from './mcp-server/tools/definitions/pubmed
 import { searchArticlesTool } from './mcp-server/tools/definitions/search-articles.tool.js';
 import { spellCheckTool } from './mcp-server/tools/definitions/spell-check.tool.js';
 import { initEuropePmcService } from './services/europe-pmc/europe-pmc-service.js';
+import { initIciteService } from './services/icite/icite-service.js';
 import { initNcbiService } from './services/ncbi/ncbi-service.js';
 import { initOpenAlexService } from './services/openalex/openalex-service.js';
 import { initUnpaywallService } from './services/unpaywall/unpaywall-service.js';
@@ -35,6 +37,7 @@ const tools = [
   lookupMeshTool,
   lookupCitationTool,
   convertIdsTool,
+  fetchCitationMetricsTool,
   ...(config.europepmcEnabled ? [pubmedEuropepmcSearchTool, pubmedEuropepmcFetchTool] : []),
 ];
 
@@ -46,7 +49,7 @@ await createApp({
   resources: [databaseInfoResource],
   prompts: [researchPlanPrompt],
   instructions:
-    "Use the pubmed_* tools to search PubMed and PubMed Central, fetch article metadata and full text, format citations, and find related articles via NCBI's E-utilities. Articles are keyed by PMID (integer); PMC full text by PMCID (`PMC` prefix); most also carry a DOI. Typical flow: `pubmed_search_articles` → `pubmed_fetch_articles` → `pubmed_fetch_fulltext`. When PubMed itself comes up empty (preprints, EPMC-only OA), broaden via `pubmed_europepmc_search`, then `pubmed_europepmc_fetch` with `records: [{ source, epmcId }]` copied from a hit for its complete abstract. Prefer deterministic resolvers when inputs are structured: `pubmed_lookup_citation` for partial references, `pubmed_convert_ids` to crosswalk IDs. Refine queries with `pubmed_lookup_mesh` and `pubmed_spell_check`.",
+    "Use the pubmed_* tools to search PubMed and PubMed Central, fetch article metadata and full text, format citations, and find related articles via NCBI's E-utilities. Articles are keyed by PMID (integer); PMC full text by PMCID (`PMC` prefix); most also carry a DOI. Typical flow: `pubmed_search_articles` → `pubmed_fetch_articles` → `pubmed_fetch_fulltext`. When PubMed itself comes up empty (preprints, EPMC-only OA), broaden via `pubmed_europepmc_search`, then `pubmed_europepmc_fetch` with `records: [{ source, epmcId }]` copied from a hit for its complete abstract. Prefer deterministic resolvers when inputs are structured: `pubmed_lookup_citation` for partial references, `pubmed_convert_ids` to crosswalk IDs. Refine queries with `pubmed_lookup_mesh` and `pubmed_spell_check`. For an article's citation influence, `pubmed_fetch_citation_metrics` returns its Relative Citation Ratio, NIH percentile, and citation counts (Source: NIH iCite, https://icite.od.nih.gov/).",
   landing: {
     requireAuth: false,
     tagline:
@@ -77,5 +80,6 @@ await createApp({
     initUnpaywallService();
     initEuropePmcService();
     initOpenAlexService();
+    initIciteService();
   },
 });

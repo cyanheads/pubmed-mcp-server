@@ -402,7 +402,11 @@ describe('fetchFulltextTool escapes JATS prose for content[] (#255)', () => {
 
     expect(text).toContain('- \\*Lung\\* Study_Group_ \\[A\\] (collective)\n- Wen Li');
     expect(text).toContain('- \\# 1 Department of \\*Thoracic\\* and \\*Oncology\\* Surgery');
-    expect(text).toContain('**Journal:** J_Mol_ \\*Med\\*, **12**(3*), 1-9*, ISSN 1234-5678');
+    // The journal parts share a paragraph, so each lone `*` and the trailing `_`
+    // are escaped too: `3*` and `1-9*` would pair into emphasis. (#261)
+    expect(text.split('\n')).toContain(
+      '**Journal:** J_Mol\\_ \\*Med\\*, **12**(3\\*), 1-9\\*, ISSN 1234-5678',
+    );
     expect(text).toContain('**Keywords:** EGFR\\*, Lys\\*');
     expect(text).toContain(
       '- [1 R1] WHO. Report \\[Internet\\]. Geneva; 2021 \\[accessed 2021\\].\n- \\- Dash \\*first\\* citation',

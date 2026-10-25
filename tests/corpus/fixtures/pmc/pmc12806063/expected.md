@@ -21,6 +21,9 @@
 **PubMed:** https://pubmed.ncbi.nlm.nih.gov/41675504/
 **Keywords:** David Hume, entropy, Gauguin, human intelligence, saltation
 
+**License:** [https://creativecommons.org/licenses/by/4.0/](<https://creativecommons.org/licenses/by/4.0/>)
+This is an open access article under the terms of the http://creativecommons.org/licenses/by/4.0/ License, which permits use, distribution and reproduction in any medium, provided the original work is properly cited.
+
 #### untitled section
 In this rapidly evolving era of artificial intelligence, we are still lacking the knowledge of human natural intelligence. The article [1] reported that the saltations in the proximal cis‐regulatory modules could, to some extent, explain the miraculous human intelligence at the molecular level. To help readers understand the work, I made some comments from both historical and methodological perspectives.
 

@@ -23,6 +23,7 @@ import { normalizePmid, pmidStringSchema } from './_schemas.js';
 import {
   escapeMarkdownBlock,
   escapeMarkdownInline,
+  escapeMarkdownInParagraph,
   escapeMarkdownLineStart,
   escapeMarkdownListItem,
 } from './_text.js';
@@ -628,33 +629,35 @@ export const fetchArticlesTool = tool('pubmed_fetch_articles', {
       }
 
       // Every upstream value below is escaped on its own; the brackets, bold
-      // and separators around them are this server's. (#255)
+      // and separators around them are this server's. (#255) The journal,
+      // book and identifier lines run together into paragraphs, so each value
+      // takes the paragraph escape. (#261)
       const ji = a.journalInfo;
       if (ji) {
         const parts: string[] = [];
-        const title = ji.title ? escapeMarkdownInline(ji.title) : undefined;
+        const title = ji.title ? escapeMarkdownInParagraph(ji.title) : undefined;
         if (title) parts.push(title);
         if (ji.isoAbbreviation && ji.isoAbbreviation !== ji.title) {
-          const iso = escapeMarkdownInline(ji.isoAbbreviation);
+          const iso = escapeMarkdownInParagraph(ji.isoAbbreviation);
           parts.push(title ? `(${iso})` : iso);
         }
         const pubDateStr = formatPublicationDate(ji.publicationDate);
-        if (pubDateStr) parts.push(escapeMarkdownInline(pubDateStr));
+        if (pubDateStr) parts.push(escapeMarkdownInParagraph(pubDateStr));
         if (ji.volume) {
-          const issue = ji.issue ? `(${escapeMarkdownInline(ji.issue)})` : '';
-          parts.push(`**${escapeMarkdownInline(ji.volume)}**${issue}`);
+          const issue = ji.issue ? `(${escapeMarkdownInParagraph(ji.issue)})` : '';
+          parts.push(`**${escapeMarkdownInParagraph(ji.volume)}**${issue}`);
         }
-        if (ji.pages) parts.push(escapeMarkdownInline(ji.pages));
+        if (ji.pages) parts.push(escapeMarkdownInParagraph(ji.pages));
         if (ji.elocationId) {
-          const elocationId = escapeMarkdownInline(ji.elocationId);
+          const elocationId = escapeMarkdownInParagraph(ji.elocationId);
           parts.push(
             ji.elocationIdType
-              ? `${escapeMarkdownInline(ji.elocationIdType)}: ${elocationId}`
+              ? `${escapeMarkdownInParagraph(ji.elocationIdType)}: ${elocationId}`
               : elocationId,
           );
         }
-        if (ji.issn) parts.push(`ISSN ${escapeMarkdownInline(ji.issn)}`);
-        if (ji.eIssn) parts.push(`eISSN ${escapeMarkdownInline(ji.eIssn)}`);
+        if (ji.issn) parts.push(`ISSN ${escapeMarkdownInParagraph(ji.issn)}`);
+        if (ji.eIssn) parts.push(`eISSN ${escapeMarkdownInParagraph(ji.eIssn)}`);
         if (parts.length) lines.push(`\n**Journal:** ${parts.join(', ')}`);
       }
 
@@ -666,9 +669,9 @@ export const fetchArticlesTool = tool('pubmed_fetch_articles', {
         const bookLines: string[] = [];
         // On a whole-book record the heading above already is the book title;
         // the medium marker then stands alone rather than repeating it.
-        const medium = bk.medium ? escapeMarkdownInline(bk.medium) : undefined;
+        const medium = bk.medium ? escapeMarkdownInParagraph(bk.medium) : undefined;
         if (a.recordType !== 'book' && bk.title) {
-          const bookTitle = escapeMarkdownInline(bk.title);
+          const bookTitle = escapeMarkdownInParagraph(bk.title);
           bookLines.push(`**Book:** ${medium ? `${bookTitle} [${medium}]` : bookTitle}`);
         } else if (medium) {
           bookLines.push(`**Medium:** ${medium}`);
@@ -679,9 +682,13 @@ export const fetchArticlesTool = tool('pubmed_fetch_articles', {
             bookLines.push(`- ${formatAuthor(ed)}`);
           }
         }
-        if (bk.publisher) bookLines.push(`**Publisher:** ${escapeMarkdownInline(bk.publisher)}`);
+        if (bk.publisher) {
+          bookLines.push(`**Publisher:** ${escapeMarkdownInParagraph(bk.publisher)}`);
+        }
         if (bk.publisherLocation) {
-          bookLines.push(`**Publisher Location:** ${escapeMarkdownInline(bk.publisherLocation)}`);
+          bookLines.push(
+            `**Publisher Location:** ${escapeMarkdownInParagraph(bk.publisherLocation)}`,
+          );
         }
         // A book published over several years carries a closed range
         // (GeneReviews 1993–2026), one still being updated an open one
@@ -695,14 +702,14 @@ export const fetchArticlesTool = tool('pubmed_fetch_articles', {
           range && bk.pubDate && bk.pubDate !== bk.beginningDate
             ? `${bk.pubDate} (${range})`
             : (range ?? bk.pubDate ?? bk.beginningDate ?? bk.endingDate);
-        if (bookDate) bookLines.push(`**Published:** ${escapeMarkdownInline(bookDate)}`);
-        if (bk.edition) bookLines.push(`**Edition:** ${escapeMarkdownInline(bk.edition)}`);
+        if (bookDate) bookLines.push(`**Published:** ${escapeMarkdownInParagraph(bookDate)}`);
+        if (bk.edition) bookLines.push(`**Edition:** ${escapeMarkdownInParagraph(bk.edition)}`);
         if (bk.collectionTitle) {
-          bookLines.push(`**Collection:** ${escapeMarkdownInline(bk.collectionTitle)}`);
+          bookLines.push(`**Collection:** ${escapeMarkdownInParagraph(bk.collectionTitle)}`);
         }
         if (bk.isbns?.length)
-          bookLines.push(`**ISBN:** ${escapeMarkdownInline(bk.isbns.join(', '))}`);
-        if (bk.doi) bookLines.push(`**Book DOI:** ${escapeMarkdownInline(bk.doi)}`);
+          bookLines.push(`**ISBN:** ${escapeMarkdownInParagraph(bk.isbns.join(', '))}`);
+        if (bk.doi) bookLines.push(`**Book DOI:** ${escapeMarkdownInParagraph(bk.doi)}`);
         if (bk.accession) {
           bookLines.push(`**Bookshelf:** https://www.ncbi.nlm.nih.gov/books/${bk.accession}/`);
         }
@@ -711,17 +718,17 @@ export const fetchArticlesTool = tool('pubmed_fetch_articles', {
 
       lines.push(`**Record Type:** ${a.recordType}`);
       if (a.publicationTypes?.length) {
-        lines.push(`**Type:** ${escapeMarkdownInline(a.publicationTypes.join(', '))}`);
+        lines.push(`**Type:** ${escapeMarkdownInParagraph(a.publicationTypes.join(', '))}`);
       }
       if (a.pmid) lines.push(`**PMID:** ${a.pmid}`);
-      if (a.doi) lines.push(`**DOI:** ${escapeMarkdownInline(a.doi)}`);
+      if (a.doi) lines.push(`**DOI:** ${escapeMarkdownInParagraph(a.doi)}`);
       if (a.pmcId) lines.push(`**PMCID:** ${a.pmcId}`);
       if (a.pubmedUrl) lines.push(`**PubMed:** ${a.pubmedUrl}`);
       if (a.pmcUrl) lines.push(`**PMC:** ${a.pmcUrl}`);
 
       if (a.articleDates?.length) {
         lines.push(
-          `**Article Dates:** ${escapeMarkdownInline(a.articleDates.map(formatArticleDate).join('; '))}`,
+          `**Article Dates:** ${escapeMarkdownInParagraph(a.articleDates.map(formatArticleDate).join('; '))}`,
         );
       }
 
@@ -734,9 +741,9 @@ export const fetchArticlesTool = tool('pubmed_fetch_articles', {
         }
         for (const cc of a.commentsCorrections) {
           const pmid = cc.pmid ? ` — PMID ${cc.pmid}` : '';
-          const note = cc.note ? ` — Note: ${escapeMarkdownInline(cc.note)}` : '';
+          const note = cc.note ? ` — Note: ${escapeMarkdownInParagraph(cc.note)}` : '';
           lines.push(
-            `- **${escapeMarkdownInline(cc.refType)}:** ${escapeMarkdownInline(cc.refSource)}${pmid}${note}`,
+            `- **${escapeMarkdownInParagraph(cc.refType)}:** ${escapeMarkdownInParagraph(cc.refSource)}${pmid}${note}`,
           );
         }
       }
@@ -753,8 +760,11 @@ export const fetchArticlesTool = tool('pubmed_fetch_articles', {
       if (a.meshTerms?.length) {
         lines.push(`\n#### MeSH Terms`);
         for (const m of a.meshTerms) {
-          // The descriptor opens the list item, so its line start is escaped too.
-          const descriptorName = m.descriptorName && escapeMarkdownListItem(m.descriptorName);
+          // The descriptor opens the list item, so its line start is escaped too;
+          // it shares the item with its qualifiers. (#261)
+          const descriptorName =
+            m.descriptorName &&
+            escapeMarkdownLineStart(escapeMarkdownInParagraph(m.descriptorName));
           const descriptor = m.descriptorUi
             ? `${descriptorName} [${m.descriptorUi}]`
             : descriptorName;
@@ -762,7 +772,7 @@ export const fetchArticlesTool = tool('pubmed_fetch_articles', {
           const qualifiers = m.qualifiers?.length
             ? ` (${m.qualifiers
                 .map((q) => {
-                  const qualifierName = escapeMarkdownInline(q.qualifierName);
+                  const qualifierName = escapeMarkdownInParagraph(q.qualifierName);
                   const name = q.qualifierUi
                     ? `${qualifierName} [${q.qualifierUi}]`
                     : qualifierName;
@@ -784,7 +794,10 @@ export const fetchArticlesTool = tool('pubmed_fetch_articles', {
               ? [g.agency, `(${g.acronym})`].filter(Boolean).join(' ')
               : g.agency;
           const parts = [grantId, agency, g.country].filter((part): part is string => !!part);
-          lines.push(`- ${escapeMarkdownLineStart(parts.map(escapeMarkdownInline).join(' — '))}`);
+          // The item is this one line and holds only these values and the
+          // server's ` — ` and `(…)`, which carry no delimiter, so pairing is
+          // judged across it whole: a lone `_` in `(WT_)` pairs with nothing. (#261)
+          lines.push(`- ${escapeMarkdownLineStart(escapeMarkdownInline(parts.join(' — ')))}`);
         }
       }
       if (a.dataBanks?.length) {
@@ -793,10 +806,10 @@ export const fetchArticlesTool = tool('pubmed_fetch_articles', {
           'Find other records citing an accession with `pubmed_search_articles` for `<accession>[si]`.',
         );
         for (const bank of a.dataBanks) {
-          const name = escapeMarkdownInline(bank.name);
+          const name = escapeMarkdownInParagraph(bank.name);
           lines.push(
             bank.accessionNumbers?.length
-              ? `- **${name}:** ${bank.accessionNumbers.map(escapeMarkdownInline).join(', ')}`
+              ? `- **${name}:** ${bank.accessionNumbers.map(escapeMarkdownInParagraph).join(', ')}`
               : `- **${name}**`,
           );
         }
@@ -837,7 +850,7 @@ function formatAuthor(au: FormattedAuthor): string {
   if (au.affiliationIndices?.length) {
     parts.push(`[aff ${au.affiliationIndices.join(',')}]`);
   }
-  if (au.orcid) parts.push(`· ORCID ${escapeMarkdownInline(au.orcid)}`);
+  if (au.orcid) parts.push(`· ORCID ${escapeMarkdownInParagraph(au.orcid)}`);
   return parts.join(' ') || 'Unknown';
 }
 

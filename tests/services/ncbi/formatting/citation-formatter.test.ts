@@ -17,6 +17,7 @@ import {
 } from '@/services/ncbi/formatting/citation-formatter.js';
 import { parseArticleSet } from '@/services/ncbi/parsing/article-parser.js';
 import type { ParsedArticle } from '@/services/ncbi/types.js';
+import { readCommonMark } from '../../../_helpers.js';
 import { PMC_FIXTURES_DIR } from '../../../corpus/fixtures.js';
 import { PUBMED_FIXTURES_DIR } from '../../../corpus/pubmed-fixtures.js';
 import {
@@ -2248,5 +2249,156 @@ describe('author name suffixes in every style (#226)', () => {
       );
       expect(formatApa(book)).toMatch(/^Adam, M\. P\., Jr \(Ed\.\)\. \(2026\)\. /);
     });
+  });
+});
+
+describe('APA and MLA escape the record text they carry as Markdown (#263)', () => {
+  /** PMID 42504015, two of its twelve authors: a title holding two `*`. */
+  const twoStars: ParsedArticle = {
+    recordType: 'journal-article',
+    pmid: '42504015',
+    title:
+      'HLA-B*15:21 carrier status is a susceptibility factor of carbamazepine-induced nonimmediate cutaneous adverse reactions in HLA-B*15:02-negative patients: A retrospective cohort study.',
+    authors: [
+      { lastName: 'Ruanglertboon', firstName: 'Warit', initials: 'W' },
+      { lastName: 'Seree-Aphinan', firstName: 'Chanudda', initials: 'C' },
+    ],
+    journalInfo: {
+      title: 'British journal of clinical pharmacology',
+      isoAbbreviation: 'Br J Clin Pharmacol',
+      publicationDate: { year: '2026' },
+    },
+    doi: '10.1002/bcp.70714',
+  };
+
+  /** PMID 41035243, two of its four authors: a title holding one `*`. */
+  const oneStar: ParsedArticle = {
+    recordType: 'journal-article',
+    pmid: '41035243',
+    title:
+      'HLA‒B*58:01 and skin reactions in pediatric hematology and oncology patients treated with allopurinol.',
+    authors: [
+      { lastName: 'Maneechai', firstName: 'Parisa', initials: 'P' },
+      { lastName: 'Sanpakit', firstName: 'Kleebsabai', initials: 'K' },
+    ],
+    journalInfo: {
+      title: 'Clinical and experimental pediatrics',
+      isoAbbreviation: 'Clin Exp Pediatr',
+      volume: '68',
+      issue: '12',
+      pages: '974-980',
+      publicationDate: { year: '2025' },
+    },
+    doi: '10.3345/cep.2025.01032',
+  };
+
+  it('escapes a title whose two `*` would pair, and renders both (PMID 42504015)', () => {
+    const apa = formatApa(twoStars);
+    const mla = formatMla(twoStars);
+    expect(apa).toBe(
+      'Ruanglertboon, W., & Seree-Aphinan, C. (2026). HLA-B\\*15:21 carrier status is a susceptibility factor of carbamazepine-induced nonimmediate cutaneous adverse reactions in HLA-B\\*15:02-negative patients: A retrospective cohort study. *British Journal of Clinical Pharmacology*. https://doi.org/10.1002/bcp.70714',
+    );
+    expect(mla).toBe(
+      'Ruanglertboon, Warit, and Chanudda Seree-Aphinan. "HLA-B\\*15:21 carrier status is a susceptibility factor of carbamazepine-induced nonimmediate cutaneous adverse reactions in HLA-B\\*15:02-negative patients: A retrospective cohort study." *British Journal of Clinical Pharmacology*, 2026. https://doi.org/10.1002/bcp.70714.',
+    );
+    expect(readCommonMark(apa)).toBe(
+      'Ruanglertboon, W., & Seree-Aphinan, C. (2026). HLA-B*15:21 carrier status is a susceptibility factor of carbamazepine-induced nonimmediate cutaneous adverse reactions in HLA-B*15:02-negative patients: A retrospective cohort study. ⟨em⟩British Journal of Clinical Pharmacology⟨/em⟩. https://doi.org/10.1002/bcp.70714',
+    );
+    expect(readCommonMark(mla)).toContain(
+      'in HLA-B*15:02-negative patients: A retrospective cohort study." ⟨em⟩British Journal of Clinical Pharmacology⟨/em⟩, 2026.',
+    );
+  });
+
+  it('leaves a citation with one lone `*` byte-identical (PMID 41035243)', () => {
+    expect(formatApa(oneStar)).toBe(
+      'Maneechai, P., & Sanpakit, K. (2025). HLA‒B*58:01 and skin reactions in pediatric hematology and oncology patients treated with allopurinol. *Clinical and Experimental Pediatrics*, *68*(12), 974–980. https://doi.org/10.3345/cep.2025.01032',
+    );
+    expect(formatMla(oneStar)).toBe(
+      'Maneechai, Parisa, and Kleebsabai Sanpakit. "HLA‒B*58:01 and skin reactions in pediatric hematology and oncology patients treated with allopurinol." *Clinical and Experimental Pediatrics*, vol. 68, no. 12, 2025, pp. 974-980. https://doi.org/10.3345/cep.2025.01032.',
+    );
+    expect(readCommonMark(formatApa(oneStar))).toContain('HLA‒B*58:01 and skin reactions');
+  });
+
+  it('judges pairing across the whole citation: one `*` in a name and one in the title', () => {
+    const apa = formatApa({
+      ...oneStar,
+      authors: [{ collectiveName: 'HLA*Study Group' }],
+    });
+    expect(apa).toMatch(/^HLA\\\*Study Group\. \(2025\)\. HLA‒B\\\*58:01 and skin/);
+    expect(readCommonMark(apa)).toMatch(/^HLA\*Study Group\. \(2025\)\. HLA‒B\*58:01 and skin/);
+  });
+
+  it('escapes every `*` inside the italics it writes: journal, volume, book title', () => {
+    const article: ParsedArticle = {
+      ...oneStar,
+      title: 'Plain title.',
+      journalInfo: {
+        ...oneStar.journalInfo,
+        title: 'J*Med',
+        isoAbbreviation: 'J*Med',
+        volume: '6*',
+      },
+    };
+    const apa = formatApa(article);
+    expect(apa).toContain('Plain title. *J\\*Med*, *6\\**(12), 974–980.');
+    expect(readCommonMark(apa)).toContain('Plain title. ⟨em⟩J*Med⟨/em⟩, ⟨em⟩6*⟨/em⟩(12), 974–980.');
+    const mla = formatMla(article);
+    expect(mla).toContain('"Plain title." *J\\*Med*, vol. 6*, no. 12');
+    expect(readCommonMark(mla)).toContain('⟨em⟩J*Med⟨/em⟩, vol. 6*, no. 12');
+
+    const [chapter] = parseArticleSet(
+      parseArticleSetXml(
+        articleSetXml(
+          GENEREVIEWS_CHAPTER_XML.replace(
+            '<BookTitle book="gene">GeneReviews',
+            '<BookTitle book="gene">Gene*Reviews',
+          ),
+        ),
+      ),
+    );
+    if (!chapter) throw new Error('fixture did not parse');
+    for (const citation of [formatApa(chapter), formatMla(chapter)]) {
+      expect(citation).toContain('*Gene\\*Reviews®');
+      expect(readCommonMark(citation)).toContain('⟨em⟩Gene*Reviews®');
+      expect(citation).not.toMatch(/\\(?=[^*])/);
+    }
+  });
+
+  it('applies the prose rules to the rest: tags, entities, links, underscores', () => {
+    const article: ParsedArticle = {
+      ...oneStar,
+      title: 'Effects of <i>Bacillus</i> on R&amp;D [see](x) in _wild_ type.',
+    };
+    const apa = formatApa(article);
+    expect(apa).toContain(
+      '(2025). Effects of \\<i>Bacillus\\</i> on R\\&amp;D [see\\](x) in \\_wild\\_ type. *Clinical',
+    );
+    expect(readCommonMark(apa)).toContain(
+      '(2025). Effects of <i>Bacillus</i> on R&amp;D [see](x) in _wild_ type. ⟨em⟩Clinical',
+    );
+  });
+
+  it('leaves a bracketed translated title and an intraword underscore byte-identical', () => {
+    const apa = formatApa({ ...oneStar, title: '[Effects of TP53_mutant cells].' });
+    expect(apa).toContain('(2025). [Effects of TP53_mutant cells]. *Clinical');
+  });
+
+  it('writes the DOI and Bookshelf URLs as they are, never backslash-escaped', () => {
+    const apa = formatApa({ ...twoStars, doi: '10.1002/(SICI)1097_x_*y' });
+    expect(apa.endsWith(' https://doi.org/10.1002/(SICI)1097_x_*y')).toBe(true);
+    const mla = formatMla({ ...twoStars, doi: '10.1002/(SICI)1097_x_*y' });
+    expect(mla.endsWith(' https://doi.org/10.1002/(SICI)1097_x_*y.')).toBe(true);
+
+    const [chapter] = parseArticleSet(parseArticleSetXml(articleSetXml(GENEREVIEWS_CHAPTER_XML)));
+    if (!chapter) throw new Error('fixture did not parse');
+    expect(formatApa(chapter)).toMatch(/ https:\/\/www\.ncbi\.nlm\.nih\.gov\/books\/NBK1247\/$/);
+  });
+
+  it('counts a delimiter in a URL, so a lone one in the title cannot pair with it', () => {
+    const apa = formatApa({ ...oneStar, doi: '10.1/x*y' });
+    expect(apa).toContain('HLA‒B\\*58:01');
+    expect(apa.endsWith('https://doi.org/10.1/x*y')).toBe(true);
+    expect(readCommonMark(apa)).toContain('HLA‒B*58:01');
+    expect(readCommonMark(apa).endsWith('https://doi.org/10.1/x*y')).toBe(true);
   });
 });

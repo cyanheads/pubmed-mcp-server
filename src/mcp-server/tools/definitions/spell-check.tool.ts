@@ -1,7 +1,8 @@
 /**
  * @fileoverview PubMed spell-check tool. Applies NCBI ESpell's corrections to a
- * PubMed search query in place, keeping its field tags, operators, spacing, and
- * gene symbols — the recovery step after a zero-hit or thin
+ * PubMed search query in place, keeping its field tags, the values of indexed
+ * fields (`aged[mh]`), operators, spacing, and gene symbols — the recovery
+ * step after a zero-hit or thin
  * `pubmed_search_articles` result. `term` is accepted as an alias for `query`.
  * @module src/mcp-server/tools/definitions/spell-check.tool
  */
@@ -15,7 +16,7 @@ import { hasVisibleText } from './_visible-text.js';
 
 export const spellCheckTool = tool('pubmed_spell_check', {
   description:
-    'Spell-check a PubMed search query against NCBI ESpell and get the corrected query back. Use after a zero-hit or thin `pubmed_search_articles` result, or when a drug, gene, disease, or author name may be misspelled. Corrections are applied in place, so field tags, operators, spacing, and gene symbols stay as written (`alzhiemer diseese treatmnt outcomse` → `alzheimer disease treatment outcomes`). Words in all capitals, with digits or non-ASCII letters, or differing only in case are never changed, nor is a single letter swapped for another (`q fever`, the initial in `smith q`), words after a number or symbol ESpell skips are left as written, and `hasSuggestion` is false when no correction was applied. Re-run the search with `corrected`.',
+    'Spell-check a PubMed search query against NCBI ESpell and get the corrected query back. Use after a zero-hit or thin `pubmed_search_articles` result, or when a drug, gene, disease, or author name may be misspelled. Corrections are applied in place, so field tags, operators, spacing, and gene symbols stay as written (`alzhiemer diseese treatmnt outcomse` → `alzheimer disease treatment outcomes`). The value of an indexed field — MeSH, publication type, journal, author, language, subset, and the like (`aged[mh]`, `free full text[sb]`, `zhang y[au]`) — is kept as written, misspelled or not, since the ESpell dictionary is not the index that field searches; free-text fields such as `[tiab]`, `[ti]`, and `[tw]` are corrected. Words in all capitals, with digits or non-ASCII letters, or differing only in case are never changed, nor is a single letter swapped for another (`q fever`, the initial in `smith q`), words after a number or symbol ESpell skips are left as written, and `hasSuggestion` is false when no correction was applied. Re-run the search with `corrected`.',
   annotations: { readOnlyHint: true, openWorldHint: true },
   _meta: conceptMeta([SCHEMA_SEARCH_ACTION]),
   sourceUrl:
@@ -41,7 +42,7 @@ export const spellCheckTool = tool('pubmed_spell_check', {
     corrected: z
       .string()
       .describe(
-        "The query with ESpell's accepted corrections applied in place; field tags, operators, spacing, words in capitals or with digits, and a single letter ESpell would swap for another are kept as written. Same as `original` when `hasSuggestion` is false.",
+        "The query with ESpell's accepted corrections applied in place; field tags, the values of indexed fields such as `aged[mh]` and `zhang y[au]`, operators, spacing, words in capitals or with digits, and a single letter ESpell would swap for another are kept as written. Same as `original` when `hasSuggestion` is false.",
       ),
     hasSuggestion: z
       .boolean()

@@ -1,6 +1,8 @@
 /**
  * @fileoverview Types for the Europe PMC REST API. Covers the search response
- * shape and the fullTextXML endpoint contract.
+ * shape and the fullTextXML endpoint contract, including which search hits it
+ * publishes full text for (`epmcFullTextId`) and where each result type keeps
+ * the journal name (`epmcJournal`).
  *
  * See https://europepmc.org/RestfulWebService for the full API. We use only
  * the search endpoint (`/webservices/rest/search`) and the fullText endpoint
@@ -28,7 +30,7 @@ export const EUROPEPMC_ALL_SOURCES = ['MED', 'PMC', 'PPR', 'PAT', 'AGR'] as cons
  * Single record from a Europe PMC search response. Only fields the server
  * actually consumes are typed; the upstream payload carries many more under
  * `resultType=core`. Field optionality reflects EPMC's real-world sparsity —
- * preprints often lack `journalTitle`; patents lack `authorString`.
+ * preprints carry no journal; patents lack `authorString`.
  */
 export interface EuropePmcSearchHit {
   abstractText?: string;
@@ -40,9 +42,16 @@ export interface EuropePmcSearchHit {
   firstIndexDate?: string;
   /** ISO date (YYYY-MM-DD) of publication where known. */
   firstPublicationDate?: string;
+  /**
+   * The ids Europe PMC serves full text under: the PMCID for a `MED` or `PMC`
+   * record, the record's own accession for a `PPR` preprint. Present on every
+   * open-access record and on some outside the open-access subset, so it is
+   * not an availability signal on its own — see {@link epmcFullTextId}.
+   */
+  fullTextIdList?: { fullTextId?: string[] };
   hasBook?: 'Y' | 'N';
   hasPDF?: 'Y' | 'N';
-  /** "Y"/"N" — whether EPMC believes a full-text XML is available for this record. */
+  /** "Y"/"N" — whether Europe PMC holds text-mined terms for this record. Not a full-text signal. */
   hasTextMinedTerms?: 'Y' | 'N';
   /** EPMC's own record identifier — unique within `source`. Always present. */
   id: string;
@@ -50,9 +59,12 @@ export interface EuropePmcSearchHit {
   inPMC?: 'Y' | 'N';
   isOpenAccess?: 'Y' | 'N';
   issue?: string;
+  /** The journal block of a `core` result, which carries no `journalTitle`. Read through {@link epmcJournal}. */
+  journalInfo?: { journal?: { medlineAbbreviation?: string; title?: string } };
+  /** The journal name of a `lite` result; `core` results carry `journalInfo` instead. Read through {@link epmcJournal}. */
   journalTitle?: string;
   journalVolume?: string;
-  /** Some hits carry their own license. Free-form per EPMC. */
+  /** Europe PMC's license string for the record (`cc by`, `cc0`, …). `core` results only; independent of `isOpenAccess`. */
   license?: string;
   pageInfo?: string;
   pmcid?: string;
@@ -61,6 +73,32 @@ export interface EuropePmcSearchHit {
   source: EuropePmcSource;
   title?: string;
   [extra: string]: unknown;
+}
+
+/**
+ * The id to request a hit's `fullTextXML` under, or `undefined` when Europe
+ * PMC publishes none for it. Europe PMC serves that XML for its open-access
+ * subset only: the hit must carry `isOpenAccess: "Y"` and a `fullTextIdList`
+ * id, the PMCID or a preprint's own accession. `inPMC` and `inEPMC` do not
+ * decide it, and a request for any other record draws an HTTP 500 that cannot
+ * be told apart from an unknown id or an outage — so a hit failing this test is
+ * never requested. (#267)
+ */
+export function epmcFullTextId(hit: EuropePmcSearchHit): string | undefined {
+  return hit.isOpenAccess === 'Y' ? hit.fullTextIdList?.fullTextId?.[0] : undefined;
+}
+
+/**
+ * A hit's journal name, the same for both result types: a `lite` result's
+ * `journalTitle`, else a `core` result's `journalInfo.journal`
+ * `medlineAbbreviation`, else its full `title`. That fallback reproduces
+ * `journalTitle` on every captured record — the full `title` alone matches it
+ * only where Europe PMC records no abbreviation, and `isoabbreviation` is absent
+ * on Agricola records. `undefined` when the hit carries no journal. (#274)
+ */
+export function epmcJournal(hit: EuropePmcSearchHit): string | undefined {
+  const journal = hit.journalInfo?.journal;
+  return hit.journalTitle || journal?.medlineAbbreviation || journal?.title || undefined;
 }
 
 /** Wrapper for the `resultList` block in a search response. */

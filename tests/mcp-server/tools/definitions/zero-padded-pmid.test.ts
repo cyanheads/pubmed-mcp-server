@@ -10,7 +10,9 @@
  * distinct PMID, the `ID list is empty!` envelope when nothing in the list is a
  * UID, an ID Converter that resolves only the canonical spelling and answers a
  * repeated ID once, and an ELink `pubmed_pubmed` neighbor list that leads with
- * the source article itself.
+ * the source article itself. NIH iCite answers from captured records, and like
+ * the live API misses a zero-padded PMID, so `pubmed_fetch_citation_metrics`
+ * has to send the canonical form too.
  *
  * Pinned reporting: records carry NCBI's canonical PMID; `unavailablePmids`,
  * `unavailable[].id`, `pubmed_fetch_fulltext`'s `deferred.ids`, and
@@ -23,6 +25,7 @@ import { createMockContext, getEnrichment } from '@cyanheads/mcp-ts-core/testing
 import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { textBlocks } from '../../../_helpers.js';
+import { ICITE_HOST, pubsFrom } from '../../../services/icite/_icite-fixtures.js';
 import { articleSetXml } from '../../../services/ncbi/parsing/_book-fixtures.js';
 
 vi.mock('@cyanheads/mcp-ts-core/utils', async () => {
@@ -41,6 +44,10 @@ vi.stubEnv('NCBI_API_KEY', '');
 vi.stubEnv('NCBI_REQUEST_DELAY_MS', '50');
 
 const { initNcbiService } = await import('@/services/ncbi/ncbi-service.js');
+const { initIciteService } = await import('@/services/icite/icite-service.js');
+const { fetchCitationMetricsTool } = await import(
+  '@/mcp-server/tools/definitions/fetch-citation-metrics.tool.js'
+);
 const { fetchArticlesTool } = await import('@/mcp-server/tools/definitions/fetch-articles.tool.js');
 const { formatCitationsTool } = await import(
   '@/mcp-server/tools/definitions/format-citations.tool.js'
@@ -150,9 +157,13 @@ let fetchSpy: ReturnType<typeof vi.spyOn>;
 const requests = (): URL[] =>
   fetchSpy.mock.calls.map((args: unknown[]) => new URL(String(args[0])));
 
+/** iCite `/api/pubs`: the captured records for the PMIDs sent, a padded spelling matching none. */
+const icitePubs = pubsFrom();
+
 beforeAll(() => {
   fetchSpy = vi.spyOn(globalThis, 'fetch').mockImplementation(async (input) => {
     const url = new URL(String(input));
+    if (url.hostname === ICITE_HOST) return icitePubs(url);
     const ids = (url.searchParams.get('id') ?? url.searchParams.get('ids') ?? '').split(',');
     if (url.pathname.endsWith('/efetch.fcgi')) {
       return url.searchParams.get('db') === 'pmc' ? pmcEFetch(ids) : pubmedEFetch(ids);
@@ -163,6 +174,7 @@ beforeAll(() => {
     throw new Error(`unexpected request ${url.href}`);
   });
   initNcbiService();
+  initIciteService();
 });
 
 beforeEach(() => {
@@ -457,5 +469,50 @@ describe('pubmed_convert_ids with zero-padded PMIDs', () => {
     ]);
     expect(result.records.map((r) => r.pmid)).toEqual(['1', '23193287', '99999999']);
     expect(result).toMatchObject({ totalConverted: 1, totalSubmitted: 3 });
+  });
+});
+
+describe('pubmed_fetch_citation_metrics with zero-padded PMIDs', () => {
+  async function fetchMetrics(pmids: string[]) {
+    const ctx = createMockContext({ errors: fetchCitationMetricsTool.errors });
+    const result = await fetchCitationMetricsTool.handler(
+      fetchCitationMetricsTool.input.parse({ pmids }),
+      ctx,
+    );
+    const icite = requests().filter((u) => u.hostname === ICITE_HOST);
+    return { result, icite, text: textOf(fetchCitationMetricsTool.format?.(result) ?? []) };
+  }
+
+  it('returns the record a padded PMID names, requested under the canonical PMID', async () => {
+    const { result, icite, text } = await fetchMetrics(['00023456789']);
+
+    expect(result.records.map((r) => r.pmid)).toEqual(['23456789']);
+    expect(result.unavailablePmids).toBeUndefined();
+    expect(text).not.toContain('Unavailable PMIDs');
+    expect(icite.map((u) => u.searchParams.get('pmids'))).toEqual(['23456789']);
+  });
+
+  it('returns one record for two spellings of one PMID, from one request', async () => {
+    const { result, icite } = await fetchMetrics(['23456789', '0023456789']);
+
+    expect(result.records.map((r) => r.pmid)).toEqual(['23456789']);
+    expect(result.unavailablePmids).toBeUndefined();
+    expect(icite.map((u) => u.searchParams.get('pmids'))).toEqual(['23456789']);
+  });
+
+  it('reports only the misses in a mixed batch, under the caller’s spelling', async () => {
+    const { result, text } = await fetchMetrics(['0023456789', '099999999', '1']);
+
+    expect(result.records.map((r) => r.pmid)).toEqual(['23456789', '1']);
+    expect(result.unavailablePmids).toEqual(['099999999']);
+    expect(text).toContain('**Unavailable PMIDs:** 099999999');
+  });
+
+  it('never sends the all-zero PMID and reports it under the caller’s spelling', async () => {
+    const { result, icite, text } = await fetchMetrics(['00000000']);
+
+    expect(result).toEqual({ records: [], unavailablePmids: ['00000000'] });
+    expect(icite).toEqual([]);
+    expect(text).toContain('**Unavailable PMIDs:** 00000000');
   });
 });

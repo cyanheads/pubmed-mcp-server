@@ -559,14 +559,15 @@ describe('citation formatters — injection in metadata', () => {
     expect(lines.at(-1)).toBe('ER  - ');
   });
 
-  it('APA: HTML tags in title appear verbatim (no sanitization — no HTML context)', () => {
+  it('APA and MLA: a tag-shaped title reads as text, escaped for the Markdown both are (#263)', () => {
     const article: ParsedArticle = {
       ...baseArticle,
       title: '<b>Bold</b> approach to therapy',
     };
-    const citation = formatApa(article);
-    // APA is plain text — tags are included as-is (no HTML rendering context)
-    expect(citation).toContain('<b>Bold</b> approach to therapy');
+    // APA and MLA are Markdown on both surfaces, so a tag a renderer would read
+    // as raw HTML carries a backslash; nothing is stripped.
+    expect(formatApa(article)).toContain('\\<b>Bold\\</b> approach to therapy');
+    expect(formatMla(article)).toContain('"\\<b>Bold\\</b> approach to therapy."');
   });
 
   it('BibTeX: journal name with & is escaped to \\&', () => {

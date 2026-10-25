@@ -26,7 +26,7 @@ import {
 } from '@/services/openalex/types.js';
 import { conceptMeta, EDAM_DATA_RETRIEVAL, SCHEMA_SCHOLARLY_ARTICLE } from './_concepts.js';
 import { normalizePmid, pmidStringSchema } from './_schemas.js';
-import { escapeMarkdownInline, escapeMarkdownLineStart } from './_text.js';
+import { escapeMarkdownInParagraph, escapeMarkdownLineStart } from './_text.js';
 
 // ─── ELink XML types ─────────────────────────────────────────────────────────
 
@@ -896,16 +896,18 @@ export const findRelatedTool = tool('pubmed_find_related', {
     if (result.articles.length === 0) {
       lines.push('No related articles found.');
     } else {
-      const escaped = (part: string | undefined) => (part ? escapeMarkdownInline(part) : '');
+      // The title, author, editor and meta lines of an item are one paragraph,
+      // and the authors sit inside this server's own `*…*`, so every value takes
+      // the paragraph escape: a lone `*` in two of them would pair. (#261)
+      const escaped = (part: string | undefined) => (part ? escapeMarkdownInParagraph(part) : '');
       for (const a of result.articles) {
         lines.push(`- **[PMID ${a.pmid}](https://pubmed.ncbi.nlm.nih.gov/${a.pmid}/)**`);
         // The title and meta lines open a line of the list item, where a
         // leading `#`, `>` or `- ` would start a heading, quote or nested list,
         // so the line start is escaped as well. (#255)
-        if (a.title) lines.push(`  ${escapeMarkdownLineStart(escapeMarkdownInline(a.title))}`);
-        if (a.authors) lines.push(`  *${escapeMarkdownInline(a.authors)}*`);
-        if (a.editors?.length)
-          lines.push(`  edited by ${escapeMarkdownInline(a.editors.join(', '))}`);
+        if (a.title) lines.push(`  ${escapeMarkdownLineStart(escaped(a.title))}`);
+        if (a.authors) lines.push(`  *${escaped(a.authors)}*`);
+        if (a.editors?.length) lines.push(`  edited by ${escaped(a.editors.join(', '))}`);
         // A Bookshelf record has no journal: its book and publisher stand in
         // for the source so the row still names a venue. (#114)
         const book = [escaped(a.bookTitle), escaped(a.publisherName)].filter(Boolean).join(' — ');

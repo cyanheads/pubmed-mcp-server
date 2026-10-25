@@ -12,7 +12,16 @@ import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
 import { createMockContext, getEnrichment, runToolContract } from '@cyanheads/mcp-ts-core/testing';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
-import { bunMarkdown, textBlocks, renderedText as visibleText } from '../../../_helpers.js';
+import {
+  bunMarkdown,
+  readCommonMark,
+  textBlocks,
+  renderedText as visibleText,
+} from '../../../_helpers.js';
+import {
+  EPMC_APOS_TITLE_HIT,
+  EPMC_ENCODED_TAGS_HIT,
+} from '../../../services/ncbi/parsing/_entity-fixtures.js';
 
 const mockFetchRecords = vi.fn();
 const mockGetEpmc = vi.fn();
@@ -110,25 +119,101 @@ describe('pubmedEuropepmcFetchTool', () => {
   });
 
   it('flattens EPMC `Y`/`N` flags and emits an epmcUrl', async () => {
+    // `hasFullTextXml` follows open-access status and the full-text id, never
+    // `inPMC`: `MED 42684012` is PMC13536919, in PMC but outside the
+    // open-access subset. A record with no open-access status carries neither
+    // flag. (#267)
     mockFetchRecords.mockResolvedValue([
-      { id: 'PPR1', source: 'PPR', isOpenAccess: 'Y', inPMC: 'N' },
-      { id: 'PMC5', source: 'PMC', isOpenAccess: 'N', inPMC: 'Y' },
+      {
+        id: 'PPR1',
+        source: 'PPR',
+        isOpenAccess: 'Y',
+        inPMC: 'N',
+        fullTextIdList: { fullTextId: ['PPR1'] },
+      },
+      {
+        id: '42684012',
+        source: 'MED',
+        pmcid: 'PMC13536919',
+        isOpenAccess: 'N',
+        inPMC: 'Y',
+        fullTextIdList: { fullTextId: ['PMC13536919'] },
+      },
+      { id: 'KR1', source: 'PAT', inPMC: 'N' },
     ]);
-    const ctx = createMockContext({ errors: pubmedEuropepmcFetchTool.errors });
-    const result = await pubmedEuropepmcFetchTool.handler(
-      pubmedEuropepmcFetchTool.input.parse({
-        records: [
-          { source: 'PPR', epmcId: 'PPR1' },
-          { source: 'PMC', epmcId: 'PMC5' },
-        ],
-      }),
-      ctx,
-    );
-    expect(result.records.map((r) => [r.isOpenAccess, r.hasFullTextXml])).toEqual([
-      [true, false],
-      [false, true],
+    const result = await runToolContract(pubmedEuropepmcFetchTool, {
+      records: [
+        { source: 'PPR', epmcId: 'PPR1' },
+        { source: 'MED', epmcId: '42684012' },
+        { source: 'PAT', epmcId: 'KR1' },
+      ],
+    });
+    const parsed = pubmedEuropepmcFetchTool.output.parse(result.structuredContent);
+    expect(parsed.records.map((r) => [r.isOpenAccess, r.hasFullTextXml])).toEqual([
+      [true, true],
+      [false, false],
+      [undefined, undefined],
     ]);
-    expect(result.records[0]?.epmcUrl).toBe('https://europepmc.org/article/PPR/PPR1');
+    expect('hasFullTextXml' in (parsed.records[2] ?? {})).toBe(false);
+    expect(parsed.records[0]?.epmcUrl).toBe('https://europepmc.org/article/PPR/PPR1');
+    const text = textBlocks(result.content)
+      .map((b) => b.text)
+      .join('\n');
+    expect(text.match(/^\*\*Full-text XML in EPMC:\*\*.*$/gm)).toEqual([
+      '**Full-text XML in EPMC:** yes',
+      '**Full-text XML in EPMC:** no',
+    ]);
+  });
+
+  it("relays Europe PMC's license verbatim on both surfaces, and omits it when Europe PMC supplies none (#269)", async () => {
+    mockFetchRecords.mockResolvedValue([
+      { id: 'PPR1325930', source: 'PPR', title: 'Licensed', isOpenAccess: 'Y', license: 'cc by' },
+      {
+        id: '42685738',
+        source: 'MED',
+        title: 'Not open access',
+        isOpenAccess: 'N',
+        license: 'cc by',
+      },
+      { id: 'KR1', source: 'PAT', title: 'Unlicensed' },
+    ]);
+    const result = await runToolContract(pubmedEuropepmcFetchTool, {
+      records: [
+        { source: 'PPR', epmcId: 'PPR1325930' },
+        { source: 'MED', epmcId: '42685738' },
+        { source: 'PAT', epmcId: 'KR1' },
+      ],
+    });
+
+    const parsed = pubmedEuropepmcFetchTool.output.parse(result.structuredContent);
+    expect(parsed.records.map((r) => r.license)).toEqual(['cc by', 'cc by', undefined]);
+    expect('license' in (parsed.records[2] ?? {})).toBe(false);
+    const text = textBlocks(result.content)
+      .map((b) => b.text)
+      .join('\n');
+    expect(text.match(/^\*\*License:\*\*.*$/gm)).toEqual([
+      '**License:** cc by',
+      '**License:** cc by',
+    ]);
+  });
+
+  it('counts the license toward maxResponseCharacters (#269)', async () => {
+    const licensed = { id: 'PPR1', source: 'PPR', title: 'Licensed', license: 'cc by-nc-nd' };
+    mockFetchRecords.mockResolvedValue([licensed]);
+    const records = [{ source: 'PPR' as const, epmcId: 'PPR1' }];
+    const full = await runToolContract(pubmedEuropepmcFetchTool, { records });
+    const record = pubmedEuropepmcFetchTool.output.parse(full.structuredContent).records[0];
+    if (!record) throw new Error('no record returned');
+    const { license: _, ...unlicensed } = record;
+
+    const cut = await runToolContract(pubmedEuropepmcFetchTool, {
+      records,
+      maxResponseCharacters: JSON.stringify(unlicensed).length,
+    });
+    expect(pubmedEuropepmcFetchTool.output.parse(cut.structuredContent).deferred).toMatchObject({
+      deferredCount: 1,
+      nextDeferredCharacters: JSON.stringify(record).length,
+    });
   });
 
   it('normalizes the abstract: strips JATS/HTML, decodes entities, drops soft hyphens', async () => {
@@ -198,11 +283,31 @@ describe('pubmedEuropepmcFetchTool', () => {
       expect(result.records[0]?.journal).toBe('Journal of Plant Physiology');
     });
 
-    it('decodes entities once, never twice', async () => {
-      // A double-encoded upstream value collapses one level and stops there —
-      // a second pass would turn `&lt;` into a structural `<`.
-      const result = await fetchOne({ title: 'Assay of &amp;lt;i&amp;gt; markers' });
-      expect(result.records[0]?.title).toBe('Assay of &lt;i&gt; markers');
+    it('decodes the title one layer further than the abstract, authors and journal (#272)', async () => {
+      // Europe PMC escapes a title once more than the text NCBI ships, so the
+      // title alone carries a residual layer; the other fields decode once.
+      const value = 'Assay of &amp;lt;i&amp;gt; markers';
+      mockFetchRecords.mockResolvedValue([
+        {
+          id: 'PPR1226893',
+          source: 'PPR',
+          title: value,
+          abstractText: value,
+          authorString: value,
+          journalTitle: value,
+        },
+      ]);
+      const result = await runToolContract(pubmedEuropepmcFetchTool, {
+        records: [{ source: 'PPR', epmcId: 'PPR1226893' }],
+      });
+      const parsed = pubmedEuropepmcFetchTool.output.parse(result.structuredContent);
+      expect(parsed.records[0]).toMatchObject({
+        title: 'Assay of <i> markers',
+        abstract: 'Assay of &lt;i&gt; markers',
+        authors: 'Assay of &lt;i&gt; markers',
+        journal: 'Assay of &lt;i&gt; markers',
+      });
+      expect(contractText(result)).toContain('\n### Assay of \\<i> markers\n');
     });
 
     it('leaves a statistical comparison in the title intact', async () => {
@@ -744,12 +849,16 @@ describe('pubmedEuropepmcFetchTool content[] escaping of the abstract (#255)', (
     },
   };
 
-  it('escapes the not-found and deferred pairs', () => {
-    const text = renderedText(pairs);
-
-    // The middle `_` is intraword and cannot pair.
-    expect(text).toContain('**Not found:** PPR/\\_a_b\\_\n');
-    expect(text).toContain('(`source`/`epmcId`): PAT/KR\\*1\\*');
+  it('quotes the not-found and deferred pairs as code spans (#263)', () => {
+    expect(renderedText(pairs)).toBe(
+      [
+        '## Europe PMC Records',
+        '**Returned:** 0',
+        '**Not found:** `PPR/_a_b_`',
+        '**Deferred by the response budget:** 1 record(s) — 0 of 1 budgeted characters returned; next deferred record 500 characters',
+        'Re-call `pubmed_europepmc_fetch` with these as `records` (`source`/`epmcId`): `PAT/KR*1*`',
+      ].join('\n'),
+    );
   });
 
   it.runIf(bunMarkdown !== undefined)('renders every character of the pairs', () => {
@@ -857,10 +966,10 @@ describe('pubmedEuropepmcFetchTool whole-response budget (#188)', () => {
     });
 
     expect(JSON.stringify(result.structuredContent)).toBe(
-      '{"records":[{"source":"PPR","epmcId":"PPR1283828","title":"Preprint one","authors":"Smith J.","pubYear":"2024","isOpenAccess":true,"hasFullTextXml":false,"abstract":"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA","epmcUrl":"https://europepmc.org/article/PPR/PPR1283828"},{"source":"MED","epmcId":"34265844","title":"Indexed article","journal":"Nature","pmid":"34265844","pmcId":"PMC8371605","abstract":"BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB","citedByCount":3,"epmcUrl":"https://europepmc.org/article/MED/34265844"}],"notFound":[{"source":"AGR","epmcId":"IND000000000"}],"notice":"Europe PMC returned no record for 1 of 3 requested pairs: AGR/IND000000000. Verify each against its pubmed_europepmc_search hit — a mismatched `source` is the usual cause."}',
+      '{"records":[{"source":"PPR","epmcId":"PPR1283828","title":"Preprint one","authors":"Smith J.","pubYear":"2024","isOpenAccess":true,"hasFullTextXml":false,"abstract":"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA","epmcUrl":"https://europepmc.org/article/PPR/PPR1283828"},{"source":"MED","epmcId":"34265844","title":"Indexed article","journal":"Nature","pmid":"34265844","pmcId":"PMC8371605","abstract":"BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB","citedByCount":3,"epmcUrl":"https://europepmc.org/article/MED/34265844"}],"notFound":[{"source":"AGR","epmcId":"IND000000000"}],"notice":"Europe PMC returned no record for 1 of 3 requested pairs: `AGR/IND000000000`. Verify each against its pubmed_europepmc_search hit — a mismatched `source` is the usual cause."}',
     );
     expect(JSON.stringify(result.content)).toBe(
-      '[{"type":"text","text":"## Europe PMC Records\\n**Returned:** 2\\n**Not found:** AGR/IND000000000\\n\\n### Preprint one\\n**Source:** PPR | **EPMC ID:** PPR1283828\\n**Authors:** Smith J.\\n**Year:** 2024\\n**Open Access:** yes\\n**Full-text XML in EPMC:** no\\n**URL:** https://europepmc.org/article/PPR/PPR1283828\\n\\n#### Abstract\\nAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA\\n\\n### Indexed article\\n**Source:** MED | **EPMC ID:** 34265844\\n**Journal:** Nature\\n**PMID:** 34265844\\n**PMCID:** PMC8371605\\n**Cited by:** 3\\n**URL:** https://europepmc.org/article/MED/34265844\\n\\n#### Abstract\\nBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB"},{"type":"text","text":"\\n\\n> Europe PMC returned no record for 1 of 3 requested pairs: AGR/IND000000000. Verify each against its pubmed_europepmc_search hit — a mismatched `source` is the usual cause."}]',
+      '[{"type":"text","text":"## Europe PMC Records\\n**Returned:** 2\\n**Not found:** `AGR/IND000000000`\\n\\n### Preprint one\\n**Source:** PPR | **EPMC ID:** PPR1283828\\n**Authors:** Smith J.\\n**Year:** 2024\\n**Open Access:** yes\\n**Full-text XML in EPMC:** no\\n**URL:** https://europepmc.org/article/PPR/PPR1283828\\n\\n#### Abstract\\nAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA\\n\\n### Indexed article\\n**Source:** MED | **EPMC ID:** 34265844\\n**Journal:** Nature\\n**PMID:** 34265844\\n**PMCID:** PMC8371605\\n**Cited by:** 3\\n**URL:** https://europepmc.org/article/MED/34265844\\n\\n#### Abstract\\nBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB"},{"type":"text","text":"\\n\\n> Europe PMC returned no record for 1 of 3 requested pairs: `AGR/IND000000000`. Verify each against its pubmed_europepmc_search hit — a mismatched `source` is the usual cause."}]',
     );
   });
 
@@ -968,7 +1077,7 @@ describe('pubmedEuropepmcFetchTool whole-response budget (#188)', () => {
     // The second record alone fits this ceiling, so "no record fits" would be
     // false; the one ceiling to name is the first record's size. (#236)
     expect(notice).toBe(
-      `The first record alone exceeds the requested maxResponseCharacters of ${sizes[1]}, so none were returned. 2 resolved record(s) were deferred whole: PPR/PPR1, MED/111. Re-call pubmed_europepmc_fetch with those pairs as \`records: [{ source, epmcId }]\` and maxResponseCharacters ≥ ${sizes[0]}, the size of that first record.`,
+      `The first record alone exceeds the requested maxResponseCharacters of ${sizes[1]}, so none were returned. 2 resolved record(s) were deferred whole: \`PPR/PPR1\`, \`MED/111\`. Re-call pubmed_europepmc_fetch with those pairs as \`records: [{ source, epmcId }]\` and maxResponseCharacters ≥ ${sizes[0]}, the size of that first record.`,
     );
     expect(notice).not.toMatch(/no record fits/i);
     expect(notice).not.toMatch(/returned no record/i);
@@ -994,15 +1103,11 @@ describe('pubmedEuropepmcFetchTool whole-response budget (#188)', () => {
     expect(structured.records.map((r) => r.epmcId)).toEqual(['PPR1']);
     expect(structured.deferred?.records).toEqual([{ source: 'MED', epmcId: '34265844' }]);
     expect(structured.notFound).toEqual([{ source: 'AGR', epmcId: 'IND000000000' }]);
-    expect(text).toContain('**Not found:** AGR/IND000000000\n');
+    expect(text).toContain('**Not found:** `AGR/IND000000000`\n');
     // One notice carries both guidances.
-    const notice = structured.notice ?? '';
-    expect(notice).toContain('Europe PMC returned no record for 1 of 3 requested pairs');
-    expect(notice).toContain('AGR/IND000000000');
-    expect(notice).toContain('deferred whole: MED/34265844');
     const [returned = 0, next = 0] = sizes;
-    expect(notice).toContain(
-      `Response character budget reached: ${returned} of ${returned} characters returned. 1 resolved record(s) were deferred whole: MED/34265844. To continue, re-call pubmed_europepmc_fetch with those pairs as \`records: [{ source, epmcId }]\` and maxResponseCharacters ≥ ${next}, the size of the next deferred record. To return the next deferred record in this response instead, repeat this call with maxResponseCharacters ≥ ${returned + next}.`,
+    expect(structured.notice).toBe(
+      `Europe PMC returned no record for 1 of 3 requested pairs: \`AGR/IND000000000\`. Verify each against its pubmed_europepmc_search hit — a mismatched \`source\` is the usual cause. Response character budget reached: ${returned} of ${returned} characters returned. 1 resolved record(s) were deferred whole: \`MED/34265844\`. To continue, re-call pubmed_europepmc_fetch with those pairs as \`records: [{ source, epmcId }]\` and maxResponseCharacters ≥ ${next}, the size of the next deferred record. To return the next deferred record in this response instead, repeat this call with maxResponseCharacters ≥ ${returned + next}.`,
     );
   });
 
@@ -1013,10 +1118,10 @@ describe('pubmedEuropepmcFetchTool whole-response budget (#188)', () => {
 
     const { structured } = await call(hits, refs, { maxResponseCharacters: sizes[0] });
 
-    const notice = structured.notice ?? '';
-    expect(notice).toContain('MED/PMC00000000');
-    expect(notice).toContain('pubmed_fetch_fulltext');
-    expect(notice).toContain('deferred whole: PAT/KR1');
+    const [returned = 0, next = 0] = sizes;
+    expect(structured.notice).toBe(
+      `Europe PMC returned no record for 1 of 3 requested pairs: \`MED/PMC00000000\`. Verify each against its pubmed_europepmc_search hit — a mismatched \`source\` is the usual cause. An id shaped like a PMCID also resolves through pubmed_fetch_fulltext, whose \`pmcids\` input takes it on its own. Response character budget reached: ${returned} of ${returned} characters returned. 1 resolved record(s) were deferred whole: \`PAT/KR1\`. To continue, re-call pubmed_europepmc_fetch with those pairs as \`records: [{ source, epmcId }]\` and maxResponseCharacters ≥ ${next}, the size of the next deferred record. To return the next deferred record in this response instead, repeat this call with maxResponseCharacters ≥ ${returned + next}.`,
+    );
   });
 
   it('renders the same deferral state in content[] that structuredContent carries', async () => {
@@ -1030,7 +1135,7 @@ describe('pubmedEuropepmcFetchTool whole-response budget (#188)', () => {
       `**Deferred by the response budget:** 2 record(s) — ${d?.returnedCharacters} of ${d?.maxResponseCharacters} budgeted characters returned; next deferred record ${d?.nextDeferredCharacters} characters`,
     );
     expect(text).toContain(
-      'Re-call `pubmed_europepmc_fetch` with these as `records` (`source`/`epmcId`): MED/111, PAT/KR1',
+      'Re-call `pubmed_europepmc_fetch` with these as `records` (`source`/`epmcId`): `MED/111`, `PAT/KR1`',
     );
     expect(text).toContain('### Record PPR1');
     expect(text).not.toContain('### Record 111');
@@ -1039,7 +1144,7 @@ describe('pubmedEuropepmcFetchTool whole-response budget (#188)', () => {
     const next = d?.nextDeferredCharacters ?? 0;
     expect(next).toBeGreaterThan(d?.maxResponseCharacters ?? 0);
     expect(structured.notice).toBe(
-      `Response character budget reached: ${returned} of ${d?.maxResponseCharacters} characters returned. 2 resolved record(s) were deferred whole: MED/111, PAT/KR1. To continue, re-call pubmed_europepmc_fetch with those pairs as \`records: [{ source, epmcId }]\` and maxResponseCharacters ≥ ${next}, the size of the next deferred record. To return the next deferred record in this response instead, repeat this call with maxResponseCharacters ≥ ${returned + next}.`,
+      `Response character budget reached: ${returned} of ${d?.maxResponseCharacters} characters returned. 2 resolved record(s) were deferred whole: \`MED/111\`, \`PAT/KR1\`. To continue, re-call pubmed_europepmc_fetch with those pairs as \`records: [{ source, epmcId }]\` and maxResponseCharacters ≥ ${next}, the size of the next deferred record. To return the next deferred record in this response instead, repeat this call with maxResponseCharacters ≥ ${returned + next}.`,
     );
     expect(text).toContain(structured.notice ?? '');
   });
@@ -1056,7 +1161,7 @@ describe('pubmedEuropepmcFetchTool whole-response budget (#188)', () => {
     expect(structured.deferred?.records).toEqual([{ source: 'MED', epmcId: '111' }]);
     expect(next).toBeLessThan(ceiling);
     expect(structured.notice).toBe(
-      `Response character budget reached: ${returned} of ${ceiling} characters returned. 1 resolved record(s) were deferred whole: MED/111. To continue, re-call pubmed_europepmc_fetch with those pairs as \`records: [{ source, epmcId }]\` at the current maxResponseCharacters of ${ceiling}, which already fits the next deferred record (${next} characters). To return the next deferred record in this response instead, repeat this call with maxResponseCharacters ≥ ${returned + next}.`,
+      `Response character budget reached: ${returned} of ${ceiling} characters returned. 1 resolved record(s) were deferred whole: \`MED/111\`. To continue, re-call pubmed_europepmc_fetch with those pairs as \`records: [{ source, epmcId }]\` at the current maxResponseCharacters of ${ceiling}, which already fits the next deferred record (${next} characters). To return the next deferred record in this response instead, repeat this call with maxResponseCharacters ≥ ${returned + next}.`,
     );
     expect(text).toContain(structured.notice ?? '');
 
@@ -1175,7 +1280,7 @@ describe('pubmedEuropepmcFetchTool source case and the records shape (issue #244
     expect(result.structuredContent).toMatchObject({
       notFound: [{ source: 'PPR', epmcId: 'PPR404' }],
     });
-    expect(contractText(result)).toContain('**Not found:** PPR/PPR404');
+    expect(contractText(result)).toContain('**Not found:** `PPR/PPR404`');
   });
 
   it.each([['pubmed'], ['pmid'], ['']])(
@@ -1189,7 +1294,7 @@ describe('pubmedEuropepmcFetchTool source case and the records shape (issue #244
       expect(result.structuredContent).toMatchObject({
         error: { code: JsonRpcErrorCode.InvalidParams },
       });
-      expect(contractText(result)).toContain('"MED"|"PMC"|"PPR"|"PAT"|"AGR"');
+      expect(readCommonMark(contractText(result))).toContain('"MED"|"PMC"|"PPR"|"PAT"|"AGR"');
       expect(mockFetchRecords).not.toHaveBeenCalled();
     },
   );
@@ -1218,6 +1323,200 @@ describe('pubmedEuropepmcFetchTool source case and the records shape (issue #244
     );
     expect(pubmedEuropepmcFetchTool.description).toContain(
       "copy each hit's `source` and `epmcId` into `records` here",
+    );
+  });
+});
+
+describe('pubmedEuropepmcFetchTool NCBI records with a residual entity layer (#262, #272)', () => {
+  beforeEach(() => {
+    mockFetchRecords.mockReset();
+    mockGetEpmc.mockReset();
+    mockGetEpmc.mockReturnValue({ fetchRecords: mockFetchRecords });
+  });
+
+  it('returns MED/42138044’s title as pubmed_fetch_articles does and MED/42515993’s abstract with no encoded tags', async () => {
+    mockFetchRecords.mockResolvedValue([EPMC_APOS_TITLE_HIT, EPMC_ENCODED_TAGS_HIT]);
+
+    const result = await runToolContract(pubmedEuropepmcFetchTool, {
+      records: [
+        { source: 'MED', epmcId: '42138044' },
+        { source: 'MED', epmcId: '42515993' },
+      ],
+    });
+
+    const title =
+      "Cervical Vestibular-Evoked Myogenic Potentials (cVEMPs) in Parkinson's Disease Patients: Prospective, Case-Control study.";
+    const abstract =
+      'Introduction: Pollen monitoring plays an important role in modern allergy care. Quantitatively determining airborne pollen concentrations serves as a clinically relevant tool for diagnosis, treatment, disease monitoring, and prevention. Aim: The study provides an overview of current clinical applications of pollen monitoring in allergology and otolaryngology, and its integration with new technologies that support precision medicine. Conclusions: Pollen monitoring is a clinically significant component of personalised management of allergic respiratory diseases. Integration with advanced technologies is expected to improve diagnostic accuracy, optimise allergen immunotherapy, strengthen preventive strategies, and support the ongoing development of precision medicine.</p&gt.';
+    // The abstract's own layer decodes once: its encoded `&lt;b&gt;` labels are
+    // stripped, and the sentence they ended keeps its break.
+    const aposAbstract =
+      "Introduction: Postural stability depends on the integration of various neural circuits, including somatosensory, motor, visual, vestibular, and cognitive systems, which enable flexible posture and gait control. However, the understanding of vestibular otolith function and its brain connections remains limited. Aim: To elucidate the anomalies of cervical vestibular-evoked myogenic potentials (cVEMPs) and their clinical correlation with symptoms associated with brainstem involvement in individuals with Parkinson's disease (PD).";
+    const { records } = result.structuredContent as {
+      records: Array<{ title?: string; abstract?: string }>;
+    };
+    expect(records[0]?.title).toBe(title);
+    expect(records[0]?.abstract).toBe(aposAbstract);
+    expect(records[1]?.abstract).toBe(abstract);
+    // Neither abstract holds a character the prose escape touches, so each
+    // renders as the structured value, whole.
+    const text = contractText(result);
+    expect(text).toContain(`\n### ${title}\n`);
+    expect(text).toContain(`\n#### Abstract\n${aposAbstract}\n\n### `);
+    expect(text.endsWith(`\n#### Abstract\n${abstract}`)).toBe(true);
+    expect(readCommonMark(text.slice(text.lastIndexOf('#### Abstract')))).toBe(
+      `⟨heading_open⟩\n\nAbstract\n\n⟨heading_close⟩\n\n${abstract}`,
+    );
+  });
+});
+
+describe('pubmedEuropepmcFetchTool record lines that share a paragraph (#261)', () => {
+  it('keeps a lone delimiter in each of two values visible', () => {
+    const text = renderedText({
+      records: [
+        {
+          source: 'PPR',
+          epmcId: 'PPR1',
+          title: 'HLA-B*57:01 carriers',
+          authors: 'Smith J*, Lee _K',
+          journal: 'J_ Med*',
+          doi: '10.1/5`x',
+          license: 'cc by` 4~',
+          epmcUrl: 'https://europepmc.org/article/PPR/PPR1',
+        },
+      ],
+    });
+
+    expect(text).toContain('\n### HLA-B*57:01 carriers\n');
+    expect(readCommonMark(text.slice(text.indexOf('**Source:**')))).toBe(
+      [
+        '⟨strong⟩Source:⟨/strong⟩ PPR | ⟨strong⟩EPMC ID:⟨/strong⟩ PPR1',
+        '⟨strong⟩Authors:⟨/strong⟩ Smith J*, Lee _K',
+        '⟨strong⟩Journal:⟨/strong⟩ J_ Med*',
+        '⟨strong⟩DOI:⟨/strong⟩ 10.1/5`x',
+        '⟨strong⟩License:⟨/strong⟩ cc by` 4~',
+        '⟨strong⟩URL:⟨/strong⟩ https://europepmc.org/article/PPR/PPR1',
+      ].join('\n'),
+    );
+  });
+
+  it('keeps a lone delimiter in a not-found and a deferred pair visible', () => {
+    const text = renderedText({
+      records: [],
+      notFound: [{ source: 'PPR', epmcId: 'x._y' }],
+      deferred: {
+        maxResponseCharacters: 1,
+        returnedCharacters: 0,
+        deferredCount: 1,
+        records: [{ source: 'PAT', epmcId: 'KR_' }],
+        nextDeferredCharacters: 500,
+      },
+    });
+
+    expect(readCommonMark(text)).toBe(
+      [
+        '⟨heading_open⟩\n\nEurope PMC Records\n\n⟨heading_close⟩\n',
+        '⟨strong⟩Returned:⟨/strong⟩ 0',
+        '⟨strong⟩Not found:⟨/strong⟩ ⟨code_inline:PPR/x._y⟩',
+        '⟨strong⟩Deferred by the response budget:⟨/strong⟩ 1 record(s) — 0 of 1 budgeted characters returned; next deferred record 500 characters',
+        'Re-call ⟨code_inline:pubmed_europepmc_fetch⟩ with these as ⟨code_inline:records⟩ (⟨code_inline:source⟩/⟨code_inline:epmcId⟩): ⟨code_inline:PAT/KR_⟩',
+      ].join('\n'),
+    );
+  });
+});
+
+describe('pubmedEuropepmcFetchTool journal on core records (#274)', () => {
+  beforeEach(() => {
+    mockFetchRecords.mockReset();
+    mockGetEpmc.mockReset();
+    mockGetEpmc.mockReturnValue({ fetchRecords: mockFetchRecords });
+  });
+
+  it('reports MED/42515993’s journal from `journalInfo`, which a core record carries in place of `journalTitle`', async () => {
+    // The record as Europe PMC's `core` result type returns it: no `journalTitle`.
+    mockFetchRecords.mockResolvedValue([
+      {
+        ...EPMC_ENCODED_TAGS_HIT,
+        journalInfo: {
+          issue: '5',
+          volume: '80',
+          dateOfPublication: '2026 Jul',
+          journal: {
+            medlineAbbreviation: 'Otolaryngol Pol',
+            title: 'Otolaryngologia polska = The Polish otolaryngology',
+            essn: '2300-8423',
+            issn: '0030-6657',
+            isoabbreviation: 'Otolaryngol Pol',
+            nlmid: '0404453',
+          },
+        },
+      },
+    ]);
+
+    const result = await runToolContract(pubmedEuropepmcFetchTool, {
+      records: [{ source: 'MED', epmcId: '42515993' }],
+    });
+
+    const { records } = result.structuredContent as { records: Array<{ journal?: string }> };
+    expect(records[0]?.journal).toBe('Otolaryngol Pol');
+    expect(contractText(result)).toContain('\n**Journal:** Otolaryngol Pol\n');
+  });
+});
+
+describe('pubmedEuropepmcFetchTool pairs quoted as code spans (#263)', () => {
+  beforeEach(() => {
+    mockFetchRecords.mockReset();
+    mockGetEpmc.mockReset();
+    mockGetEpmc.mockReturnValue({ fetchRecords: mockFetchRecords });
+  });
+
+  /** The `> …` notice blockquote of a contract run, as a CommonMark parse reads it. */
+  const noticeRead = (result: Awaited<ReturnType<typeof runToolContract>>) =>
+    readCommonMark(contractText(result).slice(contractText(result).lastIndexOf('\n> ') + 1));
+
+  it('quotes an unresolved caller id whose underscores would pair as emphasis', async () => {
+    // `a._b_.c` passes the id schema; bare, `_b_` reads as emphasis.
+    mockFetchRecords.mockResolvedValue([patHit]);
+
+    const result = await runToolContract(pubmedEuropepmcFetchTool, {
+      records: [
+        { source: 'PAT', epmcId: 'KR20120031038' },
+        { source: 'PPR', epmcId: 'a._b_.c' },
+      ],
+    });
+
+    expect(noticeRead(result)).toBe(
+      '⟨blockquote_open⟩\n\nEurope PMC returned no record for 1 of 2 requested pairs: ⟨code_inline:PPR/a._b_.c⟩. Verify each against its pubmed_europepmc_search hit — a mismatched ⟨code_inline:source⟩ is the usual cause.\n\n⟨blockquote_close⟩',
+    );
+    const structured = result.structuredContent as { notFound?: unknown; notice?: string };
+    expect(structured.notFound).toEqual([{ source: 'PPR', epmcId: 'a._b_.c' }]);
+    expect(structured.notice).toBe(
+      'Europe PMC returned no record for 1 of 2 requested pairs: `PPR/a._b_.c`. Verify each against its pubmed_europepmc_search hit — a mismatched `source` is the usual cause.',
+    );
+    expect(readCommonMark(contractText(result))).toContain(
+      '⟨strong⟩Not found:⟨/strong⟩ ⟨code_inline:PPR/a._b_.c⟩\n',
+    );
+  });
+
+  it('quotes each deferred pair in the notice and on the re-call line', async () => {
+    const hits = [
+      { id: 'PPR1', source: 'PPR', title: 'One', abstractText: 'x'.repeat(200) },
+      { id: 'x._y_.z', source: 'PAT', title: 'Two' },
+      { id: 'a_b_', source: 'AGR', title: 'Three' },
+    ];
+    mockFetchRecords.mockResolvedValue(hits);
+
+    const result = await runToolContract(pubmedEuropepmcFetchTool, {
+      records: hits.map(({ id, source }) => ({ source, epmcId: id })) as never,
+      maxResponseCharacters: 50,
+    });
+
+    const spans = '⟨code_inline:PPR/PPR1⟩, ⟨code_inline:PAT/x._y_.z⟩, ⟨code_inline:AGR/a_b_⟩';
+    expect(noticeRead(result)).toContain(`deferred whole: ${spans}.`);
+    expect(readCommonMark(contractText(result))).toContain(`: ${spans}\n`);
+    const structured = result.structuredContent as { notice?: string };
+    expect(structured.notice).toContain(
+      '3 resolved record(s) were deferred whole: `PPR/PPR1`, `PAT/x._y_.z`, `AGR/a_b_`.',
     );
   });
 });

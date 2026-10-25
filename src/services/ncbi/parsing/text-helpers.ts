@@ -45,17 +45,20 @@ const FORMATTING_TAG_ALTERNATION = FORMATTING_TAG_NAMES.join('|');
 /**
  * Names a bare raw tag is stripped under with no closing partner: the formatting
  * names, plus HTML void and optional-close elements, which are never closed
- * (`<br>`, `<p>` with no `</p>`). (#256)
+ * (`<br>`, `<p>` with no `</p>`). The same names are the only ones recognized in
+ * entity-encoded form. (#256, #262)
  */
-const UNPAIRED_TAG_NAME_SET: ReadonlySet<string> = new Set([
-  ...FORMATTING_TAG_NAMES,
-  'br',
-  'hr',
-  'img',
-  'li',
-  'p',
-  'wbr',
-]);
+const UNPAIRED_TAG_NAMES = [...FORMATTING_TAG_NAMES, 'br', 'hr', 'img', 'li', 'p', 'wbr'] as const;
+const UNPAIRED_TAG_NAME_SET: ReadonlySet<string> = new Set(UNPAIRED_TAG_NAMES);
+/**
+ * An entity-encoded tag with an {@link UNPAIRED_TAG_NAMES} name and nothing else
+ * inside the brackets but a closing `/` before the name or a self-closing `/`
+ * after it: `&lt;i&gt;`, `&lt;/sup&gt;`, `&lt;br /&gt;`, `&lt;p&gt;`. Captures
+ * the leading `/`, the name and the trailing `/`. Every other escaped
+ * `&lt;…&gt;` — another name, attributes — is literal text. A failed match costs
+ * at most the whitespace run after the name, so the scan stays linear.
+ */
+const ENCODED_TAG_SOURCE = `&lt;(\\/?)(${UNPAIRED_TAG_NAMES.join('|')})(\\s*\\/)?&gt;`;
 /**
  * A markup tag, in one of two forms, recognized in a single left-to-right pass.
  *
@@ -73,15 +76,16 @@ const UNPAIRED_TAG_NAME_SET: ReadonlySet<string> = new Set([
  * the body must start with, so a failed match costs only the characters up to
  * the next angle bracket and the scan stays linear.
  *
- * Entity-encoded: a bare formatting tag as Europe PMC escapes it in PubMed
- * titles (`&lt;i&gt;`, `&lt;/sup&gt;`). Only these names, with nothing else
- * inside the brackets, are recognized — every other escaped `&lt;…&gt;` stays
- * literal text. (#181)
+ * Entity-encoded: {@link ENCODED_TAG_SOURCE} — a tag as Europe PMC escapes it
+ * in PubMed titles (`&lt;i&gt;`, `&lt;/sup&gt;`, #181), and as NCBI
+ * double-encodes it in abstracts (`&lt;br /&gt;`, `&lt;p&gt;`, #262).
  */
 const MARKUP_TAG_RE = new RegExp(
-  `<\\/?([A-Za-z][^\\s/<>=]*)([\\s/][^<>]*)?>|&lt;\\/?(?:${FORMATTING_TAG_ALTERNATION})&gt;`,
+  `<\\/?([A-Za-z][^\\s/<>=]*)([\\s/][^<>]*)?>|${ENCODED_TAG_SOURCE}`,
   'gi',
 );
+/** {@link ENCODED_TAG_SOURCE} alone, for the strip that leaves raw tags as text. */
+const ENCODED_TAG_RE = new RegExp(ENCODED_TAG_SOURCE, 'gi');
 /** Punctuation that closes a sentence or a heading label (`Results:`). */
 const SENTENCE_END = new Set(['.', ':', '!', '?']);
 /** Sticky: one bare formatting tag, raw or encoded, at `lastIndex`. */
@@ -113,30 +117,48 @@ function closingTagNames(text: string): ReadonlySet<string> {
  * is a closing tag, has a body (attributes, a `/`), carries an
  * {@link UNPAIRED_TAG_NAME_SET} name, or has a `</name>` partner somewhere in
  * the string; any other bare `<NAME>` is literal notation and stays as written
- * (`HuMab<CD20>`, #256). Of the markup, a bare formatting tag, raw or encoded,
- * is removed outright; any other raw tag becomes a space so the words on either
- * side of a structural boundary stay apart. A formatting tag that sits between a
- * sentence's closing punctuation and the next word also becomes a space:
- * abstracts set headings in bold or italic with no whitespace around them
- * (`children.<b>Aim.</b> The`, `<i>Objective.</i>Quantitative`), and joining
- * there fuses the sentences. `closingNames` is computed on first use, so a
- * string with no bare unknown tag never pays for it.
+ * (`HuMab<CD20>`, #256). An encoded match is always markup. `closingNames` is
+ * computed on first use, so a string with no bare unknown tag never pays for it.
+ * The markup itself is replaced as {@link tagReplacement} says.
  */
 function replaceMarkupTag(
   tag: string,
   rawName: string | undefined,
   rawBody: string | undefined,
+  encodedName: string | undefined,
+  encodedSelfClose: string | undefined,
   offset: number,
   text: string,
   closingNames: () => ReadonlySet<string>,
 ): string {
-  if (rawName !== undefined && rawBody === undefined && tag[1] !== '/') {
+  if (rawName === undefined) {
+    return tagReplacement(encodedSelfClose === undefined, encodedName ?? '', tag, offset, text);
+  }
+  if (rawBody === undefined && tag[1] !== '/') {
     const name = rawName.toLowerCase();
     if (!UNPAIRED_TAG_NAME_SET.has(name) && !closingNames().has(name)) return tag;
   }
-  const formatting =
-    rawName === undefined ||
-    (rawBody === undefined && FORMATTING_TAG_NAME_SET.has(rawName.toLowerCase()));
+  return tagReplacement(rawBody === undefined, rawName, tag, offset, text);
+}
+
+/**
+ * What a markup tag spanning `offset`–`offset + tag.length` of `text` becomes.
+ * A bare formatting tag (`bare`: no attributes, no self-closing `/`), raw or
+ * encoded, is removed outright; any other tag becomes a space so the words on
+ * either side of a structural boundary stay apart. A formatting tag that sits
+ * between a sentence's closing punctuation and the next word also becomes a
+ * space: abstracts set headings in bold or italic with no whitespace around them
+ * (`children.<b>Aim.</b> The`, `<i>Objective.</i>Quantitative`), and joining
+ * there fuses the sentences.
+ */
+function tagReplacement(
+  bare: boolean,
+  name: string,
+  tag: string,
+  offset: number,
+  text: string,
+): '' | ' ' {
+  const formatting = bare && FORMATTING_TAG_NAME_SET.has(name.toLowerCase());
   return formatting && !breaksSentence(text, offset, offset + tag.length) ? '' : ' ';
 }
 
@@ -203,13 +225,89 @@ export function toDisplayText(text: string): string {
   const closingNames = () => (closing ??= closingTagNames(text));
   const stripped = text.replace(
     MARKUP_TAG_RE,
-    (tag: string, rawName: string | undefined, rawBody: string | undefined, offset: number) =>
-      replaceMarkupTag(tag, rawName, rawBody, offset, text, closingNames),
+    (
+      tag: string,
+      rawName: string | undefined,
+      rawBody: string | undefined,
+      _encodedClose: string | undefined,
+      encodedName: string | undefined,
+      encodedSelfClose: string | undefined,
+      offset: number,
+    ) =>
+      replaceMarkupTag(
+        tag,
+        rawName,
+        rawBody,
+        encodedName,
+        encodedSelfClose,
+        offset,
+        text,
+        closingNames,
+      ),
   );
   return decodeHtmlEntities(stripped)
     .replace(SOFT_HYPHEN_RE, '')
     .replace(WHITESPACE_RE, ' ')
     .trim();
+}
+
+/**
+ * {@link toDisplayText} for a Europe PMC title, then one more single
+ * {@link decodeHtmlEntities} pass. Europe PMC serves a PubMed title escaped
+ * over the text NCBI's XML parser yields, so the layer NCBI double-encodes
+ * (`Parkinson&amp;apos;s` in the XML) survives the strip's decode, and this
+ * pass removes it as `esummary-parser.ts` and `article-parser.ts` do for the
+ * same title — never to a fixed point: `&amp;amp;lt;` reads `&lt;`. A title
+ * with no residual layer reads as {@link toDisplayText} returns it. Abstracts,
+ * authors and journal titles arrive one layer lower (`patient&apos;s`,
+ * `&lt;b&gt;`), so they take {@link toDisplayText} alone. Linear in the
+ * length of the text. (#272)
+ */
+export function europePmcTitleText(text: string): string {
+  return decodeHtmlEntities(toDisplayText(text));
+}
+
+const WHITESPACE_CHAR_RE = /\s/;
+const isWhitespaceChar = (character: string | undefined): boolean =>
+  character !== undefined && WHITESPACE_CHAR_RE.test(character);
+
+/**
+ * Strip the entity-encoded tags {@link toDisplayText} strips —
+ * {@link ENCODED_TAG_SOURCE}, with the same replacements — and nothing else:
+ * no raw tag, no decode, no whitespace collapse. For NCBI text a parser has
+ * decoded once, where a surviving `&lt;b&gt;` is markup NCBI double-encoded
+ * (`&amp;lt;b&amp;gt;` in the XML) while a raw `<b>` was single-encoded in the
+ * XML, so it is the deposit's text. Run it before the residual
+ * {@link decodeHtmlEntities} pass, so the decode is still the only one and
+ * reveals no tag (#262).
+ *
+ * A tag that becomes a space adds one only between two non-whitespace
+ * characters, so the text's own spacing and line breaks — the blank line
+ * between abstract sections — stay byte for byte, and a tag at either end
+ * leaves no space behind. Linear in the length of the text.
+ */
+export function stripEncodedMarkupTags(text: string): string {
+  let out = '';
+  let last = 0;
+  let pendingSpace = false;
+  const emit = (chunk: string) => {
+    if (chunk === '') return;
+    if (pendingSpace && out !== '' && !isWhitespaceChar(out.at(-1)) && !isWhitespaceChar(chunk[0]))
+      out += ' ';
+    pendingSpace = false;
+    out += chunk;
+  };
+  for (const match of text.matchAll(ENCODED_TAG_RE)) {
+    const [tag, , name = '', selfClose] = match;
+    emit(text.slice(last, match.index));
+    if (tagReplacement(selfClose === undefined, name, tag, match.index, text) === ' ') {
+      pendingSpace = true;
+    }
+    last = match.index + tag.length;
+  }
+  if (last === 0) return text;
+  emit(text.slice(last));
+  return out;
 }
 
 /**

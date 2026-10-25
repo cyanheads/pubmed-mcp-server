@@ -17,6 +17,7 @@ import type {
   ESummaryAuthor as XmlESummaryAuthor,
   XmlESummaryAuthorRaw,
 } from '../types.js';
+import { decodeHtmlEntities } from './text-helpers.js';
 import { ensureArray, getAttribute, getOptionalText, getText } from './xml-helpers.js';
 
 /**
@@ -339,12 +340,15 @@ function parseSingleDocumentSummary(docSummary: ESummaryDocumentSummary): Omit<
   const pmcEntry = idsArray.find((id) => getArticleIdType(id) === 'pmc');
   const pmcIdValue = pmcEntry ? getOptionalText(getArticleIdValue(pmcEntry)) : undefined;
 
-  const title = getText(docSummary.Title);
+  // NCBI double-encodes some titles here as in EFetch (`Parkinson&amp;apos;s`),
+  // so Title and BookTitle take the one residual decode EFetch's parser gives
+  // the same fields; names and the journal read as parsed on both paths. (#262)
+  const title = decodeHtmlEntities(getText(docSummary.Title));
   const source =
     getText(docSummary.Source) || getText(docSummary.FullJournalName) || getText(docSummary.SO);
   // A Bookshelf record leaves Source and FullJournalName empty and carries its
   // venue here instead, so without these a book summary renders with none. (#114)
-  const bookTitle = getText(docSummary.BookTitle);
+  const bookTitle = decodeHtmlEntities(getText(docSummary.BookTitle));
   const publisherName = getText(docSummary.PublisherName);
   const docType = getText(docSummary.DocType);
   // A chapter's PubDate is its book's (GeneReviews: 1993); its own dates are in
@@ -435,7 +439,8 @@ function parseSingleDocSumOldXml(docSum: ESummaryDocSumOldXml): Omit<
     pmcIdFromItems = getText(pmcIdItem);
   }
 
-  const title = getItemValue('Title', 'String');
+  const rawTitle = getItemValue('Title', 'String');
+  const title = rawTitle === undefined ? undefined : decodeHtmlEntities(rawTitle);
   const source = getItemValue(['Source', 'FullJournalName', 'SO'], 'String');
   const rawPubDate = getItemValue(['PubDate', 'ArticleDate'], 'Date');
   const rawEPubDate = getItemValue('EPubDate', 'Date');

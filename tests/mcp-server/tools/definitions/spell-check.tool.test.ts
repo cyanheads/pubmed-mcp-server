@@ -103,8 +103,8 @@ describe('spellCheckTool', () => {
       );
       fetchSpy = vi.spyOn(globalThis, 'fetch').mockImplementation((input) => {
         const url = new URL(String(input));
-        if (!url.pathname.endsWith('/espell.fcgi')) {
-          throw new Error(`unexpected request ${url.pathname}`);
+        if (url.hostname !== 'eutils.ncbi.nlm.nih.gov' || !url.pathname.endsWith('/espell.fcgi')) {
+          throw new Error(`unexpected request ${url.hostname}${url.pathname}`);
         }
         const term = url.searchParams.get('term') ?? '';
         const body = `<?xml version="1.0" encoding="UTF-8" ?>\n<!DOCTYPE eSpellResult PUBLIC "-//NLM//DTD esearch 20060628//EN" "https://eutils.ncbi.nlm.nih.gov/eutils/dtd/20060628/espell.dtd">\n<eSpellResult>\n\t<Database>pubmed</Database>\n\t<Query>${term}</Query>\n\t<CorrectedQuery>${term}</CorrectedQuery>\n\t<SpelledQuery/>\n</eSpellResult>\n`;
@@ -148,8 +148,8 @@ describe('spellCheckTool', () => {
       );
       fetchSpy = vi.spyOn(globalThis, 'fetch').mockImplementation((input) => {
         const url = new URL(String(input));
-        if (!url.pathname.endsWith('/espell.fcgi')) {
-          throw new Error(`unexpected request ${url.pathname}`);
+        if (url.hostname !== 'eutils.ncbi.nlm.nih.gov' || !url.pathname.endsWith('/espell.fcgi')) {
+          throw new Error(`unexpected request ${url.hostname}${url.pathname}`);
         }
         return Promise.resolve(
           new Response(capturedEspell(url.searchParams.get('term') ?? ''), { status: 200 }),
@@ -175,6 +175,10 @@ describe('spellCheckTool', () => {
       ['risk[tiab] AND alzhiemer', 'risk[tiab] AND alzheimer'],
       ['smith j[au] AND diabetis', 'smith j[au] AND diabetes'],
       ['q fever outbreak', 'q fever outbreaks'],
+      // ESpell rewrites `aged` to `age`: an indexed value stays as written, and a
+      // free-text one is corrected. (#259)
+      ['cancr AND aged[mh]', 'cancer AND aged[mh]'],
+      ['cancr AND diabetis[tiab]', 'cancer AND diabetes[tiab]'],
     ])('keeps %j re-runnable on both surfaces', async (query, corrected) => {
       const result = await runToolContract(spellCheckTool, { query });
 
@@ -185,7 +189,9 @@ describe('spellCheckTool', () => {
       );
     });
 
-    it.each(['IL6', 'HbA1c'])(
+    // ESpell would rewrite `humen[mh]` to `human[mh]`; a misspelled indexed
+    // value is kept as written too. (#259)
+    it.each(['IL6', 'HbA1c', 'neoplasm[mh] AND humen[mh]'])(
       'reports no suggestion for %s, which ESpell only lowercases or rewrites',
       async (query) => {
         const result = await runToolContract(spellCheckTool, { query });
@@ -342,6 +348,13 @@ describe('spellCheckTool description (issue #151)', () => {
     expect(description).toContain('zero-hit or thin `pubmed_search_articles` result');
     expect(description).toContain('`hasSuggestion` is false');
     expect(description).toContain('Re-run the search with `corrected`');
+  });
+
+  it('says the value of an indexed field is kept and a free-text one corrected (#259)', () => {
+    expect(description).toContain('`aged[mh]`');
+    expect(description).toMatch(/value of an indexed field[^.]*is kept as written/);
+    expect(description).toMatch(/free-text fields such as `\[tiab\]`[^.]*are corrected/);
+    expect(spellCheckTool.output.shape.corrected.description).toContain('values of indexed fields');
   });
 
   it('carries a worked example that matches ESpell’s own answer', async () => {

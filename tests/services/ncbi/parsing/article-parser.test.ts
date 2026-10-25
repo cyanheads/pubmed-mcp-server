@@ -50,6 +50,7 @@ import {
 } from './_comments-corrections-fixtures.js';
 import {
   APOS_TITLE_XML,
+  ENCODED_TAGS_ABSTRACT_XML,
   R_AND_D_ABSTRACT_XML,
   R_AND_D_AFFILIATION_XML,
   R_AND_D_KEYWORD_XML,
@@ -1406,9 +1407,67 @@ describe('text NCBI double-encodes, decoded one layer (#255)', () => {
     expect(record.abstractText).toContain(
       'A statistically significant difference (P < 0.001) was found between the two groups',
     );
-    // The section labels were double-encoded HTML; one decode leaves the tags as text.
-    expect(record.abstractText).toContain('remains limited.<b>Aim:</b> To elucidate');
-    expect(record.abstractText).not.toMatch(/&(?:lt|gt|apos);/);
+    // The section labels were double-encoded HTML, stripped before the decode
+    // could turn them into tag text; the break after the sentence stays. (#262)
+    expect(record.abstractText).toMatch(
+      /^Introduction: Postural stability .+ remains limited\. Aim: To elucidate .+ Methods: This prospective/,
+    );
+    expect(record.abstractText).not.toMatch(/<\/?b>|&(?:lt|gt|apos);/);
+  });
+
+  describe('entity-encoded tags in an abstract, stripped before the decode (#262)', () => {
+    /** `xml` with `from` replaced by `to`, failing when `from` is absent: a no-op edit would test the fixture unedited. */
+    const edited = (xml: string, from: string, to: string) => {
+      expect(xml).toContain(from);
+      return xml.replace(from, to);
+    };
+
+    it('reads an abstract wrapped in encoded paragraph, label and line-wrap tags (PMID 42515993)', () => {
+      // The closing tag lacks its `;`, so it is no tag: it keeps what the decode makes of it.
+      expect(parseOne(ENCODED_TAGS_ABSTRACT_XML).abstractText).toBe(
+        'Introduction: Pollen monitoring plays an important role in modern allergy care. Quantitatively determining airborne pollen concentrations serves as a clinically relevant tool for diagnosis, treatment, disease monitoring, and prevention. Aim: The study provides an overview of current clinical applications of pollen monitoring in allergology and otolaryngology, and its integration with new technologies that support precision medicine. Conclusions: Pollen monitoring is a clinically significant component of personalised management of allergic respiratory diseases. Integration with advanced technologies is expected to improve diagnostic accuracy, optimise allergen immunotherapy, strengthen preventive strategies, and support the ongoing development of precision medicine.</p&gt.',
+      );
+    });
+
+    it('keeps a tag the XML encoded once: the parser already decoded it to text', () => {
+      const { abstractText } = parseOne(
+        edited(
+          APOS_TITLE_XML,
+          '&amp;lt;b&amp;gt;Aim:&amp;lt;/b&amp;gt;',
+          '&lt;b&gt;Aim:&lt;/b&gt;',
+        ),
+      );
+      expect(abstractText).toContain('remains limited.<b>Aim:</b> To elucidate');
+      expect(abstractText).toContain('Methods: This prospective');
+    });
+
+    it('keeps the blank line between labelled sections', () => {
+      const { abstractText } = parseOne(
+        edited(
+          edited(
+            R_AND_D_KEYWORD_XML,
+            'investment in R&amp;amp;D of ATMPs</AbstractText>',
+            'investment in R&amp;amp;D of ATMPs&amp;lt;/p&amp;gt;</AbstractText>',
+          ),
+          '<AbstractText Label="CONCLUSIONS">Despite',
+          '<AbstractText Label="CONCLUSIONS">&amp;lt;p&amp;gt;Despite',
+        ),
+      );
+      expect(abstractText).toMatch(
+        /\(R&D\)\. Data on investment in R&D of ATMPs\n\nCONCLUSIONS: Despite the need/,
+      );
+    });
+
+    it('strips them in a Bookshelf chapter abstract too', () => {
+      const { abstractText } = parseOne(
+        edited(
+          GENEREVIEWS_CHAPTER_XML,
+          '<AbstractText Label="DIAGNOSIS/TESTING">The diagnosis',
+          '<AbstractText Label="DIAGNOSIS/TESTING">The&amp;lt;br /&amp;gt;diagnosis',
+        ),
+      );
+      expect(abstractText).toContain('\n\nDIAGNOSIS/TESTING: The diagnosis of');
+    });
   });
 
   it('reads R&D in a keyword and across labelled abstract sections (PMID 35945103)', () => {

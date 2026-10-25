@@ -117,6 +117,9 @@
 **PubMed:** https://pubmed.ncbi.nlm.nih.gov/37994903/
 **Keywords:** reproducible research, scientific rigor, transparency, open science, higher education, curriculum design
 
+**License:** [https://creativecommons.org/licenses/by/4.0/](<https://creativecommons.org/licenses/by/4.0/>)
+This article is distributed under the terms of the Creative Commons Attribution License, which permits unrestricted use and redistribution provided that the original author and source are credited.
+
 #### Abstract
 Reproducible research and open science practices have the potential to accelerate scientific progress by allowing others to reuse research outputs, and by promoting rigorous research that is more likely to yield trustworthy results. However, these practices are uncommon in many fields, so there is a clear need for training that helps and encourages researchers to integrate reproducible research and open science practices into their daily work. Here, we outline eleven strategies for making training in these practices the norm at research institutions. The strategies, which emerged from a virtual brainstorming event organized in collaboration with the German Reproducibility Network, are concentrated in three areas: (i) adapting research assessment criteria and program requirements; (ii) training; (iii) building communities. We provide a brief overview of each strategy, offer tips for implementation, and provide links to resources. We also highlight the importance of allocating resources and monitoring impact. Our goal is to encourage researchers – in their roles as scientists, supervisors, mentors, instructors, and members of curriculum, hiring or evaluation committees – to think creatively about the many ways they can promote reproducible research and open science practices in their institutions.
 

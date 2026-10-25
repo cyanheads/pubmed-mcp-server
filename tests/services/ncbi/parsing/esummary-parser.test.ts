@@ -21,6 +21,7 @@ import {
   CHAPTER_DATES_ESUMMARY_XML,
   parseESummaryXml,
 } from './_book-fixtures.js';
+import { APOS_TITLE_ESUMMARY_XML } from './_entity-fixtures.js';
 
 describe('formatESummaryAuthors', () => {
   it('returns empty string for no authors', () => {
@@ -874,5 +875,58 @@ describe('Bookshelf chapter dates (#199)', () => {
       expect(t80k / t5k).toBeLessThan(64);
       expect(t80k).toBeLessThan(250);
     });
+  });
+});
+
+/* -------------------------------------------------------------------------- */
+/*  Text NCBI double-encodes (#262)                                           */
+/* -------------------------------------------------------------------------- */
+
+describe('ESummary text NCBI double-encodes, decoded one layer (#262)', () => {
+  const summariesOf = (xml: string) => extractBriefSummaries(parseESummaryXml(xml));
+
+  it('reads the apostrophe EFetch decodes in the same title (PMID 42138044)', async () => {
+    const [summary] = await summariesOf(APOS_TITLE_ESUMMARY_XML);
+    expect(summary?.title).toBe(
+      "Cervical Vestibular-Evoked Myogenic Potentials (cVEMPs) in Parkinson's Disease Patients: Prospective, Case-Control study.",
+    );
+    expect(summary?.source).toBe('Otolaryngol Pol');
+    expect(summary?.authors).toBe('Abbas AI, Ghanem SS, Abed EE, et al.');
+  });
+
+  it('decodes a Bookshelf book title, and the title on the version 1.0 path', async () => {
+    const book = (
+      await summariesOf(
+        BOOK_ESUMMARY_XML.replace(
+          '<BookTitle>StatPearls</BookTitle>',
+          '<BookTitle>StatPearls &amp;amp; Q&amp;amp;A</BookTitle>',
+        ),
+      )
+    ).find((s) => s.pmid === '29262038');
+    expect(book?.bookTitle).toBe('StatPearls & Q&A');
+
+    const [v1] = await summariesOf(
+      BOOK_ESUMMARY_V1_XML.replace(
+        'Ovarian Cancer.</Item>',
+        'Ovarian Cancer: Parkinson&amp;apos;s Q&amp;amp;A.</Item>',
+      ),
+    );
+    expect(v1?.title).toBe(
+      "BRCA1- and BRCA2-Associated Hereditary Breast and Ovarian Cancer: Parkinson's Q&A.",
+    );
+  });
+
+  it('decodes one layer only, leaves a bare ampersand, and reads names and sources as parsed', async () => {
+    const [summary] = await summariesOf(
+      APOS_TITLE_ESUMMARY_XML.replace(
+        'Parkinson&amp;apos;s Disease',
+        'Parkinson&amp;amp;lt;s&amp;amp;gt; AT&amp;T Disease',
+      )
+        .replace('<Name>Abbas AI</Name>', '<Name>R&amp;amp;D Group</Name>')
+        .replace('<Source>Otolaryngol Pol</Source>', '<Source>Otolaryngol &amp;amp; Pol</Source>'),
+    );
+    expect(summary?.title).toContain('in Parkinson&lt;s&gt; AT&T Disease Patients');
+    expect(summary?.authorNames?.[0]).toBe('R&amp;D Group');
+    expect(summary?.source).toBe('Otolaryngol &amp; Pol');
   });
 });

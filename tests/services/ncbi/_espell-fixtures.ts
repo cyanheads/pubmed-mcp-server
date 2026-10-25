@@ -1,6 +1,7 @@
 /**
  * @fileoverview ESpell responses captured from NCBI (`espell.fcgi?db=pubmed`,
- * 2026-10-12; field-tag and single-letter terms 2026-10-22), keyed by the
+ * 2026-10-12; field-tag and single-letter terms 2026-10-22; indexed field-tag
+ * values 2026-10-25), keyed by the
  * `term` sent. Each body is byte-for-byte what NCBI
  * returned; only the shared prolog and DOCTYPE are factored into
  * {@link espellBody}. `<CorrectedQuery>` is ESpell's lowercased, punctuation-
@@ -78,6 +79,30 @@ const ESPELL_RESULTS: Readonly<Record<string, string>> = {
     '<eSpellResult>\n\t<Database>pubmed</Database>\n\t<Query>diabetis[tiab]</Query>\n\t<CorrectedQuery>diabetes diab</CorrectedQuery>\n\t<SpelledQuery><Original></Original><Replaced>diabetes</Replaced><Original>[</Original><Replaced>diab</Replaced><Original>]</Original></SpelledQuery>\n\t<ERROR/>\n</eSpellResult>\n',
   'neoplasm[mh] AND humen[mh]':
     '<eSpellResult>\n\t<Database>pubmed</Database>\n\t<Query>neoplasm[mh] AND humen[mh]</Query>\n\t<CorrectedQuery>neoplasms mh and human mh</CorrectedQuery>\n\t<SpelledQuery><Original></Original><Replaced>neoplasms</Replaced><Original>[mh] AND </Original><Replaced>human</Replaced><Original>[mh]</Original></SpelledQuery>\n\t<ERROR/>\n</eSpellResult>\n',
+  'cancr AND free full text[sb]':
+    '<eSpellResult>\n\t<Database>pubmed</Database>\n\t<Query>cancr AND free full text[sb]</Query>\n\t<CorrectedQuery>cancer and fred full text srs</CorrectedQuery>\n\t<SpelledQuery><Original></Original><Replaced>cancer</Replaced><Original> AND </Original><Replaced>fred</Replaced><Original> full text[</Original><Replaced>srs</Replaced><Original>]</Original></SpelledQuery>\n\t<ERROR/>\n</eSpellResult>\n',
+  'cancr AND "free full text"[sb]':
+    '<eSpellResult>\n\t<Database>pubmed</Database>\n\t<Query>cancr AND &quot;free full text&quot;[sb]</Query>\n\t<CorrectedQuery>cancer and fred full text srs</CorrectedQuery>\n\t<SpelledQuery><Original></Original><Replaced>cancer</Replaced><Original> AND &quot;</Original><Replaced>fred</Replaced><Original> full text&quot;[</Original><Replaced>srs</Replaced><Original>]</Original></SpelledQuery>\n\t<ERROR/>\n</eSpellResult>\n',
+  'cancr AND "pubmed books"[sb]':
+    '<eSpellResult>\n\t<Database>pubmed</Database>\n\t<Query>cancr AND &quot;pubmed books&quot;[sb]</Query>\n\t<CorrectedQuery>cancer and pubmed hooks sb</CorrectedQuery>\n\t<SpelledQuery><Original></Original><Replaced>cancer</Replaced><Original> AND &quot;pubmed </Original><Replaced>hooks</Replaced><Original>&quot;[sb]</Original></SpelledQuery>\n\t<ERROR/>\n</eSpellResult>\n',
+  'cancr AND randomized controlled trial[pt]':
+    '<eSpellResult>\n\t<Database>pubmed</Database>\n\t<Query>cancr AND randomized controlled trial[pt]</Query>\n\t<CorrectedQuery>cancer and randomized controlled terial pt</CorrectedQuery>\n\t<SpelledQuery><Original></Original><Replaced>cancer</Replaced><Original> AND randomized controlled </Original><Replaced>terial</Replaced><Original>[pt]</Original></SpelledQuery>\n\t<ERROR/>\n</eSpellResult>\n',
+  'cancr AND lancet[ta]':
+    '<eSpellResult>\n\t<Database>pubmed</Database>\n\t<Query>cancr AND lancet[ta]</Query>\n\t<CorrectedQuery>cancer and lane ta</CorrectedQuery>\n\t<SpelledQuery><Original></Original><Replaced>cancer</Replaced><Original> AND </Original><Replaced>lane</Replaced><Original>[ta]</Original></SpelledQuery>\n\t<ERROR/>\n</eSpellResult>\n',
+  'cancr AND aged[mh]':
+    '<eSpellResult>\n\t<Database>pubmed</Database>\n\t<Query>cancr AND aged[mh]</Query>\n\t<CorrectedQuery>cancer and age mh</CorrectedQuery>\n\t<SpelledQuery><Original></Original><Replaced>cancer</Replaced><Original> AND </Original><Replaced>age</Replaced><Original>[mh]</Original></SpelledQuery>\n\t<ERROR/>\n</eSpellResult>\n',
+  'cancr AND aged[MeSH Terms]':
+    '<eSpellResult>\n\t<Database>pubmed</Database>\n\t<Query>cancr AND aged[MeSH Terms]</Query>\n\t<CorrectedQuery>cancer and age mesh terms</CorrectedQuery>\n\t<SpelledQuery><Original></Original><Replaced>cancer</Replaced><Original> AND </Original><Replaced>age</Replaced><Original>[MeSH Terms]</Original></SpelledQuery>\n\t<ERROR/>\n</eSpellResult>\n',
+  'cancr AND eng[la]':
+    '<eSpellResult>\n\t<Database>pubmed</Database>\n\t<Query>cancr AND eng[la]</Query>\n\t<CorrectedQuery>cancer and end la</CorrectedQuery>\n\t<SpelledQuery><Original></Original><Replaced>cancer</Replaced><Original> AND </Original><Replaced>end</Replaced><Original>[la]</Original></SpelledQuery>\n\t<ERROR/>\n</eSpellResult>\n',
+  'cancr AND zhang y[au]':
+    '<eSpellResult>\n\t<Database>pubmed</Database>\n\t<Query>cancr AND zhang y[au]</Query>\n\t<CorrectedQuery>cancer and jhang y au</CorrectedQuery>\n\t<SpelledQuery><Original></Original><Replaced>cancer</Replaced><Original> AND </Original><Replaced>jhang</Replaced><Original> y[au]</Original></SpelledQuery>\n\t<ERROR/>\n</eSpellResult>\n',
+  'cancr AND [sb]':
+    '<eSpellResult>\n\t<Database>pubmed</Database>\n\t<Query>cancr AND [sb]</Query>\n\t<CorrectedQuery>cancer and st</CorrectedQuery>\n\t<SpelledQuery><Original></Original><Replaced>cancer</Replaced><Original> AND [</Original><Replaced>st</Replaced><Original>]</Original></SpelledQuery>\n\t<ERROR/>\n</eSpellResult>\n',
+  'cancr AND diabetis[tiab]':
+    '<eSpellResult>\n\t<Database>pubmed</Database>\n\t<Query>cancr AND diabetis[tiab]</Query>\n\t<CorrectedQuery>cancer and diabetes tiab</CorrectedQuery>\n\t<SpelledQuery><Original></Original><Replaced>cancer</Replaced><Original> AND </Original><Replaced>diabetes</Replaced><Original>[tiab]</Original></SpelledQuery>\n\t<ERROR/>\n</eSpellResult>\n',
+  'asthma AND smith j[Author] AND englsh[Language]':
+    '<eSpellResult>\n\t<Database>pubmed</Database>\n\t<Query>asthma AND smith j[Author] AND englsh[Language]</Query>\n\t<CorrectedQuery>asthma and smith j author and english language</CorrectedQuery>\n\t<SpelledQuery><Original>asthma AND smith j[Author] AND </Original><Replaced>english</Replaced><Original>[Language]</Original></SpelledQuery>\n\t<ERROR/>\n</eSpellResult>\n',
 };
 
 /** Wrap an `<eSpellResult>` element in the prolog and DOCTYPE NCBI sends with it. */

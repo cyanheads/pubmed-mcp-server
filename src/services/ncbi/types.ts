@@ -877,6 +877,14 @@ export interface ParsedPmcArticle {
   doi?: string;
   journal?: ParsedPmcJournal;
   keywords?: string[];
+  /**
+   * Reuse statements the article deposits, one per `<license>` in its
+   * `<article-meta>` `<permissions>`, in document order: `text` is the
+   * `<license-p>` paragraphs as plain text, `urls` the distinct `@xlink:href`
+   * then `ali:license_ref` values. Absent when the article-meta carries none.
+   * (#269)
+   */
+  licenses?: { text?: string; urls?: string[] }[];
   pmcId: string;
   pmcUrl: string;
   pmid?: string;

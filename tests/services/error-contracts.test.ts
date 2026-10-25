@@ -8,6 +8,7 @@ import { describe, expect, it } from 'vitest';
 
 import {
   EUROPEPMC_SERVICE_ERRORS,
+  ICITE_SERVICE_ERRORS,
   NCBI_ID_INPUT_ERRORS,
   NCBI_SERVICE_ERRORS,
   OPENALEX_SERVICE_ERRORS,
@@ -20,6 +21,7 @@ describe('contract provenance', () => {
       ...NCBI_SERVICE_ERRORS,
       ...EUROPEPMC_SERVICE_ERRORS,
       ...OPENALEX_SERVICE_ERRORS,
+      ...ICITE_SERVICE_ERRORS,
     ]) {
       expect((entry as { thrownBy?: string }).thrownBy, entry.reason).toBe('service');
     }
@@ -136,6 +138,31 @@ describe('NCBI_SERVICE_ERRORS', () => {
     for (const entry of NCBI_SERVICE_ERRORS) {
       expect(validCodes, `code for ${entry.reason}`).toContain(entry.code);
     }
+  });
+});
+
+describe('ICITE_SERVICE_ERRORS', () => {
+  it('declares the two reasons the iCite service stamps, both retryable ServiceUnavailable', () => {
+    expect(
+      ICITE_SERVICE_ERRORS.map(({ reason, code, retryable }) => ({ reason, code, retryable })),
+    ).toEqual([
+      {
+        reason: 'icite_unreachable',
+        code: JsonRpcErrorCode.ServiceUnavailable,
+        retryable: true,
+      },
+      {
+        reason: 'icite_invalid_response',
+        code: JsonRpcErrorCode.ServiceUnavailable,
+        retryable: true,
+      },
+    ]);
+  });
+
+  it('names both invalid-response cases: an unparseable body and an unrequested record', () => {
+    const entry = ICITE_SERVICE_ERRORS.find((e) => e.reason === 'icite_invalid_response');
+    expect(entry?.when).toMatch(/not its JSON record list on the last attempt/);
+    expect(entry?.when).toMatch(/a record for a PMID the call did not request/);
   });
 });
 

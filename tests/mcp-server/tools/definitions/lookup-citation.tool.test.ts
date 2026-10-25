@@ -9,7 +9,13 @@ import { createMockContext, runToolContract } from '@cyanheads/mcp-ts-core/testi
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { toJSONSchema } from 'zod/v4/core';
 
-import { bunMarkdown, renderedHtml, renderedText, textBlocks } from '../../../_helpers.js';
+import {
+  bunMarkdown,
+  readCommonMark,
+  renderedHtml,
+  renderedText,
+  textBlocks,
+} from '../../../_helpers.js';
 
 const mockECitMatch = vi.fn();
 const mockESummary = vi.fn();
@@ -992,8 +998,8 @@ describe('lookupCitationTool', () => {
       });
       const text = textBlocks(result.content as ContentBlock[])[0]?.text ?? '';
       expect(text).toContain('### 1 · \\*ref\\* \\<i>1\\</i> \\[a\\](b)\n');
-      // A lone or intraword `_` cannot pair and stays raw.
-      expect(text).toContain('**First Author:** \\*Smith\\* J_\n');
+      // The result lines share a paragraph, so even a lone `_` there is escaped. (#261)
+      expect(text).toContain('**First Author:** \\*Smith\\* J\\_\n');
       expect(text).toContain('**Detail:** NOT_FOUND;INVALID_JOURNAL \\*x\\* \\<b>\n');
       expect(text).toContain(
         '- [author_mismatch] Queried author "o_brien\\_ k" not found in the matched article\'s 2-author roster (\\*Smith\\* J\\_, Doe\\_ K).',
@@ -1008,6 +1014,30 @@ describe('lookupCitationTool', () => {
       expect(visible).toContain(`1 · ${key} PMID: 111 First Author: *Smith* J_`);
       expect(visible).toContain(`[author_mismatch] ${message}`);
       expect(visible).toContain('Detail: NOT_FOUND;INVALID_JOURNAL *x* <b>');
+    });
+
+    it('keeps a lone delimiter in the first author and detail lines visible (#261)', () => {
+      const text =
+        textBlocks(
+          lookupCitationTool.format!({
+            results: [
+              {
+                key: '1',
+                matched: true,
+                status: 'matched',
+                pmid: '111',
+                matchedFirstAuthor: 'Smith J*',
+                detail: 'AMBIGUOUS* match',
+              },
+            ],
+            totalMatched: 1,
+            totalSubmitted: 1,
+            totalWarnings: 0,
+          }),
+        )[0]?.text ?? '';
+      expect(readCommonMark(text)).toContain(
+        '⟨strong⟩PMID:⟨/strong⟩ 111\n⟨strong⟩First Author:⟨/strong⟩ Smith J*\n⟨strong⟩Detail:⟨/strong⟩ AMBIGUOUS* match\n',
+      );
     });
   });
 });

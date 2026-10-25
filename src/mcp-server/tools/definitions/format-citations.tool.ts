@@ -105,7 +105,11 @@ export const formatCitationsTool = tool('pubmed_format_citations', {
           .object({
             pmid: z.string().describe('PubMed ID'),
             title: z.string().optional().describe('Article title'),
-            citations: z.record(z.string(), z.string()).describe('Citations keyed by style'),
+            citations: z
+              .record(z.string(), z.string())
+              .describe(
+                'Citations keyed by style. APA and MLA are Markdown — the journal, volume and book title in *italics*, every other character of the record escaped so it renders as written; BibTeX, RIS and Vancouver are plain text.',
+              ),
             notices: z
               .array(CitationNoticeSchema)
               .optional()
@@ -200,8 +204,9 @@ export const formatCitationsTool = tool('pubmed_format_citations', {
       if (entry.notices?.length) lines.push('', ...noticeLines(entry.notices));
       // BibTeX and RIS pass verbatim inside a fence no backtick run in them can
       // close. APA and MLA are Markdown already — the formatter italicizes the
-      // journal and volume — and pass as they are; Vancouver is plain text
-      // carrying the record's own title and names, escaped as prose. (#255)
+      // journal and volume and escapes the record's text — and pass as they
+      // are; Vancouver is plain text carrying the record's own title and names,
+      // escaped as prose. (#255, #263)
       for (const [style, citation] of Object.entries(entry.citations)) {
         lines.push(`\n### ${style.toUpperCase()}`);
         if (style === 'bibtex' || style === 'ris') {

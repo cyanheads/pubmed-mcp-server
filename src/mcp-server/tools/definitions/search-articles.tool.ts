@@ -1,9 +1,11 @@
 /**
  * @fileoverview PubMed search tool. Searches PubMed with full query syntax,
  * field-specific filters, date ranges, pagination, and optional brief summaries.
- * A query with no search term — blank, invisible characters only, markup only, a
- * bare field tag, or empty parentheses — is rejected before NCBI is called, as
- * is a filter value with no term once sanitized (`"   "`, `"()"`), a
+ * The query and each filter value are sent as written, attribute-less inline
+ * formatting tags (`<i>`, `<b>`) and their closers aside; a sanitized copy
+ * only decides whether a value carries a term. A query with no search term — blank, invisible characters only, markup
+ * only, a bare field tag, or empty parentheses — is rejected before NCBI is
+ * called, as is a filter value with no term once sanitized (`"   "`, `"()"`), a
  * `dateRange` bound that is no real calendar date, and a range whose `minDate`
  * falls after its `maxDate`. `limit`, `retmax`, `num_results`, and `pageSize`
  * are accepted as aliases for `maxResults`, `term` and `queryTerm` for `query`,
@@ -18,8 +20,10 @@ import { tool, z } from '@cyanheads/mcp-ts-core';
 import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
 import { sanitization } from '@cyanheads/mcp-ts-core/utils';
 import { NCBI_SERVICE_ERRORS, QUERY_INPUT_ERRORS } from '@/services/error-contracts.js';
+import { fieldTagKind } from '@/services/ncbi/field-tags.js';
 import { getNcbiService } from '@/services/ncbi/ncbi-service.js';
 import { extractBriefSummaries } from '@/services/ncbi/parsing/esummary-parser.js';
+import { decodeHtmlEntities } from '@/services/ncbi/parsing/text-helpers.js';
 import type { ESearchErrorList, ESearchWarningList } from '@/services/ncbi/types.js';
 import {
   conceptMeta,
@@ -27,7 +31,7 @@ import {
   EDAM_PUBMED_ID,
   SCHEMA_SEARCH_ACTION,
 } from './_concepts.js';
-import { escapeMarkdownInline, markdownCodeSpan } from './_text.js';
+import { escapeMarkdownInline, escapeMarkdownInParagraph, markdownCodeSpan } from './_text.js';
 import { hasVisibleText } from './_visible-text.js';
 
 /**
@@ -125,41 +129,83 @@ function dateRangeProblem(
 const FILTER_SYNTAX = /[()[\]"]/g;
 
 /**
- * Sanitizes one filter value, recording `path` in `blank` when it holds no term
- * once {@link FILTER_SYNTAX} is disregarded (`"   "`, `"<b></b>"`, `"&#8203;"`,
- * `"()"`): sent as written, it would put a field clause with no term in the
- * query PubMed runs, and PubMed answers `asthma AND ()[Author]` with every
- * `asthma` match. A value that passes is returned sanitized, syntax characters
- * included. An exactly-empty string sets no filter — form clients send one for a
- * field left untouched (#14) — so it returns `undefined`, like an omitted field.
- * (#176)
+ * An inline formatting tag — `<i>`, `<b>`, `<em>`, `<strong>`, or `<u>` — in
+ * any case: a closer with no attributes (group 1 holds its `/`), or an opener
+ * with or without attributes (group 3 holds them); group 2 is the name. A
+ * title pasted with its italics carries the attribute-less form, and PubMed
+ * searches it as text: `<i>Staphylococcus aureus</i>[tiab]` matches 3 records
+ * as written and 152,258 without the tags. (#260)
  */
-async function sanitizeFilter(
+const FORMATTING_TAG = /<(\/(?=(?:b|em|i|strong|u)>))?(b|em|i|strong|u)(\s[^<>]*)?>/gi;
+
+/**
+ * `text` as it is sent to ESearch: each {@link FORMATTING_TAG} opener with no
+ * attributes is removed along with the closer that pairs with it, an opener
+ * with attributes and its closer are kept, and a closer with no open tag of its
+ * name is removed. Pairing runs per tag name, innermost first, so
+ * `<i class="a"><i>x</i></i>` is sent as `<i class="a">x</i>`. Every other
+ * character — `<`, `>`, and `&` included — is kept as written, so `R&D`,
+ * `c.1A>G`, and `"p<0.05"` reach PubMed as the caller typed them.
+ * `URLSearchParams` encodes the term once as a single parameter, so nothing in
+ * it can add or override another. One pass, linear in `text`. (#260)
+ *
+ * @internal exported for direct unit tests
+ */
+export function withoutFormattingTags(text: string): string {
+  /** Per lower-cased tag name, whether each still-open opener is kept. */
+  const open = new Map<string, boolean[]>();
+  return text.replace(
+    FORMATTING_TAG,
+    (tag, slash: string | undefined, tagName: string, attributes: string | undefined) => {
+      const name = tagName.toLowerCase();
+      if (slash) return open.get(name)?.pop() ? tag : '';
+      const kept = attributes !== undefined;
+      const stack = open.get(name);
+      if (stack) stack.push(kept);
+      else open.set(name, [kept]);
+      return kept ? tag : '';
+    },
+  );
+}
+
+/**
+ * One filter value as it is sent, recording `path` in `blank` instead when its
+ * sanitized copy holds no term once {@link FILTER_SYNTAX} is disregarded
+ * (`"   "`, `"<b></b>"`, `"&#8203;"`, `"()"`): sent as written, it would put a
+ * field clause with no term in the query PubMed runs, and PubMed answers
+ * `asthma AND ()[Author]` with every `asthma` match (#176). A value that passes
+ * is returned as written, syntax characters included, with only its formatting
+ * tags removed ({@link withoutFormattingTags}); the sanitized copy decides
+ * blankness and nothing else (#260). An exactly-empty string sets no filter —
+ * form clients send one for a field left untouched (#14) — so it returns
+ * `undefined`, like an omitted field.
+ */
+async function filterValue(
   value: string | undefined,
   path: string,
   blank: string[],
 ): Promise<string | undefined> {
   if (!value) return;
   const sanitized = await sanitization.sanitizeString(value, { context: 'text' });
-  if (hasVisibleText(sanitized.replace(FILTER_SYNTAX, ''))) return sanitized;
+  if (hasVisibleText(sanitized.replace(FILTER_SYNTAX, ''))) return withoutFormattingTags(value);
   blank.push(path);
   return;
 }
 
 /**
- * {@link sanitizeFilter} for each list element, naming a blank one by its
+ * {@link filterValue} for each list element, naming a blank one by its
  * index in the framework's dotted path style (`meshTerms.1`) and dropping an
  * empty one. `undefined` when no element is left to filter on.
  */
-async function sanitizeFilterList(
+async function filterValues(
   values: string[] | undefined,
   path: string,
   blank: string[],
 ): Promise<string[] | undefined> {
   const kept: string[] = [];
   for (const [index, value] of (values ?? []).entries()) {
-    const sanitized = await sanitizeFilter(value, `${path}.${index}`, blank);
-    if (sanitized !== undefined) kept.push(sanitized);
+    const sent = await filterValue(value, `${path}.${index}`, blank);
+    if (sent !== undefined) kept.push(sent);
   }
   return kept.length > 0 ? kept : undefined;
 }
@@ -172,60 +218,29 @@ async function sanitizeFilterList(
 const OFFSET_MAX = 9998;
 
 /**
- * PubMed search field tags, lowercased: the tags in PubMed's search-field help,
- * their full names, and ESearch's own field names, each confirmed live to be
- * read as a field tag — a bare `[pdat]` returns "No items found." PubMed searches
- * the content of any other bracket as text (`[18F]`, `[cancer]`, `[smith j]`, and
- * `[ab]` all return matches), so the blank-term check treats only these as
- * carrying no term. A tag missing here fails safe: its bare form is sent and
- * answered as an ordinary zero-hit search.
- */
-const PUBMED_FIELD_TAGS = new Set(
-  [
-    '1au|ad|aid|all|au|auid|book|cn|cois|crdt|dcom|doi|dp|ed|edat|fau|filter|fir|gr|ip|ir',
-    'isbn|jid|la|lastau|lid|lr|majr|mh|mhda|nm|ot|pa|pg|pl|pmid|ps|pt|pubn|rn|sb|sh|si|so',
-    'ta|ti|tiab|tt|tw|vi|affl|aucl|auth|cdat|cnty|coln|ecno|eid|epdat|epdt|faut|filt|finv',
-    'full|grnt|iss|jour|lang|laut|mdat|mesh|otrm|page|papx|pdat|pid|ppdat|ppdt|ptyp|subh',
-    'subs|titl|vol|word|author|editor|issue|subset|title|volume',
-    'keyword|affiliation|all fields|author - corporate|author - first|author - identifier',
-    'author - last|author cluster id|completion date|conflict of interest statements',
-    'corporate author|create date|date - completion|date - create|date - entry|date - mesh',
-    'date - modification|date - publication|ec/rn number|electronic publication date',
-    'entry date|extended pmid|first author name|full author name|full investigator name',
-    'grants and funding|investigator|journal|language|last author name|location id',
-    'mesh date|mesh major topic|mesh subheading|mesh terms|modification date|other term',
-    'pagination|personal name as subject|pharmacological action|place of publication',
-    'print publication date|publication date|publication type|publisher|publisher id',
-    'secondary source id|subheading|subject - personal name|supplementary concept|text word',
-    'title/abstract|transliterated title',
-  ]
-    .join('|')
-    .split('|'),
-);
-
-/**
- * The query with every parenthesis and every bracketed field tag removed — what
- * the blank-term check tests. A tag's search modifier (`[mh:noexp]`,
- * `[tiab:~3]`) does not change what it is; a bracket with no visible text
- * carries no term.
+ * The query with every parenthesis and every bracketed PubMed field tag removed
+ * — what the blank-term check tests. PubMed searches the content of any other
+ * bracket as text (`[18F]`), so only a field tag ({@link fieldTagKind}),
+ * whatever its search modifier (`[mh:noexp]`), or a bracket with no visible
+ * text counts as carrying no term.
  */
 function withoutTermlessMarkup(query: string): string {
   return query
-    .replace(/\[([^\]]*)\]/g, (bracket, content: string) => {
-      const tag = content.trim().toLowerCase();
-      return !hasVisibleText(content) || PUBMED_FIELD_TAGS.has(tag.replace(/\s*:.*$/, ''))
-        ? ''
-        : bracket;
-    })
+    .replace(/\[([^\]]*)\]/g, (bracket, content: string) =>
+      !hasVisibleText(content) || fieldTagKind(content) !== undefined ? '' : bracket,
+    )
     .replace(/[()]/g, '');
 }
 
 /** Upper bound on brief summaries fetched per call; shared by the schema and the format() cap message. */
 const SUMMARY_COUNT_MAX = 50;
 
-/** Renders a diagnostic list as a comma-separated set of backticked clauses. */
+/**
+ * Renders a diagnostic list as comma-separated code spans, each fenced past any
+ * backtick run in its clause so it reads back whole. (#263)
+ */
 function quoteClauses(clauses: string[]): string {
-  return clauses.map((clause) => `\`${clause}\``).join(', ');
+  return clauses.map(markdownCodeSpan).join(', ');
 }
 
 /**
@@ -275,10 +290,15 @@ function buildNotice(args: {
     );
   }
 
+  // ESearch encodes `&`, `<` and `>` in a QuotedPhraseNotFound phrase twice,
+  // where QueryTranslation and FieldNotFound carry them once, so the parser's
+  // decode leaves `&amp;` behind. One more single pass quotes the clause as the
+  // caller wrote it; unquoted phrases are split at those characters and never
+  // carry one. (#273)
   const unmatchedPhrases = [
     ...(errorList?.PhraseNotFound ?? []),
     ...(warningList?.PhraseNotFound ?? []),
-    ...(warningList?.QuotedPhraseNotFound ?? []),
+    ...(warningList?.QuotedPhraseNotFound ?? []).map(decodeHtmlEntities),
   ];
   if (unmatchedPhrases.length > 0) {
     notices.push(
@@ -333,8 +353,20 @@ const AppliedFiltersSchema = z.object({
   species: z
     .enum(['humans', 'animals'])
     .optional()
-    .describe('Species filter applied to the search'),
+    .describe(
+      'Species filter applied to the search: `humans` as `humans[MeSH Terms]`, `animals` as `"animals"[mh:noexp]`',
+    ),
 });
+
+/**
+ * PubMed's own species filter clauses (PubMed Help, Filters: Species). Other
+ * Animals is the heading unexploded: an exploded `animals[MeSH Terms]` takes in
+ * Humans, a heading below it, and so admits human-only studies. (#270)
+ */
+const SPECIES_CLAUSES = {
+  humans: 'humans[MeSH Terms]',
+  animals: '"animals"[mh:noexp]',
+} as const;
 
 export const searchArticlesTool = tool('pubmed_search_articles', {
   description:
@@ -385,7 +417,7 @@ export const searchArticlesTool = tool('pubmed_search_articles', {
       .string()
       .min(1)
       .describe(
-        'PubMed search query (supports full NCBI syntax). Must carry a search term: a value that is blank once markup, bracketed field tags (`[pdat]`), parentheses, and invisible characters such as a zero-width space are disregarded is rejected rather than sent to PubMed.',
+        'PubMed search query (supports full NCBI syntax), sent as written apart from inline formatting tags such as `<i>`, which are removed. Must carry a search term: a value that is blank once markup, bracketed field tags (`[pdat]`), parentheses, and invisible characters such as a zero-width space are disregarded is rejected rather than sent to PubMed.',
       ),
     maxResults: z
       .number()
@@ -462,7 +494,12 @@ export const searchArticlesTool = tool('pubmed_search_articles', {
       ),
     hasAbstract: z.boolean().optional().describe('Only include articles with abstracts'),
     freeFullText: z.boolean().optional().describe('Only include free full text articles'),
-    species: z.enum(['humans', 'animals']).optional().describe('Filter by species'),
+    species: z
+      .enum(['humans', 'animals'])
+      .optional()
+      .describe(
+        'Filter by species: `humans` adds `humans[MeSH Terms]`, `animals` adds `"animals"[mh:noexp]` (animals other than humans; a record indexed for both stays in). Both match only records with MEDLINE species indexing, which preprints and ahead-of-print citations lack.',
+      ),
     summaryCount: z
       .number()
       .int()
@@ -552,9 +589,11 @@ export const searchArticlesTool = tool('pubmed_search_articles', {
   enrichment: {
     effectiveQuery: z
       .string()
-      .describe('Sanitized query sent to PubMed after applying all active filters'),
+      .describe(
+        'The term sent to PubMed: the query as written, with a clause appended for each active filter. Only inline formatting tags with no attributes (`<i>`, `<b>`, `<em>`, `<strong>`, `<u>` and their closers) are removed; `&`, `<`, and `>` are sent as written.',
+      ),
     appliedFilters: AppliedFiltersSchema.describe(
-      'Normalized filter values that were applied to the PubMed query',
+      'Filter values applied to the PubMed query, as sent: each text value as written, formatting tags removed, and dates in YYYY/MM/DD form',
     ),
     notice: z
       .string()
@@ -567,7 +606,11 @@ export const searchArticlesTool = tool('pubmed_search_articles', {
   // content[] trailer presentation for the enrichment block. structuredContent always
   // carries the full structured value; this only shapes the human-facing trailer line.
   enrichmentTrailer: {
-    effectiveQuery: { label: 'Effective Query' },
+    // The term and each caller-written filter value render as code spans, so
+    // they read back exactly as sent, raw and rendered. Dates are validated
+    // digits and the species and date type are enum values; they render as is.
+    // (#263)
+    effectiveQuery: { render: (query) => `**Effective Query:** ${markdownCodeSpan(query)}` },
     appliedFilters: {
       render: (filters) => {
         const lines: string[] = [];
@@ -577,14 +620,16 @@ export const searchArticlesTool = tool('pubmed_search_articles', {
           );
         }
         if (filters.publicationTypes?.length) {
-          lines.push(`- **Publication types:** ${filters.publicationTypes.join(', ')}`);
+          lines.push(
+            `- **Publication types:** ${filters.publicationTypes.map(markdownCodeSpan).join(', ')}`,
+          );
         }
-        if (filters.author) lines.push(`- **Author:** ${filters.author}`);
-        if (filters.journal) lines.push(`- **Journal:** ${filters.journal}`);
+        if (filters.author) lines.push(`- **Author:** ${markdownCodeSpan(filters.author)}`);
+        if (filters.journal) lines.push(`- **Journal:** ${markdownCodeSpan(filters.journal)}`);
         if (filters.meshTerms?.length) {
-          lines.push(`- **MeSH terms:** ${filters.meshTerms.join(', ')}`);
+          lines.push(`- **MeSH terms:** ${filters.meshTerms.map(markdownCodeSpan).join(', ')}`);
         }
-        if (filters.language) lines.push(`- **Language:** ${filters.language}`);
+        if (filters.language) lines.push(`- **Language:** ${markdownCodeSpan(filters.language)}`);
         if (filters.hasAbstract) lines.push('- **Has abstract:** yes');
         if (filters.freeFullText) lines.push('- **Free full text:** yes');
         if (filters.species) lines.push(`- **Species:** ${filters.species}`);
@@ -599,7 +644,13 @@ export const searchArticlesTool = tool('pubmed_search_articles', {
     ctx.log.info('Executing pubmed_search', { query: input.query });
     const ncbi = getNcbiService();
 
-    let effectiveQuery = await sanitization.sanitizeString(input.query, { context: 'text' });
+    // ESearch receives the query as written, formatting tags aside; the
+    // sanitized copy only decides whether it carries a term. Sending the
+    // sanitizer's output HTML-encoded `&`, `<`, and `>` and deleted text after a
+    // `<` (`R&D` → `R&amp;D`, `smith<j` → `smith`), so PubMed ran a different
+    // query than the caller wrote. (#260)
+    let effectiveQuery = withoutFormattingTags(input.query);
+    const sanitizedQuery = await sanitization.sanitizeString(input.query, { context: 'text' });
 
     // `min(1)` counts whitespace, and the sanitizer reduces markup with no text
     // content to an empty string, so both reach here as a blank term. NCBI
@@ -616,7 +667,7 @@ export const searchArticlesTool = tool('pubmed_search_articles', {
     //
     // Invisible characters carry no term either, including those the sanitizer
     // decodes from an entity (`&#8203;`). (#176)
-    if (!hasVisibleText(withoutTermlessMarkup(effectiveQuery))) {
+    if (!hasVisibleText(withoutTermlessMarkup(sanitizedQuery))) {
       throw ctx.fail(
         'blank_query',
         'The `query` carries no search term — it is blank once markup, bracketed field tags, parentheses, and invisible characters are disregarded.',
@@ -631,19 +682,19 @@ export const searchArticlesTool = tool('pubmed_search_articles', {
       throw ctx.fail('invalid_date_range', dateProblem.message, { fields: dateProblem.fields });
     }
 
-    // Every filter is sanitized and checked before any clause is built, so a
-    // blank one fails the call instead of reaching PubMed as an empty field
-    // clause (`asthma AND    [Author]`). (#176)
+    // Every filter is checked before any clause is built, so a blank one fails
+    // the call instead of reaching PubMed as an empty field clause
+    // (`asthma AND    [Author]`). (#176)
     const blankFilters: string[] = [];
-    const sanitizedPubTypes = await sanitizeFilterList(
+    const publicationTypes = await filterValues(
       input.publicationTypes,
       'publicationTypes',
       blankFilters,
     );
-    const sanitizedAuthor = await sanitizeFilter(input.author, 'author', blankFilters);
-    const sanitizedJournal = await sanitizeFilter(input.journal, 'journal', blankFilters);
-    const sanitizedMeshTerms = await sanitizeFilterList(input.meshTerms, 'meshTerms', blankFilters);
-    const sanitizedLanguage = await sanitizeFilter(input.language, 'language', blankFilters);
+    const author = await filterValue(input.author, 'author', blankFilters);
+    const journal = await filterValue(input.journal, 'journal', blankFilters);
+    const meshTerms = await filterValues(input.meshTerms, 'meshTerms', blankFilters);
+    const language = await filterValue(input.language, 'language', blankFilters);
     if (blankFilters.length > 0) {
       throw ctx.fail(
         'blank_filter',
@@ -673,19 +724,19 @@ export const searchArticlesTool = tool('pubmed_search_articles', {
           ? ({ name: 'maxDate', value: maxDate } as const)
           : undefined;
 
-    if (sanitizedPubTypes) {
-      effectiveQuery += ` AND (${sanitizedPubTypes.map((pt) => `"${pt}"[Publication Type]`).join(' OR ')})`;
+    if (publicationTypes) {
+      effectiveQuery += ` AND (${publicationTypes.map((pt) => `"${pt}"[Publication Type]`).join(' OR ')})`;
     }
-    if (sanitizedAuthor) effectiveQuery += ` AND ${sanitizedAuthor}[Author]`;
-    if (sanitizedJournal) effectiveQuery += ` AND "${sanitizedJournal}"[Journal]`;
-    if (sanitizedMeshTerms) {
-      effectiveQuery += ` AND (${sanitizedMeshTerms.map((term) => `"${term}"[MeSH Terms]`).join(' AND ')})`;
+    if (author) effectiveQuery += ` AND ${author}[Author]`;
+    if (journal) effectiveQuery += ` AND "${journal}"[Journal]`;
+    if (meshTerms) {
+      effectiveQuery += ` AND (${meshTerms.map((term) => `"${term}"[MeSH Terms]`).join(' AND ')})`;
     }
-    if (sanitizedLanguage) effectiveQuery += ` AND ${sanitizedLanguage}[Language]`;
+    if (language) effectiveQuery += ` AND ${language}[Language]`;
 
     if (input.hasAbstract) effectiveQuery += ' AND hasabstract[text word]';
     if (input.freeFullText) effectiveQuery += ' AND free full text[filter]';
-    if (input.species) effectiveQuery += ` AND ${input.species}[MeSH Terms]`;
+    if (input.species) effectiveQuery += ` AND ${SPECIES_CLAUSES[input.species]}`;
 
     const esResult = await ncbi.eSearch(
       {
@@ -755,11 +806,11 @@ export const searchArticlesTool = tool('pubmed_search_articles', {
     const searchUrl = `https://pubmed.ncbi.nlm.nih.gov/?term=${encodeURIComponent(effectiveQuery)}`;
     const appliedFilters = {
       ...(normalizedDateRange && { dateRange: normalizedDateRange }),
-      ...(sanitizedPubTypes && { publicationTypes: sanitizedPubTypes }),
-      ...(sanitizedAuthor && { author: sanitizedAuthor }),
-      ...(sanitizedJournal && { journal: sanitizedJournal }),
-      ...(sanitizedMeshTerms && { meshTerms: sanitizedMeshTerms }),
-      ...(sanitizedLanguage && { language: sanitizedLanguage }),
+      ...(publicationTypes && { publicationTypes }),
+      ...(author && { author }),
+      ...(journal && { journal }),
+      ...(meshTerms && { meshTerms }),
+      ...(language && { language }),
       ...(input.hasAbstract && { hasAbstract: true }),
       ...(input.freeFullText && { freeFullText: true }),
       ...(input.species && { species: input.species }),
@@ -799,7 +850,9 @@ export const searchArticlesTool = tool('pubmed_search_articles', {
       // field tags and all — raw and rendered. (#255)
       `**Query:** ${markdownCodeSpan(result.query)}`,
       `**Returned:** ${result.pmids.length} of ${result.totalCount} | **Offset:** ${result.offset}`,
-      `**Search URL:** ${result.searchUrl}`,
+      // An autolink, so no character of the encoded query is read as Markdown
+      // and none is backslash-escaped. (#263)
+      `**Search URL:** <${result.searchUrl}>`,
     ];
     if (result.pmids.length > 0) lines.push(`\n**PMIDs:** ${result.pmids.join(', ')}`);
     if (result.summaries?.length) {
@@ -819,28 +872,30 @@ export const searchArticlesTool = tool('pubmed_search_articles', {
         // plain-text value the eSummary parser produced. (#102)
         lines.push(`\n#### ${escapeMarkdownInline(s.title ?? s.pmid)}`);
         lines.push(`**PMID:** ${s.pmid}`);
-        // Every eSummary string below is escaped the same way. (#255)
-        if (s.authors) lines.push(`**Authors:** ${escapeMarkdownInline(s.authors)}`);
+        // Every eSummary string below is escaped the same way (#255), with the
+        // paragraph escape: these lines form one paragraph, where a lone
+        // delimiter in one value pairs with one in another. (#261)
+        if (s.authors) lines.push(`**Authors:** ${escapeMarkdownInParagraph(s.authors)}`);
         if (s.editors?.length) {
-          lines.push(`**Editors:** ${escapeMarkdownInline(s.editors.join(', '))}`);
+          lines.push(`**Editors:** ${escapeMarkdownInParagraph(s.editors.join(', '))}`);
         }
-        if (s.source) lines.push(`**Source:** ${escapeMarkdownInline(s.source)}`);
+        if (s.source) lines.push(`**Source:** ${escapeMarkdownInParagraph(s.source)}`);
         // A Bookshelf record has no journal, so its venue takes the Source
         // slot rather than leaving the summary without one. (#114)
         if (s.bookTitle || s.publisherName) {
           const book = [s.bookTitle, s.publisherName]
             .filter((part): part is string => !!part)
-            .map(escapeMarkdownInline)
+            .map(escapeMarkdownInParagraph)
             .join(' — ');
           lines.push(`**Book:** ${book}`);
         }
         // `citation` is every ordinary journal article; the line earns its
         // place only when it flags a Bookshelf chapter or book. (#146)
         if (s.docType && s.docType !== 'citation') {
-          lines.push(`**Doc Type:** ${escapeMarkdownInline(s.docType)}`);
+          lines.push(`**Doc Type:** ${escapeMarkdownInParagraph(s.docType)}`);
         }
-        if (s.pubDate) lines.push(`**Published:** ${escapeMarkdownInline(s.pubDate)}`);
-        if (s.doi) lines.push(`**DOI:** ${escapeMarkdownInline(s.doi)}`);
+        if (s.pubDate) lines.push(`**Published:** ${escapeMarkdownInParagraph(s.pubDate)}`);
+        if (s.doi) lines.push(`**DOI:** ${escapeMarkdownInParagraph(s.doi)}`);
         if (s.pmcId) lines.push(`**PMCID:** ${s.pmcId}`);
         if (s.pubmedUrl) lines.push(`**PubMed:** ${s.pubmedUrl}`);
         if (s.pmcUrl) lines.push(`**PMC:** ${s.pmcUrl}`);

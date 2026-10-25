@@ -9,6 +9,8 @@ const createApp = vi.fn(async (_config: Record<string, unknown>) => undefined);
 const initNcbiService = vi.fn();
 const initUnpaywallService = vi.fn();
 const initEuropePmcService = vi.fn();
+const initOpenAlexService = vi.fn();
+const initIciteService = vi.fn();
 const getServerConfig = vi.fn(() => ({ europepmcEnabled: true }));
 
 const searchArticlesTool = { id: 'search-articles-tool' };
@@ -20,6 +22,7 @@ const spellCheckTool = { id: 'spell-check-tool' };
 const lookupMeshTool = { id: 'lookup-mesh-tool' };
 const lookupCitationTool = { id: 'lookup-citation-tool' };
 const convertIdsTool = { id: 'convert-ids-tool' };
+const fetchCitationMetricsTool = { id: 'fetch-citation-metrics-tool' };
 const pubmedEuropepmcSearchTool = { id: 'pubmed-europepmc-search-tool' };
 const pubmedEuropepmcFetchTool = { id: 'pubmed-europepmc-fetch-tool' };
 const databaseInfoResource = { id: 'database-info-resource' };
@@ -47,6 +50,14 @@ vi.mock('@/services/unpaywall/unpaywall-service.js', () => ({
 
 vi.mock('@/services/europe-pmc/europe-pmc-service.js', () => ({
   initEuropePmcService,
+}));
+
+vi.mock('@/services/openalex/openalex-service.js', () => ({
+  initOpenAlexService,
+}));
+
+vi.mock('@/services/icite/icite-service.js', () => ({
+  initIciteService,
 }));
 
 vi.mock('@/mcp-server/prompts/definitions/research-plan.prompt.js', () => ({
@@ -93,6 +104,10 @@ vi.mock('@/mcp-server/tools/definitions/convert-ids.tool.js', () => ({
   convertIdsTool,
 }));
 
+vi.mock('@/mcp-server/tools/definitions/fetch-citation-metrics.tool.js', () => ({
+  fetchCitationMetricsTool,
+}));
+
 vi.mock('@/mcp-server/tools/definitions/pubmed-europepmc-search.tool.js', () => ({
   pubmedEuropepmcSearchTool,
 }));
@@ -115,6 +130,8 @@ describe('server entry point', () => {
     initNcbiService.mockClear();
     initUnpaywallService.mockClear();
     initEuropePmcService.mockClear();
+    initOpenAlexService.mockClear();
+    initIciteService.mockClear();
     getServerConfig.mockClear();
     vi.resetModules();
   });
@@ -141,6 +158,7 @@ describe('server entry point', () => {
       lookupMeshTool,
       lookupCitationTool,
       convertIdsTool,
+      fetchCitationMetricsTool,
       pubmedEuropepmcSearchTool,
       pubmedEuropepmcFetchTool,
     ]);
@@ -155,7 +173,17 @@ describe('server entry point', () => {
     const appConfig = createApp.mock.calls[0]?.[0] as { tools: unknown[] };
     expect(appConfig.tools).not.toContain(pubmedEuropepmcSearchTool);
     expect(appConfig.tools).not.toContain(pubmedEuropepmcFetchTool);
-    expect(appConfig.tools).toHaveLength(9);
+    expect(appConfig.tools).toContain(fetchCitationMetricsTool);
+    expect(appConfig.tools).toHaveLength(10);
+  });
+
+  it('names the citation-metrics tool and credits NIH iCite in its instructions', async () => {
+    await loadModule();
+
+    const appConfig = createApp.mock.calls[0]?.[0] as { instructions: string };
+    expect(appConfig.instructions).toContain(
+      "For an article's citation influence, `pubmed_fetch_citation_metrics` returns its Relative Citation Ratio, NIH percentile, and citation counts (Source: NIH iCite, https://icite.od.nih.gov/).",
+    );
   });
 
   it('names the `records` input shape where its instructions hand a Europe PMC hit to the fetch tool (#244)', async () => {
@@ -167,7 +195,7 @@ describe('server entry point', () => {
     );
   });
 
-  it('initializes NCBI, Unpaywall, and Europe PMC services in the app setup hook', async () => {
+  it('initializes every upstream service in the app setup hook', async () => {
     await loadModule();
 
     const appConfig = createApp.mock.calls[0]?.[0] as {
@@ -179,5 +207,7 @@ describe('server entry point', () => {
     expect(initNcbiService).toHaveBeenCalledOnce();
     expect(initUnpaywallService).toHaveBeenCalledOnce();
     expect(initEuropePmcService).toHaveBeenCalledOnce();
+    expect(initOpenAlexService).toHaveBeenCalledOnce();
+    expect(initIciteService).toHaveBeenCalledOnce();
   });
 });

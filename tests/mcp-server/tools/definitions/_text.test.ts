@@ -7,10 +7,11 @@
  */
 
 import { describe, expect, it } from 'vitest';
-import { bunMarkdown, renderedHtml, renderedText } from '../../../_helpers.js';
+import { bunMarkdown, readCommonMark, renderedHtml, renderedText } from '../../../_helpers.js';
 
 const {
   escapeMarkdownBlock,
+  escapeMarkdownInParagraph,
   escapeMarkdownInline,
   escapeMarkdownLineStart,
   escapeMarkdownListItem,
@@ -242,6 +243,68 @@ describe('escapeMarkdownInline (issue #102)', () => {
 
   it('returns an empty string unchanged', () => {
     expect(escapeMarkdownInline('')).toBe('');
+  });
+
+  it('keeps a lone delimiter raw in a heading, the whole inline run it renders in (#261)', () => {
+    for (const title of ['HLA-B*57:01 carriers', '5` UTR', '~250 participants', 'Lee _K']) {
+      const heading = `#### ${escapeMarkdownInline(title)}`;
+      expect(heading).toBe(`#### ${title}`);
+      expect(readCommonMark(heading)).toBe(`⟨heading_open⟩\n\n${title}\n\n⟨heading_close⟩`);
+    }
+  });
+});
+
+describe('escapeMarkdownInParagraph (issue #261)', () => {
+  /** Two label lines — one CommonMark paragraph — each holding one value. */
+  const labelLines = (title: string, source: string) =>
+    `**Title:** ${escapeMarkdownInParagraph(title)}\n**Source:** ${escapeMarkdownInParagraph(source)}`;
+
+  it.each([
+    ['a lone `*` in each value', 'HLA-B*57:01 carriers', 'J Allergy*'],
+    ['a lone `_` in each value', 'Lee _K', 'J_ Med'],
+    ['a lone backtick in each value', '5` UTR', '3` end'],
+    ['a lone `~` in each value', '~250 cases', 'J Med~'],
+  ])('renders every character of two values sharing a paragraph: %s', (_label, title, source) => {
+    expect(readCommonMark(labelLines(title, source))).toBe(
+      `⟨strong⟩Title:⟨/strong⟩ ${title}\n⟨strong⟩Source:⟨/strong⟩ ${source}`,
+    );
+  });
+
+  it('keeps an authored `*…*` wrapper whole around a value with a lone `*` (pubmed_find_related)', () => {
+    const line = `- **[PMID 1](https://x)**\n  *${escapeMarkdownInParagraph('Smith J*, Doe A')}*`;
+    expect(readCommonMark(line)).toBe(
+      '⟨bullet_list_open⟩\n\n⟨list_item_open⟩\n\n⟨strong⟩⟨a⟩PMID 1⟨/a⟩⟨/strong⟩\n⟨em⟩Smith J*, Doe A⟨/em⟩\n\n⟨list_item_close⟩\n\n⟨bullet_list_close⟩',
+    );
+  });
+
+  it('escapes every `*`, backtick and `~`, and each non-intraword `_`', () => {
+    expect(escapeMarkdownInParagraph('5*g at ~250, the 5` end')).toBe(
+      '5\\*g at \\~250, the 5\\` end',
+    );
+    expect(escapeMarkdownInParagraph('TP53_mutant _stressed')).toBe('TP53_mutant \\_stressed');
+    expect(escapeMarkdownInParagraph('a *Nature* study')).toBe('a \\*Nature\\* study');
+  });
+
+  it.each([
+    'Efficacy confirmed (P<0.001) in all arms',
+    'Sampled where n<N across cohorts',
+    'TP53_mutant and BRCA1_null cell_lines',
+    'Outcomes | adverse events',
+    ' leading space',
+    'Aquaporin promotes early stomatal closure in grapevine leaves',
+  ])('changes nothing in a value with no delimiter: %s', (value) => {
+    expect(escapeMarkdownInParagraph(value)).toBe(value);
+    expect(escapeMarkdownInParagraph(value)).toBe(escapeMarkdownInline(value));
+  });
+
+  it('applies the inline rules it shares: brackets, tags, entities, backslashes, line breaks', () => {
+    expect(escapeMarkdownInParagraph('[a](b) <i>x</i> &amp; back\\slash\nnext')).toBe(
+      '\\[a\\](b) \\<i>x\\</i> \\&amp; back\\\\slash next',
+    );
+  });
+
+  it('returns an empty string unchanged', () => {
+    expect(escapeMarkdownInParagraph('')).toBe('');
   });
 });
 
@@ -846,6 +909,63 @@ describe('escapeMarkdownBlock linear time on adversarial input (issue #255)', ()
       },
     );
   }
+});
+
+describe('escapeMarkdownInParagraph linear time on adversarial input (issue #261)', () => {
+  /** Fastest of five measurements of 2 calls each — the least noisy reading of the work. */
+  const fastestMs = (input: string): number => {
+    escapeMarkdownInParagraph(input);
+    return Math.min(
+      ...Array.from({ length: 5 }, () =>
+        cpuMs(() => {
+          for (let i = 0; i < 2; i++) escapeMarkdownInParagraph(input);
+        }),
+      ),
+    );
+  };
+
+  /** Every character with a backslash before it. */
+  const escapedEach = (text: string) => text.replace(/[\s\S]/g, '\\$&');
+
+  /**
+   * Worst cases for its scans — the tag and entity lookaheads, the delimiter
+   * and underscore escapes — then a digit run and the two line-break shapes.
+   * Each row's builder takes the size and returns the input and the escape it
+   * must come back as.
+   */
+  const SHAPES: Array<[string, (n: number) => [string, string]]> = [
+    ['`<a` with no `>`', (n) => [fill('<a', n), fill('<a', n)]],
+    ['`<a@` (email branch)', (n) => [fill('<a@', n), fill('<a@', n)]],
+    [
+      '`&` then 31 letters, no `;`',
+      (n) => [fill(`&${'a'.repeat(31)}`, n), fill(`&${'a'.repeat(31)}`, n)],
+    ],
+    ['mixed delimiters', (n) => [fill('*_~`[]\\', n), escapedEach(fill('*_~`[]\\', n))]],
+    [
+      'underscores beside letters and spaces',
+      (n) => [fill('a_ _a', n), fill('a_ _a', n).replaceAll('_', '\\_')],
+    ],
+    ['a digit run', (n) => ['1'.repeat(n), '1'.repeat(n)]],
+    [
+      'one long line ending in a break',
+      (n) => [`${'§1 x'.repeat(n / 4)}\ny`, `${'§1 x'.repeat(n / 4)} y`],
+    ],
+    ['line breaks throughout', (n) => ['  \r\n'.repeat(n / 4), '   '.repeat(n / 4)]],
+  ];
+
+  it.each(SHAPES)('scales linearly from 5k to 320k characters of %s', (_label, build) => {
+    // Doubling from 5k, each size's escape and absolute bound checked before the next runs.
+    const times: number[] = [];
+    for (let n = 5_000; n <= 320_000; n *= 2) {
+      const [input, escaped] = build(n);
+      expect(escapeMarkdownInParagraph(input)).toBe(escaped);
+      const ms = fastestMs(input);
+      expect(ms).toBeLessThan(400);
+      times.push(ms);
+    }
+    // Linear work grows 64× across the span; quadratic grows 4096×.
+    expect((times.at(-1) ?? 0) / Math.max(times[0] ?? 0, 0.05)).toBeLessThan(256);
+  });
 });
 
 describe('markdownCodeSpan and markdownCodeFence linear time on adversarial input (issue #255)', () => {

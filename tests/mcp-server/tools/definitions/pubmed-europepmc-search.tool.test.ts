@@ -8,7 +8,11 @@ import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
 import { createMockContext, getEnrichment, runToolContract } from '@cyanheads/mcp-ts-core/testing';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
-import { bunMarkdown, renderedText, textBlocks } from '../../../_helpers.js';
+import { bunMarkdown, readCommonMark, renderedText, textBlocks } from '../../../_helpers.js';
+import {
+  EPMC_APOS_TITLE_HIT,
+  EPMC_ENCODED_TAGS_HIT,
+} from '../../../services/ncbi/parsing/_entity-fixtures.js';
 
 const mockSearch = vi.fn();
 const mockGetEpmc = vi.fn();
@@ -115,22 +119,76 @@ describe('pubmedEuropepmcSearchTool', () => {
   });
 
   it('flattens EPMC `Y`/`N` flags into booleans (isOpenAccess, hasFullTextXml)', async () => {
+    // `hasFullTextXml` follows open-access status and the full-text id, never
+    // `inPMC`: an open-access preprint has JATS, a PMC deposit outside the
+    // open-access subset does not, and a record with no open-access status
+    // carries neither flag. (#267)
     mockSearch.mockResolvedValue({
       hits: [
-        { id: '2', source: 'PPR', title: 'preprint', isOpenAccess: 'Y', inPMC: 'N' },
-        { id: 'PMC5', source: 'PMC', title: 'deposit', isOpenAccess: 'N', inPMC: 'Y' },
+        {
+          id: 'PPR2',
+          source: 'PPR',
+          title: 'preprint',
+          isOpenAccess: 'Y',
+          inPMC: 'N',
+          fullTextIdList: { fullTextId: ['PPR2'] },
+        },
+        {
+          id: 'PMC5',
+          source: 'PMC',
+          title: 'deposit',
+          isOpenAccess: 'N',
+          inPMC: 'Y',
+          fullTextIdList: { fullTextId: ['PMC5'] },
+        },
+        { id: '7', source: 'MED', title: 'no status', inPMC: 'Y' },
       ],
-      hitCount: 2,
+      hitCount: 3,
       cursorMark: '*',
       query: 'foo',
     });
-    const ctx = createMockContext({ errors: pubmedEuropepmcSearchTool.errors });
-    const input = pubmedEuropepmcSearchTool.input.parse({ query: 'preprint' });
-    const result = await pubmedEuropepmcSearchTool.handler(input, ctx);
-    expect(result.hits.map((h) => [h.isOpenAccess, h.hasFullTextXml])).toEqual([
-      [true, false],
-      [false, true],
+    const result = await runToolContract(pubmedEuropepmcSearchTool, { query: 'preprint' });
+    const parsed = pubmedEuropepmcSearchTool.output.parse(result.structuredContent);
+    expect(parsed.hits.map((h) => [h.isOpenAccess, h.hasFullTextXml])).toEqual([
+      [true, true],
+      [false, false],
+      [undefined, undefined],
     ]);
+    expect('hasFullTextXml' in (parsed.hits[2] ?? {})).toBe(false);
+    const text = textBlocks(result.content)
+      .map((b) => b.text)
+      .join('\n');
+    expect(text.match(/^\*\*Full-text XML in EPMC:\*\*.*$/gm)).toEqual([
+      '**Full-text XML in EPMC:** yes',
+      '**Full-text XML in EPMC:** no',
+    ]);
+  });
+
+  it("relays Europe PMC's license verbatim on both surfaces, and omits it when Europe PMC supplies none (#269)", async () => {
+    // A `lite` result carries no `license`; neither does a `core` record Europe PMC has none for.
+    mockSearch.mockResolvedValue({
+      hits: [
+        { id: 'PPR1325930', source: 'PPR', title: 'Licensed', license: 'cc by' },
+        { id: '7', source: 'MED', title: 'Unlicensed' },
+        { id: '8', source: 'MED', title: 'Markup', license: 'cc *by* nc' },
+      ],
+      hitCount: 3,
+      cursorMark: '*',
+      query: 'foo',
+    });
+    const result = await runToolContract(pubmedEuropepmcSearchTool, { query: 'licensed' });
+
+    const parsed = pubmedEuropepmcSearchTool.output.parse(result.structuredContent);
+    expect(parsed.hits.map((h) => h.license)).toEqual(['cc by', undefined, 'cc *by* nc']);
+    expect('license' in (parsed.hits[1] ?? {})).toBe(false);
+    const text = textBlocks(result.content)
+      .map((b) => b.text)
+      .join('\n');
+    expect(text.match(/^\*\*License:\*\*.*$/gm)).toEqual([
+      '**License:** cc by',
+      '**License:** cc \\*by\\* nc',
+    ]);
+    expect(readCommonMark(text)).toContain('⟨strong⟩License:⟨/strong⟩ cc *by* nc');
   });
 
   it('truncates long abstracts and emits a notice when no hits returned', async () => {
@@ -297,9 +355,34 @@ describe('pubmedEuropepmcSearchTool', () => {
       expect(result.hits[0]?.journal).toBe('Journal of Plant Physiology');
     });
 
-    it('decodes entities once, never twice', async () => {
-      const result = await searchOne({ title: 'Assay of &amp;lt;i&amp;gt; markers' });
-      expect(result.hits[0]?.title).toBe('Assay of &lt;i&gt; markers');
+    it('decodes the title one layer further than the abstract, authors and journal (#272)', async () => {
+      // Europe PMC escapes a title once more than the text NCBI ships, so the
+      // title alone carries a residual layer; the other fields decode once.
+      const value = 'Assay of &amp;lt;i&amp;gt; markers';
+      mockSearch.mockResolvedValue({
+        hits: [
+          {
+            id: 'PPR1226893',
+            source: 'PPR',
+            title: value,
+            abstractText: value,
+            authorString: value,
+            journalTitle: value,
+          },
+        ],
+        hitCount: 1,
+        cursorMark: '*',
+        query: 'foo',
+      });
+      const result = await runToolContract(pubmedEuropepmcSearchTool, { query: 'foo' });
+      const parsed = pubmedEuropepmcSearchTool.output.parse(result.structuredContent);
+      expect(parsed.hits[0]).toMatchObject({
+        title: 'Assay of <i> markers',
+        abstractSnippet: 'Assay of &lt;i&gt; markers',
+        authors: 'Assay of &lt;i&gt; markers',
+        journal: 'Assay of &lt;i&gt; markers',
+      });
+      expect(contractText(result)).toContain('\n#### Assay of \\<i> markers\n');
     });
 
     it('leaves a statistical comparison in the title intact', async () => {
@@ -592,7 +675,7 @@ describe('pubmedEuropepmcSearchTool searchUrl (issue #150)', () => {
       'https://europepmc.org/search?query=(alphafold)%20AND%20(SRC%3A%22PPR%22)',
     );
     expect(new URL(structured.searchUrl).searchParams.get('query')).toBe(structured.query);
-    expect(contractText(result)).toContain(`**Search URL:** ${structured.searchUrl}`);
+    expect(contractText(result)).toContain(`**Search URL:** <${structured.searchUrl}>\n`);
   });
 
   it('carries the default source wrapper when no sources are passed', async () => {
@@ -637,7 +720,7 @@ describe('pubmedEuropepmcSearchTool total match count in the header (issue #147)
     expect(text).not.toContain('2595 total');
     expect(text.match(/2595/g)).toHaveLength(1);
     // The rest of the trailer stays.
-    expect(text).toContain('**Effective Query:** (alphafold) AND (SRC:"PPR")');
+    expect(text).toContain('**Effective Query:** `(alphafold) AND (SRC:"PPR")`');
     expect(text).toContain('**Sources:** PPR');
   });
 
@@ -745,7 +828,7 @@ describe('pubmedEuropepmcSearchTool blank query rejection (issue #176)', () => {
           data: { reason: 'blank_query', retryable: false },
         },
       });
-      const text = contractText(result);
+      const text = readCommonMark(contractText(result));
       expect(text).toContain('`query`');
       expect(text).toMatch(/Recovery:/);
       expect(text).toMatch(/nonblank/i);
@@ -781,7 +864,7 @@ describe('pubmedEuropepmcSearchTool blank query rejection (issue #176)', () => {
         data: { reason: 'blank_query', retryable: false },
       },
     });
-    const text = contractText(result);
+    const text = readCommonMark(contractText(result));
     expect(text).toContain('`query`');
     expect(text).toMatch(/no search term/);
     // Europe PMC searches `b` and `nbsp` as words, so nothing may say it would
@@ -858,7 +941,7 @@ describe('pubmedEuropepmcSearchTool blank cursorMark rejection (issue #180)', ()
         },
       },
     });
-    const text = contractText(result);
+    const text = readCommonMark(contractText(result));
     expect(text).toContain('`cursorMark`');
     expect(text).toMatch(/Recovery: .*`nextCursorMark`/);
     expect(text).toContain('(reason blank_cursor · not retryable');
@@ -893,6 +976,9 @@ describe('pubmedEuropepmcSearchTool blank cursorMark rejection (issue #180)', ()
     expect(description).toMatch(/whitespace-only/i);
     expect(description).toContain('europepmc_invalid_input');
     expect(description).toMatch(/verbatim/);
+    expect(description).toContain(
+      'Under relevance ranking (no `sort`), a record can reappear on the next page, so de-duplicate hits by `epmcId` across pages.',
+    );
   });
 });
 
@@ -1121,7 +1207,7 @@ describe('pubmedEuropepmcSearchTool source case and the fetch hand-off (issue #2
       expect(result.structuredContent).toMatchObject({
         error: { code: JsonRpcErrorCode.InvalidParams },
       });
-      expect(contractText(result)).toContain('"MED"|"PMC"|"PPR"|"PAT"|"AGR"');
+      expect(readCommonMark(contractText(result))).toContain('"MED"|"PMC"|"PPR"|"PAT"|"AGR"');
       expect(mockSearch).not.toHaveBeenCalled();
     },
   );
@@ -1159,5 +1245,138 @@ describe('pubmedEuropepmcSearchTool source case and the fetch hand-off (issue #2
     expect(description).toContain(
       'a key without a direction, an empty key, or an extra word fails with `europepmc_invalid_input` before the request',
     );
+  });
+});
+
+describe('pubmedEuropepmcSearchTool NCBI records with a residual entity layer (#262, #272)', () => {
+  beforeEach(() => {
+    mockSearch.mockReset();
+    mockGetEpmc.mockReset();
+    mockGetEpmc.mockReturnValue({ search: mockSearch });
+  });
+
+  it('returns the title as pubmed_fetch_articles does and a snippet free of encoded tags', async () => {
+    mockSearch.mockResolvedValue(
+      page(2, [EPMC_APOS_TITLE_HIT, EPMC_ENCODED_TAGS_HIT], '(EXT_ID:42138044) AND (SRC:"MED")'),
+    );
+
+    const result = await runToolContract(pubmedEuropepmcSearchTool, { query: 'EXT_ID:42138044' });
+
+    const { hits } = result.structuredContent as {
+      hits: Array<{ title?: string; abstractSnippet?: string }>;
+    };
+    const title =
+      "Cervical Vestibular-Evoked Myogenic Potentials (cVEMPs) in Parkinson's Disease Patients: Prospective, Case-Control study.";
+    expect(hits[0]?.title).toBe(title);
+    expect(hits[1]?.abstractSnippet).toMatch(
+      /^Introduction: Pollen monitoring plays an important role in modern allergy care\. Quantitatively determining airborne pollen concentrations serves as a clinically relevant tool for /,
+    );
+    expect(hits[1]?.abstractSnippet).not.toMatch(/<|&lt;/);
+    const text = contractText(result);
+    expect(text).toContain(`\n#### ${title}\n`);
+    // The snippet holds no character the prose escape touches, so content[]
+    // carries it as its own paragraph, whole.
+    expect(text).toContain(`\n\n${hits[1]?.abstractSnippet}\n\n_Abstract truncated at `);
+  });
+});
+
+describe('pubmedEuropepmcSearchTool hit lines that share a paragraph (#261)', () => {
+  it('keeps a lone delimiter in each of two values visible', () => {
+    const text =
+      textBlocks(
+        pubmedEuropepmcSearchTool.format!({
+          hits: [
+            {
+              source: 'PPR',
+              epmcId: 'PPR1',
+              title: 'HLA-B*57:01 carriers',
+              authors: 'Smith J*, Lee _K',
+              journal: 'J_ Med*',
+              doi: '10.1/5`x',
+              license: 'cc by` 4~',
+              epmcUrl: 'https://europepmc.org/article/PPR/PPR1',
+            },
+          ],
+          cursorMark: '*',
+          searchUrl: 'https://europepmc.org/search?query=x',
+          totalCount: 1,
+        }),
+      )[0]?.text ?? '';
+
+    expect(text).toContain('\n#### HLA-B*57:01 carriers\n');
+    expect(readCommonMark(text.slice(text.indexOf('**Source:**')))).toBe(
+      [
+        '⟨strong⟩Source:⟨/strong⟩ PPR | ⟨strong⟩EPMC ID:⟨/strong⟩ PPR1',
+        '⟨strong⟩Authors:⟨/strong⟩ Smith J*, Lee _K',
+        '⟨strong⟩Journal:⟨/strong⟩ J_ Med*',
+        '⟨strong⟩DOI:⟨/strong⟩ 10.1/5`x',
+        '⟨strong⟩License:⟨/strong⟩ cc by` 4~',
+        '⟨strong⟩URL:⟨/strong⟩ https://europepmc.org/article/PPR/PPR1',
+      ].join('\n'),
+    );
+  });
+});
+
+describe('pubmedEuropepmcSearchTool effective query and Search URL (#263)', () => {
+  beforeEach(() => {
+    mockSearch.mockReset();
+    mockGetEpmc.mockReset();
+    mockGetEpmc.mockReturnValue({ search: mockSearch });
+  });
+
+  it('renders the effective query as a code span and the Search URL as an autolink', async () => {
+    const echoed = '(TITLE:"HLA-B*57" AND `x` AND a_b_) AND (SRC:"MED")';
+    mockSearch.mockResolvedValue(page(0, [], echoed));
+
+    const result = await runToolContract(pubmedEuropepmcSearchTool, {
+      query: 'TITLE:"HLA-B*57" AND `x` AND a_b_',
+      sources: ['MED'],
+    });
+
+    const { searchUrl } = result.structuredContent as { searchUrl: string };
+    const raw = contractText(result);
+    expect(raw).toContain(`**Effective Query:** \`\`${echoed}\`\`\n`);
+    expect(raw).toContain(`**Search URL:** <${searchUrl}>\n`);
+    const text = readCommonMark(raw);
+    expect(text).toContain(`⟨strong⟩Effective Query:⟨/strong⟩ ⟨code_inline:${echoed}⟩`);
+    const urlLine = text.split('\n').find((line) => line.startsWith('⟨strong⟩Search URL:'));
+    expect(urlLine).toMatch(/^⟨strong⟩Search URL:⟨\/strong⟩ ⟨a⟩[^⟨]+⟨\/a⟩$/);
+  });
+});
+
+describe('pubmedEuropepmcSearchTool journal on core results (#274)', () => {
+  beforeEach(() => {
+    mockSearch.mockReset();
+    mockGetEpmc.mockReset();
+    mockGetEpmc.mockReturnValue({ search: mockSearch });
+  });
+
+  it('reports a core hit’s journal from `journalInfo`, which core results carry in place of `journalTitle`', async () => {
+    // MED/42515993 as Europe PMC's `core` result type returns it: no `journalTitle`.
+    const coreHit = {
+      id: '42515993',
+      source: 'MED',
+      pmid: '42515993',
+      title: 'The role of pollen monitoring in allergology and otolaryngology.',
+      journalInfo: {
+        volume: '80',
+        journal: {
+          medlineAbbreviation: 'Otolaryngol Pol',
+          title: 'Otolaryngologia polska = The Polish otolaryngology',
+          isoabbreviation: 'Otolaryngol Pol',
+        },
+      },
+    };
+    mockSearch.mockResolvedValue(page(1, [coreHit], '(EXT_ID:42515993) AND (SRC:"MED")'));
+
+    const result = await runToolContract(pubmedEuropepmcSearchTool, {
+      query: 'EXT_ID:42515993',
+      sources: ['MED'],
+      resultType: 'core',
+    });
+
+    const { hits } = result.structuredContent as { hits: Array<{ journal?: string }> };
+    expect(hits[0]?.journal).toBe('Otolaryngol Pol');
+    expect(contractText(result)).toContain('\n**Journal:** Otolaryngol Pol\n');
   });
 });

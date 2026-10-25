@@ -10,9 +10,10 @@ import { JsonRpcErrorCode, McpError } from '@cyanheads/mcp-ts-core/errors';
 import { createMockContext, getEnrichment } from '@cyanheads/mcp-ts-core/testing';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
+import type { IciteRecord } from '@/services/icite/types.js';
 import type { ParsedBriefSummary } from '@/services/ncbi/types.js';
 
-import { textBlocks } from '../../../_helpers.js';
+import { readCommonMark, textBlocks } from '../../../_helpers.js';
 import {
   articleSetXml,
   GENEREVIEWS_CHAPTER_XML,
@@ -33,7 +34,13 @@ const mockExtractBriefSummaries = vi.fn((): Promise<ParsedBriefSummary[]> => Pro
 const mockGetUnpaywallService = vi.fn(() => undefined);
 /** Loosely typed so a test can model a Europe PMC service that throws, not only an absent one. */
 const mockGetEpmcService = vi.fn((): unknown => undefined);
+const mockIciteFetchRecords = vi.fn(
+  (_pmids: readonly string[]): Promise<IciteRecord[]> => Promise.resolve([]),
+);
 
+vi.mock('@/services/icite/icite-service.js', () => ({
+  getIciteService: () => ({ fetchRecords: mockIciteFetchRecords }),
+}));
 vi.mock('@/services/ncbi/ncbi-service.js', () => ({
   getNcbiService: () => ({
     eSearch: mockESearch,
@@ -73,6 +80,9 @@ const { fetchFulltextTool } = await import('@/mcp-server/tools/definitions/fetch
 const { lookupMeshTool } = await import('@/mcp-server/tools/definitions/lookup-mesh.tool.js');
 const { convertIdsTool } = await import('@/mcp-server/tools/definitions/convert-ids.tool.js');
 const { findRelatedTool } = await import('@/mcp-server/tools/definitions/find-related.tool.js');
+const { fetchCitationMetricsTool } = await import(
+  '@/mcp-server/tools/definitions/fetch-citation-metrics.tool.js'
+);
 
 beforeEach(() => {
   mockESearch.mockReset();
@@ -87,6 +97,8 @@ beforeEach(() => {
   mockExtractBriefSummaries.mockResolvedValue([]);
   mockGetUnpaywallService.mockReturnValue(undefined);
   mockGetEpmcService.mockReturnValue(undefined);
+  mockIciteFetchRecords.mockReset();
+  mockIciteFetchRecords.mockResolvedValue([]);
 });
 
 // ─── Input validation: injection attempts ────────────────────────────────────
@@ -102,11 +114,11 @@ describe('search-articles injection', () => {
     expect(result.success).toBe(true);
   });
 
-  it('accepts SQL-injection-like content (sanitization runs inside handler)', async () => {
-    // The tool schema does not block injection strings at the Zod layer —
-    // sanitization.sanitizeString runs inside the handler. This test confirms
-    // the parse boundary is correct (accepts any non-empty string) and that the
-    // sanitized value is forwarded to NCBI rather than rejected silently.
+  it('accepts SQL-injection-like content and forwards it to NCBI as written', async () => {
+    // The tool schema does not block injection strings at the Zod layer, and the
+    // handler sends the query as written: PubMed reads it as search text. This
+    // test confirms the parse boundary is correct (accepts any non-empty string)
+    // and that the value reaches NCBI unchanged rather than rejected silently.
     mockESearch.mockResolvedValue({
       count: 0,
       idList: [],
@@ -118,22 +130,24 @@ describe('search-articles injection', () => {
     const sqlPayload = "cancer' OR '1'='1";
     const input = searchArticlesTool.input.parse({ query: sqlPayload });
     await searchArticlesTool.handler(input, ctx);
-    // The call must have been made (query was not completely dropped)
-    expect(mockESearch).toHaveBeenCalled();
+    expect(mockESearch.mock.calls[0]?.[0]?.term).toBe(sqlPayload);
   });
 
-  it('XSS-like content: sanitizeString strips HTML tags before passing to eSearch', async () => {
-    // sanitization.sanitizeString({context:'text'}) removes HTML markup and
-    // keeps the text it wrapped. The eSearch term must NOT contain raw tags.
+  it('XSS-like content is search text: sent to eSearch as written, never as HTML', async () => {
+    // ESearch receives the query as written — PubMed searches markup as text and
+    // never renders it — so an attribute-bearing tag and the `</b>` that closes
+    // it reach it unchanged. The term travels as one URL-encoded `term`
+    // parameter, so it cannot add or override another. Before #260 the
+    // sanitizer's output was sent, which also HTML-encoded `&`, `<`, and `>` in
+    // legitimate queries (`R&D` → `R&amp;D`).
     mockESearch.mockResolvedValue({ count: 0, idList: [], retmax: 20, retstart: 0 });
     const ctx = createMockContext({ errors: searchArticlesTool.errors });
-    const input = searchArticlesTool.input.parse({ query: '<b onclick="alert(1)">cancer</b>' });
+    const query = '<b onclick="alert(1)">cancer</b>';
+    const input = searchArticlesTool.input.parse({ query });
     await searchArticlesTool.handler(input, ctx);
-    const calledTerm = mockESearch.mock.calls[0]?.[0]?.term as string;
 
-    expect(calledTerm).toContain('cancer');
-    expect(calledTerm).not.toContain('<b');
-    expect(calledTerm).not.toContain('onclick');
+    expect(mockESearch.mock.calls[0]?.[0]?.term).toBe(query);
+    expect(getEnrichment(ctx).effectiveQuery).toBe(query);
   });
 
   it('XSS-like content with no text of its own is rejected before NCBI is called', async () => {
@@ -194,27 +208,43 @@ describe('fetch-articles oversized input', () => {
   });
 });
 
+describe('fetch-citation-metrics oversized input', () => {
+  it('sends the first 200 of the 1000 PMIDs a call may name and returns the rest unfetched', async () => {
+    const pmids = Array.from({ length: 1000 }, (_, i) => String(30_000_000 + i));
+    const ctx = createMockContext({ errors: fetchCitationMetricsTool.errors });
+    const result = await fetchCitationMetricsTool.handler(
+      fetchCitationMetricsTool.input.parse({ pmids }),
+      ctx,
+    );
+    expect(mockIciteFetchRecords).toHaveBeenCalledOnce();
+    expect(mockIciteFetchRecords.mock.calls[0]?.[0]).toEqual(pmids.slice(0, 200));
+    expect(result.overLimit).toEqual({ limit: 200, pmids: pmids.slice(200) });
+  });
+});
+
 // ─── Input validation: PMID format enforcement ───────────────────────────────
 
-describe('PMID injection via fetch-articles', () => {
+describe.each([
+  ['fetch-articles', (pmids: string[]) => fetchArticlesTool.input.safeParse({ pmids })],
+  [
+    'fetch-citation-metrics',
+    (pmids: string[]) => fetchCitationMetricsTool.input.safeParse({ pmids }),
+  ],
+] as const)('PMID injection via %s', (_name, parse) => {
   it('rejects PMIDs with embedded SQL injection characters', () => {
-    const result = fetchArticlesTool.input.safeParse({ pmids: ["1234'; DROP TABLE pubmed--"] });
-    expect(result.success).toBe(false);
+    expect(parse(["1234'; DROP TABLE pubmed--"]).success).toBe(false);
   });
 
   it('rejects PMIDs with path-traversal characters', () => {
-    const result = fetchArticlesTool.input.safeParse({ pmids: ['../../../etc/passwd'] });
-    expect(result.success).toBe(false);
+    expect(parse(['../../../etc/passwd']).success).toBe(false);
   });
 
   it('rejects PMIDs with URL-encoded sequences', () => {
-    const result = fetchArticlesTool.input.safeParse({ pmids: ['%2F%2Fetc%2Fpasswd'] });
-    expect(result.success).toBe(false);
+    expect(parse(['%2F%2Fetc%2Fpasswd']).success).toBe(false);
   });
 
   it('rejects PMIDs with null bytes', () => {
-    const result = fetchArticlesTool.input.safeParse({ pmids: ['12345\0'] });
-    expect(result.success).toBe(false);
+    expect(parse(['12345\0']).success).toBe(false);
   });
 });
 
@@ -726,6 +756,37 @@ describe('format() output sanitization', () => {
     expect(text).toContain('Section: \\[METHODS\\](https://evil.test)');
     expect(text).toContain('file: bin/g001.jpg ### Injected');
   });
+
+  it('fetch-citation-metrics format() neutralizes Markdown and HTML in an iCite title and journal', async () => {
+    mockIciteFetchRecords.mockResolvedValue([
+      {
+        pmid: '23456789',
+        title: '# Injected\n[Click me](https://evil.test) <b onclick="x">bold</b> *a',
+        journal: '[J](https://evil.test)*',
+        doi: '10.1/<i>x</i>',
+      },
+    ]);
+    const ctx = createMockContext({ errors: fetchCitationMetricsTool.errors });
+    const result = await fetchCitationMetricsTool.handler(
+      fetchCitationMetricsTool.input.parse({ pmids: ['23456789'] }),
+      ctx,
+    );
+    const text = textBlocks(fetchCitationMetricsTool.format!(result))[0]?.text ?? '';
+    const read = readCommonMark(text.slice(text.indexOf('### PMID 23456789')));
+
+    // The title's tags are stripped as markup; every other character reads back
+    // as text, with no heading, link, emphasis, or raw HTML formed from it.
+    expect(read.split('\n').slice(0, 8)).toEqual([
+      '⟨heading_open⟩',
+      '',
+      'PMID 23456789',
+      '',
+      '⟨heading_close⟩',
+      '',
+      '⟨strong⟩Title:⟨/strong⟩ # Injected [Click me](https://evil.test) bold *a',
+      '⟨strong⟩Year:⟨/strong⟩ Not available | ⟨strong⟩Journal:⟨/strong⟩ [J](https://evil.test)* | ⟨strong⟩DOI:⟨/strong⟩ 10.1/<i>x</i>',
+    ]);
+  });
 });
 
 // ─── No prototype pollution ───────────────────────────────────────────────────
@@ -747,6 +808,15 @@ describe('no prototype pollution via tool inputs', () => {
     const malicious = JSON.parse('{"pmids":["12345"],"__proto__":{"hacked":true}}');
     fetchArticlesTool.input.safeParse(malicious);
     expect((Object.prototype as Record<string, unknown>).hacked).toBeUndefined();
+  });
+
+  it('fetch-citation-metrics Zod schema rejects an own __proto__ key by name, unpolluted', () => {
+    const malicious = JSON.parse('{"pmids":["12345"],"__proto__":{"iciteHacked":true}}');
+    const result = fetchCitationMetricsTool.input.safeParse(malicious);
+    expect(result.error?.issues).toEqual([
+      expect.objectContaining({ code: 'unrecognized_keys', keys: ['__proto__'] }),
+    ]);
+    expect((Object.prototype as Record<string, unknown>).iciteHacked).toBeUndefined();
   });
 });
 
@@ -794,6 +864,18 @@ describe('empty result edge cases', () => {
     );
     expect(result.articles).toEqual([]);
     expect(result.unavailablePmids).toEqual(['99999']);
+  });
+
+  it('fetch-citation-metrics handles an iCite answer with no records', async () => {
+    const ctx = createMockContext({ errors: fetchCitationMetricsTool.errors });
+    const result = await fetchCitationMetricsTool.handler(
+      fetchCitationMetricsTool.input.parse({ pmids: ['99999'] }),
+      ctx,
+    );
+    expect(result).toEqual({ records: [], unavailablePmids: ['99999'] });
+    expect(textBlocks(fetchCitationMetricsTool.format!(result))[0]?.text).toBe(
+      '## NIH iCite Citation Metrics\nSource: [NIH iCite](https://icite.od.nih.gov/)\n**Records:** 0\n**Unavailable PMIDs:** 99999',
+    );
   });
 });
 

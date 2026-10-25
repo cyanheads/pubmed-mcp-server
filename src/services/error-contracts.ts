@@ -1,10 +1,10 @@
 /**
  * @fileoverview Canonical error contracts: the failure modes the NCBI, Europe
- * PMC, and OpenAlex services throw and tools declare in `errors[]`, plus the
- * input rejections some tools raise before any upstream call. Unpaywall has no
- * array here: its one caller, `pubmed_fetch_fulltext`, catches every Unpaywall
- * failure and reports it as a tier outcome, so no Unpaywall reason reaches a
- * caller as an error.
+ * PMC, OpenAlex, and NIH iCite services throw and tools declare in `errors[]`,
+ * plus the input rejections some tools raise before any upstream call. Unpaywall
+ * has no array here: its one caller, `pubmed_fetch_fulltext`, catches every
+ * Unpaywall failure and reports it as a tier outcome, so no Unpaywall reason
+ * reaches a caller as an error.
  *
  * Service-layer code stamps `data: { reason }` on its throws, adding its own
  * `data.recovery` only where the hint depends on runtime detail. When a failure
@@ -148,6 +148,32 @@ export const OPENALEX_SERVICE_ERRORS = [
     code: JsonRpcErrorCode.ServiceUnavailable,
     when: 'The last of the retry attempts against OpenAlex returned a body that could not be parsed as JSON.',
     recovery: 'Retry the request; OpenAlex returned a malformed response that could not be parsed.',
+    retryable: true,
+    thrownBy: 'service',
+  },
+] as const;
+
+/**
+ * Failure modes the NIH iCite service layer can surface. Tools whose handler
+ * lets `getIciteService()` failures propagate spread these into their
+ * `errors[]`.
+ */
+export const ICITE_SERVICE_ERRORS = [
+  {
+    reason: 'icite_unreachable',
+    code: JsonRpcErrorCode.ServiceUnavailable,
+    when: 'NIH iCite failed on every attempt the retry budget allowed — a network failure or an HTTP 5xx.',
+    recovery:
+      'Retry after a brief delay; NIH iCite was unreachable. The other pubmed_* tools do not depend on it.',
+    retryable: true,
+    thrownBy: 'service',
+  },
+  {
+    reason: 'icite_invalid_response',
+    code: JsonRpcErrorCode.ServiceUnavailable,
+    when: 'NIH iCite returned a body that is not its JSON record list on the last attempt the retry budget allowed, or a record for a PMID the call did not request.',
+    recovery:
+      'Retry the request after a brief delay; NIH iCite returned a malformed or mismatched response.',
     retryable: true,
     thrownBy: 'service',
   },

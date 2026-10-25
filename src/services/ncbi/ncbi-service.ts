@@ -26,6 +26,7 @@ import {
 
 import { getServerConfig } from '@/config/server-config.js';
 import { NcbiApiClient } from './api-client.js';
+import { fieldTagKind } from './field-tags.js';
 import {
   childrenOf,
   findOne,
@@ -205,18 +206,53 @@ function judgeReplacement(span: string, replacement: string): 'apply' | 'keep' |
   return withinEdits(span.toLowerCase(), replacement.toLowerCase(), 2) ? 'apply' : 'stop';
 }
 
+/** A boolean operator between two clauses; PubMed reads only the uppercase forms as operators. */
+const OPERATOR = /\s(?:AND|OR|NOT)\s/y;
+
 /**
- * Every field tag in `query` — a `[`, the next `]`, and the text between — as
- * `[start, end)` offsets in order. An unclosed `[` opens no tag. One forward
- * scan: each `indexOf` starts past the last bracket found.
+ * Every span of `query` the rebuild keeps as written, as `[start, end)`
+ * offsets in order: each bracket — a `[`, the next `]`, and the text between —
+ * and, before the bracket of an indexed field tag ({@link fieldTagKind}), the
+ * value it qualifies. That value is the quoted phrase directly before the `[`,
+ * or else the text back to the nearest `AND`, `OR`, `NOT`, parenthesis, earlier
+ * bracket, or the query start. A free-text tag (`[tiab]`) and a bracket that is
+ * no field tag (`[18F]`) cover only themselves. An unclosed `[` opens no
+ * bracket. One forward scan: the text between brackets is read once for
+ * boundaries and quotes, and each `indexOf` starts past the last bracket found.
  */
 function fieldTagRanges(query: string): [start: number, end: number][] {
   const ranges: [number, number][] = [];
+  let scan = 0;
   for (let open = query.indexOf('['); open >= 0; ) {
     const close = query.indexOf(']', open + 1);
     if (close < 0) break;
-    ranges.push([open, close + 1]);
-    open = query.indexOf('[', close + 1);
+    // Where a value ending at `open` can start, and the last two quotes before it.
+    let boundary = scan;
+    let quote = -1;
+    let openingQuote = -1;
+    for (; scan < open; scan++) {
+      const char = query[scan];
+      if (char === '(' || char === ')') {
+        boundary = scan + 1;
+      } else if (char === '"') {
+        openingQuote = quote;
+        quote = scan;
+      } else {
+        OPERATOR.lastIndex = scan;
+        if (OPERATOR.test(query)) {
+          boundary = OPERATOR.lastIndex;
+          // Resume on the operator's trailing space, which can open the next one.
+          scan = boundary - 2;
+        }
+      }
+    }
+    let start = open;
+    if (fieldTagKind(query.slice(open + 1, close)) === 'indexed') {
+      start = quote === open - 1 && openingQuote >= 0 ? openingQuote : boundary;
+    }
+    ranges.push([start, close + 1]);
+    scan = close + 1;
+    open = query.indexOf('[', scan);
   }
   return ranges;
 }
@@ -229,7 +265,12 @@ function fieldTagRanges(query: string): [start: number, end: number][] {
  * two `Original`s is the span the `Replaced` between them stands for. A span
  * that overlaps a field tag keeps its text and the rebuild continues past it:
  * ESpell rewrites tag text it doesn't recognize (`risk[tiab] AND alzhiemer` →
- * `risk[tia] AND alzheimer`), and PubMed then ignores the tag (#250). Spans
+ * `risk[tia] AND alzheimer`), and PubMed then ignores the tag (#250). So does a
+ * span that overlaps the value of an indexed field ({@link fieldTagRanges}):
+ * ESpell's dictionary is not the field's index, and it rewrites correctly
+ * spelled values into ones the field doesn't hold (`free full text[sb]` →
+ * `fred full text[sb]`, `aged[mh]` → `age[mh]`); a free-text field's value
+ * (`diabetis[tiab]`) is corrected like any other text (#259). Spans
  * that hold a digit or non-ASCII character, are all uppercase, differ only in
  * case, or are one letter replaced by one letter also keep their text; the first
  * span that can't be placed or judged ends the rebuild, and the caller's text
@@ -250,9 +291,9 @@ export function rebuildSpelledQuery(
   const tags = fieldTagRanges(query);
   let tagIndex = 0;
   /**
-   * Whether `query[start, end)` overlaps a field tag. Spans arrive in query
-   * order, so a tag that ends at or before `start` can't touch a later span and
-   * the index only moves forward.
+   * Whether `query[start, end)` overlaps a field tag or an indexed value. Spans
+   * arrive in query order, so a range that ends at or before `start` can't
+   * touch a later span and the index only moves forward.
    */
   const overlapsTag = (start: number, end: number): boolean => {
     let tag = tags[tagIndex];

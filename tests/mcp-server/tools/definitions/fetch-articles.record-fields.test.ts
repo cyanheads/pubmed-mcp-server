@@ -11,12 +11,14 @@
 import { runToolContract } from '@cyanheads/mcp-ts-core/testing';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
+import { readCommonMark } from '../../../_helpers.js';
 import {
   articleSetXml,
   parseArticleSetXml,
 } from '../../../services/ncbi/parsing/_book-fixtures.js';
 import {
   APOS_TITLE_XML,
+  ENCODED_TAGS_ABSTRACT_XML,
   R_AND_D_ABSTRACT_XML,
   R_AND_D_AFFILIATION_XML,
   R_AND_D_KEYWORD_XML,
@@ -412,6 +414,23 @@ describe('text NCBI double-encodes (#255)', () => {
     expect(text).toContain("in Parkinson's Disease Patients");
     expect(text).toContain('difference (P < 0.001) was found');
     expect(text).not.toMatch(/&(?:amp;)?(?:apos|lt);/);
+  });
+
+  it('strips the double-encoded tags in an abstract on both surfaces (#262)', async () => {
+    stage(APOS_TITLE_XML, ENCODED_TAGS_ABSTRACT_XML);
+    const result = await runToolContract(fetchArticlesTool, { pmids: ['42138044', '42515993'] });
+    const [labelled, wrapped] = (result.structuredContent as { articles: DecodedOut[] }).articles;
+    expect(labelled?.abstractText).toContain('remains limited. Aim: To elucidate');
+    expect(wrapped?.abstractText).toContain('clinically relevant tool for diagnosis');
+    expect(`${labelled?.abstractText}${wrapped?.abstractText}`).not.toMatch(
+      /<\/?(?:b|p|strong)>|<br \/>/,
+    );
+
+    const text = result.content.flatMap((b) => (b.type === 'text' ? [b.text] : [])).join('\n');
+    const read = readCommonMark(text);
+    expect(read).toContain('remains limited. Aim: To elucidate');
+    expect(read).toContain('clinically relevant tool for diagnosis');
+    expect(read).not.toMatch(/⟨(?:html_inline|html_block)/);
   });
 
   it('returns R&D as a keyword and an affiliation on both surfaces', async () => {

@@ -503,12 +503,15 @@ export class EuropePmcService {
   }
 
   /**
-   * Fetch the JATS full text for an EPMC record. Returns:
+   * Fetch the JATS full text for an EPMC record under the id
+   * `epmcFullTextId()` returns for its search hit. Returns:
    *   - `{ kind: 'found', xml, epmcId, source }` — JATS XML string usable
    *     directly by tool callers that hold their own parser, or via
    *     `parseFullTextXml()` for the parsed tree.
-   *   - `{ kind: 'not-available', reason }` — EPMC has the record but
-   *     publishes no fullTextXML (404 or empty body).
+   *   - `{ kind: 'not-available', reason }` — a 404 or an empty body.
+   *
+   * Europe PMC answers an id it publishes no XML for with HTTP 500, which is
+   * retried and then thrown like any outage, so it is never asked for one.
    */
   async fullTextXml(
     epmcId: string,

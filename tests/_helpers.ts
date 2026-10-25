@@ -3,11 +3,13 @@
  * `format()` and prompt handlers return `ContentBlock` / `PromptMessage`
  * unions; assertions in these suites read `.text`, so narrow once at the call
  * site instead of guarding at every assertion. Also the rendered view of a
- * `content[]` text, for the Bun lane's render checks.
+ * `content[]` text, for the Bun lane's render checks, and its CommonMark
+ * reading, for checks that run on every lane.
  * @module tests/_helpers
  */
 
 import type { ContentBlock, PromptMessage } from '@cyanheads/mcp-ts-core';
+import MarkdownIt, { type Token } from 'markdown-it';
 
 /** A `ContentBlock` narrowed to the text variant. */
 export type TextBlock = Extract<ContentBlock, { type: 'text' }>;
@@ -56,6 +58,39 @@ export function renderedText(markdown: string): string {
     .replace(/&amp;/g, '&')
     .replace(/\s+/g, ' ')
     .trim();
+}
+
+/** GFM-flavored CommonMark with raw HTML on, the shape `content[]` clients render. */
+const commonMarkParser = new MarkdownIt('default', { html: true });
+
+function readInline(children: Token[]): string {
+  let out = '';
+  for (const token of children) {
+    if (token.type === 'text' || token.type === 'text_special') out += token.content;
+    else if (token.type === 'softbreak' || token.type === 'hardbreak') out += '\n';
+    else if (token.nesting === 1) out += `⟨${token.tag}⟩`;
+    else if (token.nesting === -1) out += `⟨/${token.tag}⟩`;
+    else out += `⟨${token.type}:${token.content}⟩`;
+  }
+  return out;
+}
+
+/**
+ * The text a CommonMark parse of `markdown` reads back: each paragraph's text
+ * (line breaks as `\n`), joined by a blank line, with every node that is not
+ * plain text named in place — `⟨strong⟩…⟨/strong⟩`, `⟨code_inline:x⟩`,
+ * `⟨bullet_list_open⟩` — so an expectation written as plain text fails on any
+ * live syntax. Unlike {@link renderedText}, it needs no Bun global.
+ */
+export function readCommonMark(markdown: string): string {
+  const parts: string[] = [];
+  for (const token of commonMarkParser.parse(markdown, {})) {
+    if (token.type === 'inline') parts.push(readInline(token.children ?? []));
+    else if (token.type !== 'paragraph_open' && token.type !== 'paragraph_close') {
+      parts.push(`⟨${token.type}⟩`);
+    }
+  }
+  return parts.join('\n\n');
 }
 
 /** Narrows prompt messages to text content, throwing on any other block kind. */

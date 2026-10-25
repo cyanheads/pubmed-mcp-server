@@ -42,7 +42,7 @@ import type {
   XmlPubmedArticleSet,
   XmlPubmedBookArticle,
 } from '../types.js';
-import { decodeHtmlEntities } from './text-helpers.js';
+import { decodeHtmlEntities, stripEncodedMarkupTags } from './text-helpers.js';
 import {
   ensureArray,
   getAttribute,
@@ -510,12 +510,14 @@ export function extractAbstractText(abstractXml?: XmlArticle['Abstract']): strin
 
   const processedTexts = abstractTexts
     .map((at: XmlAbstractText | string) => {
-      // AbstractText can be string directly or object
+      // AbstractText can be string directly or object. A tag NCBI double-encoded
+      // (`&amp;lt;b&amp;gt;Aim:`) reaches here as `&lt;b&gt;`: it is markup, and
+      // is stripped before the decode below would turn it into `<b>` text. (#262)
       if (typeof at === 'string') {
-        return at;
+        return stripEncodedMarkupTags(at);
       }
       // If it's an object, it should have #text or Label
-      const sectionText = getText(at); // Handles at['#text']
+      const sectionText = stripEncodedMarkupTags(getText(at)); // Handles at['#text']
       const label = getAttribute(at, 'Label');
       if (label && sectionText) {
         return `${label.trim()}: ${sectionText.trim()}`;

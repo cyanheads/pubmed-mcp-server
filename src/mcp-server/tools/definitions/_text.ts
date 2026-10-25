@@ -2,12 +2,22 @@
  * @fileoverview Text helpers shared by the tool definitions: the surrogate-safe
  * character cut and the word-boundary cut built on it, which bound returned text
  * to a budget, and the render-time Markdown escapes applied to upstream strings
- * interpolated into `format()` — one for an inline position, one for a table
+ * interpolated into `format()` — one for a value that is a whole inline run (a
+ * heading), one for a value sharing a paragraph with others, one for a table
  * cell, one for a multi-line block of prose such as an abstract or a section,
  * and one for a value that opens a line or a list item — plus the code span and
- * code fence that carry a value verbatim.
+ * code fence that carry a value verbatim. The prose rules they share with the
+ * citation formatter live in `src/services/markdown-escape.ts`.
  * @module src/mcp-server/tools/definitions/_text
  */
+
+import {
+  countOf,
+  escapeProse,
+  isAsciiDigit,
+  lineStartMarker,
+  pairableUnderscores,
+} from '@/services/markdown-escape.js';
 
 const HIGH_SURROGATE_FIRST = 0xd800;
 const HIGH_SURROGATE_LAST = 0xdbff;
@@ -38,7 +48,7 @@ export function sliceCodeUnits(text: string, limit: number): string {
 /** A whitespace character — the boundary a word-boundary cut backs off to. */
 const WHITESPACE_RE = /\s/;
 
-const isWhitespace = (text: string, index: number): boolean =>
+export const isWhitespace = (text: string, index: number): boolean =>
   WHITESPACE_RE.test(text.charAt(index));
 
 /**
@@ -89,43 +99,19 @@ const HTML_TAG_OPENER_RE = /<(?=[!?]|(?:[A-Za-z/]|[^\s<>@]+@)[^<>]*>)/g;
  * decodes: `&amp;` would show as `&`, `&lt;i&gt;` as `<i>`.
  */
 const ENTITY_AMPERSAND_RE = /&(?=#\d{1,7};|#[Xx][\dA-Fa-f]{1,6};|[A-Za-z][\dA-Za-z]{0,31};)/g;
-/** A character that makes an adjacent `_` intraword, where it cannot emphasize. */
-const WORD_CHAR_RE = /[0-9A-Za-z]/;
-
-function countOf(text: string, character: string): number {
-  return text.split(character).length - 1;
-}
 
 function escapeEvery(text: string, pattern: RegExp): string {
   return text.replace(pattern, (match) => `\\${match}`);
 }
 
 /**
- * Positions of the `_` characters that could open or close emphasis. CommonMark
- * forbids intraword `_` emphasis, so an underscore flanked by alphanumerics on
- * both sides (`TP53_mutant`) is inert and stays unescaped.
- */
-function pairableUnderscores(text: string): Set<number> {
-  const positions = new Set<number>();
-  for (let i = text.indexOf('_'); i !== -1; i = text.indexOf('_', i + 1)) {
-    const previous = text[i - 1];
-    const next = text[i + 1];
-    const intraword =
-      previous !== undefined &&
-      next !== undefined &&
-      WORD_CHAR_RE.test(previous) &&
-      WORD_CHAR_RE.test(next);
-    if (!intraword) positions.add(i);
-  }
-  return positions;
-}
-
-/**
  * Escape the Markdown-significant characters in an upstream string that is
- * about to be interpolated *inline* into a `format()` line — a `### `/`#### `
- * heading or a `**Label:** ` line. Render-time only: the escaped form must
- * never be written back into `structuredContent`, which is a contract over the
- * plain-text value. (#102)
+ * about to be interpolated *inline* into a `format()` line, as the whole inline
+ * run it renders in — a `### `/`#### ` heading, or a paragraph or list item
+ * holding no other upstream value. A value that shares its paragraph with
+ * another takes {@link escapeMarkdownInParagraph}. Render-time only: the
+ * escaped form must never be written back into `structuredContent`, which is a
+ * contract over the plain-text value. (#102, #261)
  *
  * Minimal by design, judged on what the reader actually sees rendered. Every
  * Markdown construct here needs a partner delimiter to form, so a delimiter is
@@ -133,26 +119,50 @@ function pairableUnderscores(text: string): Set<number> {
  * `~250`, and an intraword `_` in `TP53_mutant` are inert and stay legible.
  * Escaping them would cost a reader of the raw text a stray backslash and buy
  * nothing. What is escaped: a tag-shaped `<` (raw HTML and autolinks), an
- * entity-shaped `&`, pairable `` ` ``/`*`/`~`/`_`, every `[` and `]`, and the backslash itself,
- * without which a trailing one in the source would neutralize the escape after
- * it. Brackets get no pairing test: sibling label lines render as one
- * paragraph, so a lone `[` in one field and a lone `]` in the next would still
- * form a link.
+ * entity-shaped `&`, pairable `` ` ``/`*`/`~`/`_`, every `[` and `]`, and the
+ * backslash itself, without which a trailing one in the source would neutralize
+ * the escape after it. Brackets get no pairing test: a lone `[` in one value
+ * and a lone `]` later on the same line would still form a link.
  *
  * Line breaks collapse to a space. That is what keeps the value inline, and
  * with it the reason `#`, `>`, and `-` need no escaping: they are structural
  * only at the start of a line, and the value never reaches one.
  */
 export function escapeMarkdownInline(text: string): string {
+  return escapeInline(text, true);
+}
+
+/**
+ * Escape an upstream value that shares a CommonMark paragraph with other
+ * values — consecutive `**Label:** ` lines, a list item's title, author and meta
+ * lines, a value inside this server's own `*…*`: {@link escapeMarkdownInline},
+ * with every `*`, `` ` `` and `~` escaped and every `_` that is not intraword.
+ * CommonMark pairs those delimiters across the lines of a paragraph, so a lone
+ * one in two values renders as emphasis or a code span that hides both
+ * characters, and one inside an authored `*…*` closes it early; the pairing
+ * test cannot see the other values. Brackets are escaped every time for the same
+ * reason. A value holding none of these characters renders byte-identically.
+ * Linear in the length of the text. (#261)
+ */
+export function escapeMarkdownInParagraph(text: string): string {
+  return escapeInline(text, false);
+}
+
+/**
+ * The inline escape, with each emphasis and code delimiter escaped only when
+ * the value holds a partner for it (`pairWithinValue`), or always.
+ */
+function escapeInline(text: string, pairWithinValue: boolean): string {
+  const pairs = (delimiter: string) => !pairWithinValue || countOf(text, delimiter) >= 2;
   let escaped = text.replace(LINE_BREAK_RE, ' ').replace(/\\/g, '\\\\');
   escaped = escaped.replace(HTML_TAG_OPENER_RE, '\\<').replace(ENTITY_AMPERSAND_RE, '\\&');
-  if (countOf(text, '`') >= 2) escaped = escapeEvery(escaped, /`/g);
+  if (pairs('`')) escaped = escapeEvery(escaped, /`/g);
   escaped = escapeEvery(escaped, /[[\]]/g);
-  if (countOf(text, '*') >= 2) escaped = escapeEvery(escaped, /\*/g);
-  if (countOf(text, '~') >= 2) escaped = escapeEvery(escaped, /~/g);
+  if (pairs('*')) escaped = escapeEvery(escaped, /\*/g);
+  if (pairs('~')) escaped = escapeEvery(escaped, /~/g);
 
   const pairable = pairableUnderscores(escaped);
-  if (pairable.size < 2) return escaped;
+  if (pairable.size === 0 || (pairWithinValue && pairable.size < 2)) return escaped;
   return escaped.replace(/_/g, (underscore, index: number) =>
     pairable.has(index) ? `\\${underscore}` : underscore,
   );
@@ -202,9 +212,6 @@ const LINE_SEPARATOR_END_RE = /[\r\n]$/;
 /** A CommonMark blank line: nothing but spaces and tabs. It ends a paragraph, and with it every emphasis pairing. */
 const BLANK_LINE_RE = /^[ \t]*$/;
 
-const isAsciiDigit = (character: string | undefined): boolean =>
-  character !== undefined && character >= '0' && character <= '9';
-
 /** Index past the run of `unit` repeated from `at` in `line`. */
 function skipRepeated(line: string, at: number, unit: string): number {
   let end = at;
@@ -248,40 +255,6 @@ function structurePrefixLength(line: string): number {
   return line[markerEnd] === ' ' ? markerEnd + 1 : at;
 }
 
-/** ASCII punctuation — the only characters a CommonMark backslash escapes. */
-const ASCII_PUNCTUATION_RE = /[!-/:-@[-`{-~]/;
-/** An entity or numeric character reference a renderer decodes, tested in place at an `&`. */
-const ENTITY_REFERENCE_RE = /&(?:#\d{1,7}|#[Xx][\dA-Fa-f]{1,6}|[A-Za-z][\dA-Za-z]{0,31});/y;
-/**
- * A `<` a renderer reads as raw inline HTML or an autolink: an open tag (a tag
- * name, then whitespace, `/` or `>`), a closing tag, a URI autolink
- * (`<scheme:`) or an email autolink (`<local@`) — each closed by a `>` before
- * any other `<`, across lines — and a comment, declaration or processing
- * instruction (`<!`, `<?`) whatever follows, since its body may hold a `<`
- * (`<!-- a<b -->`). Tighter than {@link HTML_TAG_OPENER_RE} on purpose: PubMed's legacy
- * `<or= 20 or > 20` cannot open a tag (`=` follows the name directly), so it
- * stays raw here, where a prose block would otherwise carry the stray
- * backslash on every such comparison. Linear: every branch stops at the next
- * `<`. (#255)
- */
-const INLINE_HTML_OPENER_RE =
-  /<(?=[!?]|(?:[A-Za-z][\dA-Za-z-]*(?=[\s/>])|\/[A-Za-z]|[A-Za-z][\d+.A-Za-z-]{1,31}:|[^\s<>@]+@)[^<>]*>)/g;
-/**
- * A `<` opening an HTML block at a line start: a tag name followed by
- * whitespace, `/`, `>` or the line's end, or `</`, `<!`, `<?`. A block needs
- * no closing `>` on the line — `<div` alone starts one — so this is tested in
- * place, with no lookahead for a partner.
- */
-const HTML_BLOCK_OPENER_RE = /<(?:[A-Za-z][\dA-Za-z-]*(?:[\s/>]|$)|[/!?])/y;
-/**
- * A line holding only what a GFM table delimiter row is made of; the caller
- * also requires a `-`. Kept a single character class so a near miss
- * (`----…-x`) fails in one pass rather than backtracking.
- */
-const TABLE_DELIMITER_CHARS_RE = /^[|:\- \t]*$/;
-/** A setext heading's `=` underline. */
-const SETEXT_EQUALS_RE = /^=+[ \t]*$/;
-
 /** Width of a line's leading whitespace in columns, a tab advancing to the next multiple of four. */
 function indentColumns(line: string): number {
   let columns = 0;
@@ -291,74 +264,6 @@ function indentColumns(line: string): number {
     else break;
   }
   return columns;
-}
-
-/**
- * Index of the character that would open a block construct on the line
- * starting at `start` in `text`, or `-1`. CommonMark reads these after up to
- * three spaces: an ATX heading (`#`–`######` then a space or the line's end), a
- * block quote (`>`), a bullet (`-`, `+`, `*` then a space or the line's end), an
- * ordered item (up to nine digits, `.` or `)`, then a space or the line's end —
- * the `.`/`)` is the character escaped), a setext underline or thematic break
- * (a run of `=` or `-`), a GFM table delimiter row, a link reference definition
- * (`[label]:`, which hides its whole line), and an HTML block
- * ({@link HTML_BLOCK_OPENER_RE}). Fences and the `*`/`_` thematic breaks need
- * no rule of their own: three backticks, tildes, asterisks or underscores
- * always reach the pairing threshold.
- */
-function lineStartMarker(text: string, start: number): number {
-  const newline = text.indexOf('\n', start);
-  const end = newline === -1 ? text.length : newline;
-  let at = start;
-  while (at < end && at - start < 3 && text[at] === ' ') at += 1;
-  if (at >= end) return -1;
-  const opensSpace = (index: number) => index >= end || text[index] === ' ' || text[index] === '\t';
-  const character = text[at] ?? '';
-
-  switch (character) {
-    case '>':
-      return at;
-    case '#': {
-      let run = at;
-      while (run < end && run - at <= 6 && text[run] === '#') run += 1;
-      return run - at <= 6 && opensSpace(run) ? at : -1;
-    }
-    case '+':
-    case '*':
-      return opensSpace(at + 1) ? at : -1;
-    case '-':
-    case '|':
-    case ':': {
-      if (character === '-' && opensSpace(at + 1)) return at;
-      const line = text.slice(at, end);
-      return TABLE_DELIMITER_CHARS_RE.test(line) && line.includes('-') ? at : -1;
-    }
-    case '=':
-      return SETEXT_EQUALS_RE.test(text.slice(at, end)) ? at : -1;
-    case '[': {
-      // A definition's label may close on a later line of the block, and only
-      // the block's first line can open one, so there any later `]:` counts.
-      if (start === 0 && text.includes(']:', at)) return at;
-      let close = at + 1;
-      while (close < end && text[close] !== ']' && text[close] !== '[') close += 1;
-      return text[close] === ']' && text[close + 1] === ':' ? at : -1;
-    }
-    case '<':
-      HTML_BLOCK_OPENER_RE.lastIndex = at;
-      return HTML_BLOCK_OPENER_RE.test(text) ? at : -1;
-    default: {
-      let run = at;
-      while (run < end && run - at < 10 && isAsciiDigit(text[run])) run += 1;
-      const digits = run - at;
-      const delimiter = text[run];
-      const ordered =
-        digits >= 1 &&
-        digits <= 9 &&
-        (delimiter === '.' || delimiter === ')') &&
-        opensSpace(run + 1);
-      return ordered ? run : -1;
-    }
-  }
 }
 
 /**
@@ -381,62 +286,6 @@ function opensTaskMarker(text: string, at: number): boolean {
 function endsInListMarker(prefix: string): boolean {
   if (prefix.endsWith('- ')) return true;
   return prefix.endsWith('. ') && isAsciiDigit(prefix[prefix.length - 3]);
-}
-
-/**
- * Escape one run of prose lines — a blank-line-delimited block, joined with
- * `\n`, any parser structure already taken off each line. Pairing is judged
- * over the whole run because CommonMark pairs emphasis across the lines of a
- * paragraph: two lines holding one `*` each render as one emphasis span.
- */
-function escapeProse(text: string): string {
-  const pairs = {
-    '*': countOf(text, '*') >= 2,
-    '~': countOf(text, '~') >= 2,
-    '`': countOf(text, '`') >= 2,
-  };
-  const underscores = pairableUnderscores(text);
-  const underscoresPair = underscores.size >= 2;
-  const tagOpeners = new Set<number>();
-  for (const match of text.matchAll(INLINE_HTML_OPENER_RE)) tagOpeners.add(match.index);
-
-  let out = '';
-  let marker = lineStartMarker(text, 0);
-  for (let i = 0; i < text.length; i += 1) {
-    const character = text[i] ?? '';
-    if (character === '\n') {
-      out += character;
-      marker = lineStartMarker(text, i + 1);
-      continue;
-    }
-    const next = text[i + 1];
-    let needsEscape = i === marker;
-    switch (character) {
-      case '\\':
-        needsEscape ||= next === undefined || next === '\n' || ASCII_PUNCTUATION_RE.test(next);
-        break;
-      case '*':
-      case '~':
-      case '`':
-        needsEscape ||= pairs[character];
-        break;
-      case '_':
-        needsEscape ||= underscoresPair && underscores.has(i);
-        break;
-      case ']':
-        needsEscape ||= next === '(' || next === '[';
-        break;
-      case '<':
-        needsEscape ||= tagOpeners.has(i);
-        break;
-      case '&':
-        ENTITY_REFERENCE_RE.lastIndex = i;
-        needsEscape ||= ENTITY_REFERENCE_RE.test(text);
-        break;
-    }
-    out += needsEscape ? `\\${character}` : character;
-  }
-  return out;
 }
 
 /**

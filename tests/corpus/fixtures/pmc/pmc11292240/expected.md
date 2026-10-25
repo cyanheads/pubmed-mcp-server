@@ -39,6 +39,9 @@
 **PubMed:** https://pubmed.ncbi.nlm.nih.gov/39092259/
 **Keywords:** Bronchiectasis, Physiotherapy, Pulmonary rehabilitation, Core outcome set, Outcome assessment, Delphi method
 
+**License:** [https://creativecommons.org/licenses/by/4.0/](<https://creativecommons.org/licenses/by/4.0/>)
+This is an open access article under the CC BY license (http://creativecommons.org/licenses/by/4.0/).
+
 #### Abstract
 Background: Physiotherapy is recommended for bronchiectasis management, but there is disparity in evidence supporting its use. This is partly because of inconsistency and poor reporting of outcomes in available studies. A Core Outcome Set (COS) may improve trial consistency and decrease reporting bias. This study aimed to develop a COS for physiotherapy clinical trials in adults with bronchiectasis.
 

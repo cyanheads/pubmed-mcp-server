@@ -1,15 +1,21 @@
 /**
- * @fileoverview Real NCBI EFetch records whose text NCBI double-encodes
- * (`R&amp;amp;D`, `Parkinson&amp;apos;s`), so the XML parser's single decode
- * leaves a literal entity behind, for the residual decode in
- * `article-parser.ts` and every surface that renders its fields.
+ * @fileoverview Real NCBI EFetch, ESummary and ESearch bodies whose text NCBI
+ * double-encodes (`R&amp;amp;D`, `Parkinson&amp;apos;s`, `&amp;lt;b&amp;gt;`),
+ * so the XML parser's single decode leaves a literal entity behind, for the
+ * residual decode in `article-parser.ts` and `esummary-parser.ts`, the
+ * unmatched-phrase notice of `pubmed_search_articles`, and every surface that
+ * renders their fields — plus Europe PMC's copies of two of those records.
  *
- * Each constant is the upstream EFetch body captured on 2026-10-22, verbatim
- * apart from reductions that leave every double-encoded element byte-for-byte
- * intact: `History` is removed throughout, and per record as noted below.
+ * Each constant is the upstream body captured on the date noted (2026-10-22
+ * unless stated), verbatim apart from reductions that leave every
+ * double-encoded element byte-for-byte intact: `History` is removed
+ * throughout, and per record as noted below.
  *
- * Parse them with `articleSetXml` and `parseArticleSetXml` from
- * `_book-fixtures.ts`, which run the production `NcbiResponseHandler`.
+ * Parse the EFetch records with `articleSetXml` and `parseArticleSetXml`, and
+ * the ESummary one with `parseESummaryXml`, from `_book-fixtures.ts`, which run
+ * the production `NcbiResponseHandler`; parse the ESearch ones with that
+ * handler directly. The Europe PMC records are hits as Europe PMC's `core`
+ * search JSON carries them.
  * @module tests/services/ncbi/parsing/_entity-fixtures
  */
 
@@ -41,3 +47,82 @@ export const R_AND_D_KEYWORD_XML = `<PubmedArticle><MedlineCitation Status="MEDL
  * and `CoiStatement` are removed.
  */
 export const R_AND_D_AFFILIATION_XML = `<PubmedArticle><MedlineCitation Status="MEDLINE" Owner="NLM" IndexingMethod="Automated"><PMID Version="1">35796717</PMID><DateCompleted><Year>2022</Year><Month>11</Month><Day>01</Day></DateCompleted><DateRevised><Year>2025</Year><Month>05</Month><Day>30</Day></DateRevised><Article PubModel="Print"><Journal><ISSN IssnType="Print">2576-9456</ISSN><JournalIssue CitedMedium="Print"><Volume>7</Volume><Issue>6</Issue><PubDate><Year>2022</Year><Month>Oct</Month><Day>29</Day></PubDate></JournalIssue><Title>The journal of applied laboratory medicine</Title><ISOAbbreviation>J Appl Lab Med</ISOAbbreviation></Journal><ArticleTitle>The Common H202D Variant in GDF-15 Does Not Affect Its Bioactivity but Can Significantly Interfere with Measurement of Its Circulating Levels.</ArticleTitle><Pagination><StartPage>1388</StartPage><EndPage>1400</EndPage><MedlinePgn>1388-1400</MedlinePgn></Pagination><ELocationID EIdType="doi" ValidYN="Y">10.1093/jalm/jfac055</ELocationID><AuthorList CompleteYN="Y"><Author ValidYN="Y"><LastName>Karusheva</LastName><ForeName>Yanislava</ForeName><Initials>Y</Initials><AffiliationInfo><Affiliation>MRC Metabolic Diseases Unit, Wellcome-MRC Institute of Metabolic Science, University of Cambridge, Cambridge, UK.</Affiliation></AffiliationInfo><AffiliationInfo><Affiliation>Department of Clinical Biochemistry, NIHR Cambridge Biomedical Research Centre, Cambridge, UK.</Affiliation></AffiliationInfo></Author><Author ValidYN="Y"><LastName>Ratcliff</LastName><ForeName>Matthew</ForeName><Initials>M</Initials><AffiliationInfo><Affiliation>Biologics Engineering, R&amp;amp;D, AstraZeneca, Cambridge, UK.</Affiliation></AffiliationInfo><AffiliationInfo><Affiliation>Department of Biochemistry, University of Cambridge, 80 Tennis Court Road, Cambridge CB2 1GA, UK.</Affiliation></AffiliationInfo></Author><Author ValidYN="Y"><LastName>M&#xf6;rseburg</LastName><ForeName>Alexander</ForeName><Initials>A</Initials><AffiliationInfo><Affiliation>MRC Metabolic Diseases Unit, Wellcome-MRC Institute of Metabolic Science, University of Cambridge, Cambridge, UK.</Affiliation></AffiliationInfo><AffiliationInfo><Affiliation>Department of Clinical Biochemistry, NIHR Cambridge Biomedical Research Centre, Cambridge, UK.</Affiliation></AffiliationInfo></Author></AuthorList><Language>eng</Language><PublicationTypeList><PublicationType UI="D016428">Journal Article</PublicationType><PublicationType UI="D013485">Research Support, Non-U.S. Gov't</PublicationType></PublicationTypeList></Article><MedlineJournalInfo><Country>England</Country><MedlineTA>J Appl Lab Med</MedlineTA><NlmUniqueID>101693884</NlmUniqueID><ISSNLinking>2475-7241</ISSNLinking></MedlineJournalInfo><CitationSubset>IM</CitationSubset></MedlineCitation><PubmedData><PublicationStatus>ppublish</PublicationStatus><ArticleIdList><ArticleId IdType="pubmed">35796717</ArticleId><ArticleId IdType="doi">10.1093/jalm/jfac055</ArticleId><ArticleId IdType="pii">6633262</ArticleId></ArticleIdList></PubmedData></PubmedArticle>`;
+
+/**
+ * PMID 42515993 (captured 2026-10-24) — an abstract carrying double-encoded
+ * HTML throughout: `&amp;lt;p&amp;gt;`, `&amp;lt;strong&amp;gt;` section labels,
+ * and `&amp;lt;br /&amp;gt;` line wraps, most of them mid-sentence
+ * (`clinically relevant&amp;lt;br /&amp;gt;tool`). Its closing
+ * `&amp;lt;/p&amp;gt.` lacks the `;`. The abstract keeps its `Introduction`,
+ * `Aim` and `Conclusions` sections (`Methods` and `Results` removed); the author
+ * list is capped at one and `MeshHeadingList` is removed.
+ */
+export const ENCODED_TAGS_ABSTRACT_XML = `<PubmedArticle><MedlineCitation Status="MEDLINE" Owner="NLM" IndexingMethod="Automated"><PMID Version="1">42515993</PMID><DateCompleted><Year>2026</Year><Month>07</Month><Day>29</Day></DateCompleted><DateRevised><Year>2026</Year><Month>07</Month><Day>29</Day></DateRevised><Article PubModel="Print"><Journal><ISSN IssnType="Electronic">2300-8423</ISSN><JournalIssue CitedMedium="Internet"><Volume>80</Volume><Issue>5</Issue><PubDate><Year>2026</Year><Month>Jul</Month><Day>21</Day></PubDate></JournalIssue><Title>Otolaryngologia polska = The Polish otolaryngology</Title><ISOAbbreviation>Otolaryngol Pol</ISOAbbreviation></Journal><ArticleTitle>The role of pollen monitoring in allergology and otolaryngology: from environmental exposure assessment to personalized patient care.</ArticleTitle><Pagination><StartPage>1</StartPage><EndPage>7</EndPage><MedlinePgn>1-7</MedlinePgn></Pagination><ELocationID EIdType="doi" ValidYN="Y">10.5604/01.3001.0055.8490</ELocationID><Abstract><AbstractText>&amp;lt;p&amp;gt;&amp;lt;strong&amp;gt;Introduction:&amp;lt;/strong&amp;gt; Pollen monitoring plays an important role in modern allergy care.&amp;lt;br /&amp;gt;Quantitatively determining airborne pollen concentrations serves as a clinically relevant&amp;lt;br /&amp;gt;tool for diagnosis, treatment, disease monitoring, and prevention.&amp;lt;br /&amp;gt;&amp;lt;strong&amp;gt;Aim:&amp;lt;/strong&amp;gt; The study provides an overview of current clinical applications of pollen monitoring&amp;lt;br /&amp;gt;in allergology and otolaryngology, and its integration with new technologies&amp;lt;br /&amp;gt;that support precision medicine.&amp;lt;br /&amp;gt;&amp;lt;strong&amp;gt;Conclusions:&amp;lt;/strong&amp;gt; Pollen monitoring is a clinically significant component of personalised&amp;lt;br /&amp;gt;management of allergic respiratory diseases. Integration with advanced technologies&amp;lt;br /&amp;gt;is expected to improve diagnostic accuracy, optimise allergen immunotherapy,&amp;lt;br /&amp;gt;strengthen preventive strategies, and support the ongoing development of precision&amp;lt;br /&amp;gt;medicine.&amp;lt;/p&amp;gt.</AbstractText></Abstract><AuthorList CompleteYN="Y"><Author ValidYN="Y"><LastName>Lipiec</LastName><ForeName>Agnieszka</ForeName><Initials>A</Initials><AffiliationInfo><Affiliation>Department of Prevention of Environmental Hazards, Allergology and Immunology, Medical University of Warsaw, Poland.</Affiliation></AffiliationInfo></Author></AuthorList><Language>eng</Language><PublicationTypeList><PublicationType UI="D016428">Journal Article</PublicationType><PublicationType UI="D016454">Review</PublicationType></PublicationTypeList></Article><MedlineJournalInfo><Country>Poland</Country><MedlineTA>Otolaryngol Pol</MedlineTA><NlmUniqueID>0404453</NlmUniqueID><ISSNLinking>0030-6657</ISSNLinking></MedlineJournalInfo><ChemicalList><Chemical><RegistryNumber>0</RegistryNumber><NameOfSubstance UI="D000485">Allergens</NameOfSubstance></Chemical></ChemicalList><CitationSubset>IM</CitationSubset><KeywordList Owner="NOTNLM"><Keyword MajorTopicYN="N">environmental exposure</Keyword><Keyword MajorTopicYN="N">pollen monitoring</Keyword><Keyword MajorTopicYN="N">precision medicine</Keyword></KeywordList></MedlineCitation><PubmedData><PublicationStatus>ppublish</PublicationStatus><ArticleIdList><ArticleId IdType="pubmed">42515993</ArticleId><ArticleId IdType="doi">10.5604/01.3001.0055.8490</ArticleId><ArticleId IdType="pii">01.3001.0055.8490</ArticleId></ArticleIdList></PubmedData></PubmedArticle>`;
+
+/**
+ * ESummary version 2.0 for PMID 42138044 (captured 2026-10-24): the same
+ * `Parkinson&amp;apos;s` its EFetch `ArticleTitle` ships ({@link APOS_TITLE_XML}),
+ * in `Title`. Inter-element whitespace removed.
+ */
+export const APOS_TITLE_ESUMMARY_XML = `<?xml version="1.0" encoding="UTF-8" ?><!DOCTYPE eSummaryResult PUBLIC "-//NLM//DTD esummary pubmed 20160808//EN" "https://eutils.ncbi.nlm.nih.gov/eutils/dtd/20160808/esummary_pubmed.dtd"><eSummaryResult><DocumentSummarySet status="OK"><DbBuild/><DocumentSummary uid="42138044"><PubDate>2025 Nov 25</PubDate><EPubDate/><Source>Otolaryngol Pol</Source><Authors><Author><Name>Abbas AI</Name><AuthType>Author</AuthType><ClusterID/></Author><Author><Name>Ghanem SS</Name><AuthType>Author</AuthType><ClusterID/></Author><Author><Name>Abed EE</Name><AuthType>Author</AuthType><ClusterID/></Author><Author><Name>El-Adawy AFI</Name><AuthType>Author</AuthType><ClusterID/></Author><Author><Name>Rashad MH</Name><AuthType>Author</AuthType><ClusterID/></Author><Author><Name>Mawad HA</Name><AuthType>Author</AuthType><ClusterID/></Author><Author><Name>Hussein HAH</Name><AuthType>Author</AuthType><ClusterID/></Author><Author><Name>Mohamed IHA</Name><AuthType>Author</AuthType><ClusterID/></Author><Author><Name>Ali MS</Name><AuthType>Author</AuthType><ClusterID/></Author></Authors><LastAuthor>Ali MS</LastAuthor><Title>Cervical Vestibular-Evoked Myogenic Potentials (cVEMPs) in Parkinson&amp;apos;s Disease Patients: Prospective, Case-Control study.</Title><SortTitle>cervical vestibular evoked myogenic potentials cvemps in parkinson apos s disease patients prospective case control study</SortTitle><Volume>79</Volume><Issue>6</Issue><Pages>9-14</Pages><Lang><string>eng</string></Lang><NlmUniqueID>0404453</NlmUniqueID><ISSN>0030-6657</ISSN><ESSN>2300-8423</ESSN><PubType><flag>Journal Article</flag><flag>Observational Study</flag></PubType><RecordStatus>PubMed - indexed for MEDLINE</RecordStatus><PubStatus>4</PubStatus><ArticleIds><ArticleId><IdType>pubmed</IdType><IdTypeN>1</IdTypeN><Value>42138044</Value></ArticleId><ArticleId><IdType>doi</IdType><IdTypeN>3</IdTypeN><Value>10.5604/01.3001.0055.3301</Value></ArticleId><ArticleId><IdType>pii</IdType><IdTypeN>4</IdTypeN><Value>01.3001.0055.3301</Value></ArticleId></ArticleIds><References/><Attributes><flag>Has Abstract</flag></Attributes><PmcRefCount>0</PmcRefCount><FullJournalName>Otolaryngologia polska = The Polish otolaryngology</FullJournalName><ELocationID>doi: 10.5604/01.3001.0055.3301</ELocationID><DocType>citation</DocType><SrcContribList/><BookTitle/><Medium/><Edition/><PublisherLocation/><PublisherName/><SrcDate/><ReportNumber/><AvailableFromURL/><LocationLabel/><DocContribList/><DocDate/><BookName/><Chapter/><SortPubDate>2025/11/25 00:00</SortPubDate><SortFirstAuthor>Abbas AI</SortFirstAuthor><VernacularTitle/></DocumentSummary></DocumentSummarySet></eSummaryResult>`;
+
+/**
+ * ESearch for `"zzqxw & yyqzv"[tiab] AND cancer` (captured 2026-10-24):
+ * `QueryTranslation` carries the `&` encoded once, `QuotedPhraseNotFound`
+ * twice (`&amp;amp;`). `TranslationSet` removed.
+ */
+export const QUOTED_PHRASE_AMP_ESEARCH_XML = `<?xml version="1.0" encoding="UTF-8" ?><!DOCTYPE eSearchResult PUBLIC "-//NLM//DTD esearch 20060628//EN" "https://eutils.ncbi.nlm.nih.gov/eutils/dtd/20060628/esearch.dtd"><eSearchResult><Count>0</Count><RetMax>0</RetMax><RetStart>0</RetStart><IdList/><QueryTranslation>"zzqxw &amp; yyqzv"[tiab] AND cancer</QueryTranslation><WarningList><QuotedPhraseNotFound>"zzqxw &amp;amp; yyqzv"[tiab]</QuotedPhraseNotFound><OutputMessage>No items found.</OutputMessage></WarningList></eSearchResult>`;
+
+/**
+ * ESearch for `cancer AND tumor[zz&field] AND "a<b zzqxw > c"[tiab]` (captured
+ * 2026-10-24): `FieldNotFound` carries the `&` encoded once, as
+ * `QueryTranslation` does, while `QuotedPhraseNotFound` carries the `<` and `>`
+ * twice. `TranslationSet` removed.
+ */
+export const FIELD_AND_PHRASE_ESEARCH_XML = `<?xml version="1.0" encoding="UTF-8" ?><!DOCTYPE eSearchResult PUBLIC "-//NLM//DTD esearch 20060628//EN" "https://eutils.ncbi.nlm.nih.gov/eutils/dtd/20060628/esearch.dtd"><eSearchResult><Count>0</Count><RetMax>0</RetMax><RetStart>0</RetStart><IdList/><QueryTranslation>cancer AND tumor[zz&amp;field] AND "a&lt;b zzqxw &gt; c"[tiab]</QueryTranslation><ErrorList><FieldNotFound>zz&amp;field</FieldNotFound></ErrorList><WarningList><QuotedPhraseNotFound>"a&amp;lt;b zzqxw &amp;gt; c"[tiab]</QuotedPhraseNotFound><OutputMessage>No items found.</OutputMessage></WarningList></eSearchResult>`;
+
+/**
+ * Europe PMC's `core` hit for MED/42138044 (captured 2026-10-24), the record
+ * of {@link APOS_TITLE_XML}. The title carries the XML's `Parkinson&amp;apos;s`
+ * byte for byte, while the abstract arrives one layer lower than the XML's —
+ * `&lt;b&gt;`, `P &lt; 0.001` — as text the XML parser has already decoded. The
+ * abstract is cut to its `Introduction` and `Aim` sections; fields the tools do
+ * not read are removed.
+ */
+export const EPMC_APOS_TITLE_HIT = {
+  id: '42138044',
+  source: 'MED',
+  pmid: '42138044',
+  doi: '10.5604/01.3001.0055.3301',
+  title:
+    'Cervical Vestibular-Evoked Myogenic Potentials (cVEMPs) in Parkinson&amp;apos;s Disease Patients: Prospective, Case-Control study.',
+  authorString:
+    'Abbas AI, Ghanem SS, Abed EE, El-Adawy AFI, Rashad MH, Mawad HA, Hussein HAH, Mohamed IHA, Ali MS.',
+  pubYear: '2025',
+  abstractText:
+    "&lt;b&gt;Introduction:&lt;/b&gt; Postural stability depends on the integration of various neural circuits, including somatosensory, motor, visual, vestibular, and cognitive systems, which enable flexible posture and gait control. However, the understanding of vestibular otolith function and its brain connections remains limited.&lt;b&gt;Aim:&lt;/b&gt; To elucidate the anomalies of cervical vestibular-evoked myogenic potentials (cVEMPs) and their clinical correlation with symptoms associated with brainstem involvement in individuals with Parkinson's disease (PD).",
+  isOpenAccess: 'N',
+  firstPublicationDate: '2025-11-01',
+};
+
+/**
+ * Europe PMC's `core` hit for MED/42515993 (captured 2026-10-24), the record
+ * of {@link ENCODED_TAGS_ABSTRACT_XML}: the abstract's double-encoded HTML one
+ * layer down (`&lt;p&gt;`, `&lt;br /&gt;`), its closing `&lt;/p&gt.` still
+ * without the `;`. The abstract keeps its `Introduction`, `Aim` and
+ * `Conclusions` sections; fields the tools do not read are removed.
+ */
+export const EPMC_ENCODED_TAGS_HIT = {
+  id: '42515993',
+  source: 'MED',
+  pmid: '42515993',
+  doi: '10.5604/01.3001.0055.8490',
+  title:
+    'The role of pollen monitoring in allergology and otolaryngology: from environmental exposure assessment to personalized patient care.',
+  authorString: 'Lipiec A, Rapiejko J, Jurkiewicz D.',
+  pubYear: '2026',
+  abstractText:
+    '&lt;p&gt;&lt;strong&gt;Introduction:&lt;/strong&gt; Pollen monitoring plays an important role in modern allergy care.&lt;br /&gt;Quantitatively determining airborne pollen concentrations serves as a clinically relevant&lt;br /&gt;tool for diagnosis, treatment, disease monitoring, and prevention.&lt;br /&gt;&lt;strong&gt;Aim:&lt;/strong&gt; The study provides an overview of current clinical applications of pollen monitoring&lt;br /&gt;in allergology and otolaryngology, and its integration with new technologies&lt;br /&gt;that support precision medicine.&lt;br /&gt;&lt;strong&gt;Conclusions:&lt;/strong&gt; Pollen monitoring is a clinically significant component of personalised&lt;br /&gt;management of allergic respiratory diseases. Integration with advanced technologies&lt;br /&gt;is expected to improve diagnostic accuracy, optimise allergen immunotherapy,&lt;br /&gt;strengthen preventive strategies, and support the ongoing development of precision&lt;br /&gt;medicine.&lt;/p&gt.',
+  isOpenAccess: 'N',
+  firstPublicationDate: '2026-07-01',
+};

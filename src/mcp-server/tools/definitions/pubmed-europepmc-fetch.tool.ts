@@ -17,8 +17,8 @@ import { tool, z } from '@cyanheads/mcp-ts-core';
 import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
 import { EUROPEPMC_SERVICE_ERRORS } from '@/services/error-contracts.js';
 import { getEuropePmcService } from '@/services/europe-pmc/europe-pmc-service.js';
-import { EUROPEPMC_ALL_SOURCES } from '@/services/europe-pmc/types.js';
-import { toDisplayText } from '@/services/ncbi/parsing/text-helpers.js';
+import { EUROPEPMC_ALL_SOURCES, epmcFullTextId, epmcJournal } from '@/services/europe-pmc/types.js';
+import { europePmcTitleText, toDisplayText } from '@/services/ncbi/parsing/text-helpers.js';
 import { buildDeferralNotice, fitWholeItems } from './_budget.js';
 import {
   conceptMeta,
@@ -27,7 +27,12 @@ import {
   SCHEMA_SCHOLARLY_ARTICLE,
 } from './_concepts.js';
 import { europePmcSourceInputSchema } from './_schemas.js';
-import { escapeMarkdownBlock, escapeMarkdownInline } from './_text.js';
+import {
+  escapeMarkdownBlock,
+  escapeMarkdownInline,
+  escapeMarkdownInParagraph,
+  markdownCodeSpan,
+} from './_text.js';
 
 const SourceEnum = z.enum(EUROPEPMC_ALL_SOURCES);
 
@@ -79,7 +84,7 @@ const FetchedRecordSchema = z
       .string()
       .optional()
       .describe(
-        'Journal title as display-ready plain text — JATS/HTML markup stripped and HTML entities decoded.',
+        'Journal name as Europe PMC reports it — its MEDLINE abbreviation where it records one (e.g. `Otolaryngol Pol`), else the full journal title — the same name `pubmed_europepmc_search` returns for the record. Display-ready plain text — JATS/HTML markup stripped and HTML entities decoded. Absent when Europe PMC carries no journal, as for preprints.',
       ),
     pubYear: z.string().optional().describe('Publication year'),
     firstPublicationDate: z.string().optional().describe('First publication date (ISO YYYY-MM-DD)'),
@@ -99,7 +104,13 @@ const FetchedRecordSchema = z
       .boolean()
       .optional()
       .describe(
-        'Whether Europe PMC publishes a fullTextXML for this record. Derived from `inPMC` — only records with a PMC counterpart have JATS via Europe PMC.',
+        'Whether Europe PMC publishes a fullTextXML for this record: true when Europe PMC marks it open access and lists a full-text id for it, open-access preprints (`PPR`) included; false otherwise. Absent when Europe PMC reports no open-access status.',
+      ),
+    license: z
+      .string()
+      .optional()
+      .describe(
+        'License Europe PMC records for this record, verbatim (e.g. `cc by`, `cc by-nc-nd`, `cc0`). Relayed as Europe PMC states it, never interpreted. Absent when Europe PMC supplies none.',
       ),
     abstract: z
       .string()
@@ -231,12 +242,16 @@ export const pubmedEuropepmcFetchTool = tool('pubmed_europepmc_fetch', {
       // Title is the confirmed live vector — preprints carry italicized species
       // and gene names — but authors and journal are free-text upstream fields
       // on the same footing, so all three take the single-pass normalization
-      // the abstract already gets. (#102) The cleanup mirrors
+      // the abstract already gets. (#102) The title alone carries NCBI's
+      // residual entity layer as well. (#272) The cleanup mirrors
       // pubmed_europepmc_search; only the truncation is dropped.
       const abstract = h.abstractText ? toDisplayText(h.abstractText) : '';
-      const title = h.title ? toDisplayText(h.title) : '';
+      const title = h.title ? europePmcTitleText(h.title) : '';
       const authors = h.authorString ? toDisplayText(h.authorString) : '';
-      const journal = h.journalTitle ? toDisplayText(h.journalTitle) : '';
+      // `core` records, which this lookup requests, keep the journal in
+      // `journalInfo`, not `journalTitle`. (#274)
+      const journalName = epmcJournal(h);
+      const journal = journalName ? toDisplayText(journalName) : '';
       return {
         source: h.source as (typeof EUROPEPMC_ALL_SOURCES)[number],
         epmcId: h.id,
@@ -249,7 +264,8 @@ export const pubmedEuropepmcFetchTool = tool('pubmed_europepmc_fetch', {
         ...(h.pmcid && { pmcId: h.pmcid }),
         ...(h.doi && { doi: h.doi }),
         ...(h.isOpenAccess !== undefined && { isOpenAccess: h.isOpenAccess === 'Y' }),
-        ...(h.inPMC !== undefined && { hasFullTextXml: h.inPMC === 'Y' }),
+        ...(h.isOpenAccess !== undefined && { hasFullTextXml: epmcFullTextId(h) !== undefined }),
+        ...(h.license && { license: h.license }),
         ...(abstract && { abstract }),
         ...(typeof h.citedByCount === 'number' && { citedByCount: h.citedByCount }),
         epmcUrl: `https://europepmc.org/article/${h.source}/${h.id}`,
@@ -314,11 +330,7 @@ export const pubmedEuropepmcFetchTool = tool('pubmed_europepmc_fetch', {
       );
     } else if (notFound.length > 0) {
       notices.push(
-        `Europe PMC returned no record for ${notFound.length} of ${input.records.length} requested pairs: ${notFound
-          .map(formatPair)
-          .join(
-            ', ',
-          )}. Verify each against its pubmed_europepmc_search hit — a mismatched \`source\` is the usual cause.${pmcidHint}`,
+        `Europe PMC returned no record for ${notFound.length} of ${input.records.length} requested pairs: ${pairList(notFound)}. Verify each against its pubmed_europepmc_search hit — a mismatched \`source\` is the usual cause.${pmcidHint}`,
       );
     }
     if (deferred) {
@@ -326,7 +338,7 @@ export const pubmedEuropepmcFetchTool = tool('pubmed_europepmc_fetch', {
       notices.push(
         buildDeferralNotice(deferred, {
           noun: 'record',
-          ids: deferred.records.map(formatPair).join(', '),
+          ids: pairList(deferred.records),
           recall: 'pubmed_europepmc_fetch with those pairs as `records: [{ source, epmcId }]`',
         }),
       );
@@ -343,42 +355,41 @@ export const pubmedEuropepmcFetchTool = tool('pubmed_europepmc_fetch', {
   format: (result) => {
     const lines = ['## Europe PMC Records', `**Returned:** ${result.records.length}`];
 
-    // A pair's epmcId is the caller's, or Europe PMC's on a deferred one: escaped
-    // here, kept as written in the notices. (#255)
-    const pairs = (refs: { epmcId: string; source: string }[]) =>
-      escapeMarkdownInline(refs.map(formatPair).join(', '));
     if (result.notFound?.length) {
-      lines.push(`**Not found:** ${pairs(result.notFound)}`);
+      lines.push(`**Not found:** ${pairList(result.notFound)}`);
     }
 
     if (result.deferred) {
       const d = result.deferred;
       lines.push(
         `**Deferred by the response budget:** ${d.deferredCount} record(s) — ${d.returnedCharacters} of ${d.maxResponseCharacters} budgeted characters returned; next deferred record ${d.nextDeferredCharacters} characters`,
-        `Re-call \`pubmed_europepmc_fetch\` with these as \`records\` (\`source\`/\`epmcId\`): ${pairs(d.records)}`,
+        `Re-call \`pubmed_europepmc_fetch\` with these as \`records\` (\`source\`/\`epmcId\`): ${pairList(d.records)}`,
       );
     }
 
     for (const r of result.records) {
       // Escaping is render-time only — the structuredContent values above stay
-      // plain text; only these interpolations are neutralized. (#102)
+      // plain text; only these interpolations are neutralized. (#102) The
+      // heading is one inline run; the lines under it share one paragraph,
+      // where a lone delimiter in one value pairs with one in another. (#261)
       lines.push(`\n### ${escapeMarkdownInline(r.title ?? r.epmcId)}`);
-      lines.push(`**Source:** ${r.source} | **EPMC ID:** ${escapeMarkdownInline(r.epmcId)}`);
-      if (r.authors) lines.push(`**Authors:** ${escapeMarkdownInline(r.authors)}`);
-      if (r.journal) lines.push(`**Journal:** ${escapeMarkdownInline(r.journal)}`);
+      lines.push(`**Source:** ${r.source} | **EPMC ID:** ${escapeMarkdownInParagraph(r.epmcId)}`);
+      if (r.authors) lines.push(`**Authors:** ${escapeMarkdownInParagraph(r.authors)}`);
+      if (r.journal) lines.push(`**Journal:** ${escapeMarkdownInParagraph(r.journal)}`);
       if (r.firstPublicationDate) {
-        lines.push(`**Published:** ${escapeMarkdownInline(r.firstPublicationDate)}`);
+        lines.push(`**Published:** ${escapeMarkdownInParagraph(r.firstPublicationDate)}`);
       }
-      if (r.pubYear) lines.push(`**Year:** ${escapeMarkdownInline(r.pubYear)}`);
-      if (r.pmid) lines.push(`**PMID:** ${escapeMarkdownInline(r.pmid)}`);
-      if (r.pmcId) lines.push(`**PMCID:** ${escapeMarkdownInline(r.pmcId)}`);
-      if (r.doi) lines.push(`**DOI:** ${escapeMarkdownInline(r.doi)}`);
+      if (r.pubYear) lines.push(`**Year:** ${escapeMarkdownInParagraph(r.pubYear)}`);
+      if (r.pmid) lines.push(`**PMID:** ${escapeMarkdownInParagraph(r.pmid)}`);
+      if (r.pmcId) lines.push(`**PMCID:** ${escapeMarkdownInParagraph(r.pmcId)}`);
+      if (r.doi) lines.push(`**DOI:** ${escapeMarkdownInParagraph(r.doi)}`);
       if (r.isOpenAccess !== undefined) {
         lines.push(`**Open Access:** ${r.isOpenAccess ? 'yes' : 'no'}`);
       }
       if (r.hasFullTextXml !== undefined) {
         lines.push(`**Full-text XML in EPMC:** ${r.hasFullTextXml ? 'yes' : 'no'}`);
       }
+      if (r.license) lines.push(`**License:** ${escapeMarkdownInParagraph(r.license)}`);
       if (typeof r.citedByCount === 'number') lines.push(`**Cited by:** ${r.citedByCount}`);
       lines.push(`**URL:** ${r.epmcUrl}`);
       // Plain text with no structure of its own, escaped as prose throughout,
@@ -390,7 +401,12 @@ export const pubmedEuropepmcFetchTool = tool('pubmed_europepmc_fetch', {
   },
 });
 
-/** A record address as the notices and `content[]` render it: `SOURCE/epmcId`. */
-function formatPair(pair: { epmcId: string; source: string }): string {
-  return `${pair.source}/${pair.epmcId}`;
+/**
+ * Record addresses as the notices and `content[]` quote them: each
+ * `SOURCE/epmcId` its own code span, so an id reads back exactly as written,
+ * raw and rendered. The ids are the caller's, or Europe PMC's on a deferred
+ * record. (#255, #263)
+ */
+function pairList(pairs: readonly { epmcId: string; source: string }[]): string {
+  return pairs.map((p) => markdownCodeSpan(`${p.source}/${p.epmcId}`)).join(', ');
 }

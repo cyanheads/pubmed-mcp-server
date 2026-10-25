@@ -270,18 +270,21 @@ export const lookupMeshTool = tool('pubmed_lookup_mesh', {
     const nextOffset = offset + consumed;
     const hasMore = consumed > 0 && nextOffset < totalCount;
 
+    // A notice renders as authored Markdown, so the caller's query in it is a
+    // code span: it reads back exactly as sent, raw and rendered. (#263)
+    const quoted = markdownCodeSpan(query);
     if (ids.length === 0) {
       ctx.enrich.total(totalCount);
       let notice: string;
       if (totalCount === 0) {
-        notice = `No MeSH descriptors matched "${query}". Try \`pubmed_spell_check\` for a suggested correction, broaden the term, or use \`pubmed_search_articles\` for free-text discovery against article metadata.`;
+        notice = `No MeSH descriptors matched ${quoted}. Try \`pubmed_spell_check\` for a suggested correction, broaden the term, or use \`pubmed_search_articles\` for free-text discovery against article metadata.`;
       } else if (consumed > 0) {
         // The window held nothing but the pinned descriptor, already served at offset 0.
-        notice = `Offset ${offset} held only the exact-descriptor match for "${query}", which was returned on the first page.${
+        notice = `Offset ${offset} held only the exact-descriptor match for ${quoted}, which was returned on the first page.${
           hasMore ? ` Continue with offset ${nextOffset}.` : ''
         }`;
       } else {
-        notice = `Offset ${offset} returned no records — "${query}" matches ${totalCount} MeSH descriptor(s). Reset offset to 0 or lower it below ${totalCount}.`;
+        notice = `Offset ${offset} returned no records — ${quoted} matches ${totalCount} MeSH descriptor(s). Reset offset to 0 or lower it below ${totalCount}.`;
       }
       ctx.enrich.notice(notice);
       return { query, offset, ...(hasMore && { nextOffset }), results: [] };
@@ -305,7 +308,7 @@ export const lookupMeshTool = tool('pubmed_lookup_mesh', {
     // would replay this page.
     if (consumed === 0 && totalCount > 0) {
       ctx.enrich.notice(
-        `The exact-descriptor match filled this page of ${maxResults}. Raise maxResults to see the ${totalCount} ranked match(es) for "${query}".`,
+        `The exact-descriptor match filled this page of ${maxResults}. Raise maxResults to see the ${totalCount} ranked match(es) for ${quoted}.`,
       );
     }
     return { query, offset, ...(hasMore && { nextOffset }), results };

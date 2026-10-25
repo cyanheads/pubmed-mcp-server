@@ -10,7 +10,13 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { NcbiResponseHandler } from '@/services/ncbi/response-handler.js';
 import type { ESummaryResponseContainer, ESummaryResult } from '@/services/ncbi/types.js';
-import { bunMarkdown, renderedHtml, renderedText, textBlocks } from '../../../_helpers.js';
+import {
+  bunMarkdown,
+  readCommonMark,
+  renderedHtml,
+  renderedText,
+  textBlocks,
+} from '../../../_helpers.js';
 import { MESH_V2_RECORDS, meshSummaryXml } from './_mesh-esummary-fixtures.js';
 
 const mockESearch = vi.fn();
@@ -110,6 +116,21 @@ describe('lookupMeshTool', () => {
     expect(enrichment.totalCount).toBe(0);
     expect(enrichment.notice).toMatch(/xyznonexistent/);
     expect(enrichment.notice).toMatch(/spell_check|search_articles/);
+  });
+
+  it('quotes the query in a notice as a code span that reads back as sent (#263)', async () => {
+    mockESearch.mockResolvedValue({ idList: [], count: 0 });
+    const result = await runToolContract(lookupMeshTool, { query: 'zz*qx zz*qy' });
+
+    expect((result.structuredContent as { notice?: string }).notice).toMatch(
+      /^No MeSH descriptors matched `zz\*qx zz\*qy`\. /,
+    );
+    const text = textBlocks(result.content as ContentBlock[])
+      .map((b) => b.text)
+      .join('\n');
+    expect(readCommonMark(text)).toContain(
+      'No MeSH descriptors matched ⟨code_inline:zz*qx zz*qy⟩. Try ⟨code_inline:pubmed_spell_check⟩',
+    );
   });
 
   it('returns parsed MeSH records', async () => {
