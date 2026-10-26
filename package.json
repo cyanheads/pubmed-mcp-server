@@ -18,7 +18,8 @@
     "CLAUDE.md",
     "AGENTS.md",
     "Dockerfile",
-    "server.json"
+    "server.json",
+    "skills/"
   ],
   "scripts": {
     "build": "bun run scripts/build.ts",
@@ -95,7 +96,7 @@
     "access": "public"
   },
   "dependencies": {
-    "@cyanheads/mcp-ts-core": "^0.13.16",
+    "@cyanheads/mcp-ts-core": "^0.13.18",
     "defuddle": "^0.19.6",
     "fast-xml-parser": "^5.11.2",
     "linkedom": "^0.18.14",

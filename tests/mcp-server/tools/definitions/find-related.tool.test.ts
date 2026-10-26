@@ -2088,7 +2088,11 @@ describe('findRelatedTool total match count in the header (issue #147)', () => {
 
     expectHeader(result, '**Returned:** 2 of 10 | **Offset:** 0', 10);
     expect(result.structuredContent).toMatchObject({ source: 'openalex' });
-    expect(contractText(result)).toContain('**Source:** openalex');
+    // The trailer renders an enrichment string as a code span; the parse reads
+    // the whole paragraph back as the label plus the literal value.
+    expect(readCommonMark(contractText(result)).split('\n\n')).toContain(
+      '⟨strong⟩Source:⟨/strong⟩ ⟨code_inline:openalex⟩',
+    );
   });
 
   it('source confirmed missing: 0 of 0 with the not-found notice', async () => {
