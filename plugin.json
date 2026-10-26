@@ -1,0 +1,35 @@
+{
+  "$schema": "https://agent-plugins.org/schemas/1.0.0/plugin.schema.json",
+  "name": "pubmed-mcp-server",
+  "version": "2.11.0",
+  "description": "Search PubMed/Europe PMC, fetch articles and full text (PMC/EPMC/Unpaywall), citations, MeSH terms via MCP. STDIO or Streamable HTTP.",
+  "author": {
+    "name": "Casey Hand",
+    "email": "casey@caseyjhand.com",
+    "url": "https://caseyjhand.com"
+  },
+  "homepage": "https://github.com/cyanheads/pubmed-mcp-server#readme",
+  "repository": "https://github.com/cyanheads/pubmed-mcp-server",
+  "license": "Apache-2.0",
+  "keywords": [
+    "pubmed",
+    "ncbi",
+    "biomedical",
+    "research",
+    "citations",
+    "mesh",
+    "mcp",
+    "model-context-protocol",
+    "mcp-server",
+    "typescript",
+    "bun",
+    "stdio",
+    "streamable-http",
+    "ai-agent",
+    "e-utilities",
+    "open-access",
+    "full-text",
+    "unpaywall",
+    "europe-pmc"
+  ]
+}
