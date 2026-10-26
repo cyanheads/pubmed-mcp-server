@@ -2,6 +2,10 @@
 
 All notable changes to this project. Each entry links to its full per-version file in [changelog/](changelog/).
 
+## [2.11.1](changelog/2.11.x/2.11.1.md) — 2026-10-25
+
+Framework update from mcp-ts-core 0.13.16 to 0.13.18: the HTTP transport no longer retains memory per request, enrichment trailer values render as code spans, the .mcpb drops repo-local and framework build-only files, and root Agent Plugins plugin.json and mcp.json ship.
+
 ## [2.11.0](changelog/2.11.x/2.11.0.md) — 2026-10-25
 
 New pubmed_fetch_citation_metrics tool for NIH iCite metrics, sectionCap disclosure for maxSections, license metadata on PMC and Europe PMC results, Europe PMC full text gated on open access, and fixes to query encoding, Markdown escaping, and entity decoding.
