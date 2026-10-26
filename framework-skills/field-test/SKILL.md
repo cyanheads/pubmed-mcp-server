@@ -4,7 +4,7 @@ description: >
   Exercise tools, resources, and prompts against a live HTTP server via MCP JSON-RPC over curl. Starts the server, surfaces the catalog, runs real and adversarial inputs, measures every call (bytes, token estimate, wall-clock) and weighs the catalog, renders app tools' views in a headless MCP Apps host, and produces a tight report with concrete findings and numbered follow-up options. Use after adding or modifying definitions, or when the user asks to test, try out, or verify their MCP surface.
 metadata:
   author: cyanheads
-  version: "2.23"
+  version: "2.25"
   audience: external
   type: debug
 ---
@@ -357,7 +357,7 @@ The helper requests the newest `initialize`-negotiated revision the SDK supports
 mcp_call <url> '' tools/list '' <protocol-from-mcp_init>
 ```
 
-To exercise both session modes, start the server twice — once with the project's default, once with `MCP_SESSION_MODE=stateless` — and run the same calls against each.
+To exercise both session modes, start the server with `MCP_SESSION_MODE=stateful`, then with `MCP_SESSION_MODE=stateless`, and run the same calls against each. A bare `createApp({ sessionMode: 'stateless' })` sets a default; an explicit environment value overrides it. Verify that the stateful initialization returns a `Mcp-Session-Id` and reuse it, and that the stateless initialization returns none. A declared `sessionMode.require: 'stateful'` may reject stateless startup; record that limitation. Two starts resolving to stateless cover only one mode.
 
 Both modes exercise the **2025-era arm**: `initialize` negotiates the revision, and the session (when there is one) carries it. The [2026-07-28 revision](https://modelcontextprotocol.io/specification/2026-07-28/basic/transports) is a different thing from a sessionless 2025 handshake — it does not initialize at all, and is selected per request by the `io.modelcontextprotocol/protocolVersion` key in the request's own `_meta` envelope. This helper does not reach it; exercise the per-request leg from a real 2026-era client or an integration test.
 
@@ -415,6 +415,7 @@ Treat any hit as a `ux` finding in the report. The authoring rule lives under *T
 | Resource declared an `errors: [...]` contract | Error contract (resource): trigger ≥1 declared failure mode by reading a URI that exercises it. Resources re-throw errors at the JSON-RPC level — verify `error.code` matches the contract entry and `error.data.reason` is the declared reason. (Resources don't use the `result.isError` envelope — they fail the request itself.) |
 | Mutator (write/update/delete/append/patch verbs, or `destructiveHint: true`) | Mutator response observability: run an intentionally-ambiguous input (typo path, wrong ID, already-deleted target). Confirm the response carries enough state (pre/post values, state-change discriminator) for the agent to detect intent-effect divergence without re-fetching. |
 | `_meta.ui.resourceUri` on the tool (an app tool) | View rendering: Step 6. The curl calls see only the `format()` text and the view's raw HTML; whether the view runs is visible only when it is rendered. |
+| The project has a root `skills/` (a published skill, `add-skill`) | Skill claims: read each `SKILL.md` and its `references/`, then test every gate and identifier claim with a live call — the tool it names yields that ID, a precondition it states really changes the result (an unresolved filter does return the global set), a stop rule's coverage check exists. A claim that does not hold is a `bug` finding against the skill, fixed by correcting the claim or cutting it. When the server opts in with `createApp({ skills })`, `skills/list` lists each skill and `resources/read` on its `skill://` URI returns the file. |
 
 **Resources.** Happy path, not-found URI (use a syntactically valid but non-existent ID — e.g., substitute a fake ID into the URI template), `list` if defined, pagination if used.
 **Prompts.** Happy path, defaults omitted, skim message quality.
@@ -548,6 +549,7 @@ End with:
 - [ ] Stdio boot check completed — `bun run rebuild && bun run start:stdio < /dev/null` shows clean startup (every expected definition listed in the `Core services constructed` record's `tools` / `resources` / `prompts` fields, no errors) and a graceful shutdown on EOF
 - [ ] HTTP server built and started; real port parsed from log
 - [ ] Session initialized (a stateless server returns an empty `sid` — still a pass); `notifications/initialized` sent; negotiated protocol version matches the requested one (a downgrade is a finding)
+- [ ] Explicit stateful and stateless runs verified by session-header behavior; any declared requirement preventing a mode recorded
 - [ ] Catalog surfaced and presented; descriptions audited for leaks (implementation details, meta-coaching, consumer-aware phrasing)
 - [ ] Catalog weighed (`mcp_catalog_size`); total + `instructions=` bytes recorded for the report
 - [ ] Every call's `⏱` line read; any happy-path response over 24,000 B with no disclosure + retrieval path filed as `ux`
@@ -560,6 +562,7 @@ End with:
 - [ ] **If a resource declared an `errors: [...]` contract:** ≥1 declared failure mode triggered; top-level JSON-RPC `error.code` and `error.data.reason` verified against the contract entry
 - [ ] **If any tool truncates, caps, or spills its output:** truncation forced; disclosure + a retrieval path (cursor, offset, selector, canvas handle) verified
 - [ ] External-state / auth-gated tools handled explicitly (run, skip, or confirm)
+- [ ] **If the project publishes a root `skills/`:** every gate and identifier claim in each skill tested against live tool behavior, and each one that failed reported as a `bug`; when served over MCP, `skills/list` and the `skill://` reads checked
 - [ ] **If any tool carries `_meta.ui.resourceUri`:** each view rendered with `app-render` (Step 6); `initialized`, `errors`, `cspViolations`, the message log, and the screenshots checked; a missing peer or browser recorded as skipped, not as a server finding
 - [ ] Server stopped (port confirmed free); server log, app-render output, and helper script removed
 - [ ] Report: summary paragraph → size & latency table → grouped findings → numbered options
