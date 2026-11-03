@@ -29,7 +29,7 @@
 
 ## Overview
 
-Biomedical literature from PubMed, PubMed Central, and Europe PMC. Search it, fetch metadata and full text, resolve identifiers and partial citations, format references, and ground queries in MeSH vocabulary. Runs as a stdio process, a local Streamable HTTP server, or the public hosted endpoint above.
+Biomedical literature from PubMed, PubMed Central, and Europe PMC. Search it, fetch metadata and full text, resolve identifiers and partial citations, format references, and ground queries in MeSH vocabulary. Runs as a stdio process, a local Streamable HTTP server, or the public hosted endpoint above. Ships the `pubmed-guide` agent skill (`skill://pubmed-guide/SKILL.md`), which MCP clients read for PubMed query syntax, DOI-to-PMID routes outside PMC, reference-list resolution, citation counts, and full-text misses.
 
 ### Tools
 
@@ -65,7 +65,8 @@ Biomedical literature from PubMed, PubMed Central, and Europe PMC. Search it, fe
 ### `pubmed_search_articles` <sub>tool</sub>
 
 - Full PubMed query syntax plus filters (author, journal, MeSH, publication type, language, species, abstract, free full text) and publication/modification/Entrez date ranges
-- Up to 1,000 results per page and offsets up to 9,998, or `maxResults: 0` for the match count alone; `summaryCount` adds briefs for up to 50 hits
+- `query` is optional: with an author, journal, MeSH, or publication-type filter, the filters alone make the search (a journal's output over a date range, for example)
+- Up to 1,000 results per page and offsets up to 9,998, or `maxResults: 0` for the match count alone; `summaryCount` adds briefs for up to 50 hits. A larger page size is served at the cap with a notice naming where to continue
 - Reports `totalCount`, the `effectiveQuery` PubMed ran, and the `appliedFilters`
 - Rejects blank filter values, impossible dates, and reversed date ranges before PubMed is called
 
@@ -93,7 +94,7 @@ Biomedical literature from PubMed, PubMed Central, and Europe PMC. Search it, fe
 ### `pubmed_europepmc_search` <sub>tool</sub>
 
 - Adds preprints (`PPR`), patents (`PAT`), and Agricola (`AGR`) to `MED` and `PMC`; defaults to `MED`, `PMC`, `PPR`
-- Cursor pagination via `cursorMark` / `nextCursorMark`, up to 100 per page; abstracts arrive as 400-character snippets
+- Cursor pagination via `cursorMark` / `nextCursorMark`, up to 100 per page; a larger page size is served at the cap with a notice naming where to continue. Abstracts arrive as 400-character snippets
 - Optional `sort` of comma-separated `<field> asc|desc` keys; `relevance` is the default order, and a sort Europe PMC cannot use fails as `europepmc_invalid_input`
 - Hits carry `license` and `hasFullTextXml`
 - Not registered when `EUROPEPMC_ENABLED=false`
@@ -127,7 +128,7 @@ Biomedical literature from PubMed, PubMed Central, and Europe PMC. Search it, fe
 
 ### `pubmed_find_related` <sub>tool</sub>
 
-- `similar`, `cited_by`, or `references`, up to 50 per page with offset pagination
+- `similar`, `cited_by`, or `references`, up to 50 per page with offset pagination. A larger page size is served at the cap with a notice naming where to continue
 - Falls back to Europe PMC, then OpenAlex, and names the provider that answered; fails as `all_providers_failed` if none can
 
 ---
@@ -142,7 +143,7 @@ Biomedical literature from PubMed, PubMed Central, and Europe PMC. Search it, fe
 
 ### `pubmed_lookup_mesh` <sub>tool</sub>
 
-- Descriptors by name or free-text term, with an exact heading match pinned first (the descriptor, for a drug-class heading); up to 50 per page, continued via `nextOffset`
+- Descriptors by name or free-text term, with an exact heading match pinned first (the descriptor, for a drug-class heading); up to 50 per page, continued via `nextOffset`. A larger page size is served at the cap with a notice naming where to continue
 - Records carry their MeSH unique ID (`meshId`, e.g. `D000072657`) beside the Entrez UID; `includeDetails` (default on) adds tree numbers, scope notes, and entry terms
 
 ---
@@ -224,9 +225,9 @@ An [NCBI API key](https://www.ncbi.nlm.nih.gov/account/settings/) in `NCBI_API_K
 
 | Variable | Description | Default |
 |:---|:---|:---|
-| `NCBI_API_KEY` | NCBI API key; raises the rate limit from 3 to 10 req/s. | none |
+| `NCBI_API_KEY` | NCBI API key; raises the rate limit from 3 to 10 req/s. NCBI counts the limit per key (per IP address without one), so processes sharing a key or an address share it. | none |
 | `NCBI_ADMIN_EMAIL` | Contact email sent with NCBI requests, as NCBI recommends. | none |
-| `NCBI_REQUEST_DELAY_MS` | Minimum gap between NCBI request starts, in ms. | `400` (`100` with a key) |
+| `NCBI_REQUEST_DELAY_MS` | Minimum gap between NCBI request starts, in ms. | `400` (`120` with a key) |
 | `NCBI_MAX_CONCURRENT` | Max concurrent in-flight NCBI requests. | `8` |
 | `NCBI_MAX_RETRIES` | Retry attempts for failed NCBI requests. | `6` |
 | `NCBI_TIMEOUT_MS` | Per-request HTTP timeout, in ms. | `30000` |
@@ -302,6 +303,7 @@ The image defaults to HTTP transport, stateless session mode, and logs to `/var/
 | `src/services/openalex` | OpenAlex service — last-resort provider for `pubmed_find_related`. |
 | `src/config` | Server-specific environment variable parsing and validation with Zod. |
 | `tests/` | Unit and integration tests, mirroring the `src/` structure. |
+| `skills/` | The published `pubmed-guide` agent skill, served over MCP and shipped in the package, the `.mcpb` bundle, and the Docker image. |
 
 ## Development guide
 
