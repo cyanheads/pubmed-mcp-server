@@ -1,17 +1,25 @@
 /**
- * @fileoverview Tests for the NCBI API client (URL construction, GET/POST selection, error handling).
+ * @fileoverview Tests for the NCBI API client (URL construction, GET/POST selection, error
+ * handling, and the `http.client.request.duration` point each request records).
  * @module tests/services/ncbi/api-client.test
  */
 
-import { McpError } from '@cyanheads/mcp-ts-core/errors';
-import { logger, type RequestContext } from '@cyanheads/mcp-ts-core/utils';
+import { JsonRpcErrorCode, McpError } from '@cyanheads/mcp-ts-core/errors';
+import {
+  createPacer,
+  fetchWithTimeout,
+  getMeter,
+  logger,
+  type RequestContext,
+} from '@cyanheads/mcp-ts-core/utils';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { NcbiApiClient, type NcbiApiClientConfig } from '@/services/ncbi/api-client.js';
-import { NCBI_PMC_IDCONV_URL } from '@/services/ncbi/types.js';
+import { NcbiService } from '@/services/ncbi/ncbi-service.js';
+import { NcbiResponseHandler } from '@/services/ncbi/response-handler.js';
+import { NCBI_EUTILS_BASE_URL, NCBI_PMC_IDCONV_URL } from '@/services/ncbi/types.js';
 
-// makeRequest now uses plain `globalThis.fetch` (mirroring makeExternalRequest) so the
-// 500→ServiceUnavailable reclassification in makeRequest is reachable; the suites spy the
-// global. httpErrorFromResponse stays real (via `...actual`) so status→code classification
+// Every request goes out through plain `globalThis.fetch`, which the suites spy.
+// httpErrorFromResponse stays real (via `...actual`) so status→code classification
 // is exercised, not mocked. The context stub keeps its operation and fields, so a test can
 // read what each log record carries.
 vi.mock('@cyanheads/mcp-ts-core/utils', async () => {
@@ -37,6 +45,29 @@ const baseConfig: NcbiApiClientConfig = {
   toolIdentifier: 'test-tool',
   timeoutMs: 5000,
 };
+
+/**
+ * Every histogram created in this file, in creation order, with the points recorded on
+ * it. No meter provider is registered under test, so the framework's `createHistogram` —
+ * the one the client calls and the one `fetchWithTimeout` calls — takes its instrument
+ * from the OTel API's no-op meter, a single shared instance; spying on that meter
+ * captures both. Installed before any test runs, because each caller creates its
+ * instrument once, on first use, and keeps it.
+ */
+const histograms: {
+  name: string;
+  options: unknown;
+  points: { seconds: number; attributes: Record<string, unknown> }[];
+}[] = [];
+vi.spyOn(getMeter(), 'createHistogram').mockImplementation((name, options) => {
+  const histogram: (typeof histograms)[number] = { name, options, points: [] };
+  histograms.push(histogram);
+  return {
+    record: (seconds, attributes) => {
+      histogram.points.push({ seconds, attributes: { ...attributes } });
+    },
+  };
+});
 
 describe('NcbiApiClient', () => {
   let fetchSpy: ReturnType<typeof vi.spyOn>;
@@ -133,9 +164,7 @@ describe('NcbiApiClient', () => {
 
   it('classifies HTTP 500 as ServiceUnavailable so withRetry picks it up (issue #70)', async () => {
     // NCBI's eutils proxy returns 500 for transient mesh-layer failures that are safe to
-    // retry. Routing getRequest/postRequest through plain fetch hands makeRequest the
-    // failing Response so httpErrorFromResponse can classify it — fetchWithTimeout throws
-    // on non-2xx before the response is reachable.
+    // retry; httpErrorFromResponse classifies the failing Response makeRequest holds.
     const { JsonRpcErrorCode } = await import('@cyanheads/mcp-ts-core/errors');
     fetchSpy.mockResolvedValueOnce(new Response('WWW Error 500', { status: 500 }));
     const client = new NcbiApiClient(baseConfig);
@@ -612,5 +641,333 @@ describe('NcbiApiClient keeps URLs out of log records and error data', () => {
       'NCBI request failed: failed fetching https://eutils.ncbi.nlm.nih.gov/…?…',
     );
     expectNoUrlQuery(String(mcp.cause));
+  });
+});
+
+/**
+ * Each HTTP attempt records one point on the framework's `http.client.request.duration`
+ * histogram, measured the way `fetchWithTimeout` measures every other upstream: from the
+ * fetch to the response headers, plus the error-body capture on a non-2xx, with a status
+ * only when a response arrived. `performance.now` reads the fake clock and the stubbed
+ * upstream takes its time on fake timers, so every duration is exact. (#281)
+ */
+describe('NcbiApiClient records each request on http.client.request.duration (#281)', () => {
+  const EUTILS = 'eutils.ncbi.nlm.nih.gov';
+  const EINFO = '<eInfoResult><DbList><DbName>pubmed</DbName></DbList></eInfoResult>';
+  const PMID = '23193287';
+  const ARTICLE_SET = `<?xml version="1.0"?><PubmedArticleSet><PubmedArticle><MedlineCitation><PMID>${PMID}</PMID></MedlineCitation></PubmedArticle></PubmedArticleSet>`;
+
+  let fetchSpy: ReturnType<typeof vi.spyOn>;
+  let clockSpy: ReturnType<typeof vi.spyOn>;
+  let randomSpy: ReturnType<typeof vi.spyOn>;
+
+  beforeEach(() => {
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout', 'Date'] });
+    clockSpy = vi.spyOn(performance, 'now').mockImplementation(() => Date.now());
+    randomSpy = vi.spyOn(Math, 'random').mockReturnValue(0.5);
+    fetchSpy = vi.spyOn(globalThis, 'fetch').mockRejectedValue(new Error('unmocked fetch'));
+    for (const histogram of histograms) histogram.points.length = 0;
+  });
+
+  afterEach(() => {
+    fetchSpy.mockRestore();
+    randomSpy.mockRestore();
+    clockSpy.mockRestore();
+    vi.useRealTimers();
+  });
+
+  const durationPoints = () =>
+    histograms
+      .filter((histogram) => histogram.name === 'http.client.request.duration')
+      .flatMap((histogram) => histogram.points);
+  const statuses = () =>
+    durationPoints().map((point) => point.attributes['http.response.status_code']);
+
+  /** A body whose read takes `ms` on the fake clock. */
+  const bodyTaking = (text: string, ms: number) =>
+    new ReadableStream<Uint8Array>(
+      {
+        pull: (controller) =>
+          new Promise<void>((resolve) => {
+            setTimeout(() => {
+              controller.enqueue(new TextEncoder().encode(text));
+              controller.close();
+              resolve();
+            }, ms);
+          }),
+      },
+      { highWaterMark: 0 },
+    );
+
+  /** Answers with `status` once `headersMs` pass, its body read over `bodyMs` more. */
+  const answerAfter =
+    (headersMs: number, status: number, body: string, bodyMs = 0) =>
+    () =>
+      new Promise<Response>((resolve) => {
+        setTimeout(() => resolve(new Response(bodyTaking(body, bodyMs), { status })), headersMs);
+      });
+
+  /** Answers successive requests with these replies at once, the last one repeating. */
+  const answerInTurn = (...replies: [status: number, body: string][]) => {
+    let call = 0;
+    fetchSpy.mockImplementation(() => {
+      const [status, body] = replies[Math.min(call++, replies.length - 1)] as [number, string];
+      return Promise.resolve(new Response(body, { status }));
+    });
+  };
+
+  /** Never answers; rejects with the abort reason when the request's signal fires. */
+  const hangUntilAborted = (_input: unknown, init?: RequestInit) =>
+    new Promise<Response>((_, reject) => {
+      init?.signal?.addEventListener('abort', () => reject(init.signal?.reason), { once: true });
+    });
+
+  /** Answers only when the test calls the returned `release`. */
+  const holdUntilReleased = () => {
+    let release: ((response: Response) => void) | undefined;
+    fetchSpy.mockImplementation(
+      () =>
+        new Promise<Response>((resolve) => {
+          release = resolve;
+        }),
+    );
+    return (response: Response) => release?.(response);
+  };
+
+  /** Settles `pending` with the fake clock run out: its value, or what it threw. */
+  const settle = async (pending: Promise<unknown>) => {
+    const outcome = pending.catch((error: unknown) => error);
+    await vi.runAllTimersAsync();
+    return outcome;
+  };
+
+  const serviceOver = (queue = createPacer({ name: 'ncbi-test' }), totalDeadlineMs = 60_000) =>
+    new NcbiService(
+      new NcbiApiClient(baseConfig),
+      queue,
+      new NcbiResponseHandler(),
+      2,
+      totalDeadlineMs,
+    );
+
+  const requests: [string, (client: NcbiApiClient) => Promise<string>, Record<string, string>][] = [
+    [
+      'eutils GET',
+      (client) => client.makeRequest('einfo', { db: 'pubmed' }),
+      { 'http.request.method': 'GET', 'server.address': EUTILS },
+    ],
+    [
+      'eutils POST',
+      (client) => client.makeRequest('efetch', { db: 'pubmed' }, { usePost: true }),
+      { 'http.request.method': 'POST', 'server.address': EUTILS },
+    ],
+    [
+      'PMC ID Converter GET',
+      (client) => client.makeExternalRequest(NCBI_PMC_IDCONV_URL, { ids: 'PMC1' }),
+      { 'http.request.method': 'GET', 'server.address': 'pmc.ncbi.nlm.nih.gov' },
+    ],
+  ];
+
+  it.each(requests)(
+    '%s: records one point from the fetch to the response headers, the 2xx body read excluded',
+    async (_label, send, attributes) => {
+      fetchSpy.mockImplementation(answerAfter(300, 200, '<ok/>', 5_000));
+
+      expect(await settle(send(new NcbiApiClient(baseConfig)))).toBe('<ok/>');
+      expect(durationPoints()).toEqual([
+        { seconds: 0.3, attributes: { ...attributes, 'http.response.status_code': 200 } },
+      ]);
+    },
+  );
+
+  it.each(requests)(
+    '%s: a non-2xx point runs through the error-body capture',
+    async (_label, send, attributes) => {
+      fetchSpy.mockImplementation(answerAfter(300, 503, 'busy', 200));
+
+      expect(await settle(send(new NcbiApiClient(baseConfig)))).toMatchObject({
+        code: JsonRpcErrorCode.ServiceUnavailable,
+        data: { status: 503, body: 'busy' },
+      });
+      expect(durationPoints()).toEqual([
+        { seconds: 0.5, attributes: { ...attributes, 'http.response.status_code': 503 } },
+      ]);
+    },
+  );
+
+  /**
+   * The client restates the instrument because the framework exports no recorder for a
+   * caller that keeps plain `fetch`; a unit or description that drifted from the
+   * framework's would register a second, conflicting stream under the same name.
+   */
+  it('records on the instrument fetchWithTimeout registers, with the attributes it records for the same request', async () => {
+    fetchSpy.mockImplementation(() => Promise.resolve(new Response(EINFO, { status: 200 })));
+
+    await new NcbiApiClient(baseConfig).makeRequest('einfo', { db: 'pubmed' });
+    const framework = await fetchWithTimeout(
+      `${NCBI_EUTILS_BASE_URL}/einfo.fcgi?db=pubmed`,
+      5_000,
+      { requestId: 'test' } as RequestContext,
+    );
+    await framework.text();
+
+    const registered = histograms.filter((h) => h.name === 'http.client.request.duration');
+    expect(registered).toHaveLength(2);
+    const [clientInstrument, frameworkInstrument] = registered;
+    expect(clientInstrument?.options).toEqual(frameworkInstrument?.options);
+    expect(clientInstrument?.options).toMatchObject({ unit: 's' });
+    const attributes = {
+      'http.request.method': 'GET',
+      'server.address': EUTILS,
+      'http.response.status_code': 200,
+    };
+    expect(clientInstrument?.points.map((p) => p.attributes)).toEqual([attributes]);
+    expect(frameworkInstrument?.points.map((p) => p.attributes)).toEqual([attributes]);
+  });
+
+  it.each([
+    [
+      'a per-request timeout',
+      () => Promise.reject(new DOMException('The operation timed out.', 'TimeoutError')),
+    ],
+    ['a network failure', () => Promise.reject(new TypeError('fetch failed'))],
+  ])('records %s with no status', async (_label, reply) => {
+    fetchSpy.mockImplementation(reply);
+
+    expect(
+      await new NcbiApiClient(baseConfig)
+        .makeRequest('einfo', { db: 'pubmed' })
+        .catch((e: unknown) => e),
+    ).toMatchObject({ data: { reason: 'ncbi_unreachable' } });
+    expect(durationPoints()).toEqual([
+      { seconds: 0, attributes: { 'http.request.method': 'GET', 'server.address': EUTILS } },
+    ]);
+  });
+
+  it('records a request the caller aborts mid-flight with no status, up to the abort', async () => {
+    fetchSpy.mockImplementation(hangUntilAborted);
+    const caller = new AbortController();
+    const pending = new NcbiApiClient(baseConfig)
+      .makeRequest('einfo', { db: 'pubmed' }, { signal: caller.signal })
+      .catch((e: unknown) => e);
+
+    await vi.advanceTimersByTimeAsync(250);
+    caller.abort(new Error('caller cancelled'));
+
+    expect(await pending).toMatchObject({ message: 'NCBI request failed: caller cancelled' });
+    expect(durationPoints()).toEqual([
+      { seconds: 0.25, attributes: { 'http.request.method': 'GET', 'server.address': EUTILS } },
+    ]);
+  });
+
+  it.each([
+    ['eutils GET', (service: NcbiService) => service.eInfo({ db: 'pubmed' }), EINFO],
+    [
+      'eutils POST',
+      (service: NcbiService) =>
+        service.eFetch({ db: 'pubmed', id: PMID }, { retmode: 'xml', usePost: true }),
+      ARTICLE_SET,
+    ],
+    [
+      'PMC ID Converter GET',
+      (service: NcbiService) => service.idConvert(['PMC1'], 'pmcid'),
+      '{"records":[]}',
+    ],
+  ])(
+    '%s: a call retried twice records three points, one per attempt',
+    async (_label, call, body) => {
+      answerInTurn([503, 'busy'], [500, 'WWW Error 500'], [200, body]);
+
+      expect(await settle(call(serviceOver()))).not.toBeInstanceOf(Error);
+      expect(fetchSpy).toHaveBeenCalledTimes(3);
+      expect(statuses()).toEqual([503, 500, 200]);
+    },
+  );
+
+  it('records the 200 of an NCBI <ERROR> envelope the service retries as a backend failure', async () => {
+    const timeoutEnvelope =
+      '<eFetchResult><ERROR>Error: External viewer error: Empty Response. Bytes read: 0 Status: Timeout</ERROR></eFetchResult>';
+    answerInTurn([200, timeoutEnvelope], [200, ARTICLE_SET]);
+
+    expect(await settle(serviceOver().eFetch({ db: 'pubmed', id: PMID }))).toHaveProperty(
+      'PubmedArticleSet',
+    );
+    expect(statuses()).toEqual([200, 200]);
+  });
+
+  it('records the 400 of an all-invalid EFetch ID list the service resolves as an empty result', async () => {
+    answerInTurn([
+      400,
+      '<eFetchResult><ERROR>ID list is empty! Possibly it has no correct IDs.</ERROR></eFetchResult>',
+    ]);
+
+    expect(await settle(serviceOver().eFetch({ db: 'pubmed', id: '00000000' }))).toHaveProperty(
+      'PubmedArticleSet',
+    );
+    expect(statuses()).toEqual([400]);
+  });
+
+  it('leaves the queue wait out: a call held behind the start gap records only its own request', async () => {
+    const startedAfter: number[] = [];
+    const t0 = Date.now();
+    const answer = answerAfter(300, 200, EINFO);
+    fetchSpy.mockImplementation(() => {
+      startedAfter.push(Date.now() - t0);
+      return answer();
+    });
+    const service = serviceOver(createPacer({ name: 'ncbi-test', minStartGapMs: 3_000 }));
+
+    await settle(Promise.all([service.eInfo({ db: 'pubmed' }), service.eInfo({ db: 'pubmed' })]));
+
+    expect(startedAfter).toEqual([0, 3_000]);
+    expect(durationPoints().map((point) => point.seconds)).toEqual([0.3, 0.3]);
+  });
+
+  it('records a request the total deadline aborts mid-flight with no status', async () => {
+    fetchSpy.mockImplementation(hangUntilAborted);
+
+    expect(await settle(serviceOver(undefined, 5_000).eInfo({ db: 'pubmed' }))).toMatchObject({
+      code: JsonRpcErrorCode.Timeout,
+      data: { reason: 'ncbi_deadline_exceeded' },
+    });
+    expect(durationPoints()).toEqual([
+      { seconds: 5, attributes: { 'http.request.method': 'GET', 'server.address': EUTILS } },
+    ]);
+  });
+
+  it('records nothing for a call the queue sheds, and one point for the call it runs', async () => {
+    const release = holdUntilReleased();
+    const service = serviceOver(
+      createPacer({ name: 'ncbi-test', maxConcurrent: 1, maxQueueDepth: 0 }),
+    );
+    const running = service.eInfo({ db: 'pubmed' });
+    await vi.advanceTimersByTimeAsync(0);
+
+    expect(await service.eInfo({ db: 'pubmed' }).catch((e: unknown) => e)).toMatchObject({
+      data: { reason: 'queue_full' },
+    });
+    release(new Response(EINFO, { status: 200 }));
+    await running;
+
+    expect(fetchSpy).toHaveBeenCalledOnce();
+    expect(statuses()).toEqual([200]);
+  });
+
+  it('records nothing for a call whose deadline expires while it waits in the queue', async () => {
+    const release = holdUntilReleased();
+    const queue = createPacer({ name: 'ncbi-test', maxConcurrent: 1 });
+    const running = serviceOver(queue).eInfo({ db: 'pubmed' });
+    await vi.advanceTimersByTimeAsync(0);
+
+    const queued = serviceOver(queue, 5_000)
+      .eInfo({ db: 'pubmed' })
+      .catch((e: unknown) => e);
+    await vi.advanceTimersByTimeAsync(5_000);
+    expect(await queued).toMatchObject({ data: { reason: 'ncbi_deadline_exceeded' } });
+    release(new Response(EINFO, { status: 200 }));
+    await running;
+
+    expect(fetchSpy).toHaveBeenCalledOnce();
+    expect(statuses()).toEqual([200]);
   });
 });
