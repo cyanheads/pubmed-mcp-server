@@ -265,6 +265,8 @@ src/
     tools/definitions/                  # 12 tool definitions (*.tool.ts)
     resources/definitions/              # database-info.resource.ts
     prompts/definitions/                # research-plan.prompt.ts
+skills/
+  pubmed-guide/SKILL.md                 # Published agent skill — served over MCP via createApp({ skills: 'skills' }), shipped in the package
 ```
 
 ---
@@ -291,7 +293,7 @@ Two skill trees live at the project root, written for different readers:
 
 Development skills are modular instructions. Read them directly when a task matches — e.g., `framework-skills/add-tool/SKILL.md` when adding a tool. `bun run list-skills` prints the full registry. Their directory is deliberately not `skills/`: Claude Code and Codex auto-load a plugin's root `skills/`, so a server that ships `.claude-plugin/` or `.codex-plugin/` would hand them to every agent that installs it.
 
-A published skill in root `skills/` reaches plugin installs and the `.mcpb` bundle as-is, ships in the npm package and the Docker image, and reaches MCP clients when the server opts in with `createApp({ skills: 'skills' })`. `lint:packaging` validates the tree. This server publishes none today.
+A published skill in root `skills/` reaches plugin installs and the `.mcpb` bundle as-is, ships in the npm package and the Docker image, and reaches MCP clients when the server opts in with `createApp({ skills: 'skills' })`. `lint:packaging` validates the tree. This server publishes one, `pubmed-guide` (PubMed query syntax, identifier crosswalks, and the gates that span tools), and serves it over MCP. When a tool change alters behavior the skill describes, update the skill in the same change.
 
 **Agent skill directory:** Copy `framework-skills/` into the directory your agent discovers (Claude Code: `.claude/skills/`, others: equivalent). Skills then load as context without referencing `framework-skills/` paths. After framework updates, run the `maintenance` skill — Phase B re-syncs the agent directory.
 
