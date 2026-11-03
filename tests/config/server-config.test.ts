@@ -118,8 +118,8 @@ describe('getServerConfig', () => {
 
   /**
    * 120 ms, not the 100 ms that 10 req/s works out to: ten gaps then span the
-   * 1,200 ms three keyless 400 ms gaps do, a spacing NCBI was measured to accept
-   * without a 429. (#280)
+   * 1,200 ms three keyless 400 ms gaps do. Keyless bursts at 400 ms drew no 429;
+   * the keyed value is inferred from that, not measured with a key. (#280)
    */
   it('uses the 120 ms keyed delay when API key is present', async () => {
     vi.stubEnv('NCBI_API_KEY', 'test-key');
