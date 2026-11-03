@@ -13,9 +13,9 @@
 | `pubmed_fetch_fulltext` | `pubmed_pmc_fetch` | Fetch full-text articles from PubMed Central, falling back to Europe PMC and Unpaywall. Accepts PMC IDs, PMIDs, and DOIs in any mix (PMIDs and DOIs auto-resolved). Section filtering, optional references. Up to 50 distinct identifiers per request; the first 10 are fetched, the rest returned in `overLimit`. | `pmcids?`, `pmids?`, `dois?`, `sections?`, `includeReferences?`, `maxSections?` | `readOnlyHint: true` |
 | `pubmed_fetch_citation_metrics` | — | Fetch NIH iCite citation metrics for PubMed articles — Relative Citation Ratio, NIH percentile, citation counts and rates. Up to 1,000 PMIDs per request; the first 200 distinct are fetched, the rest returned in `overLimit`. | `pmids` | `readOnlyHint: true` |
 | `pubmed_format_citations` | `pubmed_cite` | Generate formatted citations in APA 7th, MLA 9th, BibTeX, RIS, or Vancouver. Multiple styles per article. Up to 50 per request. | `pmids`, `format?` | `readOnlyHint: true` |
-| `pubmed_find_related` | `pubmed_related` | Find similar articles, citing articles, or references for a given PMID. Results enriched with title, authors, date. | `pmid`, `relationship` (`similar`, `cited_by`, `references`) | `readOnlyHint: true` |
+| `pubmed_find_related` | `pubmed_related` | Find similar articles, citing articles, or references for a given PMID. Results enriched with title, authors, date. | `pmid`, `relationship` (`similar`, `cited_by`, `references`), `maxResults?`, `offset?` | `readOnlyHint: true` |
 | `pubmed_spell_check` | `pubmed_spell` | Spell-check a biomedical query using NCBI's ESpell service. Returns original, corrected, and whether a suggestion was found. | `query` | `readOnlyHint: true` |
-| `pubmed_lookup_mesh` | `pubmed_mesh_lookup` | Search and explore MeSH vocabulary — tree numbers, scope notes, entry terms. Useful for building precise PubMed queries. | `term`, `detailed?` | `readOnlyHint: true` |
+| `pubmed_lookup_mesh` | `pubmed_mesh_lookup` | Search and explore MeSH vocabulary — tree numbers, scope notes, entry terms. Useful for building precise PubMed queries. | `query`, `maxResults?`, `offset?`, `includeDetails?` | `readOnlyHint: true` |
 
 ### Resources
 
