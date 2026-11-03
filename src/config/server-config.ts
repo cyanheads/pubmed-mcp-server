@@ -12,7 +12,14 @@ const ServerConfigSchema = z.object({
   apiKey: z.string().optional().describe('NCBI API key'),
   toolIdentifier: z.string().default('pubmed-mcp-server').describe('NCBI tool identifier'),
   adminEmail: z.email().optional().describe('Admin contact email'),
-  requestDelayMs: z.coerce.number().min(50).max(5000).default(400).describe('Request delay in ms'),
+  requestDelayMs: z.coerce
+    .number()
+    .min(50)
+    .max(5000)
+    .optional()
+    .describe(
+      'Minimum gap between NCBI request starts in ms; unset takes the keyed or keyless default',
+    ),
   maxConcurrent: z.coerce
     .number()
     .min(1)
@@ -72,13 +79,16 @@ const ServerConfigSchema = z.object({
     .describe('Per-request HTTP timeout for Europe PMC calls, in ms'),
 });
 
-export type ServerConfig = z.infer<typeof ServerConfigSchema>;
+/** The parsed config, with an unset `requestDelayMs` resolved to its keyed or keyless default. */
+export type ServerConfig = Omit<z.infer<typeof ServerConfigSchema>, 'requestDelayMs'> & {
+  requestDelayMs: number;
+};
 
 let _config: ServerConfig | undefined;
 
 export function getServerConfig(): ServerConfig {
   if (!_config) {
-    const parsed = parseEnvConfig(ServerConfigSchema, {
+    const { requestDelayMs, ...parsed } = parseEnvConfig(ServerConfigSchema, {
       apiKey: 'NCBI_API_KEY',
       toolIdentifier: 'NCBI_TOOL_IDENTIFIER',
       adminEmail: 'NCBI_ADMIN_EMAIL',
@@ -96,19 +106,19 @@ export function getServerConfig(): ServerConfig {
       europepmcTimeoutMs: 'EUROPEPMC_TIMEOUT_MS',
     });
     /**
-     * An API key raises NCBI's rate ceiling from ~3 req/s to ~10 req/s. If the
-     * operator hasn't explicitly overridden the delay, tighten from the 400ms
-     * keyless default to 100ms when a key is present. A set-but-blank delay counts
-     * as not overridden, matching how `parseEnvConfig` reads it.
+     * An API key raises NCBI's rate ceiling from ~3 req/s to ~10 req/s, so an
+     * unset delay takes 120ms with a key and 400ms without one. Unset is what
+     * `parseEnvConfig` reads as unset: absent, blank, or an unsubstituted
+     * `${…}` placeholder. An explicit delay always wins.
      *
-     * The keyless default sits above the 334ms that 3 req/s works out to, leaving
-     * margin for arrival jitter: spaced at exactly the ceiling, a small burst of
-     * concurrent calls draws 429s.
+     * Neither default sits at its ceiling. Without a key, gaps of 334–367ms drew a
+     * 429 in every burst of concurrent calls and 400ms drew none, so NCBI counts
+     * over a window somewhat wider than one second. The keyed 120ms is inferred
+     * from that, not measured with a key: ten gaps span the 1,200ms that three
+     * keyless 400ms gaps do, where the 100ms that 10 req/s works out to spans
+     * only 1,000ms.
      */
-    _config =
-      parsed.apiKey && !process.env.NCBI_REQUEST_DELAY_MS?.trim()
-        ? { ...parsed, requestDelayMs: 100 }
-        : parsed;
+    _config = { ...parsed, requestDelayMs: requestDelayMs ?? (parsed.apiKey ? 120 : 400) };
   }
   return _config;
 }

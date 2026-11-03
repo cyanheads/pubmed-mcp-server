@@ -116,7 +116,12 @@ describe('getServerConfig', () => {
     expect(config.timeoutMs).toBe(60000);
   });
 
-  it('uses lower delay when API key is present', async () => {
+  /**
+   * 120 ms, not the 100 ms that 10 req/s works out to: ten gaps then span the
+   * 1,200 ms three keyless 400 ms gaps do, a spacing NCBI was measured to accept
+   * without a 429. (#280)
+   */
+  it('uses the 120 ms keyed delay when API key is present', async () => {
     vi.stubEnv('NCBI_API_KEY', 'test-key');
     delete process.env.NCBI_TOOL_IDENTIFIER;
     delete process.env.NCBI_ADMIN_EMAIL;
@@ -127,17 +132,33 @@ describe('getServerConfig', () => {
     const getServerConfig = await loadModule();
     const config = getServerConfig();
 
-    expect(config.requestDelayMs).toBe(100);
+    expect(config.requestDelayMs).toBe(120);
   });
 
-  it('uses lower delay when API key is present and the delay is set but empty', async () => {
+  it('uses the 120 ms keyed delay when API key is present and the delay is set but empty', async () => {
     vi.stubEnv('NCBI_API_KEY', 'test-key');
     vi.stubEnv('NCBI_REQUEST_DELAY_MS', '');
 
     const getServerConfig = await loadModule();
     const config = getServerConfig();
 
-    expect(config.requestDelayMs).toBe(100);
+    expect(config.requestDelayMs).toBe(120);
+  });
+
+  it('uses the 120 ms keyed delay when the delay is an unsubstituted placeholder', async () => {
+    vi.stubEnv('NCBI_API_KEY', 'test-key');
+    vi.stubEnv('NCBI_REQUEST_DELAY_MS', `\${user_config.ncbi_request_delay_ms}`);
+
+    const getServerConfig = await loadModule();
+    expect(getServerConfig().requestDelayMs).toBe(120);
+  });
+
+  it('keeps an explicit NCBI_REQUEST_DELAY_MS over the keyed default', async () => {
+    vi.stubEnv('NCBI_API_KEY', 'test-key');
+    vi.stubEnv('NCBI_REQUEST_DELAY_MS', '400');
+
+    const getServerConfig = await loadModule();
+    expect(getServerConfig().requestDelayMs).toBe(400);
   });
 
   it('keeps an explicit NCBI_REQUEST_DELAY_MS over the default without a key', async () => {
