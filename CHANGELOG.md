@@ -2,6 +2,10 @@
 
 All notable changes to this project. Each entry links to its full per-version file in [changelog/](changelog/).
 
+## [2.12.0](changelog/2.12.x/2.12.0.md) — 2026-11-02
+
+Publishes the pubmed-guide agent skill as an MCP resource, lets pubmed_search_articles run on filters alone, serves page sizes past a per-call cap at the cap instead of rejecting them, records E-utilities requests in the request-duration metric, and raises the keyed NCBI request gap to 120 ms.
+
 ## [2.11.1](changelog/2.11.x/2.11.1.md) — 2026-10-25
 
 Framework update from mcp-ts-core 0.13.16 to 0.13.18: the HTTP transport no longer retains memory per request, enrichment trailer values render as code spans, the .mcpb drops repo-local and framework build-only files, and root Agent Plugins plugin.json and mcp.json ship.

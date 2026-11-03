@@ -1,6 +1,6 @@
 # pubmed-mcp-server - Directory Structure
 
-Generated on: 2026-10-26 02:57:36
+Generated on: 2026-11-03 07:49:39
 
 ```text
 pubmed-mcp-server/
@@ -28,6 +28,7 @@ pubmed-mcp-server/
 │   ├── 2.1.x/
 │   ├── 2.10.x/
 │   ├── 2.11.x/
+│   ├── 2.12.x/
 │   ├── 2.2.x/
 │   ├── 2.3.x/
 │   ├── 2.4.x/
@@ -157,6 +158,9 @@ pubmed-mcp-server/
 │   ├── prune-musl-packages.ts
 │   ├── release-github.ts
 │   └── tree.ts
+├── skills/
+│   └── pubmed-guide/
+│       └── SKILL.md
 ├── src/
 │   ├── config/
 │   │   └── server-config.ts
@@ -173,6 +177,7 @@ pubmed-mcp-server/
 │   │           ├── _concepts.ts
 │   │           ├── _notices.ts
 │   │           ├── _outline-shares.ts
+│   │           ├── _page-size.ts
 │   │           ├── _schemas.ts
 │   │           ├── _text.ts
 │   │           ├── _visible-text.ts
@@ -338,6 +343,7 @@ pubmed-mcp-server/
 │   │           ├── _fuzz-helpers.ts
 │   │           ├── _mesh-esummary-fixtures.ts
 │   │           ├── _outline-shares.test.ts
+│   │           ├── _page-size.test.ts
 │   │           ├── _schemas.test.ts
 │   │           ├── _text.test.ts
 │   │           ├── _visible-text.test.ts
@@ -415,6 +421,7 @@ pubmed-mcp-server/
 │   │   ├── markdown-escape.test.ts
 │   │   └── retry-gate.test.ts
 │   ├── tools/
+│   ├── _helpers.test.ts
 │   ├── _helpers.ts
 │   └── index.test.ts
 ├── .dockerignore
