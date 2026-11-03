@@ -1365,7 +1365,7 @@ describe('pubmedEuropepmcFetchTool NCBI records with a residual entity layer (#2
     expect(text).toContain(`\n#### Abstract\n${aposAbstract}\n\n### `);
     expect(text.endsWith(`\n#### Abstract\n${abstract}`)).toBe(true);
     expect(readCommonMark(text.slice(text.lastIndexOf('#### Abstract')))).toBe(
-      `⟨heading_open⟩\n\nAbstract\n\n⟨heading_close⟩\n\n${abstract}`,
+      `⟨heading_open h4⟩\n\nAbstract\n\n⟨heading_close h4⟩\n\n${abstract}`,
     );
   });
 });
@@ -1415,7 +1415,7 @@ describe('pubmedEuropepmcFetchTool record lines that share a paragraph (#261)', 
 
     expect(readCommonMark(text)).toBe(
       [
-        '⟨heading_open⟩\n\nEurope PMC Records\n\n⟨heading_close⟩\n',
+        '⟨heading_open h2⟩\n\nEurope PMC Records\n\n⟨heading_close h2⟩\n',
         '⟨strong⟩Returned:⟨/strong⟩ 0',
         '⟨strong⟩Not found:⟨/strong⟩ ⟨code_inline:PPR/x._y⟩',
         '⟨strong⟩Deferred by the response budget:⟨/strong⟩ 1 record(s) — 0 of 1 budgeted characters returned; next deferred record 500 characters',

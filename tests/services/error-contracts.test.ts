@@ -142,7 +142,9 @@ describe('NCBI_SERVICE_ERRORS', () => {
 });
 
 describe('ICITE_SERVICE_ERRORS', () => {
-  it('declares the two reasons the iCite service stamps, both retryable ServiceUnavailable', () => {
+  const entryFor = (reason: string) => ICITE_SERVICE_ERRORS.find((e) => e.reason === reason);
+
+  it('declares the three reasons the iCite service stamps, all ServiceUnavailable, the unrequested record not retryable', () => {
     expect(
       ICITE_SERVICE_ERRORS.map(({ reason, code, retryable }) => ({ reason, code, retryable })),
     ).toEqual([
@@ -156,13 +158,33 @@ describe('ICITE_SERVICE_ERRORS', () => {
         code: JsonRpcErrorCode.ServiceUnavailable,
         retryable: true,
       },
+      {
+        reason: 'icite_unrequested_record',
+        code: JsonRpcErrorCode.ServiceUnavailable,
+        retryable: false,
+      },
     ]);
   });
 
-  it('names both invalid-response cases: an unparseable body and an unrequested record', () => {
-    const entry = ICITE_SERVICE_ERRORS.find((e) => e.reason === 'icite_invalid_response');
+  it('keeps icite_invalid_response to the unparseable body and its retry hint', () => {
+    const entry = entryFor('icite_invalid_response');
     expect(entry?.when).toMatch(/not its JSON record list on the last attempt/);
+    expect(entry?.when).not.toMatch(/did not request/);
+    expect(entry?.recovery).toMatch(/^Retry the request after a brief delay/);
+    expect(entry?.recovery).not.toMatch(/mismatch/);
+  });
+
+  /**
+   * iCite gives the same answer to the same PMID list every time, so resending it
+   * cannot succeed; smaller batches isolate the PMID it misreads. (#278)
+   */
+  it('declares icite_unrequested_record with a recovery that does not say to retry', () => {
+    const entry = entryFor('icite_unrequested_record');
     expect(entry?.when).toMatch(/a record for a PMID the call did not request/);
+    expect(entry?.when).toMatch(/not a PMID/);
+    expect(entry?.recovery).not.toMatch(/retry/i);
+    expect(entry?.recovery).toMatch(/same PMIDs/);
+    expect(entry?.recovery).toMatch(/smaller batches/);
   });
 });
 

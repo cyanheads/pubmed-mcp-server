@@ -46,10 +46,19 @@ describe('pubmedEuropepmcSearchTool', () => {
     expect(parsed.success).toBe(false);
   });
 
-  it('rejects pageSize beyond 100', () => {
-    const parsed = pubmedEuropepmcSearchTool.input.safeParse({ query: 'foo', pageSize: 200 });
-    expect(parsed.success).toBe(false);
-  });
+  it.each([
+    [101, true],
+    [200, true],
+    [1000, true],
+    [1001, false],
+    [0, false],
+  ])(
+    'parses pageSize %d: %s — served at 100, rejected past the 1,000 ceiling (#232)',
+    (pageSize, accepted) => {
+      const parsed = pubmedEuropepmcSearchTool.input.safeParse({ query: 'foo', pageSize });
+      expect(parsed.success).toBe(accepted);
+    },
+  );
 
   it('accepts explicit sources including PAT and AGR', () => {
     const input = pubmedEuropepmcSearchTool.input.parse({
@@ -1340,7 +1349,9 @@ describe('pubmedEuropepmcSearchTool effective query and Search URL (#263)', () =
     const text = readCommonMark(raw);
     expect(text).toContain(`⟨strong⟩Effective Query:⟨/strong⟩ ⟨code_inline:${echoed}⟩`);
     const urlLine = text.split('\n').find((line) => line.startsWith('⟨strong⟩Search URL:'));
-    expect(urlLine).toMatch(/^⟨strong⟩Search URL:⟨\/strong⟩ ⟨a⟩[^⟨]+⟨\/a⟩$/);
+    const [, href] =
+      urlLine?.match(/^⟨strong⟩Search URL:⟨\/strong⟩ ⟨a href=([^⟩]+)⟩[^⟨]+⟨\/a⟩$/) ?? [];
+    expect(href).toBe(searchUrl);
   });
 });
 
@@ -1378,5 +1389,127 @@ describe('pubmedEuropepmcSearchTool journal on core results (#274)', () => {
     const { hits } = result.structuredContent as { hits: Array<{ journal?: string }> };
     expect(hits[0]?.journal).toBe('Otolaryngol Pol');
     expect(contractText(result)).toContain('\n**Journal:** Otolaryngol Pol\n');
+  });
+});
+
+describe('pubmedEuropepmcSearchTool page-size clamp (#232)', () => {
+  beforeEach(() => {
+    mockSearch.mockReset();
+    mockGetEpmc.mockReset();
+    mockGetEpmc.mockReturnValue({ search: mockSearch });
+  });
+
+  const hits = (count: number) =>
+    Array.from({ length: count }, (_, i) => ({
+      id: `PPR${i + 1}`,
+      source: 'PPR',
+      title: `Preprint ${i + 1}`,
+    }));
+  const CLAMPED = '`pageSize` 101 is past the per-call cap of 100, so it is served at 100.';
+  const noticeOf = (result: Awaited<ReturnType<typeof runToolContract>>) =>
+    (result.structuredContent as { notice?: string }).notice;
+
+  it("advertises the 1,000 ceiling and states this server's cap, not a Europe PMC limit", () => {
+    const schema = z.toJSONSchema(pubmedEuropepmcSearchTool.input, { io: 'input' }) as unknown as {
+      properties: Record<string, Record<string, unknown>>;
+    };
+    expect(schema.properties.pageSize).toMatchObject({
+      type: 'integer',
+      minimum: 1,
+      maximum: 1000,
+      default: 25,
+    });
+    const description = String(schema.properties.pageSize?.description);
+    expect(description).toContain("up to 100 per call (this server's cap");
+    expect(description).toContain('Europe PMC itself serves up to 1,000');
+    expect(description).not.toContain('per EPMC API');
+  });
+
+  it('rejects a pageSize past the ceiling with -32602 before any upstream call', async () => {
+    const result = await runToolContract(pubmedEuropepmcSearchTool, { query: 'q', pageSize: 1001 });
+
+    expect(result.isError).toBe(true);
+    expect(result.structuredContent).toMatchObject({
+      error: { code: JsonRpcErrorCode.InvalidParams },
+    });
+    expect(contractText(result)).toContain('pageSize: Too big');
+    expect(mockSearch).not.toHaveBeenCalled();
+  });
+
+  it('asks Europe PMC for 100 and names the cursor on both surfaces after a full page', async () => {
+    mockSearch.mockResolvedValue({ ...page(5000, hits(100), 'q'), nextCursorMark: 'CURSOR_NEXT' });
+
+    const result = await runToolContract(pubmedEuropepmcSearchTool, { query: 'q', pageSize: 101 });
+
+    expect(mockSearch).toHaveBeenCalledTimes(1);
+    expect(mockSearch.mock.calls[0]?.[0]).toMatchObject({ pageSize: 100 });
+    expect(result.structuredContent).toMatchObject({ nextCursorMark: 'CURSOR_NEXT' });
+    const notice = `${CLAMPED} Pass this page's \`nextCursorMark\` as \`cursorMark\` for the next page.`;
+    expect(noticeOf(result)).toBe(notice);
+    expect(contractText(result)).toContain(`> ${notice}`);
+  });
+
+  it('names no cursor after the last page', async () => {
+    mockSearch.mockResolvedValue({ ...page(145, hits(45), 'q'), cursorMark: 'CURSOR_2' });
+
+    const result = await runToolContract(pubmedEuropepmcSearchTool, {
+      query: 'q',
+      pageSize: 101,
+      cursorMark: 'CURSOR_2',
+    });
+
+    expect(noticeOf(result)).toBe(CLAMPED);
+    expect(contractText(result)).toContain('(final page)');
+  });
+
+  it('says a cursor past the last result ended the walk on the page before', async () => {
+    // A full page that ends the set still carries a cursor; it leads to an empty page.
+    mockSearch.mockResolvedValue({ ...page(170, [], 'q'), cursorMark: 'CURSOR_3' });
+
+    const result = await runToolContract(pubmedEuropepmcSearchTool, {
+      query: 'q',
+      pageSize: 85,
+      cursorMark: 'CURSOR_3',
+    });
+
+    const notice =
+      'This cursor is past the last of the 170 results: the previous page ended the result set.';
+    expect(noticeOf(result)).toBe(notice);
+    expect(contractText(result)).toContain(`> ${notice}`);
+    expect(contractText(result)).toContain('(final page)');
+  });
+
+  it.each([
+    [
+      'empty-result',
+      page(0, [], 'q'),
+      {},
+      'No results matched your Europe PMC query. Try broadening the query, removing source filters, or running pubmed_spell_check on the term.',
+    ],
+    [
+      'date-sort',
+      page(5, hits(5), 'q'),
+      { sources: ['PPR' as const], sort: 'P_PDATE_D desc' },
+      'Europe PMC ignores `P_PDATE_D` sort for preprint-only (PPR) results — preprints have no populated publication date, so records are returned in relevance order, not by date. To order preprints by date, sort by `PUB_YEAR desc`, or re-rank the returned page by each record’s `firstPublicationDate`.',
+    ],
+  ])('joins the %s notice', async (_kind, response, args, sentence) => {
+    mockSearch.mockResolvedValue(response);
+
+    const result = await runToolContract(pubmedEuropepmcSearchTool, {
+      query: 'q',
+      pageSize: 101,
+      ...args,
+    });
+
+    expect(noticeOf(result)).toBe(`${CLAMPED} ${sentence}`);
+  });
+
+  it('sends the same request with no notice at the cap itself', async () => {
+    mockSearch.mockResolvedValue({ ...page(5000, hits(100), 'q'), nextCursorMark: 'CURSOR_NEXT' });
+
+    const result = await runToolContract(pubmedEuropepmcSearchTool, { query: 'q', pageSize: 100 });
+
+    expect(mockSearch.mock.calls[0]?.[0]).toMatchObject({ pageSize: 100 });
+    expect(noticeOf(result)).toBeUndefined();
   });
 });

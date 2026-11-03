@@ -108,7 +108,7 @@ describe('EuropePmcService.search', () => {
     const result = await service.search({
       query: 'foo',
       sources: ['MED'],
-      pageSize: 25,
+      pageSize: 1,
       cursorMark: '*',
     });
 
@@ -146,8 +146,48 @@ describe('EuropePmcService.search', () => {
     );
 
     const service = makeService();
-    const result = await service.search({ query: 'foo', cursorMark: 'CURSOR_X' });
+    const result = await service.search({ query: 'foo', pageSize: 1, cursorMark: 'CURSOR_X' });
     expect(result.nextCursorMark).toBeUndefined();
+  });
+
+  it('omits the fresh `nextCursorMark` Europe PMC returns on the short last page of a cursor walk', async () => {
+    mockFetchWithTimeout.mockResolvedValue(
+      jsonResponse({
+        hitCount: 170,
+        nextCursorMark: 'CURSOR_8',
+        request: { cursorMark: 'CURSOR_7' },
+        resultList: {
+          result: Array.from({ length: 20 }, (_, i) => ({ id: `${i}`, source: 'MED' })),
+        },
+      }),
+    );
+
+    const service = makeService();
+    const result = await service.search({ query: 'foo', pageSize: 25, cursorMark: 'CURSOR_7' });
+
+    expect(result.hits).toHaveLength(20);
+    expect(result.nextCursorMark).toBeUndefined();
+  });
+
+  it.each([
+    ['an explicit pageSize', { pageSize: 3 }, 3],
+    ['the default pageSize', {}, 25],
+  ])('keeps `nextCursorMark` after a full page at %s', async (_label, size, count) => {
+    mockFetchWithTimeout.mockResolvedValue(
+      jsonResponse({
+        hitCount: 500,
+        nextCursorMark: 'CURSOR_2',
+        request: { cursorMark: '*' },
+        resultList: {
+          result: Array.from({ length: count }, (_, i) => ({ id: `${i}`, source: 'MED' })),
+        },
+      }),
+    );
+
+    const service = makeService();
+    const result = await service.search({ query: 'foo', ...size });
+
+    expect(result.nextCursorMark).toBe('CURSOR_2');
   });
 
   it('builds query with source filter when sources are provided', async () => {

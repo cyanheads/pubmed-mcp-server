@@ -118,7 +118,11 @@ export interface EuropePmcSearchResponse {
   errMsg?: string;
   /** Total matching records across all pages. */
   hitCount?: number;
-  /** Cursor token for the next page; absent on the final page. */
+  /**
+   * Cursor token for the next page. Absent when the first page holds every
+   * hit, but present on the short last page of a cursor walk, where it leads
+   * to an empty page.
+   */
   nextCursorMark?: string;
   /** Cursor used for this response, echoed back from the request. */
   request?: {
@@ -145,11 +149,17 @@ export interface EuropePmcSearchResult {
   query: string;
 }
 
+/** Hits per search page when a request names no `pageSize`. */
+export const EUROPEPMC_DEFAULT_PAGE_SIZE = 25;
+
 /** Parameters accepted by the EPMC search endpoint. */
 export interface EuropePmcSearchParams {
   /** EPMC's cursor pagination token; start with `*` for the first page. */
   cursorMark?: string;
-  /** Max 100 (per EPMC docs). */
+  /**
+   * Europe PMC serves 1–1,000; `pubmed_europepmc_search` caps it at 100 per
+   * call. Default {@link EUROPEPMC_DEFAULT_PAGE_SIZE}.
+   */
   pageSize?: number;
   query: string;
   /** Default `core` — richest payload with abstract, IDs, dates, license. */

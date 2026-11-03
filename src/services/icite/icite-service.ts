@@ -1,7 +1,8 @@
 /**
  * @fileoverview NIH iCite service behind `pubmed_fetch_citation_metrics`: one
  * `/pubs` request per call, retried on transient failures within a total
- * deadline, its records normalized and checked against the PMIDs sent.
+ * deadline, its records normalized and checked against the PMIDs sent — a
+ * record for a PMID not sent fails as `icite_unrequested_record`, unretried.
  *
  * Once retries run out, the last attempt's `data.reason` is kept
  * (`icite_invalid_response` for a body that is not the JSON envelope), and a
@@ -123,8 +124,10 @@ export class IciteService {
    *
    * Records come back in iCite's order, one per PMID it knows; a PMID it does
    * not know is absent, with no error. A record for a PMID the call did not
-   * send fails the call as `icite_invalid_response`, unretried — repeating the
-   * request repeats the answer.
+   * send fails the call as `icite_unrequested_record`, unretried and marked
+   * `retryable: false` — repeating the request repeats the answer. The mark is
+   * set here because the framework fills in only the contract's recovery hint
+   * on a service throw, not its `retryable`.
    */
   async fetchRecords(pmids: readonly string[], ctx: Context): Promise<IciteRecord[]> {
     let raw: IciteRawRecord[];
@@ -150,7 +153,11 @@ export class IciteService {
       if (!record || !requested.has(record.pmid)) {
         throw serviceUnavailable(
           `NIH iCite answered with a record for PMID ${String(entry.pmid)}, which this call did not request.`,
-          { reason: 'icite_invalid_response', unrequestedPmid: String(entry.pmid) },
+          {
+            reason: 'icite_unrequested_record',
+            retryable: false,
+            unrequestedPmid: String(entry.pmid),
+          },
         );
       }
       return record;

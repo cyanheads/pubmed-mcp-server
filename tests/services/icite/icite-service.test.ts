@@ -210,8 +210,13 @@ describe('record normalization', () => {
   });
 });
 
+/**
+ * The same PMID list draws the same answer, so the failure carries `retryable:
+ * false` itself — the framework fills only the contract's recovery hint onto a
+ * service throw, never its `retryable`. (#278)
+ */
 describe('unrequested-record guard', () => {
-  it('fails as icite_invalid_response, without retrying, when iCite answers with a PMID not sent', async () => {
+  it('fails as a non-retryable icite_unrequested_record, without retrying, when iCite answers with a PMID not sent', async () => {
     // iCite's answer to a list holding no PMID it accepts: its first records from PMID 1.
     const fetchMock = stubIciteFetch(() => jsonResponse({ data: [sampleRow('1')] }));
     const error = await makeService(3)
@@ -219,18 +224,23 @@ describe('unrequested-record guard', () => {
       .catch((e: unknown) => e);
 
     expect(error).toBeInstanceOf(McpError);
-    expect(error).toMatchObject({
-      code: JsonRpcErrorCode.ServiceUnavailable,
-      data: { reason: 'icite_invalid_response', unrequestedPmid: '1' },
+    expect((error as McpError).code).toBe(JsonRpcErrorCode.ServiceUnavailable);
+    expect((error as McpError).data).toEqual({
+      reason: 'icite_unrequested_record',
+      retryable: false,
+      unrequestedPmid: '1',
     });
     expect(fetchMock).toHaveBeenCalledOnce();
   });
 
   it('fails the same way on a record whose PMID is not a PMID', async () => {
-    stubIciteFetch(() => jsonResponse({ data: [{ pmid: 0 }] }));
+    const fetchMock = stubIciteFetch(() => jsonResponse({ data: [{ pmid: 0 }] }));
     await expect(
-      makeService().fetchRecords(['23456789'], createMockContext()),
-    ).rejects.toMatchObject({ data: { reason: 'icite_invalid_response' } });
+      makeService(3).fetchRecords(['23456789'], createMockContext()),
+    ).rejects.toMatchObject({
+      data: { reason: 'icite_unrequested_record', retryable: false, unrequestedPmid: '0' },
+    });
+    expect(fetchMock).toHaveBeenCalledOnce();
   });
 });
 

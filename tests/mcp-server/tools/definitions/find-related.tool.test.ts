@@ -3,7 +3,8 @@
  * multi-source provider fallback (#63), the total match count in the header on
  * every return path (#147), Doc Type rendering (#146), and the label an
  * exhausted OpenAlex or Europe PMC Timeout or RateLimited reports — named by its
- * code — in the coverage summary and the all-providers-failed attempts (#160).
+ * code — in the coverage summary and the all-providers-failed attempts (#160),
+ * and a `maxResults` past the cap served at the cap on every return path (#232).
  * @module tests/mcp-server/tools/definitions/find-related.tool.test
  */
 
@@ -877,12 +878,69 @@ describe('findRelatedTool', () => {
       };
       expect(structured.articles).toEqual([]);
       expect(structured.totalCount).toBe(50000);
-      expect(structured.notice).toContain('stopped after 10 pages');
-      expect(structured.notice).toContain('lower the offset');
+      // A lower offset reads a prefix of the same PMID-less rows, so none is advised.
+      const sentence =
+        'Europe PMC paging stopped after 10 pages without finding a row that carries a PubMed PMID.';
+      expect(structured.notice).toContain(sentence);
+      expect(structured.notice).not.toContain('lower the offset');
       const text = textBlocks(result.content as ContentBlock[])
         .map((b) => b.text)
         .join('\n');
-      expect(text).toContain('lower the offset');
+      expect(text).toContain(sentence);
+    });
+
+    it('advises a lower offset when the page cap stops short of the offset', async () => {
+      mockEpmcCitations
+        .mockResolvedValueOnce({
+          pmids: ['101', '102', '103'],
+          hitCount: 50000,
+          totalCount: 50000,
+          droppedNoPmid: 17,
+        })
+        .mockResolvedValue({ pmids: [], hitCount: 50000, totalCount: 50000, droppedNoPmid: 20 });
+
+      const result = await runToolContract(findRelatedTool, {
+        pmid: '12345',
+        relationship: 'cited_by',
+        maxResults: 5,
+        offset: 15,
+      });
+
+      expect(mockEpmcCitations).toHaveBeenCalledTimes(10);
+      const structured = result.structuredContent as { articles: unknown[]; notice?: string };
+      expect(structured.articles).toEqual([]);
+      expect(structured.notice).toContain(
+        'Europe PMC paging stopped after 10 pages, having found 3 PubMed-addressable rows, without reaching offset 15; lower the offset.',
+      );
+    });
+
+    it('states the rows a page holds when the page cap stops inside the window', async () => {
+      mockEpmcCitations
+        .mockResolvedValueOnce({
+          pmids: ['101', '102'],
+          hitCount: 50000,
+          totalCount: 50000,
+          droppedNoPmid: 3,
+        })
+        .mockResolvedValue({ pmids: [], hitCount: 50000, totalCount: 50000, droppedNoPmid: 5 });
+
+      const result = await runToolContract(findRelatedTool, {
+        pmid: '12345',
+        relationship: 'cited_by',
+        maxResults: 5,
+        offset: 0,
+      });
+
+      expect(mockEpmcCitations).toHaveBeenCalledTimes(10);
+      const structured = result.structuredContent as {
+        articles: Array<{ pmid: string }>;
+        notice?: string;
+      };
+      expect(structured.articles.map((a) => a.pmid)).toEqual(['101', '102']);
+      expect(structured.notice).toContain(
+        'Europe PMC paging stopped after 10 pages, having found 2 PubMed-addressable rows, so this page holds rows 0–1 of the 0–4 requested.',
+      );
+      expect(structured.notice).not.toContain('offset 0');
     });
 
     it('discloses how many upstream rows in the fetched page had no PubMed PMID', async () => {
@@ -1016,8 +1074,10 @@ describe('findRelatedTool', () => {
       };
       expect(structured.articles).toEqual([]);
       expect(structured.totalCount).toBe(17394);
-      expect(structured.notice).toContain('OpenAlex paging stopped after 10 pages');
-      expect(structured.notice).toContain('lower the offset');
+      expect(structured.notice).toContain(
+        'OpenAlex paging stopped after 10 pages without finding a row that carries a PubMed PMID.',
+      );
+      expect(structured.notice).not.toContain('lower the offset');
       const text = textBlocks(result.content as ContentBlock[])
         .map((b) => b.text)
         .join('\n');
@@ -2273,10 +2333,10 @@ describe('findRelatedTool content[] escaping of the row lines (issue #255)', () 
 
     const rows = readCommonMark(contractText(result));
     expect(rows).toContain(
-      '⟨strong⟩⟨a⟩PMID 111⟨/a⟩⟨/strong⟩\nHLA-B*57:01 carriers\n⟨em⟩Smith J*, Doe A⟨/em⟩\nJ Allergy*, 2021\n\n⟨list_item_close⟩',
+      '⟨strong⟩⟨a href=https://pubmed.ncbi.nlm.nih.gov/111/⟩PMID 111⟨/a⟩⟨/strong⟩\nHLA-B*57:01 carriers\n⟨em⟩Smith J*, Doe A⟨/em⟩\nJ Allergy*, 2021\n\n⟨list_item_close⟩',
     );
     expect(rows).toContain(
-      '⟨strong⟩⟨a⟩PMID 222⟨/a⟩⟨/strong⟩\n5` UTR of Lee _K\n⟨em⟩Lee _K⟨/em⟩\nJ_ Med 3` end, ~2020\n\n⟨list_item_close⟩',
+      '⟨strong⟩⟨a href=https://pubmed.ncbi.nlm.nih.gov/222/⟩PMID 222⟨/a⟩⟨/strong⟩\n5` UTR of Lee _K\n⟨em⟩Lee _K⟨/em⟩\nJ_ Med 3` end, ~2020\n\n⟨list_item_close⟩',
     );
   });
 
@@ -2291,5 +2351,235 @@ describe('findRelatedTool content[] escaping of the row lines (issue #255)', () 
     const { articles } = result.structuredContent as { articles: { title?: string }[] };
     expect(articles[0]?.title).toBe(title);
     expect(readCommonMark(contractText(result))).toContain(`\n${title}\n`);
+  });
+});
+
+describe('findRelatedTool page-size clamp (#232)', () => {
+  beforeEach(() => {
+    mockELink.mockReset();
+    mockESummary.mockReset();
+    mockESummary.mockResolvedValue({ eSummaryResult: {} });
+    mockExtractBriefSummaries.mockReset();
+    mockExtractBriefSummaries.mockResolvedValue([]);
+    mockEpmcCitations.mockReset();
+    mockEpmcReferences.mockReset();
+    mockOaSimilar.mockReset();
+    mockOaCitedBy.mockReset();
+    mockOaReferences.mockReset();
+    mockGetEpmcService.mockReturnValue(epmcService);
+    mockGetOaService.mockReturnValue(oaService);
+  });
+
+  /** `count` PMIDs from 1001 up, in rank order. */
+  const ranked = (count: number, from = 1001) =>
+    Array.from({ length: count }, (_, i) => String(from + i));
+  const CLAMPED = '`maxResults` 60 is past the per-call cap of 50, so it is served at 50.';
+  const noticeOf = (result: Awaited<ReturnType<typeof runToolContract>>) =>
+    (result.structuredContent as { notice?: string }).notice;
+  const pmidsOf = (result: Awaited<ReturnType<typeof runToolContract>>) =>
+    (result.structuredContent as { articles: { pmid: string }[] }).articles.map((a) => a.pmid);
+  const ncbiDown = () =>
+    mockELink.mockRejectedValue(
+      new McpError(JsonRpcErrorCode.ServiceUnavailable, 'NCBI down', {
+        reason: 'ncbi_unreachable',
+      }),
+    );
+
+  it.each([
+    [51, true],
+    [500, true],
+    [501, false],
+    [0, false],
+    [50.5, false],
+  ])('parses maxResults %d: %s', (maxResults, accepted) => {
+    expect(findRelatedTool.input.safeParse({ pmid: '12345', maxResults }).success).toBe(accepted);
+  });
+
+  it('rejects a maxResults past the ceiling with -32602 before any upstream call', async () => {
+    const result = await runToolContract(findRelatedTool, { pmid: '12345', maxResults: 501 });
+
+    expect(result.isError).toBe(true);
+    expect(result.structuredContent).toMatchObject({
+      error: { code: JsonRpcErrorCode.InvalidParams },
+    });
+    expect(contractText(result)).toContain('maxResults: Too big');
+    expect(mockELink).not.toHaveBeenCalled();
+  });
+
+  it('advertises the 500 ceiling and states the per-call cap', () => {
+    const schema = z.toJSONSchema(findRelatedTool.input, { io: 'input' }) as unknown as {
+      properties: Record<string, Record<string, unknown>>;
+    };
+    expect(schema.properties.maxResults).toMatchObject({
+      type: 'integer',
+      minimum: 1,
+      maximum: 500,
+      default: 10,
+    });
+    expect(schema.properties.maxResults?.description).toContain('up to 50 per call');
+  });
+
+  it('serves 50 and names the next offset on both surfaces; following it reads the next 50', async () => {
+    mockELink.mockResolvedValue(eLinkResponse(ranked(120)));
+
+    const first = await runToolContract(findRelatedTool, { pmid: '12345', maxResults: 60 });
+
+    expect(first.isError).toBeFalsy();
+    // ESummary is asked for the applied window, never the requested one.
+    expect(mockESummary.mock.calls[0]?.[0]).toMatchObject({ id: ranked(50).join(',') });
+    expect(pmidsOf(first)).toEqual(ranked(50));
+    const notice = `${CLAMPED} Pass \`offset: 50\` for the next page.`;
+    expect(noticeOf(first)).toBe(notice);
+    expect(contractText(first)).toContain(`> ${notice}`);
+
+    const second = await runToolContract(findRelatedTool, {
+      pmid: '12345',
+      maxResults: 60,
+      offset: 50,
+    });
+
+    expect(pmidsOf(second)).toEqual(ranked(50, 1051));
+    expect(noticeOf(second)).toBe(`${CLAMPED} Pass \`offset: 100\` for the next page.`);
+  });
+
+  it('names no continuation when every result fits', async () => {
+    mockELink.mockResolvedValue(eLinkResponse(ranked(30)));
+
+    const result = await runToolContract(findRelatedTool, { pmid: '12345', maxResults: 60 });
+
+    expect(pmidsOf(result)).toEqual(ranked(30));
+    expect(noticeOf(result)).toBe(CLAMPED);
+  });
+
+  it('sends the same request with no notice at the cap itself', async () => {
+    mockELink.mockResolvedValue(eLinkResponse(ranked(120)));
+
+    const result = await runToolContract(findRelatedTool, { pmid: '12345', maxResults: 50 });
+
+    expect(mockESummary.mock.calls[0]?.[0]).toMatchObject({ id: ranked(50).join(',') });
+    expect(pmidsOf(result)).toEqual(ranked(50));
+    expect(noticeOf(result)).toBeUndefined();
+  });
+
+  it('sizes the Europe PMC window from the applied value and joins the provenance notice', async () => {
+    ncbiDown();
+    mockEpmcCitations.mockResolvedValue({ pmids: ranked(50), hitCount: 400, droppedNoPmid: 0 });
+
+    const result = await runToolContract(findRelatedTool, {
+      pmid: '12345',
+      relationship: 'cited_by',
+      maxResults: 60,
+    });
+
+    expect(mockEpmcCitations).toHaveBeenCalledTimes(1);
+    expect(mockEpmcCitations).toHaveBeenCalledWith('12345', 50, 1, expect.any(AbortSignal));
+    expect(noticeOf(result)).toBe(
+      `${CLAMPED} Pass \`offset: 50\` for the next page. NCBI eLink unavailable — related articles served by Europe PMC (citations index).`,
+    );
+  });
+
+  it('sizes the OpenAlex window from the applied value', async () => {
+    ncbiDown();
+    mockOaSimilar.mockResolvedValue({ pmids: ranked(100), totalCount: 100 });
+
+    const result = await runToolContract(findRelatedTool, {
+      pmid: '12345',
+      maxResults: 60,
+      offset: 10,
+    });
+
+    expect(mockOaSimilar).toHaveBeenCalledWith('12345', 60, expect.any(AbortSignal));
+    expect(pmidsOf(result)).toEqual(ranked(50, 1011));
+    expect(noticeOf(result)).toBe(
+      `${CLAMPED} Pass \`offset: 60\` for the next page. NCBI eLink unavailable — related articles served by OpenAlex (related_works — OpenAlex similarity, not PubMed’s neighbor algorithm).`,
+    );
+  });
+
+  it('sizes both reference-coverage windows from the applied value and joins the no-reference notice', async () => {
+    mockELink.mockResolvedValue({ eLinkResult: [{ LinkSet: {} }] });
+    mockExtractBriefSummaries.mockResolvedValue([{ pmid: '12345', title: 'Source' }]);
+    mockEpmcReferences.mockResolvedValue({ pmids: [], hitCount: 0, droppedNoPmid: 0 });
+    mockOaReferences.mockResolvedValue({ pmids: [], totalCount: 0 });
+
+    const result = await runToolContract(findRelatedTool, {
+      pmid: '12345',
+      relationship: 'references',
+      maxResults: 60,
+    });
+
+    expect(mockEpmcReferences).toHaveBeenCalledWith('12345', 50, 1, expect.any(AbortSignal));
+    expect(mockOaReferences).toHaveBeenCalledWith('12345', 50, expect.any(AbortSignal));
+    expect(noticeOf(result)).toBe(
+      `${CLAMPED} No reference list available for PMID 12345 via NCBI, Europe PMC, or OpenAlex. Use pubmed_fetch_articles to inspect the article record, or try relationship: "similar" / "cited_by".`,
+    );
+  });
+
+  it('joins the source-not-found notice', async () => {
+    mockELink.mockResolvedValue({ eLinkResult: [{ LinkSet: {} }] });
+
+    const result = await runToolContract(findRelatedTool, { pmid: '99999999', maxResults: 60 });
+
+    expect(noticeOf(result)).toBe(
+      `${CLAMPED} Source PMID 99999999 not found in PubMed. Verify the ID with \`pubmed_fetch_articles\` or \`pubmed_search_articles\`.`,
+    );
+  });
+
+  it('carries the clamp alone on an empty answer for a valid source', async () => {
+    mockELink.mockResolvedValue({ eLinkResult: [{ LinkSet: {} }] });
+    mockExtractBriefSummaries.mockResolvedValue([{ pmid: '12345', title: 'Source' }]);
+
+    const result = await runToolContract(findRelatedTool, { pmid: '12345', maxResults: 60 });
+
+    expect(pmidsOf(result)).toEqual([]);
+    expect(noticeOf(result)).toBe(CLAMPED);
+  });
+
+  it('joins the overshoot notice and names no offset past the end', async () => {
+    mockELink.mockResolvedValue(eLinkResponse(ranked(120)));
+
+    const result = await runToolContract(findRelatedTool, {
+      pmid: '12345',
+      maxResults: 60,
+      offset: 200,
+    });
+
+    expect(noticeOf(result)).toBe(
+      `${CLAMPED} Offset 200 exceeds totalCount (120). Reset offset to 0 or reduce it below 120 to page through results.`,
+    );
+  });
+
+  it('keeps the continuation beside the degraded-metadata notice', async () => {
+    mockELink.mockResolvedValue(eLinkResponse(ranked(120)));
+    mockESummary.mockRejectedValue(new McpError(JsonRpcErrorCode.ServiceUnavailable, 'NCBI down'));
+
+    const result = await runToolContract(findRelatedTool, { pmid: '12345', maxResults: 60 });
+
+    expect(pmidsOf(result)).toEqual(ranked(50));
+    expect(noticeOf(result)).toBe(
+      `${CLAMPED} Pass \`offset: 50\` for the next page. Article metadata is temporarily unavailable (NCBI eSummary did not respond); returning related PMIDs only. Retry for full metadata, or use pubmed_fetch_articles.`,
+    );
+  });
+
+  it('names no continuation when a fallback stopped short of the window', async () => {
+    ncbiDown();
+    // Every 50-row page carries one PMID, so ten pages leave the window unfilled.
+    mockEpmcCitations.mockImplementation(async (_pmid: string, _size: number, page: number) => ({
+      pmids: [String(5000 + page)],
+      hitCount: 50000,
+      droppedNoPmid: 49,
+    }));
+
+    const result = await runToolContract(findRelatedTool, {
+      pmid: '12345',
+      relationship: 'cited_by',
+      maxResults: 60,
+    });
+
+    expect(mockEpmcCitations).toHaveBeenCalledTimes(10);
+    expect(pmidsOf(result)).toHaveLength(10);
+    const notice = noticeOf(result) ?? '';
+    expect(notice.startsWith(`${CLAMPED} NCBI eLink unavailable`)).toBe(true);
+    expect(notice).toContain('Europe PMC paging stopped after 10 pages');
+    expect(notice).not.toContain('Pass `offset');
   });
 });

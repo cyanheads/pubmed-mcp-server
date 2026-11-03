@@ -4,7 +4,8 @@
  * and EPMC-only OA articles. Uses EPMC's cursor-based pagination
  * (`cursorMark`) — unlike `pubmed_search_articles`'s offset-based paging,
  * because EPMC's search API doesn't support offset. `max_results`, `limit`, and
- * `maxResults` are accepted as aliases for `pageSize`. A `query` with no search
+ * `maxResults` are accepted as aliases for `pageSize`, and a `pageSize` past the
+ * per-call cap is served at the cap with a notice. A `query` with no search
  * term (`()`, `<b></b>`) or a blank `cursorMark` is rejected before Europe PMC
  * is called. A lower-case `sources` code is read as its upper-case form.
  * The total hit count rides in `output` so `format()` can state it in the
@@ -37,6 +38,7 @@ import {
   EDAM_PUBMED_ID,
   SCHEMA_SEARCH_ACTION,
 } from './_concepts.js';
+import { pageSizeCeiling, pageSizeClampNotice } from './_page-size.js';
 import { europePmcSourceInputSchema } from './_schemas.js';
 import {
   escapeMarkdownBlock,
@@ -57,6 +59,12 @@ const SourceEnum = z.enum(['MED', 'PMC', 'PPR', 'PAT', 'AGR']);
  * character under the budget. (#93)
  */
 const ABSTRACT_SNIPPET_LIMIT = 400;
+
+/**
+ * Hits one call returns — this server's cap; Europe PMC itself serves up to
+ * 1,000 per page. A larger `pageSize` is served at this size. (#232)
+ */
+const PAGE_SIZE_CAP = 100;
 
 // ─── Tool Definition ─────────────────────────────────────────────────────────
 
@@ -103,9 +111,11 @@ export const pubmedEuropepmcSearchTool = tool('pubmed_europepmc_search', {
       .number()
       .int()
       .min(1)
-      .max(100)
+      .max(pageSizeCeiling(PAGE_SIZE_CAP))
       .default(25)
-      .describe('Results per page. Max 100 per EPMC API.'),
+      .describe(
+        `Results per page, up to ${PAGE_SIZE_CAP} per call (this server's cap; Europe PMC itself serves up to 1,000). A larger value is served at ${PAGE_SIZE_CAP}, with a notice; continue from \`nextCursorMark\`.`,
+      ),
     cursorMark: z
       .string()
       .default('*')
@@ -215,7 +225,9 @@ export const pubmedEuropepmcSearchTool = tool('pubmed_europepmc_search', {
     nextCursorMark: z
       .string()
       .optional()
-      .describe('Cursor to pass back as `cursorMark` for the next page. Absent on the final page.'),
+      .describe(
+        'Cursor to pass back as `cursorMark` for the next page. Absent on a page shorter than `pageSize`, which ends the result set. A full page that happens to end it still carries one, and the page it leads to comes back empty.',
+      ),
     searchUrl: z.string().describe("Europe PMC's website search URL for this query"),
     // A domain field, not enrichment: format() sees only this payload, and the
     // header states the total beside the returned count. (#147)
@@ -233,7 +245,9 @@ export const pubmedEuropepmcSearchTool = tool('pubmed_europepmc_search', {
     notice: z
       .string()
       .optional()
-      .describe('Optional guidance when results are empty or paging overshot'),
+      .describe(
+        `Optional guidance when results are empty, when a cursor is past the last result, when Europe PMC ignores a date sort on preprint-only results, or when a \`pageSize\` past the per-call cap of ${PAGE_SIZE_CAP} was served at ${PAGE_SIZE_CAP}.`,
+      ),
   },
 
   // content[] trailer presentation for the enrichment block. structuredContent always
@@ -282,10 +296,13 @@ export const pubmedEuropepmcSearchTool = tool('pubmed_europepmc_search', {
     }
 
     const sources = (input.sources ?? EUROPEPMC_DEFAULT_SOURCES) as readonly EuropePmcSource[];
+    // A `pageSize` past the cap is served at the cap rather than rejected; Europe
+    // PMC is only ever asked for the applied size. (#232)
+    const pageSize = Math.min(input.pageSize, PAGE_SIZE_CAP);
     const result = await epmc.search({
       query: input.query,
       resultType: input.resultType,
-      pageSize: input.pageSize,
+      pageSize,
       cursorMark: input.cursorMark,
       sources,
       ...(input.sort && { sort: input.sort }),
@@ -341,13 +358,35 @@ export const pubmedEuropepmcSearchTool = tool('pubmed_europepmc_search', {
     // (PUB_YEAR is honored for PPR; only the day-granularity P_PDATE_D is not.)
     const sortField = input.sort?.trim().split(/\s+/)[0]?.toUpperCase();
     const isPprOnly = sources.length > 0 && sources.every((s) => s === 'PPR');
-    let notice: string | undefined;
+    // Only the last `ctx.enrich.notice` survives, so the sentences are collected
+    // and emitted once, the page-size clamp first when it applied.
+    const notices: string[] = [];
+    if (pageSize < input.pageSize) {
+      notices.push(
+        pageSizeClampNotice(
+          'pageSize',
+          input.pageSize,
+          PAGE_SIZE_CAP,
+          result.nextCursorMark
+            ? "Pass this page's `nextCursorMark` as `cursorMark` for the next page."
+            : undefined,
+        ),
+      );
+    }
     if (result.hitCount === 0) {
-      notice =
-        'No results matched your Europe PMC query. Try broadening the query, removing source filters, or running pubmed_spell_check on the term.';
+      notices.push(
+        'No results matched your Europe PMC query. Try broadening the query, removing source filters, or running pubmed_spell_check on the term.',
+      );
+    } else if (hits.length === 0) {
+      // A full page that ends the result set still carries a cursor, and it
+      // leads here; the cursor holds no position to tell that in advance.
+      notices.push(
+        `This cursor is past the last of the ${result.hitCount} results: the previous page ended the result set.`,
+      );
     } else if (sortField === 'P_PDATE_D' && isPprOnly) {
-      notice =
-        'Europe PMC ignores `P_PDATE_D` sort for preprint-only (PPR) results — preprints have no populated publication date, so records are returned in relevance order, not by date. To order preprints by date, sort by `PUB_YEAR desc`, or re-rank the returned page by each record’s `firstPublicationDate`.';
+      notices.push(
+        'Europe PMC ignores `P_PDATE_D` sort for preprint-only (PPR) results — preprints have no populated publication date, so records are returned in relevance order, not by date. To order preprints by date, sort by `PUB_YEAR desc`, or re-rank the returned page by each record’s `firstPublicationDate`.',
+      );
     }
 
     ctx.log.info('pubmed_europepmc_search completed', {
@@ -360,7 +399,7 @@ export const pubmedEuropepmcSearchTool = tool('pubmed_europepmc_search', {
       query: result.query,
       appliedSources: [...sources] as ('MED' | 'PMC' | 'PPR' | 'PAT' | 'AGR')[],
     });
-    if (notice) ctx.enrich.notice(notice);
+    if (notices.length > 0) ctx.enrich.notice(notices.join(' '));
 
     return {
       hits,

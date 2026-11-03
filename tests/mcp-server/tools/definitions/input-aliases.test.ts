@@ -374,6 +374,68 @@ describe('max_results / limit / maxResults → pageSize', () => {
   );
 });
 
+describe('page-size aliases clamp like their target on find_related, lookup_mesh, and europepmc_search (#232)', () => {
+  /** The clamp notice off structuredContent, after asserting content[] carries it too. */
+  function clampNotice(result: Awaited<ReturnType<typeof runToolContract>>): string {
+    expect(result.isError).toBeFalsy();
+    const notice = (result.structuredContent as { notice?: string }).notice ?? '';
+    expect(textOf(result)).toContain(notice);
+    return notice;
+  }
+
+  it.each([['limit'], ['pageSize']])(
+    'pubmed_find_related `%s: 60` windows 50 PMIDs and adds the clamp notice',
+    async (key) => {
+      mockELink.mockResolvedValue({
+        eLinkResult: [
+          {
+            LinkSet: {
+              LinkSetDb: {
+                LinkName: 'pubmed_pubmed',
+                Link: Array.from({ length: 120 }, (_, i) => ({ Id: String(1001 + i) })),
+              },
+            },
+          },
+        ],
+      });
+      // Enrichment failing degrades to bare PMIDs — the window is still the observable.
+      mockESummary.mockRejectedValue(new Error('eSummary down'));
+      const result = await callRaw(findRelatedTool, { pmid: '10', [key]: 60 });
+
+      expect(String(mockESummary.mock.calls[0]?.[0].id).split(',')).toHaveLength(50);
+      const notice = clampNotice(result);
+      expect(notice).toContain('`maxResults` 60 is past the per-call cap of 50');
+      expect(notice).toContain('`offset: 50`');
+    },
+  );
+
+  it.each([['limit'], ['retmax'], ['pageSize']])(
+    'pubmed_lookup_mesh `%s: 60` asks ESearch for 50 and adds the clamp notice',
+    async (key) => {
+      stubMesh();
+      const result = await callRaw(lookupMeshTool, {
+        query: 'asthma',
+        [key]: 60,
+        includeDetails: false,
+      });
+
+      expect(meshRankedCall()).toMatchObject({ term: 'asthma', retmax: 50 });
+      expect(clampNotice(result)).toContain('`maxResults` 60 is past the per-call cap of 50');
+    },
+  );
+
+  it.each([['max_results'], ['limit'], ['maxResults']])(
+    'pubmed_europepmc_search `%s: 101` asks Europe PMC for 100 and adds the clamp notice',
+    async (key) => {
+      mockEpmcSearch.mockResolvedValue({ hits: [], hitCount: 0, query: 'crispr' });
+      const result = await callRaw(pubmedEuropepmcSearchTool, { query: 'crispr', [key]: 101 });
+
+      expect(mockEpmcSearch.mock.calls[0]?.[0]).toMatchObject({ query: 'crispr', pageSize: 100 });
+      expect(clampNotice(result)).toContain('`pageSize` 101 is past the per-call cap of 100');
+    },
+  );
+});
+
 describe('E-utility and sibling names on pubmed_search_articles (#190)', () => {
   beforeEach(() => {
     mockESearch.mockResolvedValue({ count: 40, idList: ['1', '2', '3'], retmax: 3, retstart: 0 });
@@ -448,6 +510,28 @@ describe('E-utility and sibling names on pubmed_search_articles (#190)', () => {
     });
     expect(textOf(result)).toContain('**Returned:** 3 of 31104 | **Offset:** 5');
   });
+});
+
+describe('page-size aliases clamp like maxResults on pubmed_search_articles (#232)', () => {
+  it.each([['limit'], ['retmax'], ['pageSize'], ['num_results'], ['max_results'], ['maxResults']])(
+    '`%s: 1001` sends retmax 1000 and adds the clamp notice on both surfaces',
+    async (key) => {
+      mockESearch.mockResolvedValue({
+        count: 5000,
+        idList: Array.from({ length: 1000 }, (_, i) => String(i + 1)),
+        retmax: 1000,
+        retstart: 0,
+      });
+      const result = await callRaw(searchArticlesTool, { query: 'asthma', [key]: 1001 });
+
+      expect(result.isError).toBeFalsy();
+      expect(mockESearch.mock.calls[0]?.[0]).toMatchObject({ term: 'asthma', retmax: 1000 });
+      const notice = (result.structuredContent as { notice?: string }).notice ?? '';
+      expect(notice).toContain('`maxResults` 1001 is past the per-call cap of 1000');
+      expect(notice).toContain('`offset: 1000`');
+      expect(textOf(result)).toContain(notice);
+    },
+  );
 });
 
 describe('E-utility and sibling names on pubmed_lookup_mesh (#190)', () => {
@@ -626,14 +710,14 @@ describe("an aliased value meets its target's bounds (#190)", () => {
     [
       'pubmed_europepmc_search',
       pubmedEuropepmcSearchTool,
-      { query: 'crispr', maxResults: 101 },
+      { query: 'crispr', maxResults: 1001 },
       'pageSize',
       'maxResults',
     ],
     [
       'pubmed_search_articles',
       searchArticlesTool,
-      { query: 'asthma', retmax: 1001 },
+      { query: 'asthma', retmax: 10_001 },
       'maxResults',
       'retmax',
     ],
@@ -647,14 +731,14 @@ describe("an aliased value meets its target's bounds (#190)", () => {
     [
       'pubmed_lookup_mesh',
       lookupMeshTool,
-      { query: 'asthma', pageSize: 51 },
+      { query: 'asthma', pageSize: 501 },
       'maxResults',
       'pageSize',
     ],
     [
       'pubmed_find_related',
       findRelatedTool,
-      { pmid: '10', pageSize: 51 },
+      { pmid: '10', pageSize: 501 },
       'maxResults',
       'pageSize',
     ],

@@ -3,7 +3,7 @@
  * @module tests/mcp-server/tools/definitions/lookup-mesh.tool.test
  */
 
-import type { ContentBlock } from '@cyanheads/mcp-ts-core';
+import { type ContentBlock, z } from '@cyanheads/mcp-ts-core';
 import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
 import { createMockContext, getEnrichment, runToolContract } from '@cyanheads/mcp-ts-core/testing';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
@@ -1122,5 +1122,142 @@ describe('lookupMeshTool', () => {
       expect(renderedHtml(text ?? '').split('<h1').length - 1).toBe(1);
       expect(renderedText(text ?? '')).toContain(`MeSH Lookup: ${query} Found 0`);
     });
+  });
+});
+
+describe('lookupMeshTool page-size clamp (#232)', () => {
+  beforeEach(() => {
+    mockESearch.mockReset();
+    mockESummary.mockReset();
+  });
+
+  /** `count` ranked descriptors with no exact-heading match, paged by `retstart`/`retmax`. */
+  function mockRanked(count: number): string[] {
+    const ranked = Array.from({ length: count }, (_, i) => String(68100000 + i));
+    mockESearch.mockImplementation(
+      async (params: { term: string; retmax: number; retstart?: number }) => {
+        if (params.term.endsWith('[MH]')) return { idList: [], count: 0 };
+        const start = params.retstart ?? 0;
+        return { idList: ranked.slice(start, start + params.retmax), count };
+      },
+    );
+    mockESummary.mockImplementation(async (params: { id: string }) =>
+      summaryFor(params.id.split(',')),
+    );
+    return ranked;
+  }
+
+  const CLAMPED = '`maxResults` 60 is past the per-call cap of 50, so it is served at 50.';
+  const run = (args: { maxResults: number; offset?: number }) =>
+    runToolContract(lookupMeshTool, { query: 'cancer', includeDetails: false, ...args });
+  const rankedCall = () =>
+    mockESearch.mock.calls.map((c) => c[0]).find((p) => !String(p.term).endsWith('[MH]'));
+  const noticeOf = (result: Awaited<ReturnType<typeof runToolContract>>) =>
+    (result.structuredContent as { notice?: string }).notice;
+  const uidsOf = (result: Awaited<ReturnType<typeof runToolContract>>) =>
+    (result.structuredContent as { results: { entrezUid: string }[] }).results.map(
+      (r) => r.entrezUid,
+    );
+
+  it.each([
+    [51, true],
+    [500, true],
+    [501, false],
+    [0, false],
+  ])('parses maxResults %d: %s', (maxResults, accepted) => {
+    expect(lookupMeshTool.input.safeParse({ query: 'cancer', maxResults }).success).toBe(accepted);
+  });
+
+  it('rejects a maxResults past the ceiling with -32602 before any upstream call', async () => {
+    const result = await run({ maxResults: 501 });
+
+    expect(result.isError).toBe(true);
+    expect(result.structuredContent).toMatchObject({
+      error: { code: JsonRpcErrorCode.InvalidParams },
+    });
+    expect(
+      textBlocks(result.content as ContentBlock[])
+        .map((b) => b.text)
+        .join('\n'),
+    ).toContain('maxResults: Too big');
+    expect(mockESearch).not.toHaveBeenCalled();
+  });
+
+  it('advertises the 500 ceiling and states the per-call cap', () => {
+    const schema = z.toJSONSchema(lookupMeshTool.input, { io: 'input' }) as unknown as {
+      properties: Record<string, Record<string, unknown>>;
+    };
+    expect(schema.properties.maxResults).toMatchObject({
+      type: 'integer',
+      minimum: 1,
+      maximum: 500,
+      default: 10,
+    });
+    expect(schema.properties.maxResults?.description).toContain('up to 50 per call');
+  });
+
+  it('asks ESearch for 50 and names nextOffset on both surfaces; following it reads the next 50', async () => {
+    const ranked = mockRanked(120);
+
+    const first = await run({ maxResults: 60 });
+
+    expect(rankedCall()).toMatchObject({ retmax: 50, retstart: 0 });
+    expect(uidsOf(first)).toEqual(ranked.slice(0, 50));
+    expect(first.structuredContent).toMatchObject({ nextOffset: 50 });
+    const notice = `${CLAMPED} Pass \`offset: 50\`, this page's \`nextOffset\`, for the next page.`;
+    expect(noticeOf(first)).toBe(notice);
+    expect(
+      textBlocks(first.content as ContentBlock[])
+        .map((b) => b.text)
+        .join('\n'),
+    ).toContain(`> ${notice}`);
+
+    mockESearch.mockClear();
+    const second = await run({ maxResults: 60, offset: 50 });
+
+    expect(rankedCall()).toMatchObject({ retmax: 50, retstart: 50 });
+    expect(uidsOf(second)).toEqual(ranked.slice(50, 100));
+  });
+
+  it('names no continuation when every result fits', async () => {
+    mockRanked(30);
+
+    const result = await run({ maxResults: 60 });
+
+    expect(uidsOf(result)).toHaveLength(30);
+    expect(result.structuredContent).not.toHaveProperty('nextOffset');
+    expect(noticeOf(result)).toBe(CLAMPED);
+  });
+
+  it.each([
+    [
+      'no-match',
+      0,
+      0,
+      'No MeSH descriptors matched `cancer`. Try `pubmed_spell_check` for a suggested correction, broaden the term, or use `pubmed_search_articles` for free-text discovery against article metadata.',
+    ],
+    [
+      'overshoot',
+      30,
+      100,
+      'Offset 100 returned no records — `cancer` matches 30 MeSH descriptor(s). Reset offset to 0 or lower it below 30.',
+    ],
+  ])('joins the %s notice', async (_kind, count, offset, sentence) => {
+    mockRanked(count);
+
+    const result = await run({ maxResults: 60, offset });
+
+    expect(noticeOf(result)).toBe(`${CLAMPED} ${sentence}`);
+  });
+
+  it('sends the same request with no notice at the cap itself', async () => {
+    const ranked = mockRanked(120);
+
+    const result = await run({ maxResults: 50 });
+
+    expect(rankedCall()).toMatchObject({ retmax: 50, retstart: 0 });
+    expect(uidsOf(result)).toEqual(ranked.slice(0, 50));
+    expect(result.structuredContent).toMatchObject({ nextOffset: 50 });
+    expect(noticeOf(result)).toBeUndefined();
   });
 });

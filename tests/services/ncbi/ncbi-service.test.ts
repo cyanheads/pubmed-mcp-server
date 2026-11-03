@@ -2494,83 +2494,104 @@ describe('NcbiService integration with real queue', () => {
   }
 
   it('queue wait counts toward totalDeadlineMs (regression for issue #50)', async () => {
-    const { service, mockApiClient } = createService({
-      maxConcurrent: 1,
-      deadlineMs: 200,
-      apiDurationMs: 500,
-    });
+    vi.useFakeTimers();
+    try {
+      const { service, mockApiClient } = createService({
+        maxConcurrent: 1,
+        deadlineMs: 200,
+        apiDurationMs: 500,
+      });
 
-    // Blocker holds the single in-flight slot for 500ms.
-    const blocker = service.eSearch({ db: 'pubmed', term: 'blocker' });
+      // Blocker holds the single in-flight slot for 500ms.
+      const blocker = service.eSearch({ db: 'pubmed', term: 'blocker' });
+      const queued = service.eSearch({ db: 'pubmed', term: 'queued' }).catch((e: unknown) => e);
 
-    const started = Date.now();
-    await expect(service.eSearch({ db: 'pubmed', term: 'queued' })).rejects.toMatchObject({
-      code: JsonRpcErrorCode.Timeout,
-      data: { reason: 'ncbi_deadline_exceeded' },
-    });
-    const elapsed = Date.now() - started;
+      await vi.advanceTimersByTimeAsync(199);
+      expect(await settledValue(queued)).toBe(PENDING);
+      await vi.advanceTimersByTimeAsync(1);
 
-    // Queued call must fail at its deadline (≈200ms), not after the blocker (500ms+).
-    expect(elapsed).toBeLessThan(400);
-    // Queued call never reached the API client; only the blocker did.
-    expect(mockApiClient.makeRequest).toHaveBeenCalledTimes(1);
+      // Queued call fails at its 200ms deadline, while the blocker still holds the slot.
+      expect(await settledValue(queued)).toMatchObject({
+        code: JsonRpcErrorCode.Timeout,
+        data: { reason: 'ncbi_deadline_exceeded' },
+      });
+      expect(await settledValue(blocker)).toBe(PENDING);
+      // Queued call never reached the API client; only the blocker did.
+      expect(mockApiClient.makeRequest).toHaveBeenCalledTimes(1);
 
-    await blocker;
+      await vi.advanceTimersByTimeAsync(300);
+      await blocker;
+    } finally {
+      vi.useRealTimers();
+    }
   }, 2000);
 
   it('concurrent calls execute in parallel up to maxConcurrent', async () => {
-    const { service, mockApiClient } = createService({
-      maxConcurrent: 3,
-      deadlineMs: 60_000,
-      apiDurationMs: 60,
-    });
+    vi.useFakeTimers();
+    try {
+      const { service, mockApiClient } = createService({
+        maxConcurrent: 3,
+        deadlineMs: 60_000,
+        apiDurationMs: 60,
+      });
 
-    const started = Date.now();
-    await Promise.all([
-      service.eSearch({ db: 'pubmed', term: 'a' }),
-      service.eSearch({ db: 'pubmed', term: 'b' }),
-      service.eSearch({ db: 'pubmed', term: 'c' }),
-    ]);
-    const elapsed = Date.now() - started;
+      const calls = ['a', 'b', 'c'].map((term) => service.eSearch({ db: 'pubmed', term }));
 
-    // 3 parallel 60ms tasks should finish around 60–100ms, not 180ms.
-    expect(elapsed).toBeLessThan(150);
-    expect(mockApiClient.makeRequest).toHaveBeenCalledTimes(3);
+      // All three start at once and settle together at 60ms, not one after another by 180ms.
+      await vi.advanceTimersByTimeAsync(0);
+      expect(mockApiClient.makeRequest).toHaveBeenCalledTimes(3);
+      await vi.advanceTimersByTimeAsync(59);
+      for (const call of calls) expect(await settledValue(call)).toBe(PENDING);
+      await vi.advanceTimersByTimeAsync(1);
+      for (const call of calls) expect(await settledValue(call)).not.toBe(PENDING);
+      await Promise.all(calls);
+    } finally {
+      vi.useRealTimers();
+    }
   }, 2000);
 
   it('a slow upstream call does not delay an independent fast call', async () => {
     // Two concurrent slots. First call hits a slow path (300ms); second uses a
-    // fresh request flow that resolves in <20ms. Without concurrency, the
+    // fresh request flow that resolves at once. Without concurrency, the
     // second would have to wait for the first.
-    const mockApiClient = {
-      makeRequest: vi
-        .fn()
-        .mockImplementationOnce(
-          () => new Promise<string>((r) => setTimeout(() => r('<xml/>'), 300)),
-        )
-        .mockImplementation(() => Promise.resolve('<xml/>')),
-      makeExternalRequest: vi.fn(),
-    } as unknown as NcbiApiClient;
-    const mockResponseHandler = {
-      parseAndHandleResponse: vi.fn().mockReturnValue({
-        eSearchResult: { Count: '0', RetMax: '0', RetStart: '0', QueryTranslation: '' },
-      }),
-    } as unknown as NcbiResponseHandler;
-    const service = new NcbiService(mockApiClient, realQueue(0, 2), mockResponseHandler, 0, 60_000);
+    vi.useFakeTimers();
+    try {
+      const mockApiClient = {
+        makeRequest: vi
+          .fn()
+          .mockImplementationOnce(
+            () => new Promise<string>((r) => setTimeout(() => r('<xml/>'), 300)),
+          )
+          .mockImplementation(() => Promise.resolve('<xml/>')),
+        makeExternalRequest: vi.fn(),
+      } as unknown as NcbiApiClient;
+      const mockResponseHandler = {
+        parseAndHandleResponse: vi.fn().mockReturnValue({
+          eSearchResult: { Count: '0', RetMax: '0', RetStart: '0', QueryTranslation: '' },
+        }),
+      } as unknown as NcbiResponseHandler;
+      const service = new NcbiService(
+        mockApiClient,
+        realQueue(0, 2),
+        mockResponseHandler,
+        0,
+        60_000,
+      );
 
-    const slowStarted = Date.now();
-    const slow = service.eSearch({ db: 'pubmed', term: 'slow' });
+      const slow = service.eSearch({ db: 'pubmed', term: 'slow' });
+      const fast = service.eSearch({ db: 'pubmed', term: 'fast' });
 
-    const fastStarted = Date.now();
-    await service.eSearch({ db: 'pubmed', term: 'fast' });
-    const fastElapsed = Date.now() - fastStarted;
-
-    // Fast call must complete quickly without waiting on the slow one.
-    expect(fastElapsed).toBeLessThan(100);
-
-    await slow;
-    const slowElapsed = Date.now() - slowStarted;
-    expect(slowElapsed).toBeGreaterThanOrEqual(280);
+      // Fast call settles at 0 without waiting on the slow one, which settles at 300ms.
+      await vi.advanceTimersByTimeAsync(0);
+      expect(await settledValue(fast)).not.toBe(PENDING);
+      await vi.advanceTimersByTimeAsync(299);
+      expect(await settledValue(slow)).toBe(PENDING);
+      await vi.advanceTimersByTimeAsync(1);
+      expect(await settledValue(slow)).not.toBe(PENDING);
+      await Promise.all([slow, fast]);
+    } finally {
+      vi.useRealTimers();
+    }
   }, 2000);
 
   it('respects maxConcurrent ceiling with many enqueued calls', async () => {
@@ -2601,29 +2622,34 @@ describe('NcbiService integration with real queue', () => {
   }, 2000);
 
   it('enforces minStartGapMs across consecutive calls', async () => {
-    const { service, mockApiClient } = createService({
-      maxConcurrent: 4,
-      deadlineMs: 60_000,
-      requestDelayMs: 80,
-      apiDurationMs: 5,
-    });
-    const startTimes: number[] = [];
-    (mockApiClient.makeRequest as ReturnType<typeof vi.fn>).mockImplementation(() => {
-      startTimes.push(Date.now());
-      return Promise.resolve('<xml/>');
-    });
+    vi.useFakeTimers();
+    try {
+      const { service, mockApiClient } = createService({
+        maxConcurrent: 4,
+        deadlineMs: 60_000,
+        requestDelayMs: 80,
+        apiDurationMs: 5,
+      });
+      const startTimes: number[] = [];
+      (mockApiClient.makeRequest as ReturnType<typeof vi.fn>).mockImplementation(() => {
+        startTimes.push(Date.now());
+        return Promise.resolve('<xml/>');
+      });
 
-    const begin = Date.now();
-    await Promise.all([
-      service.eSearch({ db: 'pubmed', term: 'a' }),
-      service.eSearch({ db: 'pubmed', term: 'b' }),
-      service.eSearch({ db: 'pubmed', term: 'c' }),
-    ]);
+      const begin = Date.now();
+      const all = Promise.all([
+        service.eSearch({ db: 'pubmed', term: 'a' }),
+        service.eSearch({ db: 'pubmed', term: 'b' }),
+        service.eSearch({ db: 'pubmed', term: 'c' }),
+      ]);
+      await vi.advanceTimersByTimeAsync(160);
+      await all;
 
-    const offsets = startTimes.map((t) => t - begin);
-    expect(offsets[0]).toBeLessThan(40);
-    expect(offsets[1] as number).toBeGreaterThanOrEqual(70);
-    expect(offsets[2] as number).toBeGreaterThanOrEqual(150);
+      // One start every 80ms, the first at once.
+      expect(startTimes.map((t) => t - begin)).toEqual([0, 80, 160]);
+    } finally {
+      vi.useRealTimers();
+    }
   }, 2000);
 
   it('queue_full when load exceeds the queue depth + maxConcurrent', async () => {

@@ -104,12 +104,20 @@ beforeEach(() => {
 // ─── Input validation: injection attempts ────────────────────────────────────
 
 describe('search-articles injection', () => {
-  it('rejects empty query string (min(1) constraint)', () => {
-    const result = searchArticlesTool.input.safeParse({ query: '' });
-    expect(result.success).toBe(false);
+  it('rejects an empty query with no subject filter before NCBI is called (#245)', async () => {
+    // An exactly-empty query parses as no query; with no subject filter the
+    // handler refuses it rather than searching on nothing.
+    const ctx = createMockContext({ errors: searchArticlesTool.errors });
+    const input = searchArticlesTool.input.parse({ query: '' });
+
+    await expect(searchArticlesTool.handler(input, ctx)).rejects.toMatchObject({
+      code: JsonRpcErrorCode.ValidationError,
+      data: { reason: 'no_search_term' },
+    });
+    expect(mockESearch).not.toHaveBeenCalled();
   });
 
-  it('accepts a single-character query (schema only requires min length 1)', () => {
+  it('accepts a single-character query (the schema sets no minimum length)', () => {
     const result = searchArticlesTool.input.safeParse({ query: 'x' });
     expect(result.success).toBe(true);
   });
@@ -171,8 +179,8 @@ describe('search-articles injection', () => {
     expect(negative.success).toBe(false);
   });
 
-  it('rejects maxResults above 1000 (schema max is 1000)', () => {
-    const result = searchArticlesTool.input.safeParse({ query: 'cancer', maxResults: 1001 });
+  it('rejects maxResults above the 10000 ceiling (#232)', () => {
+    const result = searchArticlesTool.input.safeParse({ query: 'cancer', maxResults: 10_001 });
     expect(result.success).toBe(false);
   });
 
@@ -343,9 +351,9 @@ describe('lookup-mesh input validation', () => {
     expect(result.success).toBe(false);
   });
 
-  it('rejects maxResults above 50 and accepts 50', () => {
-    const over = lookupMeshTool.input.safeParse({ query: 'cancer', maxResults: 51 });
-    const atMax = lookupMeshTool.input.safeParse({ query: 'cancer', maxResults: 50 });
+  it('rejects maxResults above the 500 ceiling and accepts 500 (#232)', () => {
+    const over = lookupMeshTool.input.safeParse({ query: 'cancer', maxResults: 501 });
+    const atMax = lookupMeshTool.input.safeParse({ query: 'cancer', maxResults: 500 });
     expect(over.success).toBe(false);
     expect(atMax.success).toBe(true);
   });
@@ -777,11 +785,11 @@ describe('format() output sanitization', () => {
     // The title's tags are stripped as markup; every other character reads back
     // as text, with no heading, link, emphasis, or raw HTML formed from it.
     expect(read.split('\n').slice(0, 8)).toEqual([
-      '⟨heading_open⟩',
+      '⟨heading_open h3⟩',
       '',
       'PMID 23456789',
       '',
-      '⟨heading_close⟩',
+      '⟨heading_close h3⟩',
       '',
       '⟨strong⟩Title:⟨/strong⟩ # Injected [Click me](https://evil.test) bold *a',
       '⟨strong⟩Year:⟨/strong⟩ Not available | ⟨strong⟩Journal:⟨/strong⟩ [J](https://evil.test)* | ⟨strong⟩DOI:⟨/strong⟩ 10.1/<i>x</i>',

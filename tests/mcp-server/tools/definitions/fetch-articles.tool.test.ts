@@ -2359,24 +2359,25 @@ describe('fetchArticlesTool content[] escaping of the abstract and record fields
     // list item.
     const list = (item: string) =>
       `⟨bullet_list_open⟩\n\n⟨list_item_open⟩\n\n${item}\n\n⟨list_item_close⟩\n\n⟨bullet_list_close⟩`;
-    const heading = (name: string) => `⟨heading_open⟩\n\n${name}\n\n⟨heading_close⟩`;
+    const heading = (tag: string, name: string) =>
+      `⟨heading_open ${tag}⟩\n\n${name}\n\n⟨heading_close ${tag}⟩`;
     const erratum = '⟨strong⟩ErratumIn:⟨/strong⟩ J Med* — Note: p*';
     expect(readCommonMark(text)).toBe(
       [
-        heading('PubMed Articles'),
+        heading('h2', 'PubMed Articles'),
         '⟨strong⟩Articles Returned:⟨/strong⟩ 1',
-        heading('HLA-B*57:01 carriers'),
+        heading('h3', 'HLA-B*57:01 carriers'),
         '⟨strong⟩Notices:⟨/strong⟩',
         list(erratum),
         '⟨strong⟩Journal:⟨/strong⟩ J Allergy*, (J_ All), 2024, ⟨strong⟩5`⟨/strong⟩(~3), 1*',
         '⟨strong⟩Book:⟨/strong⟩ Book* [Internet`]\n⟨strong⟩Publisher:⟨/strong⟩ Pub_ Co\n⟨strong⟩Publisher Location:⟨/strong⟩ City*\n⟨strong⟩Edition:⟨/strong⟩ 2~\n⟨strong⟩Collection:⟨/strong⟩ _Series\n⟨strong⟩ISBN:⟨/strong⟩ 97*8\n⟨strong⟩Book DOI:⟨/strong⟩ 10.1/a`\n⟨strong⟩Record Type:⟨/strong⟩ book-chapter\n⟨strong⟩Type:⟨/strong⟩ Review*\n⟨strong⟩PMID:⟨/strong⟩ 42\n⟨strong⟩DOI:⟨/strong⟩ 10.1000/x_',
-        heading('Comments and Corrections (1)'),
+        heading('h4', 'Comments and Corrections (1)'),
         list(erratum),
-        heading('MeSH Terms'),
+        heading('h4', 'MeSH Terms'),
         list('Neoplasms* [D009369] (genetics*)'),
-        heading('Grants'),
+        heading('h4', 'Grants'),
         list('R01* — NIH_ — US`'),
-        heading('Data Banks'),
+        heading('h4', 'Data Banks'),
         'Find other records citing an accession with ⟨code_inline:pubmed_search_articles⟩ for ⟨code_inline:<accession>[si]⟩.',
         list('⟨strong⟩GenBank*:⟨/strong⟩ AB_, CD*'),
       ].join('\n\n'),

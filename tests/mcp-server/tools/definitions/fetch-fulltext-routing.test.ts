@@ -1597,7 +1597,8 @@ describe('Europe PMC fan-out', () => {
 
     /**
      * Each Europe PMC answer takes 300 ms against a 50 ms start gap, so without
-     * the cap six or more requests would overlap.
+     * the cap six or more requests would overlap. A fake clock keeps both
+     * intervals exact, however late a real timer would fire.
      */
     let inFlight = 0;
     let peak = 0;
@@ -1611,10 +1612,14 @@ describe('Europe PMC fan-out', () => {
       return upstream(url);
     });
 
+    vi.useFakeTimers();
     try {
-      const { result } = await fetchFulltext({ dois });
+      const settled = fetchFulltext({ dois });
+      await vi.advanceTimersByTimeAsync(5_000);
+      const { result } = await settled;
       expect(result.unavailable?.map((u) => u.id)).toEqual(dois);
     } finally {
+      vi.useRealTimers();
       fetchSpy.mockImplementation(async (input: Parameters<typeof fetch>[0]) =>
         upstream(new URL(String(input))),
       );

@@ -2,7 +2,8 @@
  * @fileoverview MeSH (Medical Subject Headings) vocabulary lookup tool.
  * Searches the NCBI MeSH database with offset pagination and optionally
  * retrieves detailed records. `limit`, `retmax`, and `pageSize` are accepted as
- * aliases for `maxResults`, `retstart` for `offset`, and `term` for `query`.
+ * aliases for `maxResults`, `retstart` for `offset`, and `term` for `query`. A
+ * `maxResults` past the per-call cap is served at the cap with a notice.
  * @module src/mcp-server/tools/definitions/lookup-mesh.tool
  */
 
@@ -18,6 +19,7 @@ import {
   SCHEMA_DEFINED_TERM,
   SCHEMA_DEFINED_TERM_SET,
 } from './_concepts.js';
+import { pageSizeCeiling, pageSizeClampNotice } from './_page-size.js';
 import { escapeMarkdownInline, markdownCodeSpan } from './_text.js';
 import { hasVisibleText } from './_visible-text.js';
 
@@ -44,6 +46,9 @@ interface MeshSummary {
  * and its descriptor); the rest is headroom.
  */
 const EXACT_MATCH_CANDIDATES = 5;
+
+/** Records one call returns; a larger `maxResults` is served at this size. (#232) */
+const MAX_RESULTS_CAP = 50;
 
 /**
  * The record's tree numbers. Two `TreeNum` values are not tree positions: a
@@ -131,7 +136,15 @@ export const lookupMeshTool = tool('pubmed_lookup_mesh', {
       .describe(
         'MeSH descriptor name or free-text term to look up. Must carry a term: a value of only whitespace or invisible characters, such as a zero-width space, is rejected rather than searched.',
       ),
-    maxResults: z.number().int().min(1).max(50).default(10).describe('Maximum results'),
+    maxResults: z
+      .number()
+      .int()
+      .min(1)
+      .max(pageSizeCeiling(MAX_RESULTS_CAP))
+      .default(10)
+      .describe(
+        `Maximum results per page, up to ${MAX_RESULTS_CAP} per call. A larger value is served at ${MAX_RESULTS_CAP}, with a notice; continue from \`nextOffset\`.`,
+      ),
     offset: z
       .number()
       .int()
@@ -196,12 +209,15 @@ export const lookupMeshTool = tool('pubmed_lookup_mesh', {
       .string()
       .optional()
       .describe(
-        'Optional guidance when no descriptors matched or the offset overshot the result set — suggests spell-check, free-text search, or resetting the offset. Absent on successful result pages.',
+        `Optional guidance when no descriptors matched, the offset overshot the result set, or a \`maxResults\` past the per-call cap of ${MAX_RESULTS_CAP} was served at ${MAX_RESULTS_CAP} — suggests spell-check, free-text search, resetting the offset, or the \`nextOffset\` to continue from. Absent on a result page that needs none of these.`,
       ),
   },
 
   async handler(input, ctx) {
-    const { query, maxResults, offset, includeDetails } = input;
+    const { query, offset, includeDetails } = input;
+    // A `maxResults` past the cap is served at the cap rather than rejected, and
+    // the ranked ESearch window is sized from this applied value. (#232)
+    const maxResults = Math.min(input.maxResults, MAX_RESULTS_CAP);
     const ncbi = getNcbiService();
     ctx.log.debug('MeSH lookup started', { query, maxResults, offset, includeDetails });
 
@@ -273,6 +289,21 @@ export const lookupMeshTool = tool('pubmed_lookup_mesh', {
     // A notice renders as authored Markdown, so the caller's query in it is a
     // code span: it reads back exactly as sent, raw and rendered. (#263)
     const quoted = markdownCodeSpan(query);
+    // Only the last `ctx.enrich.notice` survives, so the page's sentences are
+    // collected and emitted once, the page-size clamp first when it applied.
+    const notices: string[] = [];
+    if (maxResults < input.maxResults) {
+      notices.push(
+        pageSizeClampNotice(
+          'maxResults',
+          input.maxResults,
+          MAX_RESULTS_CAP,
+          hasMore
+            ? `Pass \`offset: ${nextOffset}\`, this page's \`nextOffset\`, for the next page.`
+            : undefined,
+        ),
+      );
+    }
     if (ids.length === 0) {
       ctx.enrich.total(totalCount);
       let notice: string;
@@ -286,7 +317,8 @@ export const lookupMeshTool = tool('pubmed_lookup_mesh', {
       } else {
         notice = `Offset ${offset} returned no records — ${quoted} matches ${totalCount} MeSH descriptor(s). Reset offset to 0 or lower it below ${totalCount}.`;
       }
-      ctx.enrich.notice(notice);
+      notices.push(notice);
+      ctx.enrich.notice(notices.join(' '));
       return { query, offset, ...(hasMore && { nextOffset }), results: [] };
     }
 
@@ -307,10 +339,11 @@ export const lookupMeshTool = tool('pubmed_lookup_mesh', {
     // so there is no offset that advances — say so instead of emitting one that
     // would replay this page.
     if (consumed === 0 && totalCount > 0) {
-      ctx.enrich.notice(
+      notices.push(
         `The exact-descriptor match filled this page of ${maxResults}. Raise maxResults to see the ${totalCount} ranked match(es) for ${quoted}.`,
       );
     }
+    if (notices.length > 0) ctx.enrich.notice(notices.join(' '));
     return { query, offset, ...(hasMore && { nextOffset }), results };
   },
 

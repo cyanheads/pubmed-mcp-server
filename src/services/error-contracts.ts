@@ -102,7 +102,7 @@ export const QUERY_INPUT_ERRORS = [
   {
     reason: 'blank_query',
     code: JsonRpcErrorCode.ValidationError,
-    when: 'The query contains no search term: nothing is left once whitespace and invisible characters such as a zero-width space are disregarded. pubmed_search_articles and pubmed_europepmc_search first decode HTML entities and also disregard markup and parentheses, so `()`, `<b></b>`, and `&nbsp;` hold no term there; pubmed_search_articles also disregards bracketed field tags such as `[pdat]`.',
+    when: 'The query contains no search term: nothing is left once whitespace and invisible characters such as a zero-width space are disregarded. pubmed_search_articles and pubmed_europepmc_search first decode HTML entities and also disregard markup and parentheses, so `()`, `<b></b>`, and `&nbsp;` hold no term there; pubmed_search_articles also disregards bracketed field tags such as `[pdat]`. On pubmed_search_articles an exactly-empty `query` is not blank: it means no query, and the search runs on its filters.',
     recovery: 'Supply a nonblank search term; retrying the same blank input will not help.',
     retryable: false,
   },
@@ -171,10 +171,18 @@ export const ICITE_SERVICE_ERRORS = [
   {
     reason: 'icite_invalid_response',
     code: JsonRpcErrorCode.ServiceUnavailable,
-    when: 'NIH iCite returned a body that is not its JSON record list on the last attempt the retry budget allowed, or a record for a PMID the call did not request.',
-    recovery:
-      'Retry the request after a brief delay; NIH iCite returned a malformed or mismatched response.',
+    when: 'NIH iCite returned a body that is not its JSON record list on the last attempt the retry budget allowed.',
+    recovery: 'Retry the request after a brief delay; NIH iCite returned a malformed response.',
     retryable: true,
+    thrownBy: 'service',
+  },
+  {
+    reason: 'icite_unrequested_record',
+    code: JsonRpcErrorCode.ServiceUnavailable,
+    when: 'NIH iCite answered with a record for a PMID the call did not request, or one whose PMID is not a PMID — the answer it gives this PMID list every time.',
+    recovery:
+      'Do not resend the same PMIDs; NIH iCite answers this list the same way every time. Request them in smaller batches to isolate the PMID it misreads.',
+    retryable: false,
     thrownBy: 'service',
   },
 ] as const;

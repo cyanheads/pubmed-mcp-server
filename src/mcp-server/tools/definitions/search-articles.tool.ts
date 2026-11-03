@@ -7,7 +7,11 @@
  * only, a bare field tag, or empty parentheses — is rejected before NCBI is
  * called, as is a filter value with no term once sanitized (`"   "`, `"()"`), a
  * `dateRange` bound that is no real calendar date, and a range whose `minDate`
- * falls after its `maxDate`. `limit`, `retmax`, `num_results`, and `pageSize`
+ * falls after its `maxDate`. An omitted or exactly-empty `query` is no query:
+ * the search runs on its filter clauses alone, and is rejected unless
+ * `author`, `journal`, `meshTerms`, or `publicationTypes` carries a term.
+ * `maxResults` and `summaryCount` past their per-call cap are served at the
+ * cap with a notice. `limit`, `retmax`, `num_results`, and `pageSize`
  * are accepted as aliases for `maxResults`, `term` and `queryTerm` for `query`,
  * `retstart` for `offset`, and `sortBy` for `sort`. The total match count rides
  * in `output` so `format()` can state it in the header beside the returned
@@ -31,8 +35,10 @@ import {
   EDAM_PUBMED_ID,
   SCHEMA_SEARCH_ACTION,
 } from './_concepts.js';
+import { pageSizeCeiling, pageSizeClampNotice } from './_page-size.js';
 import { escapeMarkdownInline, escapeMarkdownInParagraph, markdownCodeSpan } from './_text.js';
 import { hasVisibleText } from './_visible-text.js';
+import { FETCH_ARTICLES_MAX_PMIDS } from './fetch-articles.tool.js';
 
 /**
  * Accepts empty strings (treated as "no filter" by the handler) or dates in
@@ -232,7 +238,10 @@ function withoutTermlessMarkup(query: string): string {
     .replace(/[()]/g, '');
 }
 
-/** Upper bound on brief summaries fetched per call; shared by the schema and the format() cap message. */
+/** Per-call cap on PMIDs returned; a larger `maxResults` is served at it. (#232) */
+const MAX_RESULTS_CAP = 1000;
+
+/** Per-call cap on brief summaries fetched; shared by the schema, the clamp, and the format() cap message. */
 const SUMMARY_COUNT_MAX = 50;
 
 /**
@@ -254,6 +263,8 @@ function quoteClauses(clauses: string[]): string {
  * - Phrases PubMed matched nothing for
  * - No matches at all (suggest spell-check / removing filters)
  * - Pagination overshoot (offset ≥ totalCount)
+ * - `maxResults` or `summaryCount` past its per-call cap, served at the cap,
+ *   with where the rest continues when the page left some out (#232)
  *
  * The one precedence rule: an unmatched phrase names the exact clause that
  * returned nothing, so it replaces the generic empty-result guidance, which
@@ -263,13 +274,29 @@ function buildNotice(args: {
   totalCount: number;
   pmidCount: number;
   offset: number;
+  /** False for a search on the filters alone. */
+  hasQuery: boolean;
   hasFilters: boolean;
+  /** As requested, before the clamp to {@link MAX_RESULTS_CAP}. */
+  maxResults: number;
+  /** As requested, before the clamp to {@link SUMMARY_COUNT_MAX}. */
+  summaryCount: number;
   partialDateBound?: { name: 'minDate' | 'maxDate'; value: string };
   errorList?: ESearchErrorList;
   warningList?: ESearchWarningList;
 }): string | undefined {
-  const { totalCount, pmidCount, offset, hasFilters, partialDateBound, errorList, warningList } =
-    args;
+  const {
+    totalCount,
+    pmidCount,
+    offset,
+    hasQuery,
+    hasFilters,
+    maxResults,
+    summaryCount,
+    partialDateBound,
+    errorList,
+    warningList,
+  } = args;
   const notices: string[] = [];
 
   if (partialDateBound) {
@@ -310,13 +337,42 @@ function buildNotice(args: {
     if (unmatchedPhrases.length === 0) {
       notices.push(
         hasFilters
-          ? 'No results matched your query with the applied filters. Try removing filters (e.g. dateRange, publicationTypes, meshTerms), broadening dates, or verifying author/journal spelling.'
+          ? `No results matched ${hasQuery ? 'your query with the applied filters' : 'the applied filters'}. Try removing filters (e.g. dateRange, publicationTypes, meshTerms), broadening dates, or verifying author/journal spelling.`
           : 'No results matched your query. Try running pubmed_spell_check for a suggested correction or broaden the query.',
       );
     }
   } else if (pmidCount === 0 && offset > 0 && offset >= totalCount) {
     notices.push(
       `Offset ${offset} exceeds totalCount (${totalCount}). Reset offset to 0 or reduce it below ${totalCount} to page through results.`,
+    );
+  }
+
+  if (maxResults > MAX_RESULTS_CAP) {
+    const nextOffset = offset + pmidCount;
+    notices.push(
+      pageSizeClampNotice(
+        'maxResults',
+        maxResults,
+        MAX_RESULTS_CAP,
+        nextOffset >= totalCount
+          ? undefined
+          : nextOffset <= OFFSET_MAX
+            ? `Pass \`offset: ${nextOffset}\` for the next page.`
+            : `PubMed serves no record past offset ${OFFSET_MAX}, so narrow the query or add filters to reach the rest.`,
+      ),
+    );
+  }
+  if (summaryCount > SUMMARY_COUNT_MAX) {
+    const unsummarized = pmidCount - SUMMARY_COUNT_MAX;
+    notices.push(
+      pageSizeClampNotice(
+        'summaryCount',
+        summaryCount,
+        SUMMARY_COUNT_MAX,
+        unsummarized > 0
+          ? `Summaries cover the first ${SUMMARY_COUNT_MAX} of this page's ${pmidCount} PMIDs; pass the other ${unsummarized} to \`pubmed_fetch_articles\` (up to ${FETCH_ARTICLES_MAX_PMIDS} per call) for theirs.`
+          : undefined,
+      ),
     );
   }
 
@@ -395,6 +451,14 @@ export const searchArticlesTool = tool('pubmed_search_articles', {
         'Give each named filter a value, or pass an empty string or omit it for no filter; the same blank value will be rejected again.',
       retryable: false,
     },
+    {
+      reason: 'no_search_term',
+      code: JsonRpcErrorCode.ValidationError,
+      when: 'No `query` is given — it is omitted or an empty string — and no subject filter (`author`, `journal`, `meshTerms`, or `publicationTypes`) carries a term. `dateRange`, `language`, `species`, `hasAbstract`, and `freeFullText` narrow a search without saying what it is for, so they cannot run one alone.',
+      recovery:
+        'Give a `query`, or set `author`, `journal`, `meshTerms`, or `publicationTypes`; for a deliberate slice of the whole database by the other filters, pass `query: "all[sb]"`.',
+      retryable: false,
+    },
   ] as const,
 
   // Never advertised; rewritten to the canonical key before the schema parses.
@@ -415,17 +479,19 @@ export const searchArticlesTool = tool('pubmed_search_articles', {
   input: z.object({
     query: z
       .string()
-      .min(1)
+      .optional()
       .describe(
-        'PubMed search query (supports full NCBI syntax), sent as written apart from inline formatting tags such as `<i>`, which are removed. Must carry a search term: a value that is blank once markup, bracketed field tags (`[pdat]`), parentheses, and invisible characters such as a zero-width space are disregarded is rejected rather than sent to PubMed.',
+        'PubMed search query (supports full NCBI syntax), sent as written apart from inline formatting tags such as `<i>`, which are removed. Omit it or pass an empty string to search on the filters alone, which needs `author`, `journal`, `meshTerms`, or `publicationTypes`; `all[sb]` selects the whole database for a slice by the other filters. A query given must carry a search term: a value that is blank once markup, bracketed field tags (`[pdat]`), parentheses, and invisible characters such as a zero-width space are disregarded is rejected rather than sent to PubMed.',
       ),
     maxResults: z
       .number()
       .int()
       .min(0)
-      .max(1000)
+      .max(pageSizeCeiling(MAX_RESULTS_CAP))
       .default(20)
-      .describe('Maximum results to return. 0 returns only `totalCount`.'),
+      .describe(
+        `Maximum results to return, up to ${MAX_RESULTS_CAP} per call; a larger value returns ${MAX_RESULTS_CAP} with a notice naming the next \`offset\`. 0 returns only \`totalCount\`.`,
+      ),
     offset: z
       .number()
       .int()
@@ -504,15 +570,15 @@ export const searchArticlesTool = tool('pubmed_search_articles', {
       .number()
       .int()
       .min(0)
-      .max(SUMMARY_COUNT_MAX)
+      .max(pageSizeCeiling(SUMMARY_COUNT_MAX))
       .default(0)
       .describe(
-        `Fetch brief summaries for top N results (0 = PMIDs only). Above the ${SUMMARY_COUNT_MAX} cap, pass the remaining PMIDs to pubmed_fetch_articles.`,
+        `Fetch brief summaries for the top N results (0 = PMIDs only), up to ${SUMMARY_COUNT_MAX} per call; a larger value fetches ${SUMMARY_COUNT_MAX} with a notice. Pass the PMIDs past the cap to pubmed_fetch_articles.`,
       ),
   }),
 
   output: z.object({
-    query: z.string().describe('Original query'),
+    query: z.string().describe('Original query; empty when the search ran on the filters alone'),
     offset: z.number().describe('Result offset used'),
     pmids: z.array(z.string()).describe('PubMed IDs'),
     summaries: z
@@ -590,7 +656,7 @@ export const searchArticlesTool = tool('pubmed_search_articles', {
     effectiveQuery: z
       .string()
       .describe(
-        'The term sent to PubMed: the query as written, with a clause appended for each active filter. Only inline formatting tags with no attributes (`<i>`, `<b>`, `<em>`, `<strong>`, `<u>` and their closers) are removed; `&`, `<`, and `>` are sent as written.',
+        'The term sent to PubMed: the query as written, with a clause appended for each active filter, or the filter clauses alone, joined by AND, when no query was given. Only inline formatting tags with no attributes (`<i>`, `<b>`, `<em>`, `<strong>`, `<u>` and their closers) are removed; `&`, `<`, and `>` are sent as written.',
       ),
     appliedFilters: AppliedFiltersSchema.describe(
       'Filter values applied to the PubMed query, as sent: each text value as written, formatting tags removed, and dates in YYYY/MM/DD form',
@@ -599,7 +665,7 @@ export const searchArticlesTool = tool('pubmed_search_articles', {
       .string()
       .optional()
       .describe(
-        'Optional guidance when the result set does not reflect what was asked for — a field tag PubMed ignored, a phrase it matched nothing for, a dateRange dropped for having one bound, no matches at all, or paging past the end. Absent when nothing applies.',
+        'Optional guidance when the result set does not reflect what was asked for — a field tag PubMed ignored, a phrase it matched nothing for, a dateRange dropped for having one bound, no matches at all, paging past the end, or a `maxResults` or `summaryCount` past its per-call cap, served at the cap. Absent when nothing applies.',
       ),
   },
 
@@ -644,30 +710,32 @@ export const searchArticlesTool = tool('pubmed_search_articles', {
     ctx.log.info('Executing pubmed_search', { query: input.query });
     const ncbi = getNcbiService();
 
-    // ESearch receives the query as written, formatting tags aside; the
-    // sanitized copy only decides whether it carries a term. Sending the
-    // sanitizer's output HTML-encoded `&`, `<`, and `>` and deleted text after a
-    // `<` (`R&D` → `R&amp;D`, `smith<j` → `smith`), so PubMed ran a different
-    // query than the caller wrote. (#260)
-    let effectiveQuery = withoutFormattingTags(input.query);
-    const sanitizedQuery = await sanitization.sanitizeString(input.query, { context: 'text' });
+    // An omitted or exactly-empty `query` is no query — a form client sends an
+    // empty string for a field left untouched — and the search runs on its
+    // filter clauses alone, once a subject filter is known to carry a term
+    // (below). (#245)
+    const query = input.query || undefined;
 
-    // `min(1)` counts whitespace, and the sanitizer reduces markup with no text
-    // content to an empty string, so both reach here as a blank term. NCBI
-    // answers a blank term with HTTP 200 and an embedded <ERROR> reading
+    // A blank term makes NCBI answer HTTP 200 with an embedded <ERROR> reading
     // "Search is temporarily unavailable", which classifies as a retryable
     // outage — the caller would spend the whole retry deadline on a
-    // deterministic input mistake. Reject before the call instead. (#122)
+    // deterministic input mistake. Whitespace, and markup the sanitizer reduces
+    // to an empty string, are rejected before the call instead. (#122)
     //
     // A bare field tag (`[pdat]`) or empty parentheses carry no term either, so
-    // the check runs on a copy with those removed; `effectiveQuery` itself is
-    // sent as written. A bracket that is not a field tag (`[18F]`) is a term, and
+    // the check runs on a copy with those removed; the query itself is sent as
+    // written. A bracket that is not a field tag (`[18F]`) is a term, and
     // boolean operators are kept: NCBI reads an operand-less `NOT[ti]` as
     // literal text and returns real matches. (#145)
     //
     // Invisible characters carry no term either, including those the sanitizer
     // decodes from an entity (`&#8203;`). (#176)
-    if (!hasVisibleText(withoutTermlessMarkup(sanitizedQuery))) {
+    if (
+      query !== undefined &&
+      !hasVisibleText(
+        withoutTermlessMarkup(await sanitization.sanitizeString(query, { context: 'text' })),
+      )
+    ) {
       throw ctx.fail(
         'blank_query',
         'The `query` carries no search term — it is blank once markup, bracketed field tags, parentheses, and invisible characters are disregarded.',
@@ -703,6 +771,25 @@ export const searchArticlesTool = tool('pubmed_search_articles', {
       );
     }
 
+    // `dateRange`, `language`, `species`, `hasAbstract`, and `freeFullText`
+    // narrow a search without saying what it is for, so with no query one of
+    // the subject filters has to. A deliberate whole-database slice says so
+    // with `all[sb]`. (#245)
+    if (query === undefined && !author && !journal && !meshTerms && !publicationTypes) {
+      throw ctx.fail(
+        'no_search_term',
+        'No search term: no `query` was given and no subject filter (`author`, `journal`, `meshTerms`, or `publicationTypes`) carries a term. `dateRange`, `language`, `species`, `hasAbstract`, and `freeFullText` narrow a search but do not say what it is for.',
+      );
+    }
+
+    // The term's clauses, joined by AND: the query, then one per active filter.
+    // ESearch receives the query as written, formatting tags aside; the
+    // sanitized copy above only decided whether it carries a term. Sending the
+    // sanitizer's output HTML-encoded `&`, `<`, and `>` and deleted text after a
+    // `<` (`R&D` → `R&amp;D`, `smith<j` → `smith`), so PubMed ran a different
+    // query than the caller wrote. (#260)
+    const clauses: string[] = query === undefined ? [] : [withoutFormattingTags(query)];
+
     // Build filters — capture normalized values for both query construction and appliedFilters
     let normalizedDateRange:
       | { minDate: string; maxDate: string; dateType: 'pdat' | 'mdat' | 'edat' }
@@ -713,7 +800,9 @@ export const searchArticlesTool = tool('pubmed_search_articles', {
         maxDate: maxDate.replace(/[-.]/g, '/'),
         dateType: dateRange.dateType,
       };
-      effectiveQuery += ` AND (${normalizedDateRange.minDate}[${normalizedDateRange.dateType}] : ${normalizedDateRange.maxDate}[${normalizedDateRange.dateType}])`;
+      clauses.push(
+        `(${normalizedDateRange.minDate}[${normalizedDateRange.dateType}] : ${normalizedDateRange.maxDate}[${normalizedDateRange.dateType}])`,
+      );
     }
     // Both bounds are required for the filter to apply, so one filled bound is a
     // dropped date range the caller gets no other signal about.
@@ -725,27 +814,35 @@ export const searchArticlesTool = tool('pubmed_search_articles', {
           : undefined;
 
     if (publicationTypes) {
-      effectiveQuery += ` AND (${publicationTypes.map((pt) => `"${pt}"[Publication Type]`).join(' OR ')})`;
+      clauses.push(`(${publicationTypes.map((pt) => `"${pt}"[Publication Type]`).join(' OR ')})`);
     }
-    if (author) effectiveQuery += ` AND ${author}[Author]`;
-    if (journal) effectiveQuery += ` AND "${journal}"[Journal]`;
+    if (author) clauses.push(`${author}[Author]`);
+    if (journal) clauses.push(`"${journal}"[Journal]`);
     if (meshTerms) {
-      effectiveQuery += ` AND (${meshTerms.map((term) => `"${term}"[MeSH Terms]`).join(' AND ')})`;
+      clauses.push(`(${meshTerms.map((term) => `"${term}"[MeSH Terms]`).join(' AND ')})`);
     }
-    if (language) effectiveQuery += ` AND ${language}[Language]`;
+    if (language) clauses.push(`${language}[Language]`);
 
-    if (input.hasAbstract) effectiveQuery += ' AND hasabstract[text word]';
-    if (input.freeFullText) effectiveQuery += ' AND free full text[filter]';
-    if (input.species) effectiveQuery += ` AND ${SPECIES_CLAUSES[input.species]}`;
+    if (input.hasAbstract) clauses.push('hasabstract[text word]');
+    if (input.freeFullText) clauses.push('free full text[filter]');
+    if (input.species) clauses.push(SPECIES_CLAUSES[input.species]);
+    const effectiveQuery = clauses.join(' AND ');
+
+    // Past its per-call cap a page size is served at the cap, with a notice,
+    // rather than rejected. The framework's argument repair never changes a
+    // too-large value, so the clamp lives here, ahead of every upstream
+    // request. (#232)
+    const maxResults = Math.min(input.maxResults, MAX_RESULTS_CAP);
+    const summaryCount = Math.min(input.summaryCount, SUMMARY_COUNT_MAX);
 
     const esResult = await ncbi.eSearch(
       {
         db: 'pubmed',
         term: effectiveQuery,
-        retmax: input.maxResults,
+        retmax: maxResults,
         retstart: input.offset,
         sort: input.sort,
-        usehistory: input.summaryCount > 0 ? 'y' : undefined,
+        usehistory: summaryCount > 0 ? 'y' : undefined,
       },
       { signal: ctx.signal },
     );
@@ -767,7 +864,7 @@ export const searchArticlesTool = tool('pubmed_search_articles', {
       pubmedUrl?: string | undefined;
     }[] = [];
 
-    if (input.summaryCount > 0 && pmids.length > 0) {
+    if (summaryCount > 0 && pmids.length > 0) {
       const eSummaryParams: Record<string, string | number | undefined> = {
         db: 'pubmed',
         version: '2.0',
@@ -776,10 +873,10 @@ export const searchArticlesTool = tool('pubmed_search_articles', {
       if (esResult.webEnv && esResult.queryKey) {
         eSummaryParams.WebEnv = esResult.webEnv;
         eSummaryParams.query_key = esResult.queryKey;
-        eSummaryParams.retmax = Math.min(input.summaryCount, pmids.length);
+        eSummaryParams.retmax = Math.min(summaryCount, pmids.length);
         eSummaryParams.retstart = input.offset;
       } else {
-        eSummaryParams.id = pmids.slice(0, input.summaryCount).join(',');
+        eSummaryParams.id = pmids.slice(0, summaryCount).join(',');
       }
 
       const eSummaryResult = await ncbi.eSummary(eSummaryParams, { signal: ctx.signal });
@@ -824,7 +921,10 @@ export const searchArticlesTool = tool('pubmed_search_articles', {
       totalCount: esResult.count,
       pmidCount: pmids.length,
       offset: input.offset,
+      hasQuery: query !== undefined,
       hasFilters: Object.keys(appliedFilters).length > 0,
+      maxResults: input.maxResults,
+      summaryCount: input.summaryCount,
       ...(partialDateBound && { partialDateBound }),
       ...(esResult.errorList && { errorList: esResult.errorList }),
       ...(esResult.warningList && { warningList: esResult.warningList }),
@@ -834,7 +934,7 @@ export const searchArticlesTool = tool('pubmed_search_articles', {
     if (notice) ctx.enrich.notice(notice);
 
     return {
-      query: input.query,
+      query: query ?? '',
       offset: input.offset,
       pmids,
       summaries,
@@ -847,8 +947,11 @@ export const searchArticlesTool = tool('pubmed_search_articles', {
     const lines = [
       `## PubMed Search Results`,
       // A code span, so the caller's query reads exactly as sent — wildcards,
-      // field tags and all — raw and rendered. (#255)
-      `**Query:** ${markdownCodeSpan(result.query)}`,
+      // field tags and all — raw and rendered. (#255) A filter-only search
+      // says so rather than printing an empty Query line. (#245)
+      result.query
+        ? `**Query:** ${markdownCodeSpan(result.query)}`
+        : '**Query:** none — the search ran on the filters alone',
       `**Returned:** ${result.pmids.length} of ${result.totalCount} | **Offset:** ${result.offset}`,
       // An autolink, so no character of the encoded query is read as Markdown
       // and none is backslash-escaped. (#263)
@@ -862,7 +965,7 @@ export const searchArticlesTool = tool('pubmed_search_articles', {
           // At the cap there is no knob left to raise, so point at the tool that
           // can read the rest instead of at `summaryCount`.
           result.summaries.length >= SUMMARY_COUNT_MAX
-            ? `\n> ${shown} — \`summaryCount\` is at its maximum (${SUMMARY_COUNT_MAX}). Fetch the remaining ${result.pmids.length - result.summaries.length} with \`pubmed_fetch_articles\` using the PMIDs above.`
+            ? `\n> ${shown} — \`summaryCount\` is at its maximum (${SUMMARY_COUNT_MAX}). Fetch the remaining ${result.pmids.length - result.summaries.length} with \`pubmed_fetch_articles\` (up to ${FETCH_ARTICLES_MAX_PMIDS} PMIDs per call) using the PMIDs above.`
             : `\n> ${shown}. Increase \`summaryCount\` (max ${SUMMARY_COUNT_MAX}) to fetch more.`,
         );
       }

@@ -16,6 +16,7 @@ import {
   formatVancouver,
 } from '@/services/ncbi/formatting/citation-formatter.js';
 import type { ParsedArticle } from '@/services/ncbi/types.js';
+import { cpuMsPerCall } from '../../../_helpers.js';
 
 // ─── Shared fixture ───────────────────────────────────────────────────────────
 
@@ -655,43 +656,6 @@ describe('formatters — sparse article (only pmid)', () => {
 // ─── Linear time on long journal names and page strings (#227, #228) ─────────
 
 describe('journal names and page strings format in linear time (#227, #228)', () => {
-  /** CPU time of `run`, in ms — this thread's user + system time, not wall clock. */
-  const cpuMs = (run: () => void): number => {
-    const start = process.threadCpuUsage();
-    run();
-    const { user, system } = process.threadCpuUsage(start);
-    return (user + system) / 1000;
-  };
-
-  /**
-   * CPU time of one call each of `small` and `large`, in ms: each call repeats
-   * until a reading spans a millisecond, then the two are read in turn for seven
-   * rounds (stopping once two seconds are spent) and each keeps its fastest, so
-   * contention lands on both sizes and a quadratic call fails the ratio rather
-   * than the test's timeout.
-   */
-  const cpuMsPerCall = (small: () => void, large: () => void): [number, number] => {
-    const readers = [small, large].map((call) => {
-      const read = (reps: number) =>
-        cpuMs(() => {
-          for (let i = 0; i < reps; i++) call();
-        });
-      let reps = 1;
-      while (read(reps) < 1) reps *= 2;
-      return { reps, read: () => read(reps) };
-    });
-    const fastest = [Number.POSITIVE_INFINITY, Number.POSITIVE_INFINITY];
-    let spentMs = 0;
-    for (let round = 0; round < 7 && spentMs < 2_000; round++) {
-      readers.forEach(({ reps, read }, i) => {
-        const ms = read();
-        spentMs += ms;
-        fastest[i] = Math.min(fastest[i] as number, ms / reps);
-      });
-    }
-    return fastest as [number, number];
-  };
-
   const every = (article: ParsedArticle) => () => {
     formatApa(article);
     formatMla(article);
@@ -718,19 +682,19 @@ describe('journal names and page strings format in linear time (#227, #228)', ()
     ['nested openers', (n: number) => ({ title: `J ${'('.repeat(n / 2)}a${')'.repeat(n / 2)}` })],
     ['unbalanced closers', (n: number) => ({ title: `J ${')'.repeat(n)}` })],
     ['an edition near-miss', (n: number) => ({ title: `J (${'ed '.repeat(n / 3)}x)` })],
-  ])(
-    '%s',
-    (_label, shape) => {
-      const at = (n: number): ParsedArticle => ({
-        ...baseArticle,
-        journalInfo: { ...baseArticle.journalInfo!, ...shape(n) },
-      });
-      const small = at(5_000);
-      const large = at(320_000);
-      const [t5k, t320k] = cpuMsPerCall(every(small), every(large));
-      expect(t320k / t5k).toBeLessThan(256);
-      expect(t320k).toBeLessThan(200);
-    },
-    30_000,
-  );
+  ])('%s', (_label, shape) => {
+    const at = (n: number): ParsedArticle => ({
+      ...baseArticle,
+      journalInfo: { ...baseArticle.journalInfo!, ...shape(n) },
+    });
+    /** Per-call CPU time at `n` characters, checked against the bound before the next size runs. */
+    const msPerCall = (n: number) => {
+      const ms = cpuMsPerCall(n, every(at(n)));
+      expect(ms).toBeLessThan(200);
+      return ms;
+    };
+    const t5k = msPerCall(5_000);
+    const t320k = msPerCall(320_000);
+    expect(t320k / t5k).toBeLessThan(256);
+  });
 });

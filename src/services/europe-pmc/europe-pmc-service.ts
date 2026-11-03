@@ -55,17 +55,18 @@ import { stripInvisibleFormatChars } from '@/services/ncbi/parsing/text-helpers.
 import { ensureArray } from '@/services/ncbi/parsing/xml-helpers.js';
 import { buildSearchQuery, EuropePmcApiClient } from './api-client.js';
 import { createEuropePmcRequestQueue } from './request-queue.js';
-import type {
-  EuropePmcFullTextResult,
-  EuropePmcLinksResponse,
-  EuropePmcRecordRef,
-  EuropePmcRelatedRecord,
-  EuropePmcRelatedResult,
-  EuropePmcSearchHit,
-  EuropePmcSearchParams,
-  EuropePmcSearchResponse,
-  EuropePmcSearchResult,
-  EuropePmcSource,
+import {
+  EUROPEPMC_DEFAULT_PAGE_SIZE,
+  type EuropePmcFullTextResult,
+  type EuropePmcLinksResponse,
+  type EuropePmcRecordRef,
+  type EuropePmcRelatedRecord,
+  type EuropePmcRelatedResult,
+  type EuropePmcSearchHit,
+  type EuropePmcSearchParams,
+  type EuropePmcSearchResponse,
+  type EuropePmcSearchResult,
+  type EuropePmcSource,
 } from './types.js';
 
 /** Ceiling on one backoff sleep, so a high retry count cannot grow it without bound. */
@@ -462,10 +463,15 @@ export class EuropePmcService {
     // EPMC's `request.cursorMark` echo is URL-encoded (the wire form), while
     // `nextCursorMark` in the JSON body is raw. Use the caller's input as the
     // current cursor so the echo is consistent and the equality check below
-    // (used to detect "no more pages") compares like-for-like.
+    // (used to detect "no more pages") compares like-for-like. A page shorter
+    // than the one asked for is the last: Europe PMC still hands back a fresh
+    // cursor on the short last page of a cursor walk, and it leads only to an
+    // empty page.
     const cursorMark = params.cursorMark ?? '*';
     const nextCursor =
-      parsed.nextCursorMark && parsed.nextCursorMark !== cursorMark
+      parsed.nextCursorMark &&
+      parsed.nextCursorMark !== cursorMark &&
+      hits.length >= (params.pageSize ?? EUROPEPMC_DEFAULT_PAGE_SIZE)
         ? parsed.nextCursorMark
         : undefined;
 

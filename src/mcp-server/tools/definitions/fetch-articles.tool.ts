@@ -416,6 +416,9 @@ const DeferredSchema = z
     'Continuation state for articles the whole-response budget withheld. Present only when `maxResponseCharacters` deferred at least one article.',
   );
 
+/** PMIDs one `pubmed_fetch_articles` call accepts. */
+export const FETCH_ARTICLES_MAX_PMIDS = 200;
+
 export const fetchArticlesTool = tool('pubmed_fetch_articles', {
   description:
     'Fetch full article metadata by PubMed IDs. Returns detailed article information including abstract, authors, journal, MeSH terms, linked retraction, erratum, and comment notices, and databank accessions such as trial registration IDs; grants and the members of a collective author are opt-in (`includeGrants`, `includeInvestigators`). Set `maxResponseCharacters` to bound the whole response: articles past the ceiling are deferred whole and listed in `deferred.ids` for a follow-up call.',
@@ -439,7 +442,11 @@ export const fetchArticlesTool = tool('pubmed_fetch_articles', {
   inputAliases: { ids: 'pmids' },
 
   input: z.object({
-    pmids: z.array(pmidStringSchema).min(1).max(200).describe('PubMed IDs to fetch'),
+    pmids: z
+      .array(pmidStringSchema)
+      .min(1)
+      .max(FETCH_ARTICLES_MAX_PMIDS)
+      .describe('PubMed IDs to fetch'),
     includeMesh: z.boolean().default(true).describe('Include MeSH terms'),
     includeGrants: z.boolean().default(false).describe('Include grant information'),
     includeInvestigators: z

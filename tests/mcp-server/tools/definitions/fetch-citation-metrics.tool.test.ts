@@ -104,9 +104,8 @@ describe('batch fetch', () => {
     stubIciteFetch();
     const { text } = await call(['23456789']);
     expect(readCommonMark(text.split('\n').slice(0, 3).join('\n'))).toBe(
-      '⟨heading_open⟩\n\nNIH iCite Citation Metrics\n\n⟨heading_close⟩\n\nSource: ⟨a⟩NIH iCite⟨/a⟩\n⟨strong⟩Records:⟨/strong⟩ 1',
+      '⟨heading_open h2⟩\n\nNIH iCite Citation Metrics\n\n⟨heading_close h2⟩\n\nSource: ⟨a href=https://icite.od.nih.gov/⟩NIH iCite⟨/a⟩\n⟨strong⟩Records:⟨/strong⟩ 1',
     );
-    expect(text).toContain('Source: [NIH iCite](https://icite.od.nih.gov/)');
   });
 
   it('fetches the first 200 distinct PMIDs in one request and returns the rest in overLimit', async () => {
@@ -345,7 +344,7 @@ describe('titles', () => {
       doi: '10.1/_x',
     });
     const block = text.slice(text.indexOf('### PMID 23456789'));
-    const [, record] = readCommonMark(block).split('\n\n⟨heading_close⟩\n\n');
+    const [, record] = readCommonMark(block).split('\n\n⟨heading_close h3⟩\n\n');
     expect(record?.split('\n').slice(0, 2)).toEqual([
       '⟨strong⟩Title:⟨/strong⟩ HLA-B*57:01 carriers',
       `⟨strong⟩Year:⟨/strong⟩ ${String(sampleRow('23456789').year)} | ⟨strong⟩Journal:⟨/strong⟩ J Allergy* | ⟨strong⟩DOI:⟨/strong⟩ 10.1/_x`,
@@ -373,14 +372,22 @@ describe('errors', () => {
     expect(text).toContain('Recovery: Retry after a brief delay; NIH iCite was unreachable.');
   });
 
-  it('fails as icite_invalid_response when iCite answers with a PMID the call did not send', async () => {
-    stubIciteFetch(() => jsonResponse({ data: [sampleRow('1')] }));
-    const { result } = await call(['23456789']);
+  it('fails as a non-retryable icite_unrequested_record when iCite answers with a PMID the call did not send', async () => {
+    const fetchMock = stubIciteFetch(() => jsonResponse({ data: [sampleRow('1')] }));
+    const { result, text } = await call(['23456789']);
 
     expect(result.isError).toBe(true);
+    expect(fetchMock).toHaveBeenCalledOnce();
     expect(result.structuredContent).toMatchObject({
-      error: { data: { reason: 'icite_invalid_response' } },
+      error: {
+        code: JsonRpcErrorCode.ServiceUnavailable,
+        data: { reason: 'icite_unrequested_record', retryable: false, unrequestedPmid: '1' },
+      },
     });
+    const recovery = text.split('\n').find((line) => line.startsWith('Recovery:'));
+    expect(recovery).toMatch(/smaller batches/);
+    expect(recovery).not.toMatch(/retry/i);
+    expect(text.trimEnd()).toMatch(/\(reason icite_unrequested_record · not retryable\)$/);
   });
 });
 

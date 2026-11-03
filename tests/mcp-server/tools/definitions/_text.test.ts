@@ -7,7 +7,13 @@
  */
 
 import { describe, expect, it } from 'vitest';
-import { bunMarkdown, readCommonMark, renderedHtml, renderedText } from '../../../_helpers.js';
+import {
+  bunMarkdown,
+  cpuMsPerCall,
+  readCommonMark,
+  renderedHtml,
+  renderedText,
+} from '../../../_helpers.js';
 
 const {
   escapeMarkdownBlock,
@@ -249,7 +255,7 @@ describe('escapeMarkdownInline (issue #102)', () => {
     for (const title of ['HLA-B*57:01 carriers', '5` UTR', '~250 participants', 'Lee _K']) {
       const heading = `#### ${escapeMarkdownInline(title)}`;
       expect(heading).toBe(`#### ${title}`);
-      expect(readCommonMark(heading)).toBe(`⟨heading_open⟩\n\n${title}\n\n⟨heading_close⟩`);
+      expect(readCommonMark(heading)).toBe(`⟨heading_open h4⟩\n\n${title}\n\n⟨heading_close h4⟩`);
     }
   });
 });
@@ -273,7 +279,7 @@ describe('escapeMarkdownInParagraph (issue #261)', () => {
   it('keeps an authored `*…*` wrapper whole around a value with a lone `*` (pubmed_find_related)', () => {
     const line = `- **[PMID 1](https://x)**\n  *${escapeMarkdownInParagraph('Smith J*, Doe A')}*`;
     expect(readCommonMark(line)).toBe(
-      '⟨bullet_list_open⟩\n\n⟨list_item_open⟩\n\n⟨strong⟩⟨a⟩PMID 1⟨/a⟩⟨/strong⟩\n⟨em⟩Smith J*, Doe A⟨/em⟩\n\n⟨list_item_close⟩\n\n⟨bullet_list_close⟩',
+      '⟨bullet_list_open⟩\n\n⟨list_item_open⟩\n\n⟨strong⟩⟨a href=https://x⟩PMID 1⟨/a⟩⟨/strong⟩\n⟨em⟩Smith J*, Doe A⟨/em⟩\n\n⟨list_item_close⟩\n\n⟨bullet_list_close⟩',
     );
   });
 
@@ -823,31 +829,11 @@ describe.runIf(bunMarkdown !== undefined)(
   },
 );
 
-/** CPU time of `run`, in ms — this thread's user + system time, not wall clock. */
-const cpuMs = (run: () => void): number => {
-  const start = process.threadCpuUsage();
-  run();
-  const { user, system } = process.threadCpuUsage(start);
-  return (user + system) / 1000;
-};
-
 /** Repeat `unit` to exactly `length` characters. */
 const fill = (unit: string, length: number) =>
   unit.repeat(Math.ceil(length / unit.length)).slice(0, length);
 
 describe('escapeMarkdownBlock linear time on adversarial input (issue #255)', () => {
-  /** Fastest of five measurements of `calls` calls each — the least noisy reading of the work. */
-  const fastestMs = (input: string, mode: 'plain' | 'structured', calls = 2): number => {
-    escapeMarkdownBlock(input, mode);
-    return Math.min(
-      ...Array.from({ length: 5 }, () =>
-        cpuMs(() => {
-          for (let i = 0; i < calls; i++) escapeMarkdownBlock(input, mode);
-        }),
-      ),
-    );
-  };
-
   /** Worst cases for each scan: tag and entity lookaheads, line-start rules, the structure prefix. */
   const ADVERSARIAL: Array<[string, (n: number) => string]> = [
     ['`<a` with no `>`', (n) => fill('<a', n)],
@@ -882,48 +868,40 @@ describe('escapeMarkdownBlock linear time on adversarial input (issue #255)', ()
     it.each(ADVERSARIAL)(
       `scales linearly from 5k to 80k characters of %s (${mode})`,
       (_label, build) => {
-        // Doubling from 5k, each size checked against the absolute bound before the next runs.
+        // Doubling from 5k, each size timed per call and checked against the absolute
+        // bound before the next runs.
         const times: number[] = [];
         for (let n = 5_000; n <= 80_000; n *= 2) {
-          const ms = fastestMs(build(n), mode);
-          expect(ms).toBeLessThan(400);
+          const input = build(n);
+          const ms = cpuMsPerCall(n, () => escapeMarkdownBlock(input, mode));
+          expect(ms).toBeLessThan(200);
           times.push(ms);
         }
         // Linear work grows 16× across the span; quadratic grows 256×.
-        expect((times.at(-1) ?? 0) / Math.max(times[0] ?? 0, 0.05)).toBeLessThan(64);
+        expect((times.at(-1) ?? 0) / Math.max(times[0] ?? 0, 0.025)).toBeLessThan(64);
       },
     );
 
     it.each(FULL_SPAN)(
       `scales linearly from 5k to 320k characters of %s (${mode})`,
       (_label, build) => {
-        // Doubling from 5k, each size checked against the absolute bound before the next runs.
+        // Doubling from 5k, each size timed per call and checked against the absolute
+        // bound before the next runs.
         const times: number[] = [];
         for (let n = 5_000; n <= 320_000; n *= 2) {
-          const ms = fastestMs(build(n), mode);
-          expect(ms).toBeLessThan(400);
+          const input = build(n);
+          const ms = cpuMsPerCall(n, () => escapeMarkdownBlock(input, mode));
+          expect(ms).toBeLessThan(200);
           times.push(ms);
         }
         // Linear work grows 64× across the span; quadratic grows 4096×.
-        expect((times.at(-1) ?? 0) / Math.max(times[0] ?? 0, 0.05)).toBeLessThan(256);
+        expect((times.at(-1) ?? 0) / Math.max(times[0] ?? 0, 0.025)).toBeLessThan(256);
       },
     );
   }
 });
 
 describe('escapeMarkdownInParagraph linear time on adversarial input (issue #261)', () => {
-  /** Fastest of five measurements of 2 calls each — the least noisy reading of the work. */
-  const fastestMs = (input: string): number => {
-    escapeMarkdownInParagraph(input);
-    return Math.min(
-      ...Array.from({ length: 5 }, () =>
-        cpuMs(() => {
-          for (let i = 0; i < 2; i++) escapeMarkdownInParagraph(input);
-        }),
-      ),
-    );
-  };
-
   /** Every character with a backslash before it. */
   const escapedEach = (text: string) => text.replace(/[\s\S]/g, '\\$&');
 
@@ -954,35 +932,23 @@ describe('escapeMarkdownInParagraph linear time on adversarial input (issue #261
   ];
 
   it.each(SHAPES)('scales linearly from 5k to 320k characters of %s', (_label, build) => {
-    // Doubling from 5k, each size's escape and absolute bound checked before the next runs.
+    // Doubling from 5k, each size's escape and per-call absolute bound checked before
+    // the next runs.
     const times: number[] = [];
     for (let n = 5_000; n <= 320_000; n *= 2) {
       const [input, escaped] = build(n);
       expect(escapeMarkdownInParagraph(input)).toBe(escaped);
-      const ms = fastestMs(input);
-      expect(ms).toBeLessThan(400);
+      const ms = cpuMsPerCall(n, () => escapeMarkdownInParagraph(input));
+      expect(ms).toBeLessThan(200);
       times.push(ms);
     }
     // Linear work grows 64× across the span; quadratic grows 4096×.
-    expect((times.at(-1) ?? 0) / Math.max(times[0] ?? 0, 0.05)).toBeLessThan(256);
+    expect((times.at(-1) ?? 0) / Math.max(times[0] ?? 0, 0.025)).toBeLessThan(256);
   });
 });
 
 describe('markdownCodeSpan and markdownCodeFence linear time on adversarial input (issue #255)', () => {
   const HELPERS = { markdownCodeSpan, markdownCodeFence } as const;
-
-  /** Fastest of five measurements of 4 calls each — the least noisy reading of the work. */
-  const fastestMs = (input: string, helper: keyof typeof HELPERS): number => {
-    const run = HELPERS[helper];
-    run(input);
-    return Math.min(
-      ...Array.from({ length: 5 }, () =>
-        cpuMs(() => {
-          for (let i = 0; i < 4; i++) run(input);
-        }),
-      ),
-    );
-  };
 
   /** Every shape carries the full 64× span: the run scan is a plain loop, no regex. */
   const SHAPES: Array<[string, (n: number) => string]> = [
@@ -998,15 +964,18 @@ describe('markdownCodeSpan and markdownCodeFence linear time on adversarial inpu
     it.each(SHAPES)(
       `scales linearly from 5k to 320k characters of %s (${helper})`,
       (_label, build) => {
-        // Doubling from 5k, each size checked against the absolute bound before the next runs.
+        // Doubling from 5k, each size timed per call and checked against the absolute
+        // bound before the next runs.
+        const run = HELPERS[helper];
         const times: number[] = [];
         for (let n = 5_000; n <= 320_000; n *= 2) {
-          const ms = fastestMs(build(n), helper);
-          expect(ms).toBeLessThan(400);
+          const input = build(n);
+          const ms = cpuMsPerCall(n, () => run(input));
+          expect(ms).toBeLessThan(100);
           times.push(ms);
         }
         // Linear work grows 64× across the span; quadratic grows 4096×.
-        expect((times.at(-1) ?? 0) / Math.max(times[0] ?? 0, 0.05)).toBeLessThan(256);
+        expect((times.at(-1) ?? 0) / Math.max(times[0] ?? 0, 0.0125)).toBeLessThan(256);
       },
     );
   }

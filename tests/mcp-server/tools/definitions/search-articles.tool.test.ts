@@ -1772,7 +1772,9 @@ describe('searchArticlesTool', () => {
       expect(searchUrl).toContain('HLA-B*57');
       expect(raw).toContain(`**Search URL:** <${searchUrl}>\n`);
       const urlLine = text.split('\n').find((line) => line.startsWith('⟨strong⟩Search URL:'));
-      expect(urlLine).toMatch(/^⟨strong⟩Search URL:⟨\/strong⟩ ⟨a⟩[^⟨]+⟨\/a⟩$/);
+      const [, href] =
+        urlLine?.match(/^⟨strong⟩Search URL:⟨\/strong⟩ ⟨a href=([^⟩]+)⟩[^⟨]+⟨\/a⟩$/) ?? [];
+      expect(href).toBe(searchUrl);
     });
   });
 
@@ -1872,7 +1874,9 @@ describe('searchArticlesTool', () => {
         const text = blocks[0]?.text ?? '';
         expect(text).toContain('Summaries shown for top 50 of 60 PMIDs');
         expect(text).toContain('`summaryCount` is at its maximum (50)');
-        expect(text).toContain('Fetch the remaining 10 with `pubmed_fetch_articles`');
+        expect(text).toContain(
+          'Fetch the remaining 10 with `pubmed_fetch_articles` (up to 200 PMIDs per call)',
+        );
         expect(text).not.toContain('Increase `summaryCount`');
       });
 
@@ -2423,7 +2427,7 @@ describe('searchArticlesTool count-only search, maxResults: 0 (issue #191)', () 
     expect(mockESummary).not.toHaveBeenCalled();
   });
 
-  it.each([[-1], [1001]])('still rejects maxResults: %d', async (maxResults) => {
+  it.each([[-1], [10_001]])('still rejects maxResults: %d', async (maxResults) => {
     const result = await runToolContract(searchArticlesTool, { query: 'ferroptosis', maxResults });
 
     expect(result.isError).toBe(true);
@@ -2440,10 +2444,478 @@ describe('searchArticlesTool count-only search, maxResults: 0 (issue #191)', () 
     expect(emitted.properties.maxResults).toMatchObject({
       type: 'integer',
       minimum: 0,
-      maximum: 1000,
+      maximum: 10_000,
       default: 20,
     });
     expect(emitted.properties.maxResults?.description).toContain('0 returns only `totalCount`');
+  });
+});
+
+describe('searchArticlesTool filter-only search with no query (issue #245)', () => {
+  beforeEach(() => {
+    mockESearch.mockReset();
+    mockESearch.mockResolvedValue({ count: 352, idList: [], retmax: 0, retstart: 0 });
+    mockESummary.mockReset();
+    mockESummary.mockRejectedValue(new Error('unmocked eSummary'));
+    mockExtractBriefSummaries.mockReset();
+    mockExtractBriefSummaries.mockResolvedValue([]);
+  });
+
+  /** The term PubMed answers with 352 records (ESearch, 2026-11-02). */
+  const REPRO_TERM = '(2024/01[pdat] : 2026/12[pdat]) AND "OncoTargets and therapy"[Journal]';
+  const repro = {
+    journal: 'OncoTargets and therapy',
+    dateRange: { minDate: '2024/01', maxDate: '2026/12' },
+    maxResults: 0,
+  };
+
+  it.each([
+    ['an empty query', { query: '', ...repro }],
+    ['the query omitted', repro],
+  ])('searches the filter clauses alone for %s', async (_label, args) => {
+    const result = await runToolContract(searchArticlesTool, args);
+
+    expect(result.isError).toBeFalsy();
+    expect(mockESearch).toHaveBeenCalledTimes(1);
+    expect(mockESearch.mock.calls[0]?.[0]).toMatchObject({ term: REPRO_TERM, retmax: 0 });
+    expect(result.structuredContent).toMatchObject({
+      query: '',
+      effectiveQuery: REPRO_TERM,
+      searchUrl: `https://pubmed.ncbi.nlm.nih.gov/?term=${encodeURIComponent(REPRO_TERM)}`,
+      totalCount: 352,
+      pmids: [],
+    });
+    const text = contractText(result);
+    expect(text).toContain('**Query:** none — the search ran on the filters alone');
+    expect(text).toContain(`**Effective Query:** \`${REPRO_TERM}\``);
+    expect(text).toContain('**Returned:** 0 of 352 | **Offset:** 0');
+  });
+
+  it.each<[string, Record<string, unknown>, string]>([
+    ['author', { author: 'Smith J' }, 'Smith J[Author]'],
+    ['journal', { journal: 'Thorax' }, '"Thorax"[Journal]'],
+    [
+      'meshTerms',
+      { meshTerms: ['Asthma', 'Child'] },
+      '("Asthma"[MeSH Terms] AND "Child"[MeSH Terms])',
+    ],
+    [
+      'publicationTypes',
+      { publicationTypes: ['Review', 'Meta-Analysis'] },
+      '("Review"[Publication Type] OR "Meta-Analysis"[Publication Type])',
+    ],
+  ])('searches on %s alone with no query', async (_label, filters, term) => {
+    const result = await runToolContract(searchArticlesTool, filters as never);
+
+    expect(result.isError).toBeFalsy();
+    expect(mockESearch.mock.calls[0]?.[0]?.term).toBe(term);
+    expect(result.structuredContent).toMatchObject({
+      query: '',
+      effectiveQuery: term,
+      appliedFilters: filters,
+    });
+    expect(contractText(result)).toContain('the search ran on the filters alone');
+  });
+
+  it.each([
+    ['a filter-only search', { journal: 'Thorax' }, 'No results matched the applied filters.'],
+    [
+      'a query with filters',
+      { query: 'asthma', journal: 'Thorax' },
+      'No results matched your query with the applied filters.',
+    ],
+  ])('words the empty-result notice for %s', async (_label, args, opening) => {
+    mockESearch.mockResolvedValue({ count: 0, idList: [], retmax: 0, retstart: 0 });
+
+    const result = await runToolContract(searchArticlesTool, args);
+
+    const notice = (result.structuredContent as { notice?: string }).notice;
+    expect(notice).toBe(
+      `${opening} Try removing filters (e.g. dateRange, publicationTypes, meshTerms), broadening dates, or verifying author/journal spelling.`,
+    );
+  });
+
+  it('joins the narrowing filters to a subject filter with no leading operator', async () => {
+    await runToolContract(searchArticlesTool, {
+      query: '',
+      author: 'Smith J',
+      language: 'english',
+      hasAbstract: true,
+      freeFullText: true,
+      species: 'humans',
+    });
+
+    expect(mockESearch.mock.calls[0]?.[0]?.term).toBe(
+      'Smith J[Author] AND english[Language] AND hasabstract[text word] AND free full text[filter] AND humans[MeSH Terms]',
+    );
+  });
+
+  it.each<[string, Record<string, unknown>]>([
+    ['no arguments', {}],
+    ['an empty query', { query: '' }],
+    ['empty subject filters', { query: '', journal: '', meshTerms: [''] }],
+    ['only a dateRange', { dateRange: { minDate: '2024', maxDate: '2025' } }],
+    ['only a language', { language: 'english' }],
+    ['only a species', { species: 'humans' }],
+    ['only hasAbstract', { hasAbstract: true }],
+    ['only freeFullText', { freeFullText: true }],
+  ])('rejects %s as no_search_term without calling NCBI', async (_label, args) => {
+    const result = await runToolContract(searchArticlesTool, args as never);
+
+    expect(result.isError).toBe(true);
+    expect(result.structuredContent).toMatchObject({
+      error: {
+        code: JsonRpcErrorCode.ValidationError,
+        data: {
+          reason: 'no_search_term',
+          retryable: false,
+          recovery: { hint: expect.stringContaining('all[sb]') },
+        },
+      },
+    });
+    const text = contractText(result);
+    expect(text).toContain('reason no_search_term');
+    expect(text).toMatch(/Recovery:/);
+    expect(readCommonMark(text)).toContain('all[sb]');
+    expect(mockESearch).not.toHaveBeenCalled();
+  });
+
+  it('declares no_search_term as a non-retryable input error naming every way to supply a term', () => {
+    const entry = searchArticlesTool.errors?.find((e) => e.reason === 'no_search_term');
+
+    expect(entry).toMatchObject({ code: JsonRpcErrorCode.ValidationError, retryable: false });
+    for (const name of [
+      '`query`',
+      '`author`',
+      '`journal`',
+      '`meshTerms`',
+      '`publicationTypes`',
+      'all[sb]',
+    ]) {
+      expect(entry?.recovery).toContain(name);
+    }
+  });
+
+  it('rejects a blank subject filter with no query as blank_filter, not no_search_term', async () => {
+    const result = await runToolContract(searchArticlesTool, { author: '   ' });
+
+    expect(result.structuredContent).toMatchObject({
+      error: { data: { reason: 'blank_filter', fields: ['author'] } },
+    });
+    expect(mockESearch).not.toHaveBeenCalled();
+  });
+
+  it.each(
+    ['   ', '<b></b>', '[pdat]', '()'].flatMap((query): [string, Record<string, unknown>][] => [
+      [query, {}],
+      [query, { journal: 'Thorax' }],
+    ]),
+  )('still rejects query %j with filters %j as blank_query', async (query, filters) => {
+    const result = await runToolContract(searchArticlesTool, { query, ...filters });
+
+    expect(result.structuredContent).toMatchObject({
+      error: { code: JsonRpcErrorCode.ValidationError, data: { reason: 'blank_query' } },
+    });
+    expect(mockESearch).not.toHaveBeenCalled();
+  });
+
+  it('sends a query with every filter as before, on both surfaces', async () => {
+    mockESearch.mockResolvedValue({ count: 2, idList: ['11', '22'], retmax: 20, retstart: 0 });
+    const filters = {
+      publicationTypes: ['Review'],
+      author: 'Smith J',
+      journal: 'Thorax',
+      meshTerms: ['Adult'],
+      language: 'english',
+      hasAbstract: true,
+      freeFullText: true,
+      species: 'humans' as const,
+    };
+    const result = await runToolContract(searchArticlesTool, {
+      query: 'asthma',
+      dateRange: { minDate: '2024/01', maxDate: '2026/12' },
+      ...filters,
+    });
+
+    const term =
+      'asthma AND (2024/01[pdat] : 2026/12[pdat]) AND ("Review"[Publication Type]) AND Smith J[Author] AND "Thorax"[Journal] AND ("Adult"[MeSH Terms]) AND english[Language] AND hasabstract[text word] AND free full text[filter] AND humans[MeSH Terms]';
+    expect(mockESearch.mock.calls[0]?.[0]?.term).toBe(term);
+    expect(result.structuredContent).toEqual({
+      query: 'asthma',
+      offset: 0,
+      pmids: ['11', '22'],
+      summaries: [],
+      searchUrl: `https://pubmed.ncbi.nlm.nih.gov/?term=${encodeURIComponent(term)}`,
+      totalCount: 2,
+      effectiveQuery: term,
+      appliedFilters: {
+        dateRange: { minDate: '2024/01', maxDate: '2026/12', dateType: 'pdat' },
+        ...filters,
+      },
+    });
+    const text = contractText(result);
+    expect(text).toContain('**Query:** `asthma`\n**Returned:** 2 of 2 | **Offset:** 0');
+    expect(text).not.toContain('filters alone');
+  });
+
+  it('advertises `query` as optional with no minimum length', () => {
+    const emitted = toJSONSchema(searchArticlesTool.input as never, {
+      target: 'draft-7',
+      io: 'input',
+    }) as { required?: string[]; properties: Record<string, Record<string, unknown>> };
+
+    expect(emitted.required ?? []).not.toContain('query');
+    expect(emitted.properties.query).toMatchObject({ type: 'string' });
+    expect(emitted.properties.query).not.toHaveProperty('minLength');
+  });
+
+  it('says an omitted or empty query searches on the filters, in the description and the blank_query contract', () => {
+    const description = searchArticlesTool.input.shape.query.description ?? '';
+    expect(description).toMatch(/omit/i);
+    for (const filter of ['`author`', '`journal`', '`meshTerms`', '`publicationTypes`']) {
+      expect(description).toContain(filter);
+    }
+
+    const entry = searchArticlesTool.errors?.find((e) => e.reason === 'blank_query');
+    expect(entry?.when).toContain('an exactly-empty `query` is not blank');
+  });
+});
+
+describe('searchArticlesTool page sizes past the per-call cap (issue #232)', () => {
+  beforeEach(() => {
+    mockESearch.mockReset();
+    mockESummary.mockReset();
+    mockESummary.mockRejectedValue(new Error('unmocked eSummary'));
+    mockExtractBriefSummaries.mockReset();
+    mockExtractBriefSummaries.mockResolvedValue([]);
+  });
+
+  /** `n` consecutive PMIDs from `first`. */
+  const ids = (n: number, first = 1) => Array.from({ length: n }, (_, i) => String(first + i));
+
+  /** ESearch's page: `count` matches and the IDs served, with history tokens when `history`. */
+  const page = (count: number, idList: string[], retstart = 0, history = false) =>
+    mockESearch.mockResolvedValue({
+      count,
+      idList,
+      retmax: idList.length,
+      retstart,
+      ...(history && { webEnv: 'NCBI_ENV', queryKey: '1' }),
+    });
+
+  /** One brief summary per requested PMID, as ESummary would answer. */
+  const summarize = (n: number) =>
+    mockExtractBriefSummaries.mockResolvedValue(
+      ids(n).map((pmid) => ({ pmid, title: `Article ${pmid}` })),
+    );
+
+  const noticeOf = (result: Awaited<ReturnType<typeof runToolContract>>) =>
+    (result.structuredContent as { notice?: string }).notice;
+
+  it('serves maxResults: 1001 as a 1000-record page and names the next offset on both surfaces', async () => {
+    page(5000, ids(1000));
+    const result = await runToolContract(searchArticlesTool, { query: 'asthma', maxResults: 1001 });
+
+    expect(result.isError).toBeFalsy();
+    expect(mockESearch).toHaveBeenCalledTimes(1);
+    expect(mockESearch.mock.calls[0]?.[0]).toMatchObject({ retmax: 1000, retstart: 0 });
+    expect((result.structuredContent as { pmids: string[] }).pmids).toHaveLength(1000);
+    const notice = noticeOf(result) ?? '';
+    expect(notice).toBe(
+      '`maxResults` 1001 is past the per-call cap of 1000, so it is served at 1000. Pass `offset: 1000` for the next page.',
+    );
+    expect(contractText(result)).toContain(notice);
+  });
+
+  it('accepts maxResults at its ceiling of 10000 and sends 1000', async () => {
+    page(50_000, ids(1000));
+    const result = await runToolContract(searchArticlesTool, {
+      query: 'asthma',
+      maxResults: 10_000,
+    });
+
+    expect(result.isError).toBeFalsy();
+    expect(mockESearch.mock.calls[0]?.[0]).toMatchObject({ retmax: 1000 });
+    expect(noticeOf(result)).toContain('`maxResults` 10000 is past the per-call cap of 1000');
+  });
+
+  it('names no continuation when every match fits the clamped page', async () => {
+    page(300, ids(300));
+    const result = await runToolContract(searchArticlesTool, { query: 'asthma', maxResults: 5000 });
+
+    expect(mockESearch.mock.calls[0]?.[0]).toMatchObject({ retmax: 1000 });
+    expect(noticeOf(result)).toBe(
+      '`maxResults` 5000 is past the per-call cap of 1000, so it is served at 1000.',
+    );
+  });
+
+  it('names the next offset when it is 9998, the last PubMed serves', async () => {
+    page(50_000, ids(1000, 8999), 8998);
+    const result = await runToolContract(searchArticlesTool, {
+      query: 'asthma',
+      maxResults: 2000,
+      offset: 8998,
+    });
+
+    expect(mockESearch.mock.calls[0]?.[0]).toMatchObject({ retmax: 1000, retstart: 8998 });
+    expect(noticeOf(result)).toContain('Pass `offset: 9998` for the next page.');
+  });
+
+  it('names no offset past 9998 when matches remain beyond it', async () => {
+    page(50_000, ids(1000, 9000), 8999);
+    const result = await runToolContract(searchArticlesTool, {
+      query: 'asthma',
+      maxResults: 2000,
+      offset: 8999,
+    });
+
+    const notice = noticeOf(result) ?? '';
+    expect(notice).toContain('`maxResults` 2000 is past the per-call cap of 1000');
+    expect(notice).not.toMatch(/offset: \d/);
+    expect(notice).toContain('narrow the query or add filters');
+  });
+
+  it('joins the offset-overshoot notice instead of replacing it', async () => {
+    page(100, [], 9000);
+    const result = await runToolContract(searchArticlesTool, {
+      query: 'asthma',
+      maxResults: 2000,
+      offset: 9000,
+    });
+
+    expect(noticeOf(result)).toBe(
+      'Offset 9000 exceeds totalCount (100). Reset offset to 0 or reduce it below 100 to page through results. `maxResults` 2000 is past the per-call cap of 1000, so it is served at 1000.',
+    );
+  });
+
+  it('joins the empty-result notice instead of replacing it', async () => {
+    page(0, []);
+    const result = await runToolContract(searchArticlesTool, { query: 'qqzzxx', maxResults: 1001 });
+
+    const notice = noticeOf(result) ?? '';
+    expect(notice).toContain('No results matched your query');
+    expect(notice).toContain('`maxResults` 1001 is past the per-call cap of 1000');
+    expect(contractText(result)).toContain(notice);
+  });
+
+  it.each([
+    ['with history tokens', true, { WebEnv: 'NCBI_ENV', query_key: '1', retmax: 50, retstart: 0 }],
+    ['without history tokens', false, { id: ids(50).join(',') }],
+  ])(
+    'fetches 50 summaries for summaryCount: 51 and routes the other PMIDs to pubmed_fetch_articles, %s',
+    async (_label, history, eSummaryParams) => {
+      page(500, ids(100), 0, history);
+      mockESummary.mockReset();
+      mockESummary.mockResolvedValue({ eSummaryResult: {} });
+      summarize(50);
+      const result = await runToolContract(searchArticlesTool, {
+        query: 'asthma',
+        maxResults: 100,
+        summaryCount: 51,
+      });
+
+      expect(mockESummary).toHaveBeenCalledTimes(1);
+      expect(mockESummary.mock.calls[0]?.[0]).toEqual({
+        db: 'pubmed',
+        version: '2.0',
+        retmode: 'xml',
+        ...eSummaryParams,
+      });
+      expect((result.structuredContent as { summaries: unknown[] }).summaries).toHaveLength(50);
+      const notice = noticeOf(result) ?? '';
+      expect(notice).toBe(
+        "`summaryCount` 51 is past the per-call cap of 50, so it is served at 50. Summaries cover the first 50 of this page's 100 PMIDs; pass the other 50 to `pubmed_fetch_articles` (up to 200 per call) for theirs.",
+      );
+      expect(contractText(result)).toContain(notice);
+    },
+  );
+
+  it('names no continuation when every PMID on the page is summarized', async () => {
+    page(20, ids(20), 0, true);
+    mockESummary.mockReset();
+    mockESummary.mockResolvedValue({ eSummaryResult: {} });
+    summarize(20);
+    const result = await runToolContract(searchArticlesTool, {
+      query: 'asthma',
+      summaryCount: 60,
+    });
+
+    expect(mockESummary.mock.calls[0]?.[0]).toMatchObject({ retmax: 20 });
+    expect(noticeOf(result)).toBe(
+      '`summaryCount` 60 is past the per-call cap of 50, so it is served at 50.',
+    );
+  });
+
+  it('clamps maxResults and summaryCount together, one notice carrying both', async () => {
+    page(5000, ids(1000), 0, true);
+    mockESummary.mockReset();
+    mockESummary.mockResolvedValue({ eSummaryResult: {} });
+    summarize(50);
+    const result = await runToolContract(searchArticlesTool, {
+      query: 'asthma',
+      maxResults: 1500,
+      summaryCount: 80,
+    });
+
+    expect(mockESearch.mock.calls[0]?.[0]).toMatchObject({ retmax: 1000, usehistory: 'y' });
+    expect(mockESummary.mock.calls[0]?.[0]).toMatchObject({ retmax: 50 });
+    const notice = noticeOf(result) ?? '';
+    expect(notice).toContain('`maxResults` 1500 is past the per-call cap of 1000');
+    expect(notice).toContain('Pass `offset: 1000` for the next page.');
+    expect(notice).toContain('`summaryCount` 80 is past the per-call cap of 50');
+    expect(notice).toContain('pass the other 950 to `pubmed_fetch_articles`');
+  });
+
+  it('sends in-cap values as before, with no notice', async () => {
+    page(5000, ids(1000), 0, true);
+    mockESummary.mockReset();
+    mockESummary.mockResolvedValue({ eSummaryResult: {} });
+    summarize(50);
+    const result = await runToolContract(searchArticlesTool, {
+      query: 'asthma',
+      maxResults: 1000,
+      summaryCount: 50,
+    });
+
+    expect(mockESearch.mock.calls[0]?.[0]).toMatchObject({ retmax: 1000, usehistory: 'y' });
+    expect(mockESummary.mock.calls[0]?.[0]).toMatchObject({ retmax: 50 });
+    expect(noticeOf(result)).toBeUndefined();
+  });
+
+  it.each<[string, Record<string, unknown>, string]>([
+    ['maxResults past its ceiling', { maxResults: 10_001 }, 'maxResults: Too big'],
+    ['a non-integer maxResults', { maxResults: 1.5 }, 'maxResults:'],
+    ['summaryCount past its ceiling', { summaryCount: 501 }, 'summaryCount: Too big'],
+    ['a negative summaryCount', { summaryCount: -1 }, 'summaryCount: Too small'],
+    ['a non-integer summaryCount', { summaryCount: 2.5 }, 'summaryCount:'],
+  ])('still rejects %s as invalid arguments', async (_label, args, message) => {
+    const result = await runToolContract(searchArticlesTool, {
+      query: 'asthma',
+      ...args,
+    } as never);
+
+    expect(result.isError).toBe(true);
+    expect(result.structuredContent).toMatchObject({
+      error: { code: JsonRpcErrorCode.InvalidParams, data: { reason: 'invalid_arguments' } },
+    });
+    expect(contractText(result)).toContain(message);
+    expect(mockESearch).not.toHaveBeenCalled();
+  });
+
+  it('advertises each ceiling as maximum and states the per-call cap', () => {
+    const emitted = toJSONSchema(searchArticlesTool.input as never, {
+      target: 'draft-7',
+      io: 'input',
+    }) as { properties: Record<string, Record<string, unknown>> };
+
+    expect(emitted.properties.summaryCount).toMatchObject({
+      type: 'integer',
+      minimum: 0,
+      maximum: 500,
+      default: 0,
+    });
+    expect(emitted.properties.maxResults?.description).toContain('1000 per call');
+    expect(emitted.properties.summaryCount?.description).toContain('50 per call');
   });
 });
 

@@ -10,6 +10,7 @@ import {
   stripEncodedMarkupTags,
   toDisplayText,
 } from '@/services/ncbi/parsing/text-helpers.js';
+import { cpuMsPerCall } from '../../../_helpers.js';
 
 import { EPMC_APOS_TITLE_HIT } from './_entity-fixtures.js';
 
@@ -369,17 +370,17 @@ describe('toDisplayText', () => {
       return (user + system) / 1000;
     };
 
-    /** Fastest of five measurements of `calls` calls each — the least noisy reading of the work. */
-    const fastestMs = (input: string, calls = 10): number => {
-      toDisplayText(input);
-      return Math.min(
-        ...Array.from({ length: 5 }, () =>
-          cpuMs(() => {
-            for (let i = 0; i < calls; i++) toDisplayText(input);
-          }),
-        ),
-      );
-    };
+    /**
+     * Per-call CPU time of `toDisplayText` at each of `sizes`, in ms, each size
+     * checked against `boundMs` before the next one runs.
+     */
+    const msPerCall = (sizes: number[], build: (n: number) => string, boundMs: number) =>
+      sizes.map((n) => {
+        const input = build(n);
+        const ms = cpuMsPerCall(n, () => toDisplayText(input));
+        expect(ms).toBeLessThan(boundMs);
+        return ms;
+      });
 
     /** Repeat `unit` to exactly `length` characters. */
     const fill = (unit: string, length: number) =>
@@ -426,11 +427,9 @@ describe('toDisplayText', () => {
       ['.<i>'],
       ['.&lt;i&gt;'],
     ])('scales linearly from 5k to 80k characters of %s', (unit) => {
-      const [t5k, t20k, t80k] = [5_000, 20_000, 80_000].map((n) => fastestMs(fill(unit, n)));
+      const [t5k, , t80k] = msPerCall([5_000, 20_000, 80_000], (n) => fill(unit, n), 40);
       // Linear work grows 16× across the span; quadratic grows 256×.
-      expect((t80k ?? 0) / Math.max(t5k ?? 0, 0.001)).toBeLessThan(64);
-      expect(t20k).toBeLessThan(400);
-      expect(t80k).toBeLessThan(400);
+      expect((t80k ?? 0) / Math.max(t5k ?? 0, 0.0001)).toBeLessThan(64);
     });
 
     it.each<[string, (n: number) => string]>([
@@ -443,22 +442,16 @@ describe('toDisplayText', () => {
       ['one long line ending in a break', (n) => `${'§1 x'.repeat(n / 4)}\ny`],
       ['line breaks throughout', (n) => '  \r\n'.repeat(n / 4)],
     ])('scales linearly from 5k to 320k characters of %s', (_label, build) => {
-      // Doubling from 5k, each size checked against the absolute bound before the
-      // next runs. Two calls per measurement keep seven sizes inside the test timeout.
-      const times: number[] = [];
-      for (let n = 5_000; n <= 320_000; n *= 2) {
-        const ms = fastestMs(build(n), 2);
-        expect(ms).toBeLessThan(400);
-        times.push(ms);
-      }
+      // Doubling from 5k, each size checked against the absolute bound before the next runs.
+      const sizes = Array.from({ length: 7 }, (_, i) => 5_000 * 2 ** i);
+      const times = msPerCall(sizes, build, 200);
       // Linear work grows 64× across the span; quadratic grows 4096×.
-      expect((times.at(-1) ?? 0) / Math.max(times[0] ?? 0, 0.05)).toBeLessThan(256);
+      expect((times.at(-1) ?? 0) / Math.max(times[0] ?? 0, 0.025)).toBeLessThan(256);
     });
 
     it('scales linearly on `<` followed only by letters', () => {
-      const [t5k, t80k] = [5_000, 80_000].map((n) => fastestMs(`<${'a'.repeat(n - 1)}`));
-      expect((t80k ?? 0) / Math.max(t5k ?? 0, 0.001)).toBeLessThan(64);
-      expect(t80k).toBeLessThan(400);
+      const [t5k, t80k] = msPerCall([5_000, 80_000], (n) => `<${'a'.repeat(n - 1)}`, 40);
+      expect((t80k ?? 0) / Math.max(t5k ?? 0, 0.0001)).toBeLessThan(64);
     });
   });
 });

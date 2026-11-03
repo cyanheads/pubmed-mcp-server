@@ -177,19 +177,27 @@ export function words(value: string): string {
   return ` ${folded.match(/[\p{L}\p{N}]+/gu)?.join(' ') ?? ''} `;
 }
 
-const reads = (haystack: string, needle: string) => words(haystack).includes(words(needle));
-const readsIgnoringCase = (haystack: string, needle: string) =>
-  words(haystack).toLowerCase().includes(words(needle).toLowerCase());
+/**
+ * Whether some one of `spaced` — haystacks already read by {@link words}, so a caller
+ * checking many needles against them folds each haystack once — holds `needle`'s words.
+ */
+const reads = (spaced: readonly string[], needle: string) => {
+  const wanted = words(needle);
+  return spaced.some((h) => h.includes(wanted));
+};
+const readsIgnoringCase = (spaced: readonly string[], needle: string) => {
+  const wanted = words(needle).toLowerCase();
+  return spaced.some((h) => h.toLowerCase().includes(wanted));
+};
 
 /**
- * Where `needle` stops reading in `haystacks`: the longest prefix of its words that some
- * one haystack holds, and the two words around the first that does not fit —
- * `mice miR223 ‸ y developed`. Prefix containment is monotonic, so a binary search
- * finds it.
+ * Where `needle` stops reading in `spaced`, haystacks already read by {@link words}: the
+ * longest prefix of its words that some one haystack holds, and the two words around the
+ * first that does not fit — `mice miR223 ‸ y developed`. Prefix containment is
+ * monotonic, so a binary search finds it.
  */
-function divergence(haystacks: readonly string[], needle: string): string {
+function divergence(spaced: readonly string[], needle: string): string {
   const wanted = words(needle).trim().split(' ');
-  const spaced = haystacks.map(words);
   const holds = (n: number) => {
     const prefix = ` ${wanted.slice(0, n).join(' ')} `;
     return spaced.some((h) => h.includes(prefix));
@@ -318,8 +326,9 @@ function fieldProblems(source: string, article: PubmedCorpusArticle): string[] {
   };
 
   const title = textOf(parts.article, 'ArticleTitle') ?? '';
-  if (words(title) !== words(article.title ?? '')) {
-    const at = divergence([article.title ?? ''], title);
+  const returnedTitle = words(article.title ?? '');
+  if (words(title) !== returnedTitle) {
+    const at = divergence([returnedTitle], title);
     problems.push(`title does not read as the source's: "${at}"`);
   }
   const sections = elements(inner(parts.article, 'Abstract'), 'AbstractText')
@@ -329,8 +338,9 @@ function fieldProblems(source: string, article: PubmedCorpusArticle): string[] {
   differs('abstract sections', sections.length, paragraphs.length);
   for (const [i, { label, text }] of sections.entries()) {
     const wanted = label ? `${label}: ${text}` : text;
-    if (words(wanted) !== words(paragraphs[i] ?? '')) {
-      const at = divergence([paragraphs[i] ?? ''], wanted);
+    const paragraph = words(paragraphs[i] ?? '');
+    if (words(wanted) !== paragraph) {
+      const at = divergence([paragraph], wanted);
       problems.push(`abstract section ${i} does not read as the source's: "${at}"`);
     }
   }
@@ -557,9 +567,10 @@ function citationProblems(source: string, citation: PubmedCorpusCitation): strin
     }
     if (doi && !value.toLowerCase().includes(doi.toLowerCase())) problems.push(`${style}: no DOI`);
     if (year && !value.includes(year)) problems.push(`${style}: no year ${year}`);
-    if (surname && !reads(value, surname)) problems.push(`${style}: no first author "${surname}"`);
-    if (volume && !reads(value, volume)) problems.push(`${style}: no volume ${volume}`);
-    if (title && !readsIgnoringCase(value, title)) {
+    const spaced = [words(value)];
+    if (surname && !reads(spaced, surname)) problems.push(`${style}: no first author "${surname}"`);
+    if (volume && !reads(spaced, volume)) problems.push(`${style}: no volume ${volume}`);
+    if (title && !readsIgnoringCase(spaced, title)) {
       problems.push(`${style}: title not read in full`);
     }
   }
@@ -607,14 +618,15 @@ export function checkPubmedInvariants({
     ...surfaceProblems('pubmed_format_citations', citationSurfaces, source),
   ];
 
-  const structured = articleSurfaces.strings.map((s) => s.value);
+  // Each surface folded once: every conserved source value is read against them.
+  const structured = articleSurfaces.strings.map((s) => words(s.value));
+  const text = [words(articleSurfaces.text)];
   for (const { field, value } of conservedTexts(source)) {
-    if (!structured.some((s) => reads(s, value))) {
+    if (!reads(structured, value)) {
       problems.push(`${field} not read in structuredContent: "${divergence(structured, value)}"`);
     }
-    if (!reads(articleSurfaces.text, value)) {
-      const at = divergence([articleSurfaces.text], value);
-      problems.push(`${field} not read in content[]: "${at}"`);
+    if (!reads(text, value)) {
+      problems.push(`${field} not read in content[]: "${divergence(text, value)}"`);
     }
   }
   problems.push(...fieldProblems(source, article));

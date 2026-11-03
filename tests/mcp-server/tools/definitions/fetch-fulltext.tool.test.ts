@@ -13,6 +13,7 @@ import { ORDERED_XML_PARSER_OPTIONS } from '@/services/ncbi/parsing/ordered-xml-
 
 import {
   bunMarkdown,
+  cpuMsPerCallAsync,
   readCommonMark,
   renderedHtml,
   renderedText,
@@ -8708,26 +8709,21 @@ describe('fetchFulltextTool blank section selectors (issue #186)', () => {
 
   describe('linear time on caller-sized blank input', () => {
     /**
-     * Fastest of five measurements of ten calls each, in ms of this thread's user
-     * + system CPU time, not wall clock. Each call is awaited until it settles,
-     * so the check is measured wherever in the handler it runs; a warm-up call
-     * first confirms the input is the one being timed, rejected as `blank_filter`.
+     * Per-call CPU time of the handler on the `n`-element input, in ms, each call
+     * awaited until it settles so the check is measured wherever in the handler it
+     * runs. A first call confirms the input is the one being timed, rejected as
+     * `blank_filter`; the result is checked against the bound before the next size runs.
      */
-    const fastestMs = async (sections: string[]): Promise<number> => {
-      const input = fetchFulltextTool.input.parse({ pmcids: ['PMC10164684'], sections });
+    const msPerCall = async (n: number, build: (n: number) => string[]): Promise<number> => {
+      const input = fetchFulltextTool.input.parse({ pmcids: ['PMC10164684'], sections: build(n) });
       const settle = () =>
         Promise.resolve(
           fetchFulltextTool.handler(input, createMockContext({ errors: fetchFulltextTool.errors })),
         ).catch((error: unknown) => error);
       expect(await settle()).toMatchObject({ data: { reason: 'blank_filter' } });
-      let fastest = Number.POSITIVE_INFINITY;
-      for (let round = 0; round < 5; round++) {
-        const start = process.threadCpuUsage();
-        for (let call = 0; call < 10; call++) await settle();
-        const { user, system } = process.threadCpuUsage(start);
-        fastest = Math.min(fastest, (user + system) / 1000);
-      }
-      return fastest;
+      const ms = await cpuMsPerCallAsync(n, settle);
+      expect(ms).toBeLessThan(100);
+      return ms;
     };
 
     it.each([
@@ -8735,12 +8731,11 @@ describe('fetchFulltextTool blank section selectors (issue #186)', () => {
       ['N single-space elements', (n: number) => Array.from({ length: n }, () => ' ')],
       ['N empty elements and one blank one', (n: number) => [...Array(n).fill(''), '​']],
     ])('rejects %s in linear CPU time', async (_label, build) => {
-      const t5k = await fastestMs(build(5_000));
-      const t80k = await fastestMs(build(80_000));
+      const t5k = await msPerCall(5_000, build);
+      const t80k = await msPerCall(80_000, build);
 
-      // Measured at a ratio of 6–21 and ~80 ms for the slowest shape.
+      // Measured at a ratio of 6–21 and under 10 ms per call for the slowest shape.
       expect(t80k / t5k).toBeLessThan(64);
-      expect(t80k).toBeLessThan(1_000);
     });
   });
 
@@ -9582,7 +9577,7 @@ describe('fetchFulltextTool license statements (issue #269)', () => {
     ]);
     const paragraphs = readCommonMark(textOf(call)).split('\n\n');
     expect(paragraphs).toContain(
-      `⟨strong⟩License 1 of 2:⟨/strong⟩ ⟨a⟩${CC_BY_HTTP}⟨/a⟩, ⟨a⟩${CC_BY_HTTPS}⟨/a⟩\n${CC_TEXT}`,
+      `⟨strong⟩License 1 of 2:⟨/strong⟩ ⟨a href=${CC_BY_HTTP}⟩${CC_BY_HTTP}⟨/a⟩, ⟨a href=${CC_BY_HTTPS}⟩${CC_BY_HTTPS}⟨/a⟩\n${CC_TEXT}`,
     );
     expect(paragraphs).toContain(`⟨strong⟩License 2 of 2:⟨/strong⟩\n${GOV_TEXT}`);
   });
@@ -9625,7 +9620,7 @@ describe('fetchFulltextTool license statements (issue #269)', () => {
       },
     ]);
     expect(readCommonMark(textOf(call)).split('\n\n')).toContain(
-      `⟨strong⟩License:⟨/strong⟩ ⟨a⟩${CC_BY_HTTPS}⟨/a⟩\nThis work is licensed under a CC BY 4.0 International license.`,
+      `⟨strong⟩License:⟨/strong⟩ ⟨a href=${CC_BY_HTTPS}⟩${CC_BY_HTTPS}⟨/a⟩\nThis work is licensed under a CC BY 4.0 International license.`,
     );
   });
 
@@ -9660,7 +9655,7 @@ describe('fetchFulltextTool license statements (issue #269)', () => {
     ]);
     const paragraphs = readCommonMark(textOf(call)).split('\n\n');
     expect(paragraphs).toContain(
-      '⟨strong⟩License:⟨/strong⟩ ⟨a⟩https://example.org/licence_(v2)⟨/a⟩, see licence.txt\nReuse *with* <b>credit</b>.',
+      '⟨strong⟩License:⟨/strong⟩ ⟨a href=https://example.org/licence_(v2)⟩https://example.org/licence_(v2)⟨/a⟩, see licence.txt\nReuse *with* <b>credit</b>.',
     );
     expect(paragraphs).toContain('1. Second paragraph.');
   });
@@ -9846,9 +9841,10 @@ describe('fetchFulltextTool sections past maxSections (issue #268)', () => {
         ...BACK_TITLES.map((title) => `  - ${title}`),
       ].join('\n'),
     );
-    // Each heading reads back as the body writes it, not as a nested ordered list.
+    // Each heading reads back as the body writes it, not as a nested ordered list
+    // (which would start at its number: `⟨ordered_list_open start=2⟩`).
     const readBack = readCommonMark(block ?? '');
-    expect(readBack).not.toContain('⟨ordered_list_open⟩');
+    expect(readBack).not.toContain('⟨ordered_list_open');
     for (const title of ALL_TITLES.slice(1)) expect(readBack).toContain(title);
     expect(readCommonMark(text).split('\n\n')).toContain('1. Introduction');
   });
@@ -10177,7 +10173,9 @@ describe('fetchFulltextTool values sharing a paragraph (issue #261)', () => {
   it('renders every character of a tagged reference and of a license URL and its text', () => {
     const read = paragraphs(result);
     expect(read).toContain('[1*] Smith J*. Title.');
-    expect(read).toContain('⟨strong⟩License:⟨/strong⟩ ⟨a⟩https://x.org/a`b⟨/a⟩\nUse it ` freely.');
+    expect(read).toContain(
+      '⟨strong⟩License:⟨/strong⟩ ⟨a href=https://x.org/a%60b⟩https://x.org/a`b⟨/a⟩\nUse it ` freely.',
+    );
   });
 
   it('renders every character of an unavailable entry and its chain', () => {
@@ -10190,7 +10188,7 @@ describe('fetchFulltextTool values sharing a paragraph (issue #261)', () => {
       '10.1/a*b (pmc): 5 of 50 characters, 1 table(s) dropped whole: Table 1*',
     );
     expect(read).toContain('1. Introduction — 0 of 10 characters (truncated: true) — dropped');
-    expect(read).not.toContain('⟨ordered_list_open⟩');
+    expect(read).not.toContain('⟨ordered_list_open');
     expect(render(result)).toContain(
       '  - 1\\. Introduction — 0 of 10 characters (truncated: true) — dropped',
     );
@@ -10222,7 +10220,7 @@ describe('fetchFulltextTool values sharing a paragraph (issue #261)', () => {
           '⟨strong⟩Source:⟨/strong⟩ Unpaywall (HTML → Markdown, best-effort)',
           '⟨strong⟩Journal:⟨/strong⟩ J Allergy*',
           '⟨strong⟩DOI:⟨/strong⟩ 10.1/u_',
-          '⟨strong⟩OA Copy:⟨/strong⟩ ⟨a⟩https://web.archive.org/web/2020*/x.pdf⟨/a⟩',
+          '⟨strong⟩OA Copy:⟨/strong⟩ ⟨a href=https://web.archive.org/web/2020*/x.pdf⟩https://web.archive.org/web/2020*/x.pdf⟨/a⟩',
           '⟨strong⟩License:⟨/strong⟩ cc*',
           '⟨strong⟩Host Type:⟨/strong⟩ repository',
           '⟨strong⟩Version:⟨/strong⟩ v1',

@@ -14,7 +14,11 @@ import { fetchWithTimeout, logger, requestContextService } from '@cyanheads/mcp-
 
 import { readBody } from '@/services/fetch-redaction.js';
 
-import { EUROPEPMC_API_BASE, type EuropePmcSearchParams } from './types.js';
+import {
+  EUROPEPMC_API_BASE,
+  EUROPEPMC_DEFAULT_PAGE_SIZE,
+  type EuropePmcSearchParams,
+} from './types.js';
 
 const USER_AGENT = 'pubmed-mcp-server (+https://github.com/cyanheads/pubmed-mcp-server)';
 
@@ -220,7 +224,7 @@ export class EuropePmcApiClient {
       query: buildSearchQuery(params),
       format: 'json',
       resultType: params.resultType ?? 'core',
-      pageSize: String(params.pageSize ?? 25),
+      pageSize: String(params.pageSize ?? EUROPEPMC_DEFAULT_PAGE_SIZE),
       cursorMark: params.cursorMark ?? '*',
     };
     if (params.sort) finalParams.sort = params.sort;

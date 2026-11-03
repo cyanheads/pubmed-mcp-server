@@ -3,7 +3,8 @@
  * source article via a provider chain: NCBI ELink (primary) → Europe PMC →
  * OpenAlex. First success wins; results are never merged across sources.
  * Supports offset pagination on the returned window, sized by `maxResults`
- * (`limit` and `pageSize` accepted as aliases). A served empty answer is a
+ * (`limit` and `pageSize` accepted as aliases); a `maxResults` past the
+ * per-call cap is served at the cap with a notice. A served empty answer is a
  * success; only a chain where every eligible provider failed is an error.
  * Every return path carries the total match count in `output`, which `format()`
  * states in the header. A zero-padded source PMID runs as the PMID it spells,
@@ -25,6 +26,7 @@ import {
   type OpenAlexRelatedResult,
 } from '@/services/openalex/types.js';
 import { conceptMeta, EDAM_DATA_RETRIEVAL, SCHEMA_SCHOLARLY_ARTICLE } from './_concepts.js';
+import { pageSizeCeiling, pageSizeClampNotice } from './_page-size.js';
 import { normalizePmid, pmidStringSchema } from './_schemas.js';
 import { escapeMarkdownInParagraph, escapeMarkdownLineStart } from './_text.js';
 
@@ -362,6 +364,9 @@ function allProvidersFailedHint(attempts: readonly ProviderAttempt[]): string {
 
 // ─── Tool Definition ─────────────────────────────────────────────────────────
 
+/** Related articles one call returns; a larger `maxResults` is served at this size. (#232) */
+const MAX_RESULTS_CAP = 50;
+
 export const findRelatedTool = tool('pubmed_find_related', {
   description:
     'Find articles related to a source article — similar content (similar), articles citing this one (cited_by), or articles this one cites (references). Uses NCBI ELink as the primary source; falls back to Europe PMC then OpenAlex when NCBI is unavailable.',
@@ -396,14 +401,22 @@ export const findRelatedTool = tool('pubmed_find_related', {
       .describe(
         'Relationship type: similar (content-based), cited_by (articles citing this one), references (articles this one cites)',
       ),
-    maxResults: z.number().int().min(1).max(50).default(10).describe('Maximum related articles'),
+    maxResults: z
+      .number()
+      .int()
+      .min(1)
+      .max(pageSizeCeiling(MAX_RESULTS_CAP))
+      .default(10)
+      .describe(
+        `Maximum related articles per page, up to ${MAX_RESULTS_CAP} per call. A larger value is served at ${MAX_RESULTS_CAP}, with a notice naming the next \`offset\` when more remain.`,
+      ),
     offset: z
       .number()
       .int()
       .min(0)
       .default(0)
       .describe(
-        'Result offset for pagination (0-based); page through results by incrementing by maxResults',
+        `Result offset for pagination (0-based). For the next page, add the number of articles returned (at most ${MAX_RESULTS_CAP}) to this offset.`,
       ),
   }),
 
@@ -483,7 +496,7 @@ export const findRelatedTool = tool('pubmed_find_related', {
       .string()
       .optional()
       .describe(
-        'Guidance when results are empty, a fallback provider answered, offset overshot, a fallback provider could not be reached, or upstream rows were excluded for carrying no PubMed PMID. Absent on a clean NCBI result page.',
+        `Guidance when results are empty, a fallback provider answered, offset overshot, a fallback provider could not be reached, upstream rows were excluded for carrying no PubMed PMID, or a \`maxResults\` past the per-call cap of ${MAX_RESULTS_CAP} was served at ${MAX_RESULTS_CAP}. Absent on an NCBI result page that needs none of these.`,
       ),
     coverageFailures: z
       .array(
@@ -524,6 +537,32 @@ export const findRelatedTool = tool('pubmed_find_related', {
     // uses the canonical form. `sourcePmid` and the notices keep the caller's
     // spelling. (#161)
     const canonicalPmid = normalizePmid(input.pmid);
+    // A `maxResults` past the cap is served at the cap rather than rejected, and
+    // every provider window and the ESummary batch are sized from this applied
+    // value, never from the request. (#232)
+    const maxResults = Math.min(input.maxResults, MAX_RESULTS_CAP);
+    /**
+     * Emits the call's one notice — only the last `ctx.enrich.notice` survives —
+     * with the page-size clamp, when it applied, ahead of the other sentences.
+     * `nextOffset` is named only when results remain past this page.
+     */
+    const emitNotice = (sentences: string[], nextOffset?: number) => {
+      const all =
+        maxResults < input.maxResults
+          ? [
+              pageSizeClampNotice(
+                'maxResults',
+                input.maxResults,
+                MAX_RESULTS_CAP,
+                nextOffset === undefined
+                  ? undefined
+                  : `Pass \`offset: ${nextOffset}\` for the next page.`,
+              ),
+              ...sentences,
+            ]
+          : sentences;
+      if (all.length > 0) ctx.enrich.notice(all.join(' '));
+    };
 
     // ── Provider chain ──────────────────────────────────────────────────────
     // Try NCBI first; on failure fall back to Europe PMC then OpenAlex (first
@@ -567,7 +606,7 @@ export const findRelatedTool = tool('pubmed_find_related', {
           canonicalPmid,
           input.relationship as 'cited_by' | 'references',
           input.offset,
-          input.maxResults,
+          maxResults,
           ctx.signal,
         );
         if (epmcResult.allPmids.length > 0) {
@@ -592,7 +631,7 @@ export const findRelatedTool = tool('pubmed_find_related', {
         providerResult = await openAlexProvider(
           canonicalPmid,
           input.relationship,
-          input.offset + input.maxResults,
+          input.offset + maxResults,
           ctx.signal,
         );
         fallbackKind = 'outage';
@@ -656,9 +695,9 @@ export const findRelatedTool = tool('pubmed_find_related', {
 
       if (sourceConfirmedMissing) {
         ctx.enrich({ source: 'ncbi' });
-        ctx.enrich.notice(
+        emitNotice([
           `Source PMID ${input.pmid} not found in PubMed. Verify the ID with \`pubmed_fetch_articles\` or \`pubmed_search_articles\`.`,
-        );
+        ]);
         return {
           sourcePmid: input.pmid,
           relationship: input.relationship,
@@ -685,17 +724,12 @@ export const findRelatedTool = tool('pubmed_find_related', {
           {
             provider: 'europepmc',
             run: () =>
-              epmcProvider(canonicalPmid, 'references', input.offset, input.maxResults, ctx.signal),
+              epmcProvider(canonicalPmid, 'references', input.offset, maxResults, ctx.signal),
           },
           {
             provider: 'openalex',
             run: () =>
-              openAlexProvider(
-                canonicalPmid,
-                'references',
-                input.offset + input.maxResults,
-                ctx.signal,
-              ),
+              openAlexProvider(canonicalPmid, 'references', input.offset + maxResults, ctx.signal),
           },
         ];
         for (const attempt of refAttempts) {
@@ -727,11 +761,11 @@ export const findRelatedTool = tool('pubmed_find_related', {
           const noReferences = sourcePmcId
             ? `No reference list found for PMID ${input.pmid} (PMCID ${sourcePmcId}) via ${checked}.`
             : `No reference list available for PMID ${input.pmid} via ${checked}. Use pubmed_fetch_articles to inspect the article record, or try relationship: "similar" / "cited_by".`;
-          ctx.enrich.notice(
+          emitNotice([
             coverageFailures.length > 0
               ? `${noReferences} ${coverageIncompleteNotice(coverageFailures)}`
               : noReferences,
-          );
+          ]);
           return {
             sourcePmid: input.pmid,
             relationship: input.relationship,
@@ -742,8 +776,10 @@ export const findRelatedTool = tool('pubmed_find_related', {
         }
       } else {
         // similar / cited_by empty for a valid source, or references with an
-        // unconfirmed source — return the honest empty without a notice.
+        // unconfirmed source — return the honest empty with no notice beyond a
+        // page-size clamp.
         ctx.enrich({ source: 'ncbi' });
+        emitNotice([]);
         return {
           sourcePmid: input.pmid,
           relationship: input.relationship,
@@ -763,7 +799,14 @@ export const findRelatedTool = tool('pubmed_find_related', {
 
     // For NCBI the full neighbor set is in memory; for EPMC/OpenAlex the provider
     // pre-fetched enough PMID-addressable rows to cover the window.
-    const window = allPmids.slice(input.offset, input.offset + input.maxResults);
+    const window = allPmids.slice(input.offset, input.offset + maxResults);
+    // The page after this one, for the clamp notice. A fallback that stopped
+    // short of the window (`reachCapped`) left rows before it unread, so no
+    // continuation is offered past them.
+    const nextOffset =
+      !reachCapped && input.offset + maxResults < totalCount
+        ? input.offset + maxResults
+        : undefined;
 
     // Only the LAST ctx.enrich.notice survives, so collect the applicable
     // fragments (overshoot, provenance, enrichment-degraded) and emit them once.
@@ -807,20 +850,26 @@ export const findRelatedTool = tool('pubmed_find_related', {
     // reach. It counts pages for Europe PMC and for OpenAlex's `cites:` filter,
     // but OpenAlex serves `similar` and `references` from the source work's own
     // ID list, which it resolves in batches — so the same cap names a different
-    // unit of work there.
+    // unit of work there. A walk that found no PMID gets no advice: a lower
+    // offset reads a prefix of the same rows, or the same batches.
     if (reachCapped) {
       const cap = source === 'europepmc' ? EPMC_MAX_PAGES : OPENALEX_MAX_UPSTREAM_REQUESTS;
       const walk =
         source === 'europepmc' || input.relationship === 'cited_by'
           ? `paging stopped after ${cap} pages`
           : `ID resolution stopped after ${cap} batches`;
-      notices.push(
-        `${PROVIDER_LABELS[source]} ${walk} (${allPmids.length} PubMed-addressable rows) without reaching offset ${input.offset}; lower the offset.`,
-      );
+      const found = allPmids.length;
+      const outcome =
+        found === 0
+          ? ' without finding a row that carries a PubMed PMID.'
+          : found <= input.offset
+            ? `, having found ${found} PubMed-addressable rows, without reaching offset ${input.offset}; lower the offset.`
+            : `, having found ${found} PubMed-addressable rows, so this page holds rows ${input.offset}–${found - 1} of the ${input.offset}–${input.offset + maxResults - 1} requested.`;
+      notices.push(`${PROVIDER_LABELS[source]} ${walk}${outcome}`);
     }
 
     if (window.length === 0) {
-      if (notices.length > 0) ctx.enrich.notice(notices.join(' '));
+      emitNotice(notices, nextOffset);
       return {
         sourcePmid: input.pmid,
         relationship: input.relationship,
@@ -860,7 +909,7 @@ export const findRelatedTool = tool('pubmed_find_related', {
           pubDate: details?.pubDate,
         };
       });
-      if (notices.length > 0) ctx.enrich.notice(notices.join(' '));
+      emitNotice(notices, nextOffset);
       return {
         sourcePmid: input.pmid,
         relationship: input.relationship,
@@ -876,7 +925,7 @@ export const findRelatedTool = tool('pubmed_find_related', {
       notices.push(
         'Article metadata is temporarily unavailable (NCBI eSummary did not respond); returning related PMIDs only. Retry for full metadata, or use pubmed_fetch_articles.',
       );
-      ctx.enrich.notice(notices.join(' '));
+      emitNotice(notices, nextOffset);
       return {
         sourcePmid: input.pmid,
         relationship: input.relationship,

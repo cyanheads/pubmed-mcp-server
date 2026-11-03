@@ -361,12 +361,20 @@ describe('EFetch backend-timeout envelope under the service deadline (issue #153
   });
 
   it('reports the envelope as retry exhaustion when the next backoff would overrun the deadline (#174)', async () => {
-    // Attempt 1 fails at ~1000ms; its 2000ms backoff cannot fit the ~500ms left of a
-    // 1500ms deadline, so the loop stops there, before the deadline fires.
+    // Attempt 1 fails at 1000ms; its 2000ms backoff cannot fit the 500ms left of a
+    // 1500ms deadline, so the loop stops there, before the deadline fires. A fake clock
+    // keeps attempt 1 at 1000ms however late a real timer would fire.
+    vi.useFakeTimers();
     const spy = stubFetch({ body: TIMEOUT_ENVELOPE, status: 400 });
     const service = buildService(10, 1500);
 
-    await expect(service.eFetch({ db: 'pubmed', id: PMID })).rejects.toMatchObject({
+    const settled = service.eFetch({ db: 'pubmed', id: PMID }).catch((e: unknown) => e);
+    await vi.advanceTimersByTimeAsync(999);
+    expect(spy).toHaveBeenCalledTimes(1);
+    await vi.advanceTimersByTimeAsync(1);
+
+    // Settled at attempt 1, half a second before the deadline would fire.
+    expect(await Promise.race([settled, 'pending'])).toMatchObject({
       code: JsonRpcErrorCode.ServiceUnavailable,
       message: expect.stringMatching(/Status: Timeout \(failed after 2 attempts\)$/),
       data: {
