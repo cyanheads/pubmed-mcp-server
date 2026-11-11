@@ -1,6 +1,6 @@
 # pubmed-mcp-server - Directory Structure
 
-Generated on: 2026-11-03 07:49:39
+Generated on: 2026-11-11 08:05:07
 
 ```text
 pubmed-mcp-server/
@@ -179,6 +179,7 @@ pubmed-mcp-server/
 │   │           ├── _outline-shares.ts
 │   │           ├── _page-size.ts
 │   │           ├── _schemas.ts
+│   │           ├── _summary-row.ts
 │   │           ├── _text.ts
 │   │           ├── _visible-text.ts
 │   │           ├── convert-ids.tool.ts
@@ -345,6 +346,7 @@ pubmed-mcp-server/
 │   │           ├── _outline-shares.test.ts
 │   │           ├── _page-size.test.ts
 │   │           ├── _schemas.test.ts
+│   │           ├── _summary-row.test.ts
 │   │           ├── _text.test.ts
 │   │           ├── _visible-text.test.ts
 │   │           ├── convert-ids-per-element.test.ts
@@ -402,9 +404,12 @@ pubmed-mcp-server/
 │   │   │   │   ├── text-helpers.test.ts
 │   │   │   │   └── xml-helpers.test.ts
 │   │   │   ├── _espell-fixtures.ts
+│   │   │   ├── _fake-clock.test.ts
+│   │   │   ├── _fake-clock.ts
 │   │   │   ├── api-client.test.ts
 │   │   │   ├── ecitmatch-truncation.test.ts
 │   │   │   ├── efetch-timeout-retry.test.ts
+│   │   │   ├── endpoint-fail-fast.test.ts
 │   │   │   ├── field-tags.test.ts
 │   │   │   ├── idconvert-http-400.test.ts
 │   │   │   ├── ncbi-service.test.ts

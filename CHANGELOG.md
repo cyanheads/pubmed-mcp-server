@@ -2,6 +2,10 @@
 
 All notable changes to this project. Each entry links to its full per-version file in [changelog/](changelog/).
 
+## [2.12.1](changelog/2.12.x/2.12.1.md) — 2026-11-11
+
+pubmed_lookup_mesh returns every MeSH record type with its recordType and searchTerm clause, and pubmed_search_articles honors sort author and journal and reports the 9,999-record window. Summary dates carry PubMed's precision, a failing NCBI endpoint gets one attempt per call, and article links in content[] render as links.
+
 ## [2.12.0](changelog/2.12.x/2.12.0.md) — 2026-11-02
 
 Publishes the pubmed-guide agent skill as an MCP resource, lets pubmed_search_articles run on filters alone, serves page sizes past a per-call cap at the cap instead of rejecting them, records E-utilities requests in the request-duration metric, and raises the keyed NCBI request gap to 120 ms.
