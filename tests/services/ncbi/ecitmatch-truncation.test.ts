@@ -22,6 +22,8 @@ vi.mock('@cyanheads/mcp-ts-core/utils', async (importOriginal) => {
     createPacer: actual.createPacer,
     defaultIsTransient: actual.defaultIsTransient,
     withRetry: actual.withRetry,
+    // The NCBI client creates its request-duration histogram when it is imported.
+    createHistogram: actual.createHistogram,
     logger: { debug: vi.fn(), info: vi.fn(), notice: vi.fn(), warning: vi.fn(), error: vi.fn() },
     requestContextService: { createRequestContext: vi.fn(() => ({ requestId: 'test' })) },
   };

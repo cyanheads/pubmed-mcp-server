@@ -10,6 +10,7 @@
 
 import { JsonRpcErrorCode, type McpError } from '@cyanheads/mcp-ts-core/errors';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { driveUntilSettled, type Outcome, track } from './_fake-clock.js';
 
 vi.mock('@cyanheads/mcp-ts-core/utils', async () => {
   const actual = await vi.importActual<typeof import('@cyanheads/mcp-ts-core/utils')>(
@@ -70,30 +71,6 @@ async function buildService(env: {
   const { initNcbiService, getNcbiService } = await import('@/services/ncbi/ncbi-service.js');
   initNcbiService();
   return getNcbiService();
-}
-
-type Outcome = { ok: true } | { ok: false; error: McpError };
-
-/** Tracks a call's settlement without awaiting it, so the test can keep driving the clock. */
-function track(promise: Promise<unknown>): { outcome: Outcome | undefined } {
-  const handle: { outcome: Outcome | undefined } = { outcome: undefined };
-  promise.then(
-    () => {
-      handle.outcome = { ok: true };
-    },
-    (error: McpError) => {
-      handle.outcome = { ok: false, error };
-    },
-  );
-  return handle;
-}
-
-/** Advances the fake clock in small steps until `handle` settles (or the budget runs out). */
-async function driveUntilSettled(handle: { outcome: Outcome | undefined }, budgetMs = 30_000) {
-  for (let spent = 0; handle.outcome === undefined && spent <= budgetMs; spent += 10) {
-    await vi.advanceTimersByTimeAsync(10);
-  }
-  return handle.outcome;
 }
 
 beforeEach(() => {

@@ -1,11 +1,13 @@
 /**
- * @fileoverview Regression for issues #152, #159, #175, and #180 at the tool
- * surface. Runs `pubmed_europepmc_search` and `pubmed_europepmc_fetch` through
- * their contract boundary against the real EuropePmcService, EuropePmcApiClient,
- * and framework `fetchWithTimeout`, behind a stubbed global `fetch`, and asserts
- * both consumption paths — `structuredContent` and `content[]` — for a `/search`
- * HTTP failure, Europe PMC's empty `{ version }` envelope, the single-source
- * query the search sends, and a 503 on a caller-supplied `cursorMark`.
+ * @fileoverview Regression for issues #152, #159, #175, #180, #239, #288, and
+ * #289 at the tool surface. Runs `pubmed_europepmc_search` and
+ * `pubmed_europepmc_fetch` through their contract boundary against the real
+ * EuropePmcService, EuropePmcApiClient, and framework `fetchWithTimeout`, behind
+ * a stubbed global `fetch`, and asserts both consumption paths —
+ * `structuredContent` and `content[]` — for a `/search` HTTP failure and each
+ * tool's outage recovery, Europe PMC's empty `{ version }` envelope, a sort it
+ * refuses, the single-source query the search sends, and a 503 on a
+ * caller-supplied `cursorMark`.
  * @module tests/mcp-server/tools/definitions/europepmc-search-failures.test
  */
 
@@ -13,6 +15,7 @@ import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
 import { runToolContract } from '@cyanheads/mcp-ts-core/testing';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
+import { EUROPEPMC_SERVICE_ERRORS } from '@/services/error-contracts.js';
 import { readCommonMark, textBlocks } from '../../../_helpers.js';
 
 vi.mock('@cyanheads/mcp-ts-core/utils', async () => {
@@ -47,8 +50,12 @@ const { pubmedEuropepmcFetchTool } = await import(
   '@/mcp-server/tools/definitions/pubmed-europepmc-fetch.tool.js'
 );
 
-const UNREACHABLE_HINT =
-  'Retry after a brief delay; Europe PMC was unreachable. NCBI PMC and Unpaywall remain available.';
+/** `pubmed_europepmc_search`'s outage recovery: it names the other search tool (#288). */
+const SEARCH_UNREACHABLE_HINT =
+  "Retry after a brief delay, or run the search through pubmed_search_articles, which covers the PubMed (`MED`) records in Europe PMC's index but not its preprints, patents, or Agricola records. Its query syntax differs: Europe PMC field tokens such as `AUTH:` do not carry over.";
+/** `pubmed_europepmc_fetch`'s outage recovery: it names the tool that reads a `MED` record. */
+const FETCH_UNREACHABLE_HINT =
+  "Retry after a brief delay, or pass a `MED` record's `epmcId`, which is its PMID, to pubmed_fetch_articles in `pmids`. That tool reads PubMed only, so it does not reach `PMC`, `PPR`, `PAT`, or `AGR` records.";
 
 type Reply = { status: number; body?: unknown; headers?: Record<string, string> };
 
@@ -95,6 +102,40 @@ function errorOf(result: Awaited<ReturnType<typeof runToolContract>>) {
   return { error, text: readCommonMark(block?.text ?? '') };
 }
 
+/**
+ * Each tool replaces only the `recovery` of the shared `europepmc_unreachable`
+ * entry, by mapping the array it spreads: code, `when`, `retryable`, and
+ * `thrownBy` stay shared, and every other Europe PMC entry is the shared one
+ * itself (#288).
+ */
+type DeclaredErrors = readonly { reason: string; recovery: string }[];
+const errorsOf = (definition: { errors?: DeclaredErrors }): DeclaredErrors =>
+  definition.errors ?? [];
+
+describe.each([
+  ['pubmed_europepmc_search', errorsOf(pubmedEuropepmcSearchTool), SEARCH_UNREACHABLE_HINT],
+  ['pubmed_europepmc_fetch', errorsOf(pubmedEuropepmcFetchTool), FETCH_UNREACHABLE_HINT],
+])('%s outage contract (#288)', (_name, errors, unreachableHint) => {
+  const shared = EUROPEPMC_SERVICE_ERRORS.find((e) => e.reason === 'europepmc_unreachable');
+
+  it('replaces only the recovery of europepmc_unreachable', () => {
+    const entries = errors.filter((e) => e.reason === 'europepmc_unreachable');
+    expect(entries).toHaveLength(1);
+    const { recovery, ...rest } = entries[0] ?? { recovery: undefined };
+    const { recovery: sharedRecovery, ...sharedRest } = shared ?? { recovery: undefined };
+    expect(recovery).toBe(unreachableHint);
+    expect(recovery).not.toBe(sharedRecovery);
+    expect(rest).toEqual(sharedRest);
+  });
+
+  it('keeps every other shared Europe PMC entry as is', () => {
+    for (const entry of EUROPEPMC_SERVICE_ERRORS.filter((e) => e !== shared)) {
+      expect(errors.filter((e) => e.reason === entry.reason)).toEqual([entry]);
+      expect(errors).toContain(entry);
+    }
+  });
+});
+
 const search = (input: Record<string, unknown>) =>
   runToolContract(pubmedEuropepmcSearchTool, { query: 'CRISPR', ...input });
 const fetchRecords = () =>
@@ -125,20 +166,20 @@ afterEach(() => {
 });
 
 describe.each([
-  ['pubmed_europepmc_search', () => search({})],
-  ['pubmed_europepmc_fetch', fetchRecords],
-])('%s on a failing /search', (_name, run) => {
+  ['pubmed_europepmc_search', () => search({}), SEARCH_UNREACHABLE_HINT],
+  ['pubmed_europepmc_fetch', fetchRecords, FETCH_UNREACHABLE_HINT],
+])('%s on a failing /search', (_name, run, unreachableHint) => {
   it('surfaces a persistent 404 as europepmc_unreachable on both paths (#152)', async () => {
     stubFetch([{ status: 404, body: 'Not Found' }]);
     const { error, text } = errorOf(await run());
 
     expect(error.code).toBe(JsonRpcErrorCode.ServiceUnavailable);
     expect(error.data?.reason).toBe('europepmc_unreachable');
-    expect(error.data?.recovery?.hint).toBe(UNREACHABLE_HINT);
+    expect(error.data?.recovery?.hint).toBe(unreachableHint);
     expect(error.message).toMatch(
       new RegExp(`Status: 404.*\\(failed after ${EXHAUSTED} attempts\\)$`),
     );
-    expect(text).toContain(`Recovery: ${UNREACHABLE_HINT}`);
+    expect(text).toContain(`Recovery: ${unreachableHint}`);
     expect(text).toContain('(reason europepmc_unreachable');
     expect(fetchSpy).toHaveBeenCalledTimes(EXHAUSTED);
   });
@@ -149,7 +190,23 @@ describe.each([
 
     expect(error.code).toBe(JsonRpcErrorCode.ServiceUnavailable);
     expect(error.data?.reason).toBe('europepmc_unreachable');
-    expect(text).toContain(`Recovery: ${UNREACHABLE_HINT}`);
+    expect(text).toContain(`Recovery: ${unreachableHint}`);
+    expect(fetchSpy).toHaveBeenCalledTimes(EXHAUSTED);
+  });
+
+  it('carries its own outage recovery on a persistent 503 (#288)', async () => {
+    stubFetch([{ status: 503, body: { errCode: 503, errMsg: 'Search service is down.' } }]);
+    const { error, text } = errorOf(await run());
+
+    expect(error.code).toBe(JsonRpcErrorCode.ServiceUnavailable);
+    expect(error.data?.reason).toBe('europepmc_unreachable');
+    expect(error.data?.recovery?.hint).toBe(unreachableHint);
+    expect(error.message).toMatch(
+      new RegExp(`Status: 503.*\\(failed after ${EXHAUSTED} attempts\\)$`),
+    );
+    expect(text).toBe(
+      `Error: ${error.message}\n\nRecovery: ${unreachableHint}\n\n(reason europepmc_unreachable)`,
+    );
     expect(fetchSpy).toHaveBeenCalledTimes(EXHAUSTED);
   });
 
@@ -162,7 +219,7 @@ describe.each([
     // `europepmc_unreachable` is declared for ServiceUnavailable only.
     expect(error.data?.reason).toBeUndefined();
     expect(text).not.toContain('europepmc_unreachable');
-    expect(text).not.toContain(UNREACHABLE_HINT);
+    expect(text).not.toContain(unreachableHint);
     expect(fetchSpy).toHaveBeenCalledTimes(EXHAUSTED);
   });
 
@@ -187,7 +244,7 @@ describe.each([
     expect(error.data?.reason).toBe('europepmc_unreachable');
     expect(error.message).toMatch(new RegExp(`\\(failed after ${EXHAUSTED} attempts\\)$`));
     expect(error.message).not.toMatch(/sort|query|CRISPR|EXT_ID/i);
-    expect(text).toContain(`Recovery: ${UNREACHABLE_HINT}`);
+    expect(text).toContain(`Recovery: ${unreachableHint}`);
     expect(fetchSpy).toHaveBeenCalledTimes(EXHAUSTED);
   });
 
@@ -360,7 +417,7 @@ describe('pubmed_europepmc_search sorts Europe PMC refuses (#239)', () => {
     );
     expect(error.message).not.toContain('FOOBAR');
     expect(text).not.toContain('FOOBAR');
-    expect(text).toContain(`Recovery: ${UNREACHABLE_HINT}`);
+    expect(text).toContain(`Recovery: ${SEARCH_UNREACHABLE_HINT}`);
     // Every attempt plus one probe.
     expect(fetchSpy).toHaveBeenCalledTimes(EXHAUSTED + 1);
   });
@@ -371,8 +428,32 @@ describe('pubmed_europepmc_search sorts Europe PMC refuses (#239)', () => {
 
     expect(result.isError).toBeFalsy();
     expect(allText(result)).toContain('31295471');
-    expect(sentParams().map((p) => p.get('sort'))).toEqual(['CITED desc', null, 'CITED desc']);
+    expect(sentParams().map((p) => p.get('sort'))).toEqual(['CITED desc', 'CITED desc']);
   });
+
+  it.each(['CITED desc', 'PUB_YEAR desc, CITED desc'])(
+    'reports an outage, not the documented sort %j, when every sorted request is refused and the unsorted one is served (#289)',
+    async (sort) => {
+      stubFetchBySort([SORT_503], [RESULTS]);
+      const { error, text } = errorOf(await search({ query: 'status epilepticus', sort }));
+
+      expect(error.code).toBe(JsonRpcErrorCode.ServiceUnavailable);
+      expect(error.data?.reason).toBe('europepmc_unreachable');
+      expect(error.data).not.toHaveProperty('sort');
+      expect(error.data?.recovery?.hint).toBe(SEARCH_UNREACHABLE_HINT);
+      expect(error.message).toMatch(
+        new RegExp(`Status: 503 \\(failed after ${EXHAUSTED} attempts\\)$`),
+      );
+      expect(error.message).not.toContain('CITED');
+      expect(text).toBe(
+        `Error: ${error.message}\n\nRecovery: ${SEARCH_UNREACHABLE_HINT}\n\n(reason europepmc_unreachable)`,
+      );
+      // Every attempt with the sort at the caller's page size; no probe.
+      expect(sentParams().map((p) => [p.get('sort'), p.get('pageSize')])).toEqual(
+        Array(EXHAUSTED).fill([sort, '25']),
+      );
+    },
+  );
 
   it('blames the sort, not the cursor, for a cursor search with a refused sort', async () => {
     stubFetchBySort([SORT_503], [RESULTS]);
@@ -493,7 +574,7 @@ describe('pubmed_europepmc_search cursorMark (#180)', () => {
     expect(text).toContain('cursorMark "abc"');
     expect(text).toContain(`Recovery: ${hint}`);
     expect(text).toContain('(reason europepmc_invalid_input · not retryable');
-    expect(text).not.toContain(UNREACHABLE_HINT);
+    expect(text).not.toContain(SEARCH_UNREACHABLE_HINT);
 
     // The cursor request, one first-page probe of the same query, and one retry
     // of the cursor that draws the 503 again — nothing else.
@@ -528,7 +609,7 @@ describe('pubmed_europepmc_search cursorMark (#180)', () => {
     expect(error.message).toMatch(
       new RegExp(`Status: 503.*\\(failed after ${EXHAUSTED} attempts\\)$`),
     );
-    expect(text).toContain(`Recovery: ${UNREACHABLE_HINT}`);
+    expect(text).toContain(`Recovery: ${SEARCH_UNREACHABLE_HINT}`);
     expect(sentParams().map((p) => p.get('cursorMark'))).toEqual(['abc', '*', 'abc', 'abc']);
   });
 
@@ -538,11 +619,11 @@ describe('pubmed_europepmc_search cursorMark (#180)', () => {
 
     expect(error.code).toBe(JsonRpcErrorCode.ServiceUnavailable);
     expect(error.data?.reason).toBe('europepmc_unreachable');
-    expect(error.data?.recovery?.hint).toBe(UNREACHABLE_HINT);
+    expect(error.data?.recovery?.hint).toBe(SEARCH_UNREACHABLE_HINT);
     expect(error.message).toMatch(
       new RegExp(`Status: 503.*\\(failed after ${EXHAUSTED} attempts\\)$`),
     );
-    expect(text).toContain(`Recovery: ${UNREACHABLE_HINT}`);
+    expect(text).toContain(`Recovery: ${SEARCH_UNREACHABLE_HINT}`);
     expect(text).toContain('(reason europepmc_unreachable');
     expect(fetchSpy).toHaveBeenCalledTimes(EXHAUSTED);
     expect(sentParams().every((p) => p.get('cursorMark') === '*')).toBe(true);

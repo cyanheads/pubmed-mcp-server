@@ -436,7 +436,7 @@ describe('fetchArticlesTool', () => {
     expect(blocks[0]?.text).toContain('**Type:** Review');
     expect(blocks[0]?.text).toContain('**DOI:** 10.1000/example');
     expect(blocks[0]?.text).toContain(
-      '**PMC:** https://www.ncbi.nlm.nih.gov/pmc/articles/PMC12345/',
+      '**PMC:** <https://www.ncbi.nlm.nih.gov/pmc/articles/PMC12345/>',
     );
     expect(blocks[0]?.text).toContain('**Keywords:** asthma, airway');
     expect(blocks[0]?.text).toContain('#### MeSH Terms');
@@ -795,7 +795,7 @@ describe('fetchArticlesTool whole-response budget (issue #99)', () => {
         '**Record Type:** journal-article',
         '**Type:** Journal Article',
         '**PMID:** 111',
-        '**PubMed:** https://pubmed.ncbi.nlm.nih.gov/111/',
+        '**PubMed:** <https://pubmed.ncbi.nlm.nih.gov/111/>',
         '',
         '#### Abstract',
         'A'.repeat(40),
@@ -809,7 +809,7 @@ describe('fetchArticlesTool whole-response budget (issue #99)', () => {
         '**Record Type:** journal-article',
         '**Type:** Journal Article',
         '**PMID:** 222',
-        '**PubMed:** https://pubmed.ncbi.nlm.nih.gov/222/',
+        '**PubMed:** <https://pubmed.ncbi.nlm.nih.gov/222/>',
         '',
         '#### Abstract',
         'B'.repeat(40),
@@ -1267,7 +1267,7 @@ describe('fetchArticlesTool Bookshelf records (issue #114)', () => {
     expect(text).toContain('**Publisher:** University of Washington, Seattle');
     expect(text).toContain('**Publisher Location:** Seattle (WA)');
     expect(text).toContain('**Published:** 1993–2026');
-    expect(text).toContain('**Bookshelf:** https://www.ncbi.nlm.nih.gov/books/NBK1247/');
+    expect(text).toContain('**Bookshelf:** <https://www.ncbi.nlm.nih.gov/books/NBK1247/>');
 
     // Whole book — both ISBNs, the series, the book DOI.
     expect(text).toContain('**ISBN:** 9780309605397, 0309605393');
@@ -1971,7 +1971,7 @@ describe('fetchArticlesTool investigators (issue #216)', () => {
         '**Record Type:** journal-article',
         '**Type:** Journal Article',
         '**PMID:** 40000216',
-        '**PubMed:** https://pubmed.ncbi.nlm.nih.gov/40000216/',
+        '**PubMed:** <https://pubmed.ncbi.nlm.nih.gov/40000216/>',
       ].join('\n'),
     );
   });
@@ -2427,5 +2427,105 @@ describe('fetchArticlesTool content[] escaping of the abstract and record fields
         expect(visible).toContain(value);
       }
     });
+  });
+});
+
+describe('fetchArticlesTool record links (issue #307)', () => {
+  beforeEach(() => {
+    mockEFetch.mockReset();
+    mockEFetch.mockResolvedValue({
+      PubmedArticleSet: parseArticleSetXml(
+        articleSetXml(JOURNAL_ARTICLE_XML, GENEREVIEWS_CHAPTER_XML),
+      ),
+    });
+  });
+
+  type LinkedRecord = {
+    pmid: string;
+    pubmedUrl?: string;
+    pmcUrl?: string;
+    book?: { accession?: string };
+  };
+  const call = async () => {
+    const result = await runToolContract(fetchArticlesTool, { pmids: ['42474064', '20301425'] });
+    const { articles } = result.structuredContent as { articles: LinkedRecord[] };
+    const text = textBlocks(result.content as Parameters<typeof textBlocks>[0])
+      .map((b) => b.text)
+      .join('\n');
+    return { articles, read: readCommonMark(text) };
+  };
+
+  it('carries each record URL in structuredContent as the plain URL', async () => {
+    const { articles } = await call();
+
+    expect(
+      articles.map(({ pmid, pubmedUrl, pmcUrl, book }) => ({
+        pmid,
+        pubmedUrl,
+        pmcUrl,
+        accession: book?.accession,
+      })),
+    ).toEqual([
+      {
+        pmid: '42474064',
+        pubmedUrl: 'https://pubmed.ncbi.nlm.nih.gov/42474064/',
+        pmcUrl: 'https://www.ncbi.nlm.nih.gov/pmc/articles/PMC13403055/',
+        accession: undefined,
+      },
+      {
+        pmid: '20301425',
+        pubmedUrl: 'https://pubmed.ncbi.nlm.nih.gov/20301425/',
+        pmcUrl: undefined,
+        accession: 'NBK1247',
+      },
+    ]);
+  });
+
+  it('renders the PubMed, PMC and Bookshelf URLs as CommonMark links to those URLs', async () => {
+    const { articles, read } = await call();
+    const [journal, chapter] = articles;
+
+    /** The CommonMark reading of `**label:** <url>`, for a URL structuredContent must carry. */
+    const link = (label: string, url: string | undefined) => {
+      if (url === undefined) throw new Error(`structuredContent carries no ${label} URL`);
+      return `⟨strong⟩${label}:⟨/strong⟩ ⟨a href=${url}⟩${url}⟨/a⟩`;
+    };
+    expect(read).toContain(
+      [link('PubMed', journal?.pubmedUrl), link('PMC', journal?.pmcUrl)].join('\n'),
+    );
+    expect(read).toContain(link('PubMed', chapter?.pubmedUrl));
+    // The Bookshelf permalink is the accession structuredContent carries, as a URL.
+    expect(read).toContain(
+      link('Bookshelf', `https://www.ncbi.nlm.nih.gov/books/${chapter?.book?.accession}/`),
+    );
+    // No label is followed by a URL a reader sees as plain text.
+    expect(read).not.toMatch(/⟨\/strong⟩ https?:\/\//);
+  });
+
+  it('renders a URL that cannot be an autolink as text reading back the URL, never a broken link', () => {
+    const pmcUrl = 'https://www.ncbi.nlm.nih.gov/pmc/articles/PMC 1/';
+    const pubmedUrl = 'https://pubmed.ncbi.nlm.nih.gov/<b>1</b>/';
+    const text =
+      textBlocks(
+        fetchArticlesTool.format!({
+          articles: [
+            {
+              recordType: 'journal-article',
+              pmid: '1',
+              title: 'T',
+              authors: [],
+              pubmedUrl,
+              pmcUrl,
+            },
+          ],
+          totalReturned: 1,
+        }),
+      )[0]?.text ?? '';
+    const read = readCommonMark(text);
+
+    expect(read).toContain(
+      `⟨strong⟩PubMed:⟨/strong⟩ ${pubmedUrl}\n⟨strong⟩PMC:⟨/strong⟩ ${pmcUrl}`,
+    );
+    expect(read).not.toContain('⟨a href');
   });
 });

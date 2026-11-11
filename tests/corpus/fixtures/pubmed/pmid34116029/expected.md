@@ -57,8 +57,8 @@
 **PMID:** 34116029
 **DOI:** 10.1053/j.gastro.2021.05.059
 **PMCID:** PMC7617121
-**PubMed:** https://pubmed.ncbi.nlm.nih.gov/34116029/
-**PMC:** https://www.ncbi.nlm.nih.gov/pmc/articles/PMC7617121/
+**PubMed:** <https://pubmed.ncbi.nlm.nih.gov/34116029/>
+**PMC:** <https://www.ncbi.nlm.nih.gov/pmc/articles/PMC7617121/>
 **Article Dates:** Electronic 2021-06-08
 
 #### Comments and Corrections (1)

@@ -44,7 +44,7 @@ Biomedical literature from PubMed, PubMed Central, and Europe PMC. Search it, fe
 | `pubmed_format_citations` | Format citations in APA 7th, MLA 9th, BibTeX, RIS, or Vancouver (ICMJE/NLM), with linked retraction and correction notices |
 | `pubmed_find_related` | Find similar articles, citing articles, or references for a PMID |
 | `pubmed_spell_check` | Correct a misspelled PubMed query via NCBI ESpell |
-| `pubmed_lookup_mesh` | Look up MeSH headings with tree numbers, scope notes, and entry terms |
+| `pubmed_lookup_mesh` | Look up MeSH records (descriptors, supplementary concepts, qualifiers, pharmacological actions) with the PubMed clause that searches each, tree numbers, scope notes, and entry terms |
 | `pubmed_lookup_citation` | Resolve partial references, up to 25 at a time, to PMIDs via ECitMatch |
 | `pubmed_convert_ids` | Convert between DOI, PMID, and PMCID via the PMC ID Converter |
 
@@ -66,7 +66,7 @@ Biomedical literature from PubMed, PubMed Central, and Europe PMC. Search it, fe
 
 - Full PubMed query syntax plus filters (author, journal, MeSH, publication type, language, species, abstract, free full text) and publication/modification/Entrez date ranges
 - `query` is optional: with an author, journal, MeSH, or publication-type filter, the filters alone make the search (a journal's output over a date range, for example)
-- Up to 1,000 results per page and offsets up to 9,998, or `maxResults: 0` for the match count alone; `summaryCount` adds briefs for up to 50 hits. A larger page size is served at the cap with a notice naming where to continue
+- Up to 1,000 results per page and offsets up to 9,998, or `maxResults: 0` for the match count alone; `summaryCount` adds briefs for up to 50 hits. A larger page size is served at the cap with a notice naming where to continue; a page that reaches PubMed's 9,999-record window says how many matches no `offset` can reach and advises narrowing or splitting the query by `dateRange`
 - Reports `totalCount`, the `effectiveQuery` PubMed ran, and the `appliedFilters`
 - Rejects blank filter values, impossible dates, and reversed date ranges before PubMed is called
 
@@ -129,6 +129,7 @@ Biomedical literature from PubMed, PubMed Central, and Europe PMC. Search it, fe
 ### `pubmed_find_related` <sub>tool</sub>
 
 - `similar`, `cited_by`, or `references`, up to 50 per page with offset pagination. A larger page size is served at the cap with a notice naming where to continue
+- Rows carry the same identifiers as search summaries: `doi`, `pmcId` and `pmcUrl` when the record has them, and a `pubmedUrl` on every row
 - Falls back to Europe PMC, then OpenAlex, and names the provider that answered; fails as `all_providers_failed` if none can
 
 ---
@@ -143,8 +144,9 @@ Biomedical literature from PubMed, PubMed Central, and Europe PMC. Search it, fe
 
 ### `pubmed_lookup_mesh` <sub>tool</sub>
 
-- Descriptors by name or free-text term, with an exact heading match pinned first (the descriptor, for a drug-class heading); up to 50 per page, continued via `nextOffset`. A larger page size is served at the cap with a notice naming where to continue
-- Records carry their MeSH unique ID (`meshId`, e.g. `D000072657`) beside the Entrez UID; `includeDetails` (default on) adds tree numbers, scope notes, and entry terms
+- MeSH records of every type (descriptors, supplementary concepts, qualifiers, pharmacological actions) by name or free-text term, with the exact heading match pinned first: the record the query names, a descriptor before a qualifier or pharmacological-action record of the same name, or the heading an entry term maps to; up to 50 per page, continued via `nextOffset`. A larger page size is served at the cap with a notice naming where to continue
+- Records carry their MeSH unique ID (`meshId`, e.g. `D000072657`) beside the Entrez UID, their `recordType`, and a `searchTerm`, the PubMed clause that searches them (`"Name"[mh]`, `[nm]` for a supplementary concept, `[pa]`, `[pt]`, `[sh]`); a drug-class heading returns its descriptor and its pharmacological-action record as two records under one name and ID, told apart by `recordType`
+- `includeDetails` (default on) adds tree numbers, scope notes, entry terms, `yearIntroduced`, and `previousIndexing`; the exact heading match on a query's first page also gets its allowable `subheadings`
 
 ---
 
@@ -181,7 +183,7 @@ Built on [`@cyanheads/mcp-ts-core`](https://github.com/cyanheads/mcp-ts-core): s
 PubMed-specific:
 
 - NCBI E-utilities (ESearch, EFetch, ESummary, ELink, ESpell, EInfo, ECitMatch) and the PMC ID Converter, with Europe PMC, OpenAlex, and Unpaywall filling the gaps
-- Shared NCBI request queue: paced request starts, capped concurrency, a cooldown that holds every caller after an NCBI 429, and one deadline covering queue wait and retries
+- Shared NCBI request queue: paced request starts, capped concurrency, a cooldown that holds every caller after an NCBI 429, one deadline covering queue wait and retries, and fail-fast for an endpoint whose retries were just spent on an outage: later calls to it make one attempt each until one succeeds
 - XML parsing built for PubMed's inconsistent records: structured abstracts, missing fields, varying date formats
 - Forgiving identifiers: a zero-padded PMID resolves as the PMID it spells in every tool that takes one; `pubmed_fetch_fulltext` also matches DOIs case-insensitively and PMC IDs with or without the `PMC` prefix
 - Hand-rolled citation formatters (APA, MLA, BibTeX, RIS, Vancouver) with no dependencies
@@ -229,7 +231,7 @@ An [NCBI API key](https://www.ncbi.nlm.nih.gov/account/settings/) in `NCBI_API_K
 | `NCBI_ADMIN_EMAIL` | Contact email sent with NCBI requests, as NCBI recommends. | none |
 | `NCBI_REQUEST_DELAY_MS` | Minimum gap between NCBI request starts, in ms. | `400` (`120` with a key) |
 | `NCBI_MAX_CONCURRENT` | Max concurrent in-flight NCBI requests. | `8` |
-| `NCBI_MAX_RETRIES` | Retry attempts for failed NCBI requests. | `6` |
+| `NCBI_MAX_RETRIES` | Retry attempts for failed NCBI requests. An endpoint whose last call failed unreachable on every attempt gets one attempt per call until one succeeds. | `6` |
 | `NCBI_TIMEOUT_MS` | Per-request HTTP timeout, in ms. | `30000` |
 | `NCBI_TOTAL_DEADLINE_MS` | Deadline for one NCBI call across queue wait, retries, and backoff, in ms. A call that can't start in time is rejected at once. | `60000` |
 | `UNPAYWALL_EMAIL` | Contact email for Unpaywall. Setting it enables the Unpaywall tier of `pubmed_fetch_fulltext` for non-PMC DOIs. | none |
@@ -254,7 +256,7 @@ See [`.env.example`](./.env.example) for every server setting and the common fra
 
 ### Local development
 
-Requires [Bun v1.4.0](https://bun.sh/) or higher (or Node.js v24+).
+Requires [Bun v1.4.4](https://bun.sh/) or higher (or Node.js v24+).
 
 - **Clone and install**:
 

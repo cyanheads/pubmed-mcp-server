@@ -6,7 +6,7 @@
  */
 
 import type { RequestContext } from '@cyanheads/mcp-ts-core/utils';
-import { dateParser, logger, requestContextService, withExtra } from '@cyanheads/mcp-ts-core/utils';
+import { logger, requestContextService, withExtra } from '@cyanheads/mcp-ts-core/utils';
 import type {
   ESummaryArticleId,
   ESummaryDocSumOldXml,
@@ -50,39 +50,88 @@ const MONTH_ABBREV: Record<string, string> = {
   Dec: '12',
 };
 
-/**
- * Matches NCBI ESummary date formats:
- * - "2024"               → year only
- * - "2024 Jan"           → year + month
- * - "2024 Jan 15"        → year + month + day
- * - "2018 Jul-Aug"       → year + month range (dash)
- * - "2018 Jan/Feb"       → year + month range (slash)
- *
- * Groups: 1=year, 2=firstMonth?, 3=day? (second month in range is non-capturing)
- */
-const NCBI_DATE_RE = /^(\d{4})(?:\s+([A-Za-z]{3})(?:[/-][A-Za-z]{3})?(?:\s+(\d{1,2}))?)?$/;
+/** One end of a stated date, holding only the parts ESummary states. */
+interface DatePoint {
+  day?: string;
+  month?: string;
+  year: string;
+}
+
+/** A date or one end of a range: `2026`, `2026 Dec`, `2026 Sep 30`. Groups: year, month?, day? */
+const POINT_RE = /^(\d{4})(?: ([A-Za-z]{3})(?: (\d{1,2}))?)?$/;
+/** A range end that keeps the start's year and month: the `25` of `1999 Dec 18-25`. */
+const DAY_END_RE = /^\d{1,2}$/;
+/** A season after a year or a year range: `1996 Summer`, `1994-1995 Winter`. */
+const SEASON_RE = / (?:Spring|Summer|Fall|Autumn|Winter)$/;
+/** The year a value of any other shape opens with: `2017 May-June`. */
+const LEADING_YEAR_RE = /^(\d{4})(?:[ /-]|$)/;
+
+function readPoint(text: string): DatePoint | undefined {
+  const [, year, monthName, day] = POINT_RE.exec(text) ?? [];
+  if (year === undefined) return;
+  if (monthName === undefined) return { year };
+  const month = MONTH_ABBREV[monthName];
+  if (!month) return;
+  return day === undefined ? { year, month } : { year, month, day: day.padStart(2, '0') };
+}
 
 /**
- * Parses NCBI ESummary date strings into YYYY-MM-DD (or YYYY-MM-01 / YYYY-01-01
- * for partial dates). Returns undefined for unrecognized formats.
- *
- * NCBI's ESummary API returns a small set of predictable date formats. chrono-node
- * (used by the framework's dateParser) mishandles most of them — its `forwardDate`
- * option causes "2023 Dec" to resolve to a future December, ignoring the year.
+ * A range's end, at its start's precision. The end may leave out the start's
+ * year (`Sep-Oct`, `Aug 30-Sep 5`) or year and month (`Dec 18-25`), and a day
+ * after a month range is dropped (`2026 Jan-Feb 01` is January to February).
+ * Undefined for an end at any other precision.
+ */
+function readRangeEnd(text: string, start: DatePoint): DatePoint | undefined {
+  const end =
+    readPoint(text) ??
+    readPoint(`${start.year} ${text}`) ??
+    (start.day && DAY_END_RE.test(text) ? { ...start, day: text.padStart(2, '0') } : undefined);
+  if (!end) return;
+  if (start.day) return end.day ? end : undefined;
+  if (start.month) return end.month ? { year: end.year, month: end.month } : undefined;
+  return end.month ? undefined : end;
+}
+
+const isoPoint = ({ year, month, day }: DatePoint) =>
+  [year, month, day].filter((part) => part !== undefined).join('-');
+
+/** A date or a `-`/`/` range, a year optionally followed by a season; undefined for other shapes. */
+function readStatedDate(text: string): string | undefined {
+  const season = SEASON_RE.exec(text);
+  const body = season ? text.slice(0, season.index) : text;
+  const separator = body.search(/[-/]/);
+  const start = readPoint(separator === -1 ? body : body.slice(0, separator));
+  // A season qualifies a year, never a month.
+  if (!start || (season && start.month)) return;
+  if (separator === -1) return isoPoint(start);
+
+  const end = readRangeEnd(body.slice(separator + 1), start);
+  if (!end) return;
+  const from = isoPoint(start);
+  const to = isoPoint(end);
+  if (to < from) return;
+  // Equal ends state one point: `2026 Sep-Sep` is September.
+  if (to === from) return from;
+  // Every month of one year is that year.
+  if (from === `${start.year}-01` && to === `${start.year}-12`) return start.year;
+  return `${from}/${to}`;
+}
+
+/**
+ * Reads an ESummary date — `PubDate`, `EPubDate`, or part of a Bookshelf
+ * `DocDate` — as ISO 8601 at the precision PubMed states it: `2026`, `2026-12`,
+ * `2026-09-30`. A stated range is an interval `start/end` with both ends at the
+ * start's precision: `2026 Sep-Oct` and `2026 Sep/Oct` read `2026-09/2026-10`,
+ * `1994-1995 Winter` `1994/1995`, `1999 Dec 18-25` `1999-12-18/1999-12-25`, and
+ * `2006 Dec 12-2007 Jan 1` `2006-12-12/2007-01-01`. A range whose ends are
+ * equal reads as that one point (`2026 Sep-Sep` `2026-09`), `2026 Jan-Dec` as
+ * `2026`, a season as its year, and any other value opening with a four-digit
+ * year (`2017 May-June`) as that year. Undefined for a value that opens with
+ * no year. (#293)
  */
 export function parseNcbiDate(dateStr: string): string | undefined {
-  const m = NCBI_DATE_RE.exec(dateStr.trim());
-  if (!m) return;
-
-  const [, year, monthAbbrev, day] = m;
-  if (!year) return;
-
-  const month = monthAbbrev ? MONTH_ABBREV[monthAbbrev] : undefined;
-  if (monthAbbrev && !month) return; // unrecognized month abbreviation
-
-  if (month && day) return `${year}-${month}-${day.padStart(2, '0')}`;
-  if (month) return `${year}-${month}-01`;
-  return `${year}-01-01`;
+  const text = dateStr.trim().split(/\s+/).join(' ');
+  return readStatedDate(text) ?? LEADING_YEAR_RE.exec(text)?.[1];
 }
 
 /** Opens the revision date inside a Bookshelf chapter's `DocDate`. */
@@ -90,64 +139,21 @@ const DOC_DATE_UPDATED = '[updated ';
 
 /**
  * A Bookshelf chapter's own date from its ESummary `DocDate` — `1998 Oct 23
- * [updated 2018 Dec 20]`, `2025 Jul 3`, `2021 Sep`, or `2026`: the revision when
- * there is one, otherwise the contribution date, as `pubmed_format_citations`
- * dates the chapter (#189). An unreadable revision falls back to the
- * contribution date; undefined when neither is one of ESummary's date forms, so
- * the caller keeps the book's date rather than guessing. (#199)
+ * [updated 2018 Dec 20]`, `2025 Jul 3`, `2021 Sep`, or `2026` — read by
+ * {@link parseNcbiDate}: the revision when there is one, otherwise the
+ * contribution date, as `pubmed_format_citations` dates the chapter (#189). An
+ * unreadable revision falls back to the contribution date; undefined when
+ * neither reads, so the caller keeps the book's date rather than guessing. (#199)
  */
 export function chapterDateFromDocDate(docDate: string): string | undefined {
-  const readable = (part: string) => {
-    const trimmed = part.trim();
-    return parseNcbiDate(trimmed) ? trimmed : undefined;
-  };
   const updated = docDate.indexOf(DOC_DATE_UPDATED);
   const close = updated === -1 ? -1 : docDate.indexOf(']', updated);
   const revised =
-    close === -1 ? undefined : readable(docDate.slice(updated + DOC_DATE_UPDATED.length, close));
+    close === -1
+      ? undefined
+      : parseNcbiDate(docDate.slice(updated + DOC_DATE_UPDATED.length, close));
   const bracket = docDate.indexOf('[');
-  return revised ?? readable(docDate.slice(0, bracket === -1 ? undefined : bracket));
-}
-
-/**
- * Standardizes date strings from ESummary to 'YYYY-MM-DD' format.
- * Uses a dedicated NCBI date parser for known formats, falling back to
- * chrono-node via the framework's dateParser for anything unexpected.
- */
-export async function standardizeESummaryDate(
-  dateStr?: string,
-  parentContext?: RequestContext,
-): Promise<string | undefined> {
-  if (dateStr == null) return;
-
-  const dateInputString = String(dateStr).trim();
-  if (!dateInputString) return;
-
-  const ncbiResult = parseNcbiDate(dateInputString);
-  if (ncbiResult) return ncbiResult;
-
-  const currentContext =
-    parentContext ||
-    requestContextService.createRequestContext({
-      operation: 'standardizeESummaryDateInternal',
-      additionalContext: { inputDate: dateInputString },
-    });
-  try {
-    const parsedDate = await dateParser.parseDate(dateInputString, currentContext);
-    if (parsedDate) {
-      return parsedDate.toISOString().split('T')[0];
-    }
-    logger.debug(
-      `standardizeESummaryDate: could not parse "${dateInputString}", returning undefined.`,
-      currentContext,
-    );
-  } catch (e) {
-    logger.warning(
-      `standardizeESummaryDate: dateParser.parseDate error for "${dateInputString}", returning undefined.`,
-      withExtra(currentContext, { error: e instanceof Error ? e.message : String(e) }),
-    );
-  }
-  return;
+  return revised ?? parseNcbiDate(docDate.slice(0, bracket === -1 ? undefined : bracket));
 }
 
 /**
@@ -303,13 +309,7 @@ function splitContributors(contributors: XmlESummaryAuthor[]): {
   return { authors: authors.length > 0 ? authors : contributors, editors };
 }
 
-function parseSingleDocumentSummary(docSummary: ESummaryDocumentSummary): Omit<
-  ParsedBriefSummary,
-  'pubDate' | 'epubDate'
-> & {
-  rawPubDate?: string;
-  rawEPubDate?: string;
-} {
+function parseSingleDocumentSummary(docSummary: ESummaryDocumentSummary): ParsedBriefSummary {
   const pmid = docSummary['@_uid'];
   const { authors: authorsArray, editors } = splitContributors(
     parseESummaryAuthorsFromDocumentSummary(docSummary),
@@ -355,8 +355,8 @@ function parseSingleDocumentSummary(docSummary: ESummaryDocumentSummary): Omit<
   // DocDate, which ESummary sets on chapters only. (#199)
   const chapterDate =
     docType === 'chapter' ? chapterDateFromDocDate(getText(docSummary.DocDate)) : undefined;
-  const rawPubDate = chapterDate ?? getText(docSummary.PubDate);
-  const rawEPubDate = getText(docSummary.EPubDate);
+  const pubDate = chapterDate ?? parseNcbiDate(getText(docSummary.PubDate));
+  const epubDate = parseNcbiDate(getText(docSummary.EPubDate));
 
   return {
     pmid: String(pmid),
@@ -370,18 +370,12 @@ function parseSingleDocumentSummary(docSummary: ESummaryDocumentSummary): Omit<
     ...(docType && { docType }),
     ...(doiValue && { doi: doiValue }),
     ...(pmcIdValue && { pmcId: pmcIdValue }),
-    ...(rawPubDate && { rawPubDate }),
-    ...(rawEPubDate && { rawEPubDate }),
+    ...(pubDate && { pubDate }),
+    ...(epubDate && { epubDate }),
   };
 }
 
-function parseSingleDocSumOldXml(docSum: ESummaryDocSumOldXml): Omit<
-  ParsedBriefSummary,
-  'pubDate' | 'epubDate'
-> & {
-  rawPubDate?: string;
-  rawEPubDate?: string;
-} {
+function parseSingleDocSumOldXml(docSum: ESummaryDocSumOldXml): ParsedBriefSummary {
   const pmid = docSum.Id;
   const items = ensureArray(docSum.Item);
 
@@ -442,8 +436,8 @@ function parseSingleDocSumOldXml(docSum: ESummaryDocSumOldXml): Omit<
   const rawTitle = getItemValue('Title', 'String');
   const title = rawTitle === undefined ? undefined : decodeHtmlEntities(rawTitle);
   const source = getItemValue(['Source', 'FullJournalName', 'SO'], 'String');
-  const rawPubDate = getItemValue(['PubDate', 'ArticleDate'], 'Date');
-  const rawEPubDate = getItemValue('EPubDate', 'Date');
+  const pubDate = parseNcbiDate(getItemValue(['PubDate', 'ArticleDate'], 'Date') ?? '');
+  const epubDate = parseNcbiDate(getItemValue('EPubDate', 'Date') ?? '');
 
   return {
     pmid: String(pmid),
@@ -453,72 +447,50 @@ function parseSingleDocSumOldXml(docSum: ESummaryDocSumOldXml): Omit<
     ...(source !== undefined && { source }),
     ...(doiFromItems !== undefined && { doi: doiFromItems }),
     ...(pmcIdFromItems !== undefined && { pmcId: pmcIdFromItems }),
-    ...(rawPubDate !== undefined && { rawPubDate }),
-    ...(rawEPubDate !== undefined && { rawEPubDate }),
+    ...(pubDate && { pubDate }),
+    ...(epubDate && { epubDate }),
   };
 }
 
-/**
- * Extracts and formats brief summaries from ESummary XML result.
- * Handles both DocumentSummarySet (newer) and older DocSum structures.
- */
-export async function extractBriefSummaries(
-  eSummaryResult?: ESummaryResult,
-  context?: RequestContext,
-): Promise<ParsedBriefSummary[]> {
+function readBriefSummaries(
+  eSummaryResult: ESummaryResult | undefined,
+  context: RequestContext | undefined,
+): ParsedBriefSummary[] {
   if (!eSummaryResult) return [];
-  const opContext =
-    context ||
-    requestContextService.createRequestContext({
-      operation: 'extractBriefSummariesInternal',
-    });
 
   if (eSummaryResult.ERROR) {
     logger.warning(
       'ESummary result contains an error',
-      withExtra(opContext, { errorDetails: eSummaryResult.ERROR }),
+      withExtra(
+        context ??
+          requestContextService.createRequestContext({
+            operation: 'extractBriefSummariesInternal',
+          }),
+        { errorDetails: eSummaryResult.ERROR },
+      ),
     );
     return [];
   }
 
-  let rawSummaries: (Omit<ParsedBriefSummary, 'pubDate' | 'epubDate'> & {
-    rawPubDate?: string;
-    rawEPubDate?: string;
-  })[] = [];
-
   if (eSummaryResult.DocumentSummarySet?.DocumentSummary) {
     const docSummaries = ensureArray(eSummaryResult.DocumentSummarySet.DocumentSummary);
-    rawSummaries = docSummaries.map(parseSingleDocumentSummary).filter((s) => s.pmid);
-  } else if (eSummaryResult.DocSum) {
-    const docSums = ensureArray(eSummaryResult.DocSum);
-    rawSummaries = docSums.map(parseSingleDocSumOldXml).filter((s) => s.pmid);
+    return docSummaries.map(parseSingleDocumentSummary).filter((s) => s.pmid);
   }
+  if (eSummaryResult.DocSum) {
+    const docSums = ensureArray(eSummaryResult.DocSum);
+    return docSums.map(parseSingleDocSumOldXml).filter((s) => s.pmid);
+  }
+  return [];
+}
 
-  const processedSummaries = await Promise.all(
-    rawSummaries.map(async (rawSummary) => {
-      const [pubDate, epubDate] = await Promise.all([
-        standardizeESummaryDate(rawSummary.rawPubDate, opContext),
-        standardizeESummaryDate(rawSummary.rawEPubDate, opContext),
-      ]);
-      return {
-        pmid: rawSummary.pmid,
-        ...(rawSummary.title !== undefined && { title: rawSummary.title }),
-        ...(rawSummary.authors !== undefined && { authors: rawSummary.authors }),
-        ...(rawSummary.authorNames !== undefined && { authorNames: rawSummary.authorNames }),
-        ...(rawSummary.editors !== undefined && { editors: rawSummary.editors }),
-        ...(rawSummary.source !== undefined && { source: rawSummary.source }),
-        ...(rawSummary.bookTitle !== undefined && { bookTitle: rawSummary.bookTitle }),
-        ...(rawSummary.publisherName !== undefined && {
-          publisherName: rawSummary.publisherName,
-        }),
-        ...(rawSummary.docType !== undefined && { docType: rawSummary.docType }),
-        ...(rawSummary.doi !== undefined && { doi: rawSummary.doi }),
-        ...(rawSummary.pmcId !== undefined && { pmcId: rawSummary.pmcId }),
-        ...(pubDate !== undefined && { pubDate }),
-        ...(epubDate !== undefined && { epubDate }),
-      } satisfies ParsedBriefSummary;
-    }),
-  );
-
-  return processedSummaries;
+/**
+ * Extracts and formats brief summaries from ESummary XML result.
+ * Handles both DocumentSummarySet (newer) and older DocSum structures. The
+ * parse is synchronous; the promise keeps the signature its callers await.
+ */
+export function extractBriefSummaries(
+  eSummaryResult?: ESummaryResult,
+  context?: RequestContext,
+): Promise<ParsedBriefSummary[]> {
+  return Promise.try(readBriefSummaries, eSummaryResult, context);
 }

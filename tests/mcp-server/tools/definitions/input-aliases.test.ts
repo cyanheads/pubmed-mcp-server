@@ -1,5 +1,5 @@
 /**
- * @fileoverview Declared `inputAliases` (issues #156, #190, #254, #258), driven through the framework's
+ * @fileoverview Declared `inputAliases` (issues #156, #190, #254, #258, #290), driven through the framework's
  * real argument path. `runToolContract` calls `parseToolArguments` — the alias
  * rewrite and the strict Zod parse a `tools/call` goes through — so each case
  * exercises the declaration itself rather than a hand-built input. Upstream
@@ -96,7 +96,7 @@ function textOf(result: Awaited<ReturnType<typeof runToolContract>>): string {
 }
 
 /**
- * A MeSH ESearch with 30 ranked records and no exact-descriptor match, and an
+ * A MeSH ESearch with 30 ranked records and no exact match, and an
  * ESummary that names each requested UID.
  */
 function stubMesh(): void {
@@ -332,6 +332,8 @@ describe('each alias is load-bearing', () => {
     ['pubmed_lookup_mesh', lookupMeshTool, { term: 'asthma' }, 'term'],
     ['pubmed_find_related', findRelatedTool, { pmid: '10', pageSize: 2 }, 'pageSize'],
     ['pubmed_spell_check', spellCheckTool, { term: 'asthmaa' }, 'term'],
+    // #290
+    ['pubmed_find_related', findRelatedTool, { pmid: '10', relation: 'references' }, 'relation'],
     // #221
     ['pubmed_fetch_fulltext', fetchFulltextTool, { pmcid: 'PMC8875423' }, 'pmcid'],
     ['pubmed_fetch_fulltext', fetchFulltextTool, { pmcId: 'PMC12924062' }, 'pmcId'],
@@ -597,6 +599,29 @@ describe('sibling names on pubmed_find_related and pubmed_spell_check (#190)', (
     expect(textOf(result)).toContain('**Returned:** 3');
   });
 
+  it('pubmed_find_related resolves `relation` as `relationship` (#290)', async () => {
+    mockELink.mockResolvedValue({
+      eLinkResult: [
+        {
+          LinkSet: {
+            LinkSetDb: {
+              LinkName: 'pubmed_pubmed_refs',
+              Link: ['11', '12'].map((id) => ({ Id: id })),
+            },
+          },
+        },
+      ],
+    });
+    mockESummary.mockRejectedValue(new Error('eSummary down'));
+    const result = await callRaw(findRelatedTool, { pmid: '10', relation: 'references' });
+
+    expect(result.isError).toBeFalsy();
+    expect(mockELink).toHaveBeenCalledTimes(1);
+    expect(mockELink.mock.calls[0]?.[0]).toMatchObject({ linkname: 'pubmed_pubmed_refs' });
+    expect(result.structuredContent).toMatchObject({ relationship: 'references' });
+    expect(textOf(result)).toContain('**Relationship:** references');
+  });
+
   it('pubmed_spell_check resolves `term` as `query`', async () => {
     mockESpell.mockResolvedValue({
       original: 'asthmaa',
@@ -667,6 +692,14 @@ describe('an alias sent with its target is still rejected (#190)', () => {
       { pmid: '10', maxResults: 2, pageSize: 3 },
       'pageSize',
       'maxResults',
+    ],
+    // #290
+    [
+      'pubmed_find_related',
+      findRelatedTool,
+      { pmid: '10', relationship: 'similar', relation: 'references' },
+      'relation',
+      'relationship',
     ],
     ['pubmed_spell_check', spellCheckTool, { query: 'asthma', term: 'copd' }, 'term', 'query'],
     // #254
@@ -769,6 +802,20 @@ describe("an aliased value meets its target's bounds (#190)", () => {
       expect(mockIdConvert).not.toHaveBeenCalled();
     },
   );
+
+  it('pubmed_find_related rejects a `relation` outside the relationship values with the enum message (#290)', async () => {
+    const result = await callRaw(findRelatedTool, { pmid: '10', relation: 'cites' });
+
+    expect(result.isError).toBe(true);
+    expect(result.structuredContent).toMatchObject({
+      error: { code: JsonRpcErrorCode.InvalidParams, data: { reason: 'invalid_arguments' } },
+    });
+    const text = textOf(result);
+    expect(text).toContain('relationship: Invalid option');
+    expect(text).toContain('Validated relation as relationship.');
+    expect(text).not.toContain('Unrecognized key: "relation"');
+    expect(mockELink).not.toHaveBeenCalled();
+  });
 });
 
 describe('singular id keys and maxCharsPerArticle on pubmed_fetch_fulltext (#221, #258)', () => {

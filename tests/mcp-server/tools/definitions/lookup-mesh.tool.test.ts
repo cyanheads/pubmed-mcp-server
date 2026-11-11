@@ -47,6 +47,9 @@ function meshDoc(
     recordType = 'descriptor',
     scopeNote = '',
     treeNums = [] as string[],
+    yearIntroduced = '',
+    subheadings = [] as string[],
+    previousIndexing = [] as string[],
   } = {},
 ): string {
   const links = treeNums
@@ -55,12 +58,17 @@ function meshDoc(
         `\t\t<LinksType>\n\t\t\t<Parent>1000067</Parent>\n\t\t\t<TreeNum>${t}</TreeNum>\n\t\t\t<Children>\n\t\t\t</Children>\n\t\t</LinksType>\n`,
     )
     .join('');
+  const list = (tag: string, entries: string[]) =>
+    [`\t<${tag}>`, ...entries.map((e) => `\t\t<string>${e}</string>`), `\t</${tag}>`].join('\n');
   return [
     `<DocumentSummary uid="${uid}">`,
+    `\t<DS_YearIntroduced>${yearIntroduced}</DS_YearIntroduced>`,
     `\t<DS_ScopeNote>${scopeNote}</DS_ScopeNote>`,
     '\t<DS_MeshTerms>',
     ...terms.map((t) => `\t\t<string>${t}</string>`),
     '\t</DS_MeshTerms>',
+    list('DS_Subheading', subheadings),
+    list('DS_PreviousIndexing', previousIndexing),
     `\t<DS_IdxLinks>\n${links}\t</DS_IdxLinks>`,
     `\t<DS_RecordType>${recordType}</DS_RecordType>`,
     `\t<DS_MeSHUI>${ui}</DS_MeSHUI>`,
@@ -123,13 +131,13 @@ describe('lookupMeshTool', () => {
     const result = await runToolContract(lookupMeshTool, { query: 'zz*qx zz*qy' });
 
     expect((result.structuredContent as { notice?: string }).notice).toMatch(
-      /^No MeSH descriptors matched `zz\*qx zz\*qy`\. /,
+      /^No MeSH records matched `zz\*qx zz\*qy`\. /,
     );
     const text = textBlocks(result.content as ContentBlock[])
       .map((b) => b.text)
       .join('\n');
     expect(readCommonMark(text)).toContain(
-      'No MeSH descriptors matched ⟨code_inline:zz*qx zz*qy⟩. Try ⟨code_inline:pubmed_spell_check⟩',
+      'No MeSH records matched ⟨code_inline:zz*qx zz*qy⟩. Try ⟨code_inline:pubmed_spell_check⟩',
     );
   });
 
@@ -178,7 +186,7 @@ describe('lookupMeshTool', () => {
       expect.objectContaining({ signal: expect.any(AbortSignal) }),
     );
     expect(mockESearch).toHaveBeenCalledWith(
-      { db: 'mesh', term: 'Neoplasms[MH]', retmax: 5 },
+      { db: 'mesh', term: '(Neoplasms[MH]) OR "Neoplasms"[MH]', retmax: 5 },
       expect.objectContaining({ signal: expect.any(AbortSignal) }),
     );
     expect(mockESummary).toHaveBeenCalledWith(
@@ -245,7 +253,13 @@ describe('lookupMeshTool', () => {
       expect.objectContaining({ signal: expect.any(AbortSignal) }),
     );
     expect(result.results).toEqual([
-      { entrezUid: '68009369', meshId: 'D009369', name: 'Neoplasms' },
+      {
+        entrezUid: '68009369',
+        meshId: 'D009369',
+        name: 'Neoplasms',
+        recordType: 'descriptor',
+        searchTerm: '"Neoplasms"[mh]',
+      },
     ]);
   });
 
@@ -299,7 +313,13 @@ describe('lookupMeshTool', () => {
         expect.objectContaining({ signal: expect.any(AbortSignal) }),
       );
       expect(result.results).toEqual([
-        { entrezUid: '68009369', meshId: 'D009369', name: 'Neoplasms' },
+        {
+          entrezUid: '68009369',
+          meshId: 'D009369',
+          name: 'Neoplasms',
+          recordType: 'descriptor',
+          searchTerm: '"Neoplasms"[mh]',
+        },
       ]);
     });
 
@@ -346,6 +366,10 @@ describe('lookupMeshTool', () => {
           entrezUid: '2016754',
           meshId: 'D000072657',
           name: 'ST Elevation Myocardial Infarction',
+          recordType: 'descriptor',
+          searchTerm: '"ST Elevation Myocardial Infarction"[mh]',
+          yearIntroduced: '2017',
+          previousIndexing: ['Myocardial Infarction (1999-2016)'],
           scopeNote:
             'A clinical syndrome defined by MYOCARDIAL ISCHEMIA symptoms; persistent elevation in the ST segments of the ELECTROCARDIOGRAM; and release of BIOMARKERS of myocardial NECROSIS (e.g., elevated TROPONIN levels). ST segment elevation in the ECG is often used in determining the treatment protocol (see also NON-ST ELEVATION MYOCARDIAL INFARCTION).',
           entryTerms: [
@@ -365,6 +389,9 @@ describe('lookupMeshTool', () => {
           entrezUid: '2016178',
           meshId: 'Q000000981',
           name: 'diagnostic imaging',
+          recordType: 'qualifier',
+          searchTerm: '"diagnostic imaging"[sh]',
+          yearIntroduced: '2017(1967)',
           scopeNote:
             'Used for the visualization of an anatomical structure or for the diagnosis of disease. Commonly used imaging techniques include radiography, radionuclide imaging, thermography, tomography, and ultrasonography',
           entryTerms: [
@@ -389,6 +416,9 @@ describe('lookupMeshTool', () => {
           entrezUid: '81000009',
           meshId: 'Q000009',
           name: 'adverse effects',
+          recordType: 'qualifier',
+          searchTerm: '"adverse effects"[sh]',
+          yearIntroduced: '1966',
           scopeNote:
             'Used with drugs, chemicals, or biological agents in accepted dosage - or with physical agents or manufactured products in normal usage - when intended for diagnostic, therapeutic, prophylactic, or anesthetic purposes. It is used also for adverse effects or complications of diagnostic, therapeutic, prophylactic, anesthetic, surgical, or other procedures.',
           entryTerms: ['adverse effects', 'side effects'],
@@ -398,6 +428,10 @@ describe('lookupMeshTool', () => {
           entrezUid: '68000019',
           meshId: 'D000019',
           name: 'Abortifacient Agents',
+          recordType: 'descriptor',
+          searchTerm: '"Abortifacient Agents"[mh]',
+          yearIntroduced: '1975',
+          previousIndexing: ['Abortion, Induced (1970-1974)'],
           scopeNote: 'Chemical substances that interrupt pregnancy after implantation.',
           entryTerms: [
             'Abortifacient Agents',
@@ -417,6 +451,8 @@ describe('lookupMeshTool', () => {
           entrezUid: '2025952',
           meshId: 'C000626284',
           name: 'tisagenlecleucel',
+          recordType: 'supplemental-record',
+          searchTerm: '"tisagenlecleucel"[nm]',
           scopeNote:
             'anti-CD19 chimeric antigen receptor (CAR) T-cell therapy for treatment of B-Cell lymphoblastic leukemia',
           entryTerms: ['tisagenlecleucel', 'CTL019', 'KYMRIAH'],
@@ -426,6 +462,8 @@ describe('lookupMeshTool', () => {
           entrezUid: '67585596',
           meshId: 'C585596',
           name: 'Jentadueto',
+          recordType: 'supplemental-record',
+          searchTerm: '"Jentadueto"[nm]',
           scopeNote:
             'fixed combination of linagliptin plus metformin for the treatment of type 2 diabetes',
           entryTerms: ['Jentadueto'],
@@ -438,7 +476,13 @@ describe('lookupMeshTool', () => {
       const result = await lookUp(['68009369', '99999999']);
 
       expect(result.results).toEqual([
-        { entrezUid: '68009369', meshId: 'D009369', name: 'Neoplasms' },
+        {
+          entrezUid: '68009369',
+          meshId: 'D009369',
+          name: 'Neoplasms',
+          recordType: 'descriptor',
+          searchTerm: '"Neoplasms"[mh]',
+        },
         { entrezUid: '99999999', name: '99999999' },
       ]);
     });
@@ -488,7 +532,7 @@ describe('lookupMeshTool', () => {
         .map((b) => b.text)
         .join('\n');
       expect(text).toContain(
-        '## Neoplasms\n- **MeSH ID:** D009369\n- **Entrez UID:** 68009369\n\n## 99999999\n- **Entrez UID:** 99999999',
+        '## Neoplasms\n- **Record Type:** descriptor\n- **Search Term:** `"Neoplasms"[mh]`\n- **MeSH ID:** D009369\n- **Entrez UID:** 68009369\n\n## 99999999\n- **Entrez UID:** 99999999',
       );
     });
   });
@@ -561,7 +605,7 @@ describe('lookupMeshTool', () => {
         .map((b) => b.text)
         .join('\n');
       expect(text).toContain(
-        `\n## ${heading}\n- **MeSH ID:** ${descriptor.meshId}\n- **Entrez UID:** ${descriptorUid}\n${treeLine}\n- **Scope Note:** ${descriptor.scopeNote}\n- **Entry Terms:** ${heading}; `,
+        `\n## ${heading}\n- **Record Type:** descriptor\n- **Search Term:** \`"${heading}"[mh]\`\n- **MeSH ID:** ${descriptor.meshId}\n- **Entrez UID:** ${descriptorUid}\n${treeLine}\n- **Scope Note:** ${descriptor.scopeNote}\n- **Entry Terms:** ${heading}; `,
       );
       // One eSummary per call, record types included.
       expect(mockESummary).toHaveBeenCalledTimes(1);
@@ -579,6 +623,8 @@ describe('lookupMeshTool', () => {
         entrezUid: '82000900',
         meshId: 'D000900',
         name: 'Anti-Bacterial Agents',
+        recordType: 'pharmacological-action',
+        searchTerm: '"Anti-Bacterial Agents"[pa]',
         entryTerms: ['Anti-Bacterial Agents'],
       });
     });
@@ -765,7 +811,7 @@ describe('lookupMeshTool', () => {
         expect.objectContaining({ signal: expect.any(AbortSignal) }),
       );
       expect(mockESearch).toHaveBeenCalledWith(
-        { db: 'mesh', term: 'cancer[MH]', retmax: 5 },
+        { db: 'mesh', term: '(cancer[MH]) OR "cancer"[MH]', retmax: 5 },
         expect.objectContaining({ signal: expect.any(AbortSignal) }),
       );
     });
@@ -849,7 +895,9 @@ describe('lookupMeshTool', () => {
       expect(result.results.map((r) => r.entrezUid)).toEqual(['68999999']);
       // No offset would advance past this page, so none is offered.
       expect(result.nextOffset).toBeUndefined();
-      expect(getEnrichment(ctx).notice).toMatch(/Raise maxResults/);
+      expect(getEnrichment(ctx).notice).toMatch(
+        /^The exact match filled this page of 1\. Raise maxResults/,
+      );
     });
   });
 
@@ -957,7 +1005,7 @@ describe('lookupMeshTool', () => {
       expect(result.results).toEqual([]);
       // The rank slot is consumed, so the walk advances past it rather than stalling.
       expect(result.nextOffset).toBe(7);
-      expect(getEnrichment(ctx).notice).toMatch(/exact-descriptor match/);
+      expect(getEnrichment(ctx).notice).toMatch(/^Offset 6 held only the exact match for `/);
       expect(getEnrichment(ctx).notice).toMatch(/Continue with offset 7/);
       // Not the overshoot guidance — there are more records to read.
       expect(getEnrichment(ctx).notice).not.toMatch(/Reset offset to 0/);
@@ -1234,13 +1282,13 @@ describe('lookupMeshTool page-size clamp (#232)', () => {
       'no-match',
       0,
       0,
-      'No MeSH descriptors matched `cancer`. Try `pubmed_spell_check` for a suggested correction, broaden the term, or use `pubmed_search_articles` for free-text discovery against article metadata.',
+      'No MeSH records matched `cancer`. Try `pubmed_spell_check` for a suggested correction, broaden the term, or use `pubmed_search_articles` for free-text discovery against article metadata.',
     ],
     [
       'overshoot',
       30,
       100,
-      'Offset 100 returned no records — `cancer` matches 30 MeSH descriptor(s). Reset offset to 0 or lower it below 30.',
+      'Offset 100 returned no records — `cancer` matches 30 MeSH record(s). Reset offset to 0 or lower it below 30.',
     ],
   ])('joins the %s notice', async (_kind, count, offset, sentence) => {
     mockRanked(count);
@@ -1259,5 +1307,823 @@ describe('lookupMeshTool page-size clamp (#232)', () => {
     expect(uidsOf(result)).toEqual(ranked.slice(0, 50));
     expect(result.structuredContent).toMatchObject({ nextOffset: 50 });
     expect(noticeOf(result)).toBeUndefined();
+  });
+});
+
+describe('lookupMeshTool record type, search term, and heading details (#282, #294, #296)', () => {
+  beforeEach(() => {
+    mockESearch.mockReset();
+    mockESummary.mockReset();
+  });
+
+  /**
+   * `exact` answers the `<query>[MH]` search, `ranked` the broad one (paged by
+   * `retstart`/`retmax`); eSummary serves the captured record for each UID asked.
+   */
+  function mockPage(exact: string[], ranked: string[]) {
+    mockESearch.mockImplementation(
+      async (params: { term: string; retmax: number; retstart?: number }) => {
+        if (params.term.endsWith('[MH]')) {
+          return { idList: exact.slice(0, params.retmax), count: exact.length };
+        }
+        const start = params.retstart ?? 0;
+        return { idList: ranked.slice(start, start + params.retmax), count: ranked.length };
+      },
+    );
+    mockESummary.mockImplementation(async (params: { id: string }) =>
+      summaryFor(params.id.split(',')),
+    );
+  }
+
+  const resultsOf = (result: Awaited<ReturnType<typeof runToolContract>>) =>
+    (result.structuredContent as { results: Record<string, unknown>[] }).results;
+  const textOf = (result: Awaited<ReturnType<typeof runToolContract>>) =>
+    textBlocks(result.content as ContentBlock[])
+      .map((b) => b.text)
+      .join('\n');
+  /** The rendered block of one record: its name and the list lines under it, up to the next blank line. */
+  const blockOf = (text: string, entrezUid: string) =>
+    text
+      .split('\n\n## ')
+      .find((block) => `${block}\n`.includes(`- **Entrez UID:** ${entrezUid}\n`))
+      ?.split('\n\n')[0];
+  /** Anti-Bacterial Agents' allowable subheadings, as its restored fixture lists them. */
+  const ANTI_BACTERIAL_SUBHEADINGS = [
+    'administration and dosage',
+    'adverse effects',
+    'analysis',
+    'biosynthesis',
+    'blood',
+    'cerebrospinal fluid',
+    'chemical synthesis',
+    'chemistry',
+    'classification',
+    'economics',
+    'history',
+    'immunology',
+    'isolation and purification',
+    'metabolism',
+    'pharmacokinetics',
+    'pharmacology',
+    'poisoning',
+    'radiation effects',
+    'standards',
+    'supply and distribution',
+    'therapeutic use',
+    'toxicity',
+    'urine',
+  ];
+
+  it('omits tree numbers without includeDetails for every record type, in one eSummary', async () => {
+    // A descriptor, a qualifier, a pharmacological-action record and an SCR, each
+    // carrying a TreeNum in its summary.
+    mockPage([], ['68009369', '2016178', '82000900', '67585596']);
+
+    const result = await runToolContract(lookupMeshTool, {
+      query: 'mixed types',
+      includeDetails: false,
+    });
+
+    const results = resultsOf(result);
+    expect(results.map((r) => r.entrezUid)).toEqual([
+      '68009369',
+      '2016178',
+      '82000900',
+      '67585596',
+    ]);
+    for (const record of results) expect(record).not.toHaveProperty('treeNumbers');
+    expect(textOf(result)).not.toContain('Tree Numbers');
+    expect(mockESummary).toHaveBeenCalledTimes(1);
+  });
+
+  it.each([false, true])(
+    'labels a supplementary concept and gives its [nm] search term (includeDetails: %s)',
+    async (includeDetails) => {
+      mockPage([], ['67585596']);
+
+      const result = await runToolContract(lookupMeshTool, { query: 'jentadueto', includeDetails });
+
+      expect(resultsOf(result)[0]).toMatchObject({
+        entrezUid: '67585596',
+        recordType: 'supplemental-record',
+        searchTerm: '"Jentadueto"[nm]',
+      });
+      expect(textOf(result)).toContain(
+        '\n## Jentadueto\n- **Record Type:** supplemental-record\n- **Search Term:** `"Jentadueto"[nm]`\n- **MeSH ID:** C585596\n',
+      );
+      expect(mockESummary).toHaveBeenCalledTimes(1);
+    },
+  );
+
+  it.each([
+    // A publication type is a descriptor in the V tree; [mh] matches it nowhere.
+    ['68016449', 'descriptor', '"Randomized Controlled Trial"[pt]', true],
+    ['68009369', 'descriptor', '"Neoplasms"[mh]', true],
+    ['2025952', 'supplemental-record', '"tisagenlecleucel"[nm]', false],
+    ['81000009', 'qualifier', '"adverse effects"[sh]', true],
+    ['82000019', 'pharmacological-action', '"Abortifacient Agents"[pa]', false],
+  ])('labels %s as %s, searched by %s, with or without details', async (uid, type, term, trees) => {
+    for (const includeDetails of [false, true]) {
+      mockESummary.mockClear();
+      mockPage([], [uid]);
+
+      const result = await runToolContract(lookupMeshTool, { query: 'record', includeDetails });
+
+      const [record] = resultsOf(result);
+      expect(record).toMatchObject({ entrezUid: uid, recordType: type, searchTerm: term });
+      // The V check reads tree numbers on every call; they reach the record only with details.
+      expect(record?.treeNumbers !== undefined).toBe(includeDetails && trees);
+      expect(blockOf(textOf(result), uid)).toContain(
+        `- **Record Type:** ${type}\n- **Search Term:** \`${term}\`\n`,
+      );
+      expect(mockESummary).toHaveBeenCalledTimes(1);
+    }
+  });
+
+  it('reads the search term back from content[] as one code span', async () => {
+    mockPage([], ['68016449']);
+
+    const result = await runToolContract(lookupMeshTool, { query: 'rct', includeDetails: false });
+
+    expect(readCommonMark(textOf(result))).toContain(
+      '⟨strong⟩Search Term:⟨/strong⟩ ⟨code_inline:"Randomized Controlled Trial"[pt]⟩',
+    );
+  });
+
+  it('labels a drug-class heading’s pharmacological-action record after its pinned descriptor', async () => {
+    mockPage(['82000900', '68000900'], ['82000900', '68000900']);
+
+    const result = await runToolContract(lookupMeshTool, { query: 'Anti-Bacterial Agents' });
+
+    const results = resultsOf(result);
+    expect(results.map((r) => [r.entrezUid, r.recordType, r.searchTerm])).toEqual([
+      ['68000900', 'descriptor', '"Anti-Bacterial Agents"[mh]'],
+      ['82000900', 'pharmacological-action', '"Anti-Bacterial Agents"[pa]'],
+    ]);
+    expect(results[1]).not.toHaveProperty('treeNumbers');
+    expect(blockOf(textOf(result), '82000900')).toBe(
+      'Anti-Bacterial Agents\n- **Record Type:** pharmacological-action\n- **Search Term:** `"Anti-Bacterial Agents"[pa]`\n- **MeSH ID:** D000900\n- **Entrez UID:** 82000900\n- **Entry Terms:** Anti-Bacterial Agents',
+    );
+    expect(mockESummary).toHaveBeenCalledTimes(1);
+  });
+
+  it.each([
+    ['an empty record type', ''],
+    ['an unrecognized record type', 'mystery-record'],
+  ])('gives %s no search term, and an empty one no record type', async (_label, recordType) => {
+    mockPage([], ['68000001', '68009369']);
+    mockESummary.mockImplementation(async () =>
+      parseSummary([
+        meshDoc('68000001', { terms: ['Odd Record'], recordType }),
+        docFor('68009369'),
+      ]),
+    );
+
+    const result = await runToolContract(lookupMeshTool, { query: 'odd', includeDetails: false });
+
+    const [odd, neoplasms] = resultsOf(result);
+    // The same summary labeled its other record.
+    expect(neoplasms).toMatchObject({ recordType: 'descriptor', searchTerm: '"Neoplasms"[mh]' });
+    expect(odd).toEqual({
+      entrezUid: '68000001',
+      meshId: 'D000001',
+      name: 'Odd Record',
+      ...(recordType ? { recordType } : {}),
+    });
+    const block = blockOf(textOf(result), '68000001');
+    expect(block).toBe(
+      `Odd Record\n${recordType ? `- **Record Type:** ${recordType}\n` : ''}- **MeSH ID:** D000001\n- **Entrez UID:** 68000001`,
+    );
+    expect(block).not.toContain('Search Term');
+  });
+
+  it('builds no search term from the UID of a typed record that names no term', async () => {
+    mockPage([], ['68000001']);
+    mockESummary.mockImplementation(async () => parseSummary([meshDoc('68000001', { terms: [] })]));
+
+    const result = await runToolContract(lookupMeshTool, {
+      query: 'unnamed',
+      includeDetails: false,
+    });
+
+    // The record falls back to its UID as its name, never as a heading to search.
+    expect(resultsOf(result)).toEqual([
+      { entrezUid: '68000001', meshId: 'D000001', name: '68000001', recordType: 'descriptor' },
+    ]);
+    expect(textOf(result)).not.toContain('Search Term');
+  });
+
+  it('gives the pinned heading its subheadings and every result its year and previous indexing', async () => {
+    // The descriptor is the second exact match, behind its pharmacological-action record.
+    mockPage(['82000900', '68000900'], ['82000900', '68000900', '68000019']);
+
+    const result = await runToolContract(lookupMeshTool, { query: 'Anti-Bacterial Agents' });
+
+    const results = resultsOf(result);
+    expect(results.map((r) => r.entrezUid)).toEqual(['68000900', '82000900', '68000019']);
+    expect(results[0]).toMatchObject({
+      yearIntroduced: '2004(1963)',
+      subheadings: ANTI_BACTERIAL_SUBHEADINGS,
+    });
+    expect(results[0]).not.toHaveProperty('previousIndexing');
+    // Empty year, previous-indexing and subheading elements omit their fields.
+    expect(results[1]).toEqual({
+      entrezUid: '82000900',
+      meshId: 'D000900',
+      name: 'Anti-Bacterial Agents',
+      recordType: 'pharmacological-action',
+      searchTerm: '"Anti-Bacterial Agents"[pa]',
+      entryTerms: ['Anti-Bacterial Agents'],
+    });
+    expect(results[2]).toMatchObject({
+      yearIntroduced: '1975',
+      previousIndexing: ['Abortion, Induced (1970-1974)'],
+    });
+    expect(results[2]).not.toHaveProperty('subheadings');
+
+    const text = textOf(result);
+    expect(blockOf(text, '68000900')).toMatch(
+      new RegExp(
+        `\\n- \\*\\*Year Introduced:\\*\\* 2004\\(1963\\)\\n- \\*\\*Subheadings:\\*\\* ${ANTI_BACTERIAL_SUBHEADINGS.join(', ')}$`,
+      ),
+    );
+    expect(blockOf(text, '68000019')).toMatch(
+      /\n- \*\*Year Introduced:\*\* 1975\n- \*\*Previous Indexing:\*\* Abortion, Induced \(1970-1974\)$/,
+    );
+    expect(text.match(/- \*\*Subheadings:\*\*/g)).toHaveLength(1);
+    expect(mockESummary).toHaveBeenCalledTimes(1);
+  });
+
+  it('pins a lone exact match without a record-type read and still gives it its subheadings', async () => {
+    mockPage(['68000900'], ['68000001', '68000900']);
+
+    const result = await runToolContract(lookupMeshTool, { query: 'Anti-Bacterial Agents' });
+
+    expect(resultsOf(result)[0]).toMatchObject({
+      entrezUid: '68000900',
+      subheadings: ANTI_BACTERIAL_SUBHEADINGS,
+    });
+    expect(mockESummary).toHaveBeenCalledTimes(1);
+    expect(mockESummary).toHaveBeenCalledWith(
+      { db: 'mesh', id: '68000900,68000001', version: '2.0' },
+      expect.anything(),
+    );
+  });
+
+  it('gives the pinned heading its subheadings when the query is one of its entry terms', async () => {
+    // `Antibiotics[MH]` resolves the entry term to its heading, named otherwise.
+    mockPage(['68000900'], ['68000019', '68000900']);
+
+    const result = await runToolContract(lookupMeshTool, { query: 'Antibiotics' });
+
+    const results = resultsOf(result);
+    expect(results.map((r) => r.entrezUid)).toEqual(['68000900', '68000019']);
+    expect(results[0]).toMatchObject({
+      name: 'Anti-Bacterial Agents',
+      subheadings: ANTI_BACTERIAL_SUBHEADINGS,
+    });
+    expect(results[1]).not.toHaveProperty('subheadings');
+    expect(blockOf(textOf(result), '68000900')).toContain(
+      `\n- **Subheadings:** ${ANTI_BACTERIAL_SUBHEADINGS.join(', ')}`,
+    );
+  });
+
+  it.each([
+    ['no exact match', []],
+    ['another heading pinned', ['68000019']],
+  ])('gives an unpinned record its year but no subheadings (%s)', async (_label, exact) => {
+    mockPage(exact, ['68000019', '68000900']);
+
+    const result = await runToolContract(lookupMeshTool, { query: 'agents' });
+
+    const antiBacterial = resultsOf(result).find((r) => r.entrezUid === '68000900');
+    // The record was reached with its details read.
+    expect(antiBacterial).toMatchObject({ yearIntroduced: '2004(1963)' });
+    expect(antiBacterial).not.toHaveProperty('subheadings');
+    expect(textOf(result)).not.toContain('Subheadings');
+    expect(mockESummary).toHaveBeenCalledTimes(1);
+  });
+
+  it('gives a field-tagged query no subheadings, since it pins nothing', async () => {
+    mockPage(['82000900', '68000900'], ['82000900', '68000900']);
+
+    const result = await runToolContract(lookupMeshTool, { query: 'Anti-Bacterial Agents[MH]' });
+
+    expect(mockESearch).toHaveBeenCalledTimes(1);
+    const descriptor = resultsOf(result).find((r) => r.entrezUid === '68000900');
+    expect(descriptor).toMatchObject({ yearIntroduced: '2004(1963)' });
+    expect(descriptor).not.toHaveProperty('subheadings');
+  });
+
+  it('drops the year, previous indexing and subheadings with includeDetails: false', async () => {
+    mockPage(['82000900', '68000900'], ['82000900', '68000900', '68000019']);
+
+    const result = await runToolContract(lookupMeshTool, {
+      query: 'Anti-Bacterial Agents',
+      includeDetails: false,
+    });
+
+    const results = resultsOf(result);
+    expect(results.map((r) => r.entrezUid)).toEqual(['68000900', '82000900', '68000019']);
+    for (const record of results) {
+      expect(record).toHaveProperty('searchTerm');
+      for (const field of ['yearIntroduced', 'previousIndexing', 'subheadings']) {
+        expect(record).not.toHaveProperty(field);
+      }
+    }
+    expect(textOf(result)).not.toMatch(/Year Introduced|Previous Indexing|Subheadings/);
+    expect(mockESummary).toHaveBeenCalledTimes(1);
+  });
+
+  it('serves subheadings on the first page only across a full offset walk', async () => {
+    const ranked = ['68000001', '68000900', '68000002', '68000003', '68000004'];
+    mockPage(['68000900'], ranked);
+    // A ranked record whose summary lists one subheading, which parses to a scalar.
+    mockESummary.mockImplementation(async (params: { id: string }) =>
+      parseSummary(
+        params.id
+          .split(',')
+          .map((uid) =>
+            uid === '68000003' ? meshDoc(uid, { subheadings: ['blood'] }) : docFor(uid),
+          ),
+      ),
+    );
+
+    const pages: { uid: unknown; subheadings: unknown }[][] = [];
+    let offset: number | undefined = 0;
+    while (offset !== undefined) {
+      if (pages.length > ranked.length) throw new Error('pagination did not terminate');
+      const result: Awaited<ReturnType<typeof runToolContract>> = await runToolContract(
+        lookupMeshTool,
+        { query: 'Anti-Bacterial Agents', maxResults: 2, offset },
+      );
+      pages.push(resultsOf(result).map((r) => ({ uid: r.entrezUid, subheadings: r.subheadings })));
+      offset = (result.structuredContent as { nextOffset?: number }).nextOffset;
+    }
+
+    expect(pages).toEqual([
+      [
+        { uid: '68000900', subheadings: ANTI_BACTERIAL_SUBHEADINGS },
+        { uid: '68000001', subheadings: undefined },
+      ],
+      [
+        { uid: '68000002', subheadings: undefined },
+        { uid: '68000003', subheadings: undefined },
+      ],
+      [{ uid: '68000004', subheadings: undefined }],
+    ]);
+  });
+
+  it('reads a one-entry subheading or previous-indexing list, which parses to a scalar', async () => {
+    mockPage(['68000001'], ['68000001']);
+    mockESummary.mockImplementation(async (params: { id: string }) =>
+      parseSummary(
+        params.id.split(',').map((uid) =>
+          meshDoc(uid, {
+            subheadings: ['blood'],
+            previousIndexing: ['Older Heading (1966-1999)'],
+          }),
+        ),
+      ),
+    );
+
+    const result = await runToolContract(lookupMeshTool, { query: 'Descriptor 68000001' });
+
+    expect(resultsOf(result)).toEqual([
+      expect.objectContaining({
+        entrezUid: '68000001',
+        subheadings: ['blood'],
+        previousIndexing: ['Older Heading (1966-1999)'],
+      }),
+    ]);
+  });
+
+  it('renders every new field in order, escaping NLM text but not the search clause', () => {
+    const text =
+      textBlocks(
+        lookupMeshTool.format!({
+          query: 'x',
+          offset: 0,
+          results: [
+            {
+              entrezUid: '68054144',
+              meshId: 'D054144',
+              name: 'Heart Failure, Diastolic',
+              recordType: 'descriptor',
+              searchTerm: '"Heart Failure, Diastolic"[mh]',
+              entryTerms: ['Heart Failure, Diastolic'],
+              yearIntroduced: '2008',
+              previousIndexing: [
+                'Heart Failure, Congestive (1989-2007)',
+                'Cardiac *Failure* (1966-1988)',
+              ],
+              subheadings: ['blood', 'drug therapy'],
+            },
+          ],
+        }),
+      )[0]?.text ?? '';
+
+    expect(text).toContain(
+      [
+        '## Heart Failure, Diastolic',
+        '- **Record Type:** descriptor',
+        '- **Search Term:** `"Heart Failure, Diastolic"[mh]`',
+        '- **MeSH ID:** D054144',
+        '- **Entrez UID:** 68054144',
+        '- **Entry Terms:** Heart Failure, Diastolic',
+        '- **Year Introduced:** 2008',
+        '- **Previous Indexing:** Heart Failure, Congestive (1989-2007); Cardiac \\*Failure\\* (1966-1988)',
+        '- **Subheadings:** blood, drug therapy',
+      ].join('\n'),
+    );
+  });
+
+  it('gives every result at the page-size cap a record type and search term', async () => {
+    const ranked = Array.from({ length: 120 }, (_, i) => String(68100000 + i));
+    mockPage([], ranked);
+
+    const result = await runToolContract(lookupMeshTool, {
+      query: 'cancer',
+      maxResults: 60,
+      includeDetails: false,
+    });
+
+    const results = resultsOf(result);
+    expect(results).toHaveLength(50);
+    expect(results.every((r) => r.recordType === 'descriptor')).toBe(true);
+    expect(textOf(result).match(/- \*\*Search Term:\*\* `"Descriptor \d+"\[mh\]`/g)).toHaveLength(
+      50,
+    );
+  });
+
+  describe('the pinned exact match is the record the query names', () => {
+    /**
+     * db=mesh ESearch as NCBI answers it: an unquoted `<query>[MH]` is translated (an
+     * entry term maps to its heading; `Randomized Controlled Trial[MH]` reads as
+     * `"randomized controlled trials as topic"[MeSH Terms]`), a quoted `"<query>"[MH]`
+     * matches the heading it names, and a term holding both answers their union by
+     * descending UID. The broad search, the query as sent, pages `ranked`.
+     */
+    function mockMesh(
+      query: string,
+      shape: { translated: string[]; literal: string[]; ranked: string[] },
+    ) {
+      mockESearch.mockImplementation(
+        async (params: { term: string; retmax: number; retstart?: number }) => {
+          if (params.term === query) {
+            const start = params.retstart ?? 0;
+            return {
+              idList: shape.ranked.slice(start, start + params.retmax),
+              count: shape.ranked.length,
+            };
+          }
+          const literal = `"${query.trim()}"[MH]`;
+          const matched = new Set([
+            ...(params.term.replace(literal, '').includes(`${query}[MH]`) ? shape.translated : []),
+            ...(params.term.includes(literal) ? shape.literal : []),
+          ]);
+          const idList = [...matched].sort((a, b) => Number(b) - Number(a));
+          return { idList: idList.slice(0, params.retmax), count: idList.length };
+        },
+      );
+      mockESummary.mockImplementation(async (params: { id: string }) =>
+        summaryFor(params.id.split(',')),
+      );
+    }
+
+    const exactTermFor = (query: string) =>
+      mockESearch.mock.calls.map((c) => c[0].term as string).find((term) => term !== query);
+    const uidsOf = (result: Awaited<ReturnType<typeof runToolContract>>) =>
+      resultsOf(result).map((r) => r.entrezUid);
+
+    /** The ESearch answers for `Randomized Controlled Trial`, captured 2026-11-10. */
+    const RCT = {
+      translated: ['68016032'],
+      literal: ['68016449'],
+      ranked: ['68018848', '68016449', '68016032', '67533972', '67482279', '2031098', '2023172'],
+    };
+    /** The ESearch answers for `Drug Therapy` and `drug therapy` alike, captured 2026-11-10. */
+    const DRUG_THERAPY = {
+      translated: ['81000188', '68004358'],
+      literal: ['81000188', '68004358'],
+      ranked: [
+        '81000188',
+        '68059250',
+        '68054539',
+        '68020551',
+        '68017024',
+        '68004360',
+        '68004359',
+        '68004358',
+        '68000280',
+        '2103232',
+      ],
+    };
+    const DRUG_THERAPY_SUBHEADINGS = [
+      'classification',
+      'economics',
+      'ethics',
+      'history',
+      'instrumentation',
+      'methods',
+      'mortality',
+      'nursing',
+      'psychology',
+      'standards',
+      'statistics and numerical data',
+      'trends',
+      'veterinary',
+    ];
+
+    it('searches a query holding a double quote as `<query>[MH]` alone', async () => {
+      mockMesh('"heart attack"', { translated: ['68009203'], literal: [], ranked: ['68009203'] });
+
+      const result = await runToolContract(lookupMeshTool, {
+        query: '"heart attack"',
+        includeDetails: false,
+      });
+
+      expect(exactTermFor('"heart attack"')).toBe('"heart attack"[MH]');
+      expect(uidsOf(result)).toEqual(['68009203']);
+    });
+
+    it('pins nothing when neither the literal nor the translated heading matches', async () => {
+      mockMesh('Jentadueto', { translated: [], literal: [], ranked: ['67585596'] });
+
+      const result = await runToolContract(lookupMeshTool, { query: 'Jentadueto' });
+
+      expect(resultsOf(result)).toEqual([
+        expect.objectContaining({ entrezUid: '67585596', searchTerm: '"Jentadueto"[nm]' }),
+      ]);
+      expect(resultsOf(result)[0]).not.toHaveProperty('subheadings');
+      expect(mockESummary).toHaveBeenCalledTimes(1);
+    });
+
+    /*
+     * Each candidate set is ranked off the first window (`maxResults: 1`), so the
+     * page holds the pin alone: the record chosen, not one the ranked list placed.
+     */
+    it.each([
+      [
+        'the first descriptor when no candidate is named as the query',
+        'agents',
+        ['68000900', '68000019'],
+        '68000900',
+      ],
+      [
+        'the first non-pharmacological-action record when no candidate is a descriptor',
+        'agents',
+        ['82000900', '81000009'],
+        '81000009',
+      ],
+      [
+        'a descriptor over a pharmacological-action record named as the query',
+        'Anti-Bacterial Agents',
+        ['82000900', '68000019'],
+        '68000019',
+      ],
+      [
+        'the first candidate when every one is a pharmacological-action record',
+        'agents',
+        ['82000900', '82000019'],
+        '82000900',
+      ],
+      [
+        'a descriptor named as the query over an earlier descriptor named otherwise',
+        'Randomized Controlled Trial',
+        ['68018848', '68016449'],
+        '68016449',
+      ],
+      [
+        'a qualifier named as the query over an earlier descriptor named otherwise',
+        'Diagnostic Imaging',
+        ['68009369', '2016178'],
+        '2016178',
+      ],
+    ])('pins %s', async (_label, query, exact, pinned) => {
+      mockMesh(query, { translated: exact, literal: [], ranked: ['68100001', ...exact] });
+
+      const result = await runToolContract(lookupMeshTool, {
+        query,
+        maxResults: 1,
+        includeDetails: false,
+      });
+
+      expect(uidsOf(result)).toEqual([pinned]);
+      expect(mockESummary).toHaveBeenCalledTimes(1);
+    });
+
+    it('pins the publication type a query names over the topic heading it translates to', async () => {
+      mockMesh('Randomized Controlled Trial', RCT);
+
+      const result = await runToolContract(lookupMeshTool, {
+        query: 'Randomized Controlled Trial',
+      });
+
+      expect(uidsOf(result)).toEqual([
+        '68016449',
+        '68018848',
+        '68016032',
+        '67533972',
+        '67482279',
+        '2031098',
+        '2023172',
+      ]);
+      const [named, , topic] = resultsOf(result);
+      expect(named).toMatchObject({
+        name: 'Randomized Controlled Trial',
+        recordType: 'descriptor',
+        searchTerm: '"Randomized Controlled Trial"[pt]',
+      });
+      // The topic heading lists eleven subheadings; unpinned, it carries none of them.
+      expect(topic).toMatchObject({ name: 'Randomized Controlled Trials as Topic' });
+      expect(topic).not.toHaveProperty('subheadings');
+      const text = textOf(result);
+      expect(text.split('\n\n## ')[1]).toMatch(
+        /^Randomized Controlled Trial\n- \*\*Record Type:\*\* descriptor\n- \*\*Search Term:\*\* `"Randomized Controlled Trial"\[pt\]`\n/,
+      );
+      expect(text).not.toContain('Subheadings');
+      // The literal and the translated heading ride one exact search.
+      expect(exactTermFor('Randomized Controlled Trial')).toBe(
+        '(Randomized Controlled Trial[MH]) OR "Randomized Controlled Trial"[MH]',
+      );
+      expect(mockESearch).toHaveBeenCalledTimes(2);
+      expect(mockESummary).toHaveBeenCalledTimes(1);
+    });
+
+    it.each([
+      [{ maxResults: 1 }, ['68016449'], undefined, /^The exact match filled this page of 1\. /],
+      [{ maxResults: 2 }, ['68016449', '68018848'], 2, undefined],
+      // The named record ranks in this window and is held back, not served twice.
+      [{ maxResults: 2, offset: 1 }, ['68016032'], 3, undefined],
+      [{ maxResults: 2, offset: 7 }, [], undefined, /^Offset 7 returned no records/],
+      [
+        { maxResults: 60 },
+        ['68016449', '68018848', '68016032', '67533972', '67482279', '2031098', '2023172'],
+        undefined,
+        /served at 50\.$/,
+      ],
+    ])(
+      'serves the named record on the first page only (%o)',
+      async (args, uids, nextOffset, notice) => {
+        mockMesh('Randomized Controlled Trial', RCT);
+
+        const result = await runToolContract(lookupMeshTool, {
+          query: 'Randomized Controlled Trial',
+          includeDetails: false,
+          ...args,
+        });
+
+        expect(uidsOf(result)).toEqual(uids);
+        const structured = result.structuredContent as { nextOffset?: number; notice?: string };
+        expect(structured.nextOffset).toBe(nextOffset);
+        if (notice) expect(structured.notice).toMatch(notice);
+        else expect(structured.notice).toBeUndefined();
+      },
+    );
+
+    it('walks every record once, the named one on the first page, from offset to nextOffset', async () => {
+      mockMesh('Randomized Controlled Trial', RCT);
+
+      const pages: unknown[][] = [];
+      let offset: number | undefined = 0;
+      while (offset !== undefined) {
+        if (pages.length > RCT.ranked.length) throw new Error('pagination did not terminate');
+        const result: Awaited<ReturnType<typeof runToolContract>> = await runToolContract(
+          lookupMeshTool,
+          { query: 'Randomized Controlled Trial', maxResults: 2, offset, includeDetails: false },
+        );
+        pages.push(uidsOf(result));
+        offset = (result.structuredContent as { nextOffset?: number }).nextOffset;
+      }
+
+      expect(pages).toEqual([
+        ['68016449', '68018848'],
+        ['68016032', '67533972'],
+        ['67482279', '2031098'],
+        ['2023172'],
+      ]);
+      expect([...pages.flat()].sort()).toEqual([...RCT.ranked].sort());
+    });
+
+    it.each(['Drug Therapy', 'drug therapy'])(
+      'pins the descriptor `%s` names over the qualifier of that name, with its subheadings',
+      async (query) => {
+        mockMesh(query, DRUG_THERAPY);
+
+        const result = await runToolContract(lookupMeshTool, { query, maxResults: 3 });
+
+        const results = resultsOf(result);
+        expect(results.map((r) => [r.entrezUid, r.recordType])).toEqual([
+          ['68004358', 'descriptor'],
+          ['81000188', 'qualifier'],
+          ['68059250', 'descriptor'],
+        ]);
+        expect(results[0]).toMatchObject({
+          name: 'Drug Therapy',
+          searchTerm: '"Drug Therapy"[mh]',
+          subheadings: DRUG_THERAPY_SUBHEADINGS,
+        });
+        expect(results[1]).not.toHaveProperty('subheadings');
+        expect(blockOf(textOf(result), '68004358')).toMatch(
+          new RegExp(`\\n- \\*\\*Subheadings:\\*\\* ${DRUG_THERAPY_SUBHEADINGS.join(', ')}$`),
+        );
+        expect(textOf(result).match(/- \*\*Subheadings:\*\*/g)).toHaveLength(1);
+        // The pin sits outside the ranked window and displaces one ranked record.
+        expect((result.structuredContent as { nextOffset?: number }).nextOffset).toBe(2);
+        expect(mockESummary).toHaveBeenCalledTimes(1);
+      },
+    );
+
+    it('quotes the query without its padding and still pins the record it names', async () => {
+      const query = '  Randomized Controlled Trial  ';
+      mockMesh(query, RCT);
+
+      const result = await runToolContract(lookupMeshTool, {
+        query,
+        maxResults: 2,
+        includeDetails: false,
+      });
+
+      expect(uidsOf(result)).toEqual(['68016449', '68018848']);
+      expect(exactTermFor(query)).toBe(
+        '(  Randomized Controlled Trial  [MH]) OR "Randomized Controlled Trial"[MH]',
+      );
+    });
+  });
+});
+
+/**
+ * A caller abort at each upstream step rethrows the abort, never a page built
+ * without the step. The handler is called directly: `runToolContract` settles
+ * any result after an abort, a success included, as `RequestCancelled`, so it
+ * cannot tell a rethrow from a degraded success. Every other call is stubbed to
+ * answer, so a step that swallowed the abort would return a page.
+ */
+describe('lookupMeshTool caller cancellation', () => {
+  beforeEach(() => {
+    mockESearch.mockReset();
+    mockESummary.mockReset();
+    mockESummary.mockImplementation(async (params: { id: string }) =>
+      summaryFor(params.id.split(',')),
+    );
+  });
+
+  /**
+   * A caller cancellation. `cancel` stands in for the upstream call it lands
+   * on: it aborts the request's signal, then rejects with the abort reason, as
+   * the NCBI service does on a caller abort.
+   */
+  const cancellation = () => {
+    const controller = new AbortController();
+    const reason = new DOMException('The caller cancelled the request.', 'AbortError');
+    const cancel = () => {
+      controller.abort(reason);
+      return Promise.reject(reason);
+    };
+    return { cancel, reason, signal: controller.signal };
+  };
+
+  const run = (signal: AbortSignal) =>
+    lookupMeshTool.handler(
+      lookupMeshTool.input.parse({ query: 'Asthma' }),
+      createMockContext({ errors: lookupMeshTool.errors, signal }),
+    );
+
+  /** ESearch answering the exact-match query with `exact` and the ranked query with `ranked`. */
+  const searches = (exact: string[], ranked: string[]) =>
+    mockESearch.mockImplementation(async (params: { term: string }) =>
+      params.term.endsWith('[MH]')
+        ? { idList: exact, count: exact.length }
+        : { idList: ranked, count: ranked.length },
+    );
+
+  it('during the exact-match ESearch, while the ranked one answers: builds no page', async () => {
+    const { cancel, reason, signal } = cancellation();
+    mockESearch.mockImplementation((params: { term: string }) =>
+      params.term.endsWith('[MH]')
+        ? cancel()
+        : Promise.resolve({ idList: ['68001249', '68009999'], count: 2 }),
+    );
+
+    await expect(run(signal)).rejects.toBe(reason);
+    expect(mockESummary).not.toHaveBeenCalled();
+  });
+
+  it('during the record-type read of several exact matches: reads no page summaries', async () => {
+    const { cancel, reason, signal } = cancellation();
+    searches(['68001249', '68020000'], ['68001249', '68009999']);
+    mockESummary.mockImplementationOnce(cancel);
+
+    await expect(run(signal)).rejects.toBe(reason);
+    expect(mockESummary).toHaveBeenCalledOnce();
+  });
+
+  it('during the page ESummary: returns no rows without their records', async () => {
+    const { cancel, reason, signal } = cancellation();
+    searches(['68001249'], ['68001249', '68009999']);
+    mockESummary.mockImplementation(cancel);
+
+    await expect(run(signal)).rejects.toBe(reason);
   });
 });

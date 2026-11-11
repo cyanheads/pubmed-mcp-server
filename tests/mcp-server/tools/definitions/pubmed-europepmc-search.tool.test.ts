@@ -624,7 +624,7 @@ describe('pubmedEuropepmcSearchTool', () => {
       expect(text).toContain('**Published:** 2024-03-15');
       expect(text).toContain('**Year:** 2024');
       expect(text).toContain('Full-text XML in EPMC:** yes');
-      expect(text).toContain('**URL:** https://europepmc.org/article/MED/42');
+      expect(text).toContain('**URL:** <https://europepmc.org/article/MED/42>');
       expect(text).toContain('PMID:** 42');
       expect(text).toContain('PMCID:** PMC9');
       expect(text).toContain('DOI:** 10.1/x');
@@ -1320,7 +1320,7 @@ describe('pubmedEuropepmcSearchTool hit lines that share a paragraph (#261)', ()
         '⟨strong⟩Journal:⟨/strong⟩ J_ Med*',
         '⟨strong⟩DOI:⟨/strong⟩ 10.1/5`x',
         '⟨strong⟩License:⟨/strong⟩ cc by` 4~',
-        '⟨strong⟩URL:⟨/strong⟩ https://europepmc.org/article/PPR/PPR1',
+        '⟨strong⟩URL:⟨/strong⟩ ⟨a href=https://europepmc.org/article/PPR/PPR1⟩https://europepmc.org/article/PPR/PPR1⟨/a⟩',
       ].join('\n'),
     );
   });

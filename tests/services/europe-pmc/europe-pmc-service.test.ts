@@ -1199,11 +1199,105 @@ describe('EuropePmcService.search — upstream failures and empty envelopes (#15
       const result = await service().search({ query: 'sepsis', sort: 'CITED desc' });
 
       expect(result.hitCount).toBe(1);
-      expect(sent().map((params) => params.get('sort'))).toEqual([
+      expect(sent().map((params) => params.get('sort'))).toEqual(['CITED desc', 'CITED desc']);
+    });
+
+    /**
+     * Europe PMC refuses a documented sort only intermittently, so a 503 on one
+     * is an outage, never the sort's fault: the search runs the ordinary retry
+     * ladder with no unsorted probe. A sort with any undocumented key keeps the
+     * probe and the blame (#289).
+     */
+    describe('documented sorts are never the 503 suspect (#289)', () => {
+      it.each([
+        'P_PDATE_D desc',
         'CITED desc',
-        null,
-        'CITED desc',
-      ]);
+        'AUTH_FIRST asc',
+        'PUB_YEAR desc',
+        'FIRST_IDATE_D desc',
+        'cited DESC',
+        '  auth_first   ASC ',
+        'PUB_YEAR desc, CITED desc',
+        'pub_year desc,cited DESC',
+      ])(
+        'ends %j as retryable europepmc_unreachable when every sorted request is refused and the unsorted one is served',
+        async (sort) => {
+          routeBySort([reject503], [resolveResults]);
+
+          const err = await settle(service().search({ query: 'status epilepticus', sort }));
+
+          expect(err).toBeInstanceOf(McpError);
+          expect(err?.code).toBe(JsonRpcErrorCode.ServiceUnavailable);
+          expect(err?.data?.reason).toBe('europepmc_unreachable');
+          expect(err?.data?.attempts).toBe(EXHAUSTED);
+          expect(err?.data?.sort).toBeUndefined();
+          expect(err?.data?.recovery).toBeUndefined();
+          expect(err?.message).toMatch(
+            new RegExp(`Status: 503 \\(failed after ${EXHAUSTED} attempts\\)$`),
+          );
+          expect(defaultIsTransient(err)).toBe(true);
+          // Every attempt carries the sort at the caller's page size; no probe ran.
+          expect(sent().map((params) => params.get('sort'))).toEqual(Array(EXHAUSTED).fill(sort));
+          expect(sent().map((params) => params.get('pageSize'))).toEqual(
+            Array(EXHAUSTED).fill('25'),
+          );
+        },
+      );
+
+      it.each(['PUB_YEAR desc, FOOBAR desc', 'foobar DESC', 'FOOBAR desc, CITED desc'])(
+        'keeps the unsorted probe and the blame for %j, which has an undocumented field',
+        async (sort) => {
+          routeBySort([reject503], [resolveResults]);
+
+          const err = await settle(service().search({ query: 'status epilepticus', sort }));
+
+          expect(err?.code).toBe(JsonRpcErrorCode.ValidationError);
+          expect(err?.data).toMatchObject({
+            reason: 'europepmc_invalid_input',
+            retryable: false,
+            sort,
+            status: 503,
+          });
+          expect(err?.message).toBe(
+            `Europe PMC answered sort "${sort}" with HTTP 503 twice but served the same query without it — Europe PMC most likely cannot sort by it.`,
+          );
+          expect(hintOf(err)).toBe(SORT_HINT);
+          const requests = sent().map((params) => [params.get('sort'), params.get('pageSize')]);
+          expect(requests).toEqual([
+            [sort, '25'],
+            [null, '1'],
+            [sort, '25'],
+          ]);
+        },
+      );
+
+      it('runs the #180 cursor probe but no unsorted probe for a caller cursor under a documented sort', async () => {
+        routeBySort([reject503], [resolveResults]);
+
+        const err = await settle(
+          service().search({ query: 'status epilepticus', cursorMark: 'abc', sort: 'CITED desc' }),
+        );
+
+        expect(err?.code).toBe(JsonRpcErrorCode.ServiceUnavailable);
+        expect(err?.data?.reason).toBe('europepmc_unreachable');
+        expect(err?.data?.attempts).toBe(EXHAUSTED);
+        expect(err?.data?.cursorMark).toBeUndefined();
+        expect(err?.data?.sort).toBeUndefined();
+        const requests = sent().map((params) => ({
+          cursorMark: params.get('cursorMark'),
+          sort: params.get('sort'),
+          pageSize: params.get('pageSize'),
+        }));
+        // The cursor request, the first page with the sort (refused), then the
+        // rest of the cursor's attempts — never a request without the sort.
+        expect(requests).toEqual([
+          { cursorMark: 'abc', sort: 'CITED desc', pageSize: '25' },
+          { cursorMark: '*', sort: 'CITED desc', pageSize: '1' },
+          { cursorMark: 'abc', sort: 'CITED desc', pageSize: '25' },
+          { cursorMark: 'abc', sort: 'CITED desc', pageSize: '25' },
+          { cursorMark: 'abc', sort: 'CITED desc', pageSize: '25' },
+        ]);
+      });
     });
 
     it('skips the probe when the first 503 of a sorted search lands on the last attempt', async () => {
@@ -1336,6 +1430,77 @@ describe('EuropePmcService.search — upstream failures and empty envelopes (#15
         expect(t80k).toBeLessThan(400);
         expect(t320k).toBeLessThan(1_600);
         expect(mockFetchWithTimeout).not.toHaveBeenCalled();
+      });
+    });
+
+    /**
+     * Every search with a well-shaped sort classifies its fields before the
+     * request goes out (#289), so a caller-sized sort is scanned on the path
+     * that ends in a served page. Timed through `search()` with each request
+     * answered at once, in this thread's CPU time.
+     */
+    describe('linear time on well-shaped sorts sent upstream (#289)', () => {
+      /** Per-call CPU ms of `reps` sequential searches: the least of three measurements. */
+      const perCallMs = async (sort: string, reps: number): Promise<number> => {
+        let least = Number.POSITIVE_INFINITY;
+        for (let measurement = 0; measurement < 3; measurement++) {
+          const start = process.threadCpuUsage();
+          for (let i = 0; i < reps; i++) await service().search({ query: 'sepsis', sort });
+          const { user, system } = process.threadCpuUsage(start);
+          least = Math.min(least, (user + system) / 1000 / reps);
+        }
+        return least;
+      };
+
+      /** Documented keys, `CITED desc,` repeated, about `n` characters, closed by `last`. */
+      const keys = (n: number, unit: string, last: string) =>
+        `${unit.repeat(Math.floor((n - last.length) / unit.length))}${last}`;
+
+      /**
+       * Many short keys carry the full 5k → 320k span; one long key stops at 80k,
+       * below the length where Bun's regex engine changes mode on the key check.
+       */
+      it.each([
+        ['documented keys', (n: number) => keys(n, 'CITED desc,', 'CITED desc'), 320_000],
+        [
+          'documented keys, the last broken across a line',
+          (n: number) => keys(n, 'CITED desc,', 'CITED\ndesc'),
+          320_000,
+        ],
+        [
+          'documented keys with line breaks throughout',
+          (n: number) => keys(n, 'CITED\r\ndesc,\r\n', 'CITED desc'),
+          320_000,
+        ],
+        [
+          'one key with a long whitespace run',
+          (n: number) => `CITED${' '.repeat(n - 9)}desc`,
+          80_000,
+        ],
+        [
+          'one key with line breaks throughout',
+          (n: number) => `CITED${'  \r\n'.repeat(Math.floor((n - 9) / 4))}desc`,
+          80_000,
+        ],
+      ])('scales linearly on %s', async (_label, build, maxLength) => {
+        mockFetchWithTimeout.mockImplementation(resolveResults);
+        let largestMs = 0;
+        for (let n = 10_000; n <= maxLength; n *= 2) {
+          // The baseline is re-timed beside each size, and the least growth of
+          // two pairs is asserted, so a core switch between them is not growth.
+          let leastGrowth = Number.POSITIVE_INFINITY;
+          for (let pair = 0; pair < 2; pair++) {
+            const base = await perCallMs(build(5_000), 8);
+            largestMs = await perCallMs(build(n), Math.max(1, Math.round(40_000 / n)));
+            leastGrowth = Math.min(leastGrowth, largestMs / Math.max(base, 0.001));
+          }
+          // Linear work grows n / 5k; this allows 4× that, far under a quadratic's square.
+          expect(leastGrowth).toBeLessThan(4 * (n / 5_000));
+        }
+        expect(largestMs).toBeLessThan(maxLength > 80_000 ? 1_600 : 400);
+        // Each timed call reached the request, sort and all.
+        const lastUrl = new URL(String(mockFetchWithTimeout.mock.lastCall?.[0]));
+        expect(lastUrl.searchParams.get('sort')).toBe(build(maxLength));
       });
     });
 
@@ -1562,6 +1727,43 @@ describe('EuropePmcService request pacing', () => {
     // The probe waits out the start gap instead of riding the failed request's
     // slot; the retry that confirms the cursor follows the 1 s backoff.
     expect(starts).toEqual([0, 200, 1_200]);
+  });
+
+  /**
+   * A documented sort refused on every attempt takes the ordinary ladder (#289):
+   * four attempts with the 1 s / 2 s / 4 s backoffs between them, no probe. At
+   * the top of the ±25% jitter and with each 503 taking 10 s to arrive, the call
+   * settles at 4 × 10 s + 8.75 s, inside the 60 s an MCP SDK client waits by
+   * default.
+   */
+  it('settles a documented sort refused on every attempt on the ordinary ladder, inside 60 s (#289)', async () => {
+    randomSpy.mockReturnValue(1);
+    const latencyMs = 10_000;
+    mockFetchWithTimeout.mockImplementation((url: string) => {
+      starts.push(Date.now() - t0);
+      if (!new URL(url).searchParams.has('sort')) return Promise.resolve(results());
+      return new Promise<Response>((_resolve, reject) => {
+        setTimeout(() => reject(unavailable()), latencyMs);
+      });
+    });
+    const service = makeService({ maxRetries: 3, minStartGapMs: 200 });
+
+    let settledAt: number | undefined;
+    const outcome = expect(
+      service.search({ query: 'a', sort: 'CITED desc' }).finally(() => {
+        settledAt = Date.now() - t0;
+      }),
+    ).rejects.toMatchObject({
+      code: JsonRpcErrorCode.ServiceUnavailable,
+      data: { reason: 'europepmc_unreachable', attempts: 4 },
+    });
+    await vi.advanceTimersByTimeAsync(120_000);
+    await outcome;
+
+    // Waits of 1.25, 2.5, and 5 s after each 10 s refusal, and no probe between.
+    expect(starts).toEqual([0, 11_250, 23_750, 38_750]);
+    expect(settledAt).toBe(48_750);
+    expect(settledAt).toBeLessThan(60_000);
   });
 
   it('fails fast with the 429 and its retryAfter when Retry-After exceeds the 30 s backoff cap', async () => {

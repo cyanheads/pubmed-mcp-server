@@ -33,9 +33,14 @@ const POST_THRESHOLD = 2000;
  * records every other upstream on. The framework exports no recorder for a client that
  * keeps plain `fetch`, so the name, description, and unit are restated and must match
  * its registration exactly, or the metrics SDK registers a second, conflicting stream.
- * Created on first use, once the framework has registered its meter provider.
+ * Safe at module scope: the instrument resolves from the global meter provider on each
+ * record, so points recorded once the framework starts telemetry export.
  */
-let requestDuration: ReturnType<typeof createHistogram> | undefined;
+const requestDuration = createHistogram(
+  'http.client.request.duration',
+  'Duration of outbound HTTP requests',
+  's',
+);
 
 /**
  * One request, recorded on {@link requestDuration} the way `fetchWithTimeout` records
@@ -57,11 +62,6 @@ async function fetchRecorded(
     if (!response.ok) throw await toError(response);
     return response;
   } finally {
-    requestDuration ??= createHistogram(
-      'http.client.request.duration',
-      'Duration of outbound HTTP requests',
-      's',
-    );
     requestDuration.record((performance.now() - start) / 1000, {
       'http.request.method': init.method ?? 'GET',
       'server.address': new URL(url).hostname,
@@ -143,7 +143,9 @@ export class NcbiApiClient {
    * Injects tool and email params but not api_key (eutils-specific).
    *
    * Records and error data name the URL's host and the caller's own params,
-   * never the request URL, whose query carries the operator's email.
+   * never the request URL, whose query carries the operator's email. A non-2xx
+   * body (first 500 bytes) is the framework's capture, so `error.data.body` reads
+   * it server-side while every client envelope leaves it out.
    */
   async makeExternalRequest(
     url: string,
@@ -172,14 +174,9 @@ export class NcbiApiClient {
           additionalContext: { host, params },
         }),
       );
-      const response = await fetchRecorded(fullUrl, { signal }, async (failed) => {
-        const body = await failed.text();
-        return httpErrorFromResponse(failed, {
-          service: 'NCBI',
-          captureBody: false,
-          data: { host, body: body.substring(0, 500) },
-        });
-      });
+      const response = await fetchRecorded(fullUrl, { signal }, (failed) =>
+        httpErrorFromResponse(failed, { service: 'NCBI', data: { host } }),
+      );
 
       return await response.text();
     } catch (error: unknown) {

@@ -40,7 +40,9 @@ const { lookupCitationTool } = await import(
  * for these fields; the other rows stand in for a match so the verification of
  * that record is pinned. Live ECitMatch answered `NOT_FOUND;INVALID_JOURNAL` to
  * every Bookshelf line tried (`genereviews|1993`, `genereviews|2018`, the NICE
- * book's title), and `NOT_FOUND` to the 2025 Health Technol Assess line.
+ * book's title), and `NOT_FOUND` to the 2025 Health Technol Assess line. It
+ * matched `nurs times|2006|102|35` to 17212296 and answered `NOT_FOUND` to the
+ * 2007 and 2005 lines, which stand in for a match here.
  */
 const ECITMATCH_PMIDS: Record<string, string> = {
   'health technol assess|2026|30|1': '42474064',
@@ -50,11 +52,21 @@ const ECITMATCH_PMIDS: Record<string, string> = {
   'genereviews|2018||': '20301340',
   'nice technology appraisal guidance|2024||': '40825089',
   'withdrawn j|2001|1|1': '99999999',
+  'nurs times|2006|102|35': '17212296',
+  'nurs times|2007|102|35': '17212296',
+  'nurs times|2005|102|35': '17212296',
 };
 
 /** How version 2.0 answers a UID it holds no record for, verbatim from a live response. */
 const UNKNOWN_UID_V2_RECORD =
   '<DocumentSummary uid = "99999999"><error>cannot get document summary</error></DocumentSummary>';
+
+/**
+ * 17212296's version 2.0 record, fetched 2026-11-10 and trimmed to the fields
+ * verification reads: a weekly issue dated `2006 Dec 12-2007 Jan 1`. (#293)
+ */
+const WEEKLY_ISSUE_V2_RECORD =
+  '<DocumentSummary uid = "17212296"><PubDate>2006 Dec 12-2007 Jan 1</PubDate><EPubDate/><Source>Nurs Times</Source><Authors><Author><Name>Coad J</Name><AuthType>Author</AuthType><ClusterID/></Author><Author><Name>Hardicre J</Name><AuthType>Author</AuthType><ClusterID/></Author><Author><Name>Devitt P</Name><AuthType>Author</AuthType><ClusterID/></Author></Authors><Title>How to search for and use \'grey literature\' in research.</Title><DocType>citation</DocType><DocDate/></DocumentSummary>';
 
 /** ecitmatch.cgi: one row per submitted line, the line echoed with its outcome appended. */
 function ecitmatchAnswer(bdata: string): string {
@@ -74,8 +86,8 @@ const V1_RECORD = /<DocSum><Id>(\d+)<\/Id>[\s\S]*?<\/DocSum>/g;
 /**
  * esummary.fcgi: the requested PMIDs, in request order, in the format the
  * request names. In version 2.0, 99999999 answers with the error record
- * ESummary returns for a UID it cannot summarize; any other PMID the fixtures do
- * not hold is left out.
+ * ESummary returns for a UID it cannot summarize, and 17212296 with its own
+ * record; any other PMID the fixtures do not hold is left out.
  */
 function esummaryAnswer(params: { id?: string; version?: string }): string {
   const v2 = params.version === '2.0';
@@ -83,7 +95,10 @@ function esummaryAnswer(params: { id?: string; version?: string }): string {
   const records = new Map(
     [...xml.matchAll(v2 ? V2_RECORD : V1_RECORD)].map((m) => [m[1] as string, m[0]]),
   );
-  if (v2) records.set('99999999', UNKNOWN_UID_V2_RECORD);
+  if (v2) {
+    records.set('99999999', UNKNOWN_UID_V2_RECORD);
+    records.set('17212296', WEEKLY_ISSUE_V2_RECORD);
+  }
   const head = xml.slice(0, xml.search(v2 ? /<DocumentSummary uid/ : /<DocSum>/));
   const body = (params.id ?? '')
     .split(',')
@@ -209,8 +224,9 @@ describe('records with no consortium author and no chapter date are unchanged', 
     ]);
     const authorMessage =
       'Queried author "nobody x" not found in the matched article\'s 13-author roster (Smyth MA, Noordali H, Lall R, et al.). ECitMatch weights journal+volume+page and may return a PMID whose authors disagree with the query — verify before using this PMID.';
+    // PubDate "2026 Jul", read at its month precision (#293)
     const yearMessage =
-      'Queried year "2025" does not match matched article year "2026" (pubDate 2026-07-01). ECitMatch tolerates year disagreement — verify before using this PMID.';
+      'Queried year "2025" does not match matched article year "2026" (pubDate 2026-07). ECitMatch tolerates year disagreement — verify before using this PMID.';
     const matched = { pmid: '42474064', matched: true, status: 'matched' };
 
     expect(JSON.stringify(result.structured)).toBe(
@@ -354,6 +370,49 @@ describe('a matched Bookshelf chapter is year-checked against its own date (#199
     expect(result.text).toContain(
       '**First Author:** Bird TD\n**Status:** Matched\n**Next Step:** PMID is ready',
     );
+  });
+});
+
+describe('a match dated by a range is year-checked against either end (#293)', () => {
+  const WEEKLY = {
+    journal: 'Nurs Times',
+    volume: '102',
+    firstPage: '35',
+    authorName: 'coad j',
+    key: 'weekly',
+  };
+
+  it.each([
+    ['start', '2006'],
+    ['end', '2007'],
+  ])("accepts a query dated by the range's %s year, on both surfaces", async (_end, year) => {
+    const result = await call([{ ...WEEKLY, year }]);
+
+    expect(result.structured.results).toEqual([
+      {
+        key: 'weekly',
+        matched: true,
+        status: 'matched',
+        pmid: '17212296',
+        matchedFirstAuthor: 'Coad J',
+      },
+    ]);
+    expect(result.structured.totalWarnings).toBe(0);
+    expect(result.text).not.toContain('year_mismatch');
+    expect(result.text).toContain(
+      '**First Author:** Coad J\n**Status:** Matched\n**Next Step:** PMID is ready',
+    );
+  });
+
+  it('flags a query dated outside the range, naming both of its years, on both surfaces', async () => {
+    const result = await call([{ ...WEEKLY, year: '2005' }]);
+    const message =
+      'Queried year "2005" does not match matched article year "2006/2007" (pubDate 2006-12-12/2007-01-01). ECitMatch tolerates year disagreement — verify before using this PMID.';
+
+    expect(result.structured.results[0]?.warnings).toEqual([{ code: 'year_mismatch', message }]);
+    expect(result.structured.totalWarnings).toBe(1);
+    expect(result.text).toContain(`**Warnings:**\n- [year_mismatch] ${message}`);
+    expect(result.text).toContain('**Next Step:** year_mismatch detected');
   });
 });
 

@@ -35,8 +35,8 @@
 **PMCID:** PMC11292240
 **PMID:** 39092259
 **DOI:** 10.1016/j.heliyon.2024.e34101
-**PMC:** https://www.ncbi.nlm.nih.gov/pmc/articles/PMC11292240/
-**PubMed:** https://pubmed.ncbi.nlm.nih.gov/39092259/
+**PMC:** <https://www.ncbi.nlm.nih.gov/pmc/articles/PMC11292240/>
+**PubMed:** <https://pubmed.ncbi.nlm.nih.gov/39092259/>
 **Keywords:** Bronchiectasis, Physiotherapy, Pulmonary rehabilitation, Core outcome set, Outcome assessment, Delphi method
 
 **License:** [https://creativecommons.org/licenses/by/4.0/](<https://creativecommons.org/licenses/by/4.0/>)

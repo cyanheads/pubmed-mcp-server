@@ -364,8 +364,13 @@ export const lookupCitationTool = tool('pubmed_lookup_citation', {
       }
 
       if (queriedYear && pubDate) {
-        const matchedYear = pubDate.slice(0, 4);
-        if (/^\d{4}$/.test(matchedYear) && matchedYear !== queriedYear.trim()) {
+        // A range (`2006-12-12/2007-01-01`) matches a citation dated by either end's year (#293)
+        const [startYear = '', endYear = startYear] = pubDate
+          .split('/')
+          .map((end) => end.slice(0, 4));
+        const year = queriedYear.trim();
+        const matchedYear = endYear === startYear ? startYear : `${startYear}/${endYear}`;
+        if (year !== startYear && year !== endYear) {
           warnings.push({
             code: 'year_mismatch',
             message: `Queried year "${queriedYear}" does not match matched article year "${matchedYear}" (pubDate ${pubDate}). ECitMatch tolerates year disagreement — verify before using this PMID.`,

@@ -8,7 +8,7 @@
  * @module tests/services/ncbi/idconvert-http-400.test
  */
 
-import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
+import { JsonRpcErrorCode, McpError } from '@cyanheads/mcp-ts-core/errors';
 import { createPacer } from '@cyanheads/mcp-ts-core/utils';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { NcbiApiClient } from '@/services/ncbi/api-client.js';
@@ -63,6 +63,21 @@ describe('NcbiService.idConvert on an HTTP 400 from the PMC ID Converter', () =>
     // A caller error is not retried, though the service allows three retries.
     expect(fetchSpy).toHaveBeenCalledOnce();
     expect(String(fetchSpy.mock.calls[0]?.[0])).toContain('/tools/idconv/');
+  });
+
+  it('keeps the upstream page on the cause, for the server-side log, off the caller envelope', async () => {
+    const page = '<html><body>Bad Request: invalid id</body></html>';
+    fetchSpy.mockResolvedValueOnce(new Response(page, { status: 400 }));
+
+    const error = await service()
+      .idConvert(['not-a-real-id'], 'pmid')
+      .catch((e: unknown) => e);
+
+    expect(error).toBeInstanceOf(McpError);
+    const { cause, data } = error as McpError;
+    expect(data).toStrictEqual({ idType: 'pmid', idCount: 1 });
+    expect(cause).toBeInstanceOf(McpError);
+    expect(cause).toMatchObject({ code: JsonRpcErrorCode.InvalidParams, data: { body: page } });
   });
 
   it('keeps the generic message when no idType was given', async () => {

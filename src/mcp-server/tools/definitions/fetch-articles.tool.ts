@@ -26,6 +26,7 @@ import {
   escapeMarkdownInParagraph,
   escapeMarkdownLineStart,
   escapeMarkdownListItem,
+  markdownAutolink,
 } from './_text.js';
 
 const AuthorSchema = z
@@ -718,7 +719,8 @@ export const fetchArticlesTool = tool('pubmed_fetch_articles', {
           bookLines.push(`**ISBN:** ${escapeMarkdownInParagraph(bk.isbns.join(', '))}`);
         if (bk.doi) bookLines.push(`**Book DOI:** ${escapeMarkdownInParagraph(bk.doi)}`);
         if (bk.accession) {
-          bookLines.push(`**Bookshelf:** https://www.ncbi.nlm.nih.gov/books/${bk.accession}/`);
+          const bookshelfUrl = `https://www.ncbi.nlm.nih.gov/books/${bk.accession}/`;
+          bookLines.push(`**Bookshelf:** ${markdownAutolink(bookshelfUrl)}`);
         }
         if (bookLines.length > 0) lines.push('', ...bookLines);
       }
@@ -730,8 +732,8 @@ export const fetchArticlesTool = tool('pubmed_fetch_articles', {
       if (a.pmid) lines.push(`**PMID:** ${a.pmid}`);
       if (a.doi) lines.push(`**DOI:** ${escapeMarkdownInParagraph(a.doi)}`);
       if (a.pmcId) lines.push(`**PMCID:** ${a.pmcId}`);
-      if (a.pubmedUrl) lines.push(`**PubMed:** ${a.pubmedUrl}`);
-      if (a.pmcUrl) lines.push(`**PMC:** ${a.pmcUrl}`);
+      if (a.pubmedUrl) lines.push(`**PubMed:** ${markdownAutolink(a.pubmedUrl)}`);
+      if (a.pmcUrl) lines.push(`**PMC:** ${markdownAutolink(a.pmcUrl)}`);
 
       if (a.articleDates?.length) {
         lines.push(

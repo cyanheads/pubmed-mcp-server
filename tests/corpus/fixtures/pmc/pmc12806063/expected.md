@@ -17,8 +17,8 @@
 **PMCID:** PMC12806063
 **PMID:** 41675504
 **DOI:** 10.1002/qub2.92
-**PMC:** https://www.ncbi.nlm.nih.gov/pmc/articles/PMC12806063/
-**PubMed:** https://pubmed.ncbi.nlm.nih.gov/41675504/
+**PMC:** <https://www.ncbi.nlm.nih.gov/pmc/articles/PMC12806063/>
+**PubMed:** <https://pubmed.ncbi.nlm.nih.gov/41675504/>
 **Keywords:** David Hume, entropy, Gauguin, human intelligence, saltation
 
 **License:** [https://creativecommons.org/licenses/by/4.0/](<https://creativecommons.org/licenses/by/4.0/>)

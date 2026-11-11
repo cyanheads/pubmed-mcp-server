@@ -9,6 +9,7 @@ import { createMockContext, getEnrichment, runToolContract } from '@cyanheads/mc
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { toJSONSchema } from 'zod/v4/core';
 
+import { NCBI_SERVICE_ERRORS } from '@/services/error-contracts.js';
 import { NcbiResponseHandler } from '@/services/ncbi/response-handler.js';
 import type { ParsedBriefSummary } from '@/services/ncbi/types.js';
 
@@ -109,6 +110,65 @@ describe('searchArticlesTool', () => {
 
     it('documents the ceiling in the offset description', () => {
       expect(searchArticlesTool.input.shape.offset.description).toContain('9998');
+    });
+  });
+
+  describe('sort order sent to ESearch (issue #291)', () => {
+    beforeEach(() => {
+      mockESearch.mockResolvedValue({ count: 5, idList: ['1'], retmax: 5, retstart: 0 });
+    });
+
+    // ESearch answers a key it does not know (`journal`) with its default order;
+    // each order goes out under the key ESearch honors.
+    it.each([
+      ['relevance', 'relevance'],
+      ['pub_date', 'pub_date'],
+      ['author', 'Author'],
+      ['journal', 'JournalName'],
+    ])('sends sort %s to ESearch as %s', async (sort, key) => {
+      const result = await runToolContract(searchArticlesTool, {
+        query: 'dapagliflozin heart failure[tiab]',
+        sort,
+      } as never);
+
+      expect(result.isError).toBeFalsy();
+      expect(mockESearch).toHaveBeenCalledTimes(1);
+      expect(mockESearch.mock.calls[0]?.[0]).toMatchObject({ sort: key });
+    });
+
+    it('sends relevance when no sort is given', async () => {
+      await runToolContract(searchArticlesTool, { query: 'asthma' });
+
+      expect(mockESearch.mock.calls[0]?.[0]).toMatchObject({ sort: 'relevance' });
+    });
+
+    it('sends `sortBy: "journal"` as JournalName too', async () => {
+      const result = await runToolContract(searchArticlesTool, {
+        query: 'asthma',
+        sortBy: 'journal',
+      } as never);
+
+      expect(result.isError).toBeFalsy();
+      expect(mockESearch.mock.calls[0]?.[0]).toMatchObject({ sort: 'JournalName' });
+    });
+
+    it('advertises the same four orders, relevance by default', () => {
+      const emitted = toJSONSchema(searchArticlesTool.input as never, {
+        target: 'draft-7',
+        io: 'input',
+      }) as { properties: Record<string, Record<string, unknown>> };
+
+      expect(emitted.properties.sort).toMatchObject({
+        type: 'string',
+        enum: ['relevance', 'pub_date', 'author', 'journal'],
+        default: 'relevance',
+      });
+    });
+
+    it('names the order each value sorts by', () => {
+      const description = searchArticlesTool.input.shape.sort.description ?? '';
+      expect(description).toContain('author (first author A–Z)');
+      expect(description).toContain('journal (journal name A–Z)');
     });
   });
 
@@ -1562,6 +1622,282 @@ describe('searchArticlesTool', () => {
     });
   });
 
+  describe('unmatched-clause advice by the clause’s field (issue #294)', () => {
+    /**
+     * An ESearch answer that matched nothing, in the shape ESearch sent for each
+     * clause on 2026-11-10: a quoted clause comes back with its tag in
+     * `WarningList.QuotedPhraseNotFound`; an unquoted one, the `language`
+     * filter's included, loses its tag in `ErrorList.PhraseNotFound`.
+     */
+    const unmatchedXml = (
+      queryTranslation: string,
+      { quoted = [], bare = [] }: { quoted?: string[]; bare?: string[] },
+    ) =>
+      `<?xml version="1.0" encoding="UTF-8" ?>\n<!DOCTYPE eSearchResult PUBLIC "-//NLM//DTD esearch 20060628//EN" "https://eutils.ncbi.nlm.nih.gov/eutils/dtd/20060628/esearch.dtd">\n<eSearchResult><Count>0</Count><RetMax>0</RetMax><RetStart>0</RetStart><IdList/><QueryTranslation>${queryTranslation}</QueryTranslation>${bare.length > 0 ? `<ErrorList>${bare.map((p) => `<PhraseNotFound>${p}</PhraseNotFound>`).join('')}</ErrorList>` : ''}<WarningList>${quoted.map((p) => `<QuotedPhraseNotFound>${p}</QuotedPhraseNotFound>`).join('')}<OutputMessage>No items found.</OutputMessage></WarningList></eSearchResult>\n`;
+
+    /** The notice on both surfaces: structuredContent's string and the raw content[] text. */
+    const noticeOf = async (args: Record<string, unknown>) => {
+      const result = await runToolContract(searchArticlesTool, args as never);
+      return {
+        notice: (result.structuredContent as { notice?: string }).notice ?? '',
+        text: contractText(result),
+      };
+    };
+
+    const MESH_ADVICE =
+      'Resolve the term with pubmed_lookup_mesh and search the `searchTerm` it returns: a supplementary concept, as many drugs are, searches as `"Name"[nm]`, not as a MeSH heading.';
+
+    it('sends a MeSH-heading clause to pubmed_lookup_mesh and its `[nm]` search term', async () => {
+      mockESearch.mockResolvedValue(
+        eSearchResultOf(
+          unmatchedXml('("dapagliflozin"[MeSH Terms])', {
+            quoted: ['"dapagliflozin"[MeSH Terms]'],
+          }),
+        ),
+      );
+      const { notice, text } = await noticeOf({ meshTerms: ['dapagliflozin'], maxResults: 0 });
+
+      expect(notice).toBe(
+        `PubMed matched nothing for \`"dapagliflozin"[MeSH Terms]\`, so that clause contributed no results. ${MESH_ADVICE}`,
+      );
+      expect(text).toContain(notice);
+      // The named clause still replaces the generic empty-result guidance. (#96)
+      expect(notice).not.toContain('Try removing filters');
+      expect(notice).not.toContain('subheadings');
+    });
+
+    it('sends a publication-type clause to pubmed_lookup_mesh as MeSH vocabulary', async () => {
+      mockESearch.mockResolvedValue(
+        eSearchResultOf(
+          unmatchedXml('asthma AND ("Randomised Controlled Trial"[Publication Type])', {
+            quoted: ['"Randomised Controlled Trial"[Publication Type]'],
+          }),
+        ),
+      );
+      const { notice, text } = await noticeOf({
+        query: 'asthma',
+        publicationTypes: ['Randomised Controlled Trial'],
+        maxResults: 0,
+      });
+
+      expect(notice).toBe(
+        `PubMed matched nothing for \`"Randomised Controlled Trial"[Publication Type]\`, so that clause contributed no results. ${MESH_ADVICE}`,
+      );
+      expect(text).toContain(notice);
+    });
+
+    it('names the `subheadings` to take a qualifier from for a Heading/qualifier clause', async () => {
+      mockESearch.mockResolvedValue(
+        eSearchResultOf(
+          unmatchedXml('asthma AND "Heart Failure/zzqx"[mh]', {
+            quoted: ['"Heart Failure/zzqx"[mh]'],
+          }),
+        ),
+      );
+      const { notice, text } = await noticeOf({
+        query: 'asthma AND "Heart Failure/zzqx"[mh]',
+        maxResults: 0,
+      });
+
+      expect(notice).toBe(
+        `PubMed matched nothing for \`"Heart Failure/zzqx"[mh]\`, so that clause contributed no results. ${MESH_ADVICE} For a \`Heading/qualifier\` clause, take the qualifier from the \`subheadings\` pubmed_lookup_mesh lists for the heading under \`includeDetails\`.`,
+      );
+      expect(text).toContain(notice);
+    });
+
+    it('advises a journal clause by abbreviation or ISSN, naming no MeSH tool', async () => {
+      mockESearch.mockResolvedValue(
+        eSearchResultOf(
+          unmatchedXml('asthma AND "New England Journal of Medicine"[Journal]', {
+            quoted: ['"New England Journal of Medicine"[Journal]'],
+          }),
+        ),
+      );
+      const { notice, text } = await noticeOf({
+        query: 'asthma',
+        journal: 'New England Journal of Medicine',
+        maxResults: 0,
+      });
+
+      expect(notice).toBe(
+        'PubMed matched nothing for `"New England Journal of Medicine"[Journal]`, so that clause contributed no results. A journal matches by its NLM title abbreviation, such as `N Engl J Med`, or its ISSN; a full title matches only as NLM records it.',
+      );
+      expect(text).toContain(notice);
+      expect(notice).not.toContain('pubmed_lookup_mesh');
+      expect(notice).not.toContain('[nm]');
+      expect(notice).not.toContain('Try removing filters');
+    });
+
+    const LANGUAGE_ADVICE =
+      'A language matches by its English name or three-letter NLM code, such as `english` or `eng`; a two-letter code such as `en` matches nothing.';
+
+    it.each([
+      [
+        'the language filter ESearch reports untagged',
+        { query: 'asthma', language: 'En', maxResults: 0 },
+        unmatchedXml('asthma AND En[Language]', { bare: ['En'] }),
+        '`En`',
+      ],
+      [
+        'a padded language filter, which ESearch reports trimmed',
+        { query: 'asthma', language: ' En ', maxResults: 0 },
+        unmatchedXml('asthma AND  En [Language]', { bare: ['En'] }),
+        '`En`',
+      ],
+      [
+        'a language filter sent without its formatting tags',
+        { query: 'asthma', language: '<i>En</i>', maxResults: 0 },
+        unmatchedXml('asthma AND En[Language]', { bare: ['En'] }),
+        '`En`',
+      ],
+      [
+        'a quoted `[la]` clause',
+        { query: 'asthma AND "en"[la]', maxResults: 0 },
+        unmatchedXml('asthma AND "en"[la]', { quoted: ['"en"[la]'] }),
+        '`"en"[la]`',
+      ],
+    ])('advises %s by name or NLM code, naming no MeSH tool', async (_label, args, xml, quoted) => {
+      mockESearch.mockResolvedValue(eSearchResultOf(xml));
+      const { notice, text } = await noticeOf(args);
+
+      expect(notice).toBe(
+        `PubMed matched nothing for ${quoted}, so that clause contributed no results. ${LANGUAGE_ADVICE}`,
+      );
+      expect(text).toContain(notice);
+      expect(notice).not.toContain('pubmed_lookup_mesh');
+      expect(notice).not.toContain('[nm]');
+    });
+
+    it('gives a clause under any other field tag spelling advice only', async () => {
+      mockESearch.mockResolvedValue(
+        eSearchResultOf(unmatchedXml('"zzqxw yyqzv"[tiab]', { quoted: ['"zzqxw yyqzv"[tiab]'] })),
+      );
+      const { notice, text } = await noticeOf({ query: '"zzqxw yyqzv"[tiab]', maxResults: 0 });
+
+      expect(notice).toBe(
+        'PubMed matched nothing for `"zzqxw yyqzv"[tiab]`, so that clause contributed no results. Check the spelling.',
+      );
+      expect(text).toContain(notice);
+    });
+
+    // A slash is a heading/qualifier pair only in MeSH vocabulary; anywhere else
+    // it is part of the text, and the clause keeps its own field's advice.
+    it.each([
+      [
+        'a free-text clause',
+        { query: '"tnf/il6 zzqx"[tiab]', maxResults: 0 },
+        unmatchedXml('"tnf/il6 zzqx"[tiab]', { quoted: ['"tnf/il6 zzqx"[tiab]'] }),
+        'PubMed matched nothing for `"tnf/il6 zzqx"[tiab]`, so that clause contributed no results. Check the spelling.',
+      ],
+      [
+        'a journal clause',
+        { query: 'asthma', journal: 'Zzqx/Yyqz', maxResults: 0 },
+        unmatchedXml('asthma AND "Zzqx/Yyqz"[Journal]', { quoted: ['"Zzqx/Yyqz"[Journal]'] }),
+        'PubMed matched nothing for `"Zzqx/Yyqz"[Journal]`, so that clause contributed no results. A journal matches by its NLM title abbreviation, such as `N Engl J Med`, or its ISSN; a full title matches only as NLM records it.',
+      ],
+      [
+        'an untagged phrase from the query',
+        { query: 'asthma zzqx/yyqz', maxResults: 0 },
+        unmatchedXml('asthma zzqx/yyqz', { bare: ['zzqx/yyqz'] }),
+        'PubMed matched nothing for `zzqx/yyqz`, so that clause contributed no results. Check the spelling, or resolve the term with pubmed_lookup_mesh before filtering on it.',
+      ],
+    ])('gives no qualifier advice for a slash in %s', async (_label, args, xml, expected) => {
+      mockESearch.mockResolvedValue(eSearchResultOf(xml));
+      const { notice, text } = await noticeOf(args);
+
+      expect(notice).toBe(expected);
+      expect(notice).not.toContain('subheadings');
+      expect(text).toContain(notice);
+    });
+
+    it('adds the qualifier advice when any MeSH clause in the group pairs a heading with a qualifier', async () => {
+      mockESearch.mockResolvedValue(
+        eSearchResultOf(
+          unmatchedXml('("dapagliflozin"[MeSH Terms]) AND "Heart Failure/zzqx"[mh]', {
+            quoted: ['"dapagliflozin"[MeSH Terms]', '"Heart Failure/zzqx"[mh]'],
+          }),
+        ),
+      );
+      const { notice, text } = await noticeOf({
+        query: '"Heart Failure/zzqx"[mh]',
+        meshTerms: ['dapagliflozin'],
+        maxResults: 0,
+      });
+
+      expect(notice).toBe(
+        `PubMed matched nothing for \`"dapagliflozin"[MeSH Terms]\`, \`"Heart Failure/zzqx"[mh]\`, so those clauses contributed no results. ${MESH_ADVICE} For a \`Heading/qualifier\` clause, take the qualifier from the \`subheadings\` pubmed_lookup_mesh lists for the heading under \`includeDetails\`.`,
+      );
+      expect(text).toContain(notice);
+    });
+
+    it.each([
+      ['with no language filter', { query: 'x zzznomatch' }],
+      ['beside a language filter it is not', { query: 'x zzznomatch', language: 'english' }],
+    ])(
+      'keeps the hedged sentence for an untagged phrase from the query, %s',
+      async (_label, args) => {
+        mockESearch.mockResolvedValue({
+          count: 5,
+          idList: ['111'],
+          retmax: 20,
+          retstart: 0,
+          errorList: { PhraseNotFound: ['zzznomatch'] },
+        });
+        const { notice, text } = await noticeOf(args);
+
+        expect(notice).toBe(
+          'PubMed matched nothing for `zzznomatch`, so that clause contributed no results. Check the spelling, or resolve the term with pubmed_lookup_mesh before filtering on it.',
+        );
+        expect(text).toContain(notice);
+      },
+    );
+
+    it('advises each field once, in the order ESearch reports its clauses', async () => {
+      mockESearch.mockResolvedValue(
+        eSearchResultOf(
+          unmatchedXml(
+            'asthma AND "New England Journal of Medicine"[Journal] AND ("dapagliflozin"[MeSH Terms] AND "zzqx"[MeSH Terms]) AND En[Language]',
+            {
+              bare: ['En'],
+              quoted: [
+                '"New England Journal of Medicine"[Journal]',
+                '"dapagliflozin"[MeSH Terms]',
+                '"zzqx"[MeSH Terms]',
+              ],
+            },
+          ),
+        ),
+      );
+      const { notice, text } = await noticeOf({
+        query: 'asthma',
+        journal: 'New England Journal of Medicine',
+        meshTerms: ['dapagliflozin', 'zzqx'],
+        language: 'En',
+        maxResults: 0,
+      });
+
+      expect(notice).toBe(
+        [
+          `PubMed matched nothing for \`En\`, so that clause contributed no results. ${LANGUAGE_ADVICE}`,
+          'PubMed matched nothing for `"New England Journal of Medicine"[Journal]`, so that clause contributed no results. A journal matches by its NLM title abbreviation, such as `N Engl J Med`, or its ISSN; a full title matches only as NLM records it.',
+          `PubMed matched nothing for \`"dapagliflozin"[MeSH Terms]\`, \`"zzqx"[MeSH Terms]\`, so those clauses contributed no results. ${MESH_ADVICE}`,
+        ].join(' '),
+      );
+      expect(text).toContain(notice);
+      expect(notice).not.toContain('Try removing filters');
+    });
+
+    it('names the forms each filter takes in the `meshTerms`, `language`, and `journal` descriptions', () => {
+      const { shape } = searchArticlesTool.input;
+      expect(shape.meshTerms.description).toContain('`"dapagliflozin"[nm]`');
+      expect(shape.meshTerms.description).toContain('pubmed_lookup_mesh');
+      expect(shape.language.description).toContain('"english" or "eng"');
+      expect(shape.language.description).toContain('"en" matches nothing');
+      expect(shape.journal.description).toContain('"N Engl J Med"');
+      expect(shape.journal.description).toContain('ISSN');
+    });
+  });
+
   describe('notice composition across signals (issues #95, #96, #97)', () => {
     it('composes a partial dateRange with an ignored field tag on a hit-bearing page', async () => {
       mockESearch.mockResolvedValue({
@@ -1929,9 +2265,9 @@ describe('searchArticlesTool', () => {
     expect(blocks[0]?.text).toContain('**Published:** 2024-01-01');
     expect(blocks[0]?.text).toContain('**DOI:** 10.1000/example');
     expect(blocks[0]?.text).toContain('**PMCID:** PMC12345');
-    expect(blocks[0]?.text).toContain('**PubMed:** https://pubmed.ncbi.nlm.nih.gov/111/');
+    expect(blocks[0]?.text).toContain('**PubMed:** <https://pubmed.ncbi.nlm.nih.gov/111/>');
     expect(blocks[0]?.text).toContain(
-      '**PMC:** https://www.ncbi.nlm.nih.gov/pmc/articles/PMC12345/',
+      '**PMC:** <https://www.ncbi.nlm.nih.gov/pmc/articles/PMC12345/>',
     );
   });
 });
@@ -2031,6 +2367,7 @@ describe('searchArticlesTool format() escaping of the other summary fields (issu
               docType: 'chapter~',
               pubDate: '2026 Mar',
               doi: '10.1/x_',
+              pubmedUrl: 'https://pubmed.ncbi.nlm.nih.gov/42/',
             },
           ],
           searchUrl: 'https://pubmed.ncbi.nlm.nih.gov/?term=cancer',
@@ -2050,6 +2387,7 @@ describe('searchArticlesTool format() escaping of the other summary fields (issu
         '⟨strong⟩Doc Type:⟨/strong⟩ chapter~',
         '⟨strong⟩Published:⟨/strong⟩ 2026 Mar',
         '⟨strong⟩DOI:⟨/strong⟩ 10.1/x_',
+        '⟨strong⟩PubMed:⟨/strong⟩ ⟨a href=https://pubmed.ncbi.nlm.nih.gov/42/⟩https://pubmed.ncbi.nlm.nih.gov/42/⟨/a⟩',
       ].join('\n'),
     );
   });
@@ -2121,10 +2459,10 @@ describe('searchArticlesTool Bookshelf chapter dates (issue #199)', () => {
   const EXPECTED: [string, string][] = [
     ['20301340', '2018-12-20'], // chapter, revised — book PubDate 1993
     ['25905212', '2025-07-03'], // chapter, contributed — book PubDate 2000
-    ['36356174', '2021-09-01'], // chapter, "2021 Sep" — book PubDate 2014
-    ['42330151', '2026-01-01'], // chapter, "2026" — book PubDate 2025 Dec 4
+    ['36356174', '2021-09'], // chapter, "2021 Sep" — book PubDate 2014
+    ['42330151', '2026'], // chapter, "2026" — book PubDate 2025 Dec 4
     ['40825089', '2025-07-02'], // whole book, PubDate "2025 Jul 2"
-    ['42474064', '2026-07-01'], // journal article, PubDate "2026 Jul"
+    ['42474064', '2026-07'], // journal article, PubDate "2026 Jul"
   ];
 
   beforeEach(() => {
@@ -2165,8 +2503,132 @@ describe('searchArticlesTool Bookshelf chapter dates (issue #199)', () => {
       properties: { summaries: { items: { properties: { pubDate: { description?: string } } } } };
     };
     const description = schema.properties.summaries.items.properties.pubDate.description ?? '';
-    expect(description).toContain('YYYY-MM-DD');
+    // At PubMed's own precision. (#293)
+    expect(description).toContain('`2026-12`');
+    expect(description).toContain('`start/end`');
+    expect(description).not.toContain('first day');
     expect(description).toContain('chapter');
+  });
+});
+
+describe('searchArticlesTool summary identifiers (issue #297)', () => {
+  beforeEach(() => {
+    mockESearch.mockReset();
+    mockESummary.mockReset();
+    mockExtractBriefSummaries.mockReset();
+    mockExtractBriefSummaries.mockImplementation(realExtractBriefSummaries);
+    mockESearch.mockResolvedValue({
+      count: 6,
+      idList: ['20301340', '25905212', '36356174', '42330151', '40825089', '42474064'],
+      retmax: 20,
+      retstart: 0,
+      queryTranslation: 'x',
+    });
+    mockESummary.mockResolvedValue(parseESummaryXml(CHAPTER_DATES_ESUMMARY_XML));
+  });
+
+  it('carries each record identifier and link on both surfaces, absent where ESummary has none', async () => {
+    const result = await runToolContract(searchArticlesTool, { query: 'x', summaryCount: 6 });
+
+    const { summaries } = result.structuredContent as { summaries: Record<string, unknown>[] };
+    expect(
+      summaries.map(({ pmid, doi, pmcId, pmcUrl, pubmedUrl }) => ({
+        pmid,
+        doi,
+        pmcId,
+        pmcUrl,
+        pubmedUrl,
+      })),
+    ).toEqual([
+      { pmid: '20301340', pubmedUrl: 'https://pubmed.ncbi.nlm.nih.gov/20301340/' },
+      { pmid: '25905212', pubmedUrl: 'https://pubmed.ncbi.nlm.nih.gov/25905212/' },
+      {
+        pmid: '36356174',
+        doi: '10.3768/rtipress.2021.rb.0028.2109',
+        pubmedUrl: 'https://pubmed.ncbi.nlm.nih.gov/36356174/',
+      },
+      { pmid: '42330151', pubmedUrl: 'https://pubmed.ncbi.nlm.nih.gov/42330151/' },
+      { pmid: '40825089', pubmedUrl: 'https://pubmed.ncbi.nlm.nih.gov/40825089/' },
+      {
+        pmid: '42474064',
+        doi: '10.3310/KGTO6391',
+        pmcId: 'PMC13403055',
+        pmcUrl: 'https://www.ncbi.nlm.nih.gov/pmc/articles/PMC13403055/',
+        pubmedUrl: 'https://pubmed.ncbi.nlm.nih.gov/42474064/',
+      },
+    ]);
+    for (const summary of summaries) {
+      if (summary.pmcId === undefined)
+        expect(summary, String(summary.pmid)).not.toHaveProperty('pmcUrl');
+    }
+
+    const blocks = contractText(result).split('\n#### ').slice(1);
+    const blockOf = (pmid: string) => blocks.find((b) => b.includes(`**PMID:** ${pmid}\n`)) ?? '';
+    expect(blockOf('42474064')).toContain(
+      [
+        '**DOI:** 10.3310/KGTO6391',
+        '**PMCID:** PMC13403055',
+        '**PubMed:** <https://pubmed.ncbi.nlm.nih.gov/42474064/>',
+        '**PMC:** <https://www.ncbi.nlm.nih.gov/pmc/articles/PMC13403055/>',
+      ].join('\n'),
+    );
+    expect(blockOf('36356174')).toContain(
+      '**DOI:** 10.3768/rtipress.2021.rb.0028.2109\n**PubMed:** <https://pubmed.ncbi.nlm.nih.gov/36356174/>',
+    );
+    expect(blockOf('36356174')).not.toContain('**PMC');
+    expect(blockOf('20301340')).toContain(
+      '**PubMed:** <https://pubmed.ncbi.nlm.nih.gov/20301340/>',
+    );
+    expect(blockOf('20301340')).not.toMatch(/\*\*(DOI|PMCID|PMC):\*\*/);
+  });
+});
+
+describe('searchArticlesTool electronic publication date (issue #293)', () => {
+  beforeEach(() => {
+    mockESearch.mockReset();
+    mockESummary.mockReset();
+    mockExtractBriefSummaries.mockReset();
+    mockESearch.mockResolvedValue({
+      count: 2,
+      idList: ['42802242', '17212296'],
+      retmax: 20,
+      retstart: 0,
+      queryTranslation: 'x',
+    });
+    mockESummary.mockResolvedValue({ eSummaryResult: {} });
+    mockExtractBriefSummaries.mockResolvedValue([
+      {
+        pmid: '42802242',
+        title: 'Effectiveness of Adding GLP-1 Receptor Agonists.',
+        source: 'Diabetes Obes Metab',
+        pubDate: '2026-12',
+        epubDate: '2026-09-27',
+      },
+      {
+        pmid: '17212296',
+        title: "How to search for and use 'grey literature' in research.",
+        source: 'Nurs Times',
+        pubDate: '2006-12-12/2007-01-01',
+      },
+    ]);
+  });
+
+  it('reports the epub date beside the issue date on both surfaces, and none where ESummary has none', async () => {
+    const result = await runToolContract(searchArticlesTool, { query: 'x', summaryCount: 2 });
+
+    const { summaries } = result.structuredContent as { summaries: Record<string, unknown>[] };
+    expect(summaries[0]).toMatchObject({
+      pmid: '42802242',
+      pubDate: '2026-12',
+      epubDate: '2026-09-27',
+    });
+    expect(summaries[1]).toMatchObject({ pmid: '17212296', pubDate: '2006-12-12/2007-01-01' });
+    expect(summaries[1]).not.toHaveProperty('epubDate');
+
+    const blocks = contractText(result).split('\n#### ').slice(1);
+    expect(blocks[0]).toContain('**Published:** 2026-12\n**Epub:** 2026-09-27\n');
+    expect(blocks[1]).toContain('**Published:** 2006-12-12/2007-01-01\n');
+    expect(blocks[1]).not.toContain('**Epub:**');
   });
 });
 
@@ -2917,6 +3379,98 @@ describe('searchArticlesTool page sizes past the per-call cap (issue #232)', () 
     expect(emitted.properties.maxResults?.description).toContain('1000 per call');
     expect(emitted.properties.summaryCount?.description).toContain('50 per call');
   });
+
+  describe('a page reaching PubMed’s 9,999-record window (issue #292)', () => {
+    /** The window sentence for `n` matches past the window. */
+    const windowSentence = (n: number) =>
+      `PubMed serves no record past offset 9998, so this page ends at its 9,999-record window and ${n} more matches cannot be reached by \`offset\`; narrow the query or add filters, such as splitting it by \`dateRange\`, to reach them.`;
+
+    it.each([
+      ['a page cut short at the edge', 100, 9950, 49],
+      ['the one record left at offset 9998', 20, 9998, 1],
+      ['a full page that ends at the edge', 20, 9979, 20],
+    ])('says so on both surfaces for %s', async (_label, maxResults, offset, served) => {
+      page(385_734, ids(served, offset + 1), offset);
+      const result = await runToolContract(searchArticlesTool, {
+        query: 'heart failure',
+        maxResults,
+        offset,
+      });
+
+      expect(result.isError).toBeFalsy();
+      const notice = noticeOf(result) ?? '';
+      // 385734 matches − 9999 the window serves.
+      expect(notice).toBe(windowSentence(375_735));
+      expect(contractText(result)).toContain(notice);
+    });
+
+    it.each([
+      ['a 9,999-record set read to its end', 9999, 20, 9979, 20],
+      ['a page well inside the window', 385_734, 20, 9000, 20],
+      ['a count-only call at the last offset', 385_734, 0, 9998, 0],
+    ])('adds no window sentence for %s', async (_label, count, maxResults, offset, served) => {
+      page(count, ids(served, offset + 1), offset);
+      const result = await runToolContract(searchArticlesTool, {
+        query: 'heart failure',
+        maxResults,
+        offset,
+      });
+
+      expect(result.isError).toBeFalsy();
+      expect(noticeOf(result)).toBeUndefined();
+    });
+
+    it('follows the clamp sentence with the window sentence, once', async () => {
+      page(50_000, ids(1000, 9000), 8999);
+      const result = await runToolContract(searchArticlesTool, {
+        query: 'asthma',
+        maxResults: 2000,
+        offset: 8999,
+      });
+
+      const notice = noticeOf(result) ?? '';
+      expect(notice).toBe(
+        `\`maxResults\` 2000 is past the per-call cap of 1000, so it is served at 1000. ${windowSentence(40_001)}`,
+      );
+      expect(notice.split('9,999-record window')).toHaveLength(2);
+      expect(contractText(result)).toContain(notice);
+    });
+
+    it('names the window case in the notice description', () => {
+      const description = searchArticlesTool.enrichment?.notice?.description ?? '';
+      expect(description).toContain('9,999-record window');
+    });
+  });
+});
+
+/** The recovery this tool gives for an NCBI outage, naming the other search. (#288) */
+const SEARCH_OUTAGE_RECOVERY =
+  'Retry after a brief delay, or run the search through pubmed_europepmc_search with `sources: ["MED"]` to keep it to PubMed records. Its MED hits carry PMIDs, but its query syntax differs: PubMed field tags such as `[mh]` do not carry over.';
+
+describe('searchArticlesTool NCBI outage recovery (issue #288)', () => {
+  const errors = searchArticlesTool.errors ?? [];
+  const declared = (reason: string) => errors.find((entry) => entry.reason === reason);
+
+  it.each(['ncbi_unreachable', 'ncbi_deadline_exceeded'])(
+    'replaces only the recovery of the shared %s entry',
+    (reason) => {
+      const shared = NCBI_SERVICE_ERRORS.find((entry) => entry.reason === reason);
+      expect(shared).toBeDefined();
+      expect(declared(reason)).toEqual({ ...shared, recovery: SEARCH_OUTAGE_RECOVERY });
+    },
+  );
+
+  it('keeps every other NCBI entry shared and declares each reason once', () => {
+    for (const shared of NCBI_SERVICE_ERRORS) {
+      if (shared.reason === 'ncbi_unreachable' || shared.reason === 'ncbi_deadline_exceeded') {
+        continue;
+      }
+      expect(declared(shared.reason), shared.reason).toEqual(shared);
+    }
+    const reasons = errors.map((entry) => entry.reason);
+    expect(reasons.length).toBeGreaterThan(NCBI_SERVICE_ERRORS.length);
+    expect(new Set(reasons).size).toBe(reasons.length);
+  });
 });
 
 describe('searchArticlesTool against a failing NCBI backend (issue #174)', () => {
@@ -2999,19 +3553,72 @@ describe('searchArticlesTool against a failing NCBI backend (issue #174)', () =>
             endpoint: 'esearch',
             attempts,
             ncbiErrors: [BACKEND_FAILURE],
-            recovery: {
-              hint: expect.stringContaining('NCBI failed on every attempt this call made'),
-            },
+            recovery: { hint: SEARCH_OUTAGE_RECOVERY },
           },
         },
       });
       const text = contractText(result);
       expect(text).toContain(BACKEND_FAILURE);
-      expect(text).toContain('NCBI failed on every attempt this call made');
+      expect(readCommonMark(text)).toContain(`Recovery: ${SEARCH_OUTAGE_RECOVERY}`);
       expect(text).not.toMatch(/deadline/i);
       expect(fetchSpy).toHaveBeenCalledTimes(attempts);
     },
   );
+
+  it('fails the next search fast once ESearch failed every attempt, naming the other search (issues #287, #288)', async () => {
+    vi.spyOn(Math, 'random').mockReturnValue(0.5);
+    const fetchSpy = vi.spyOn(globalThis, 'fetch').mockImplementation(() =>
+      Promise.resolve(
+        new Response('<html><body>500</body></html>', {
+          status: 500,
+          statusText: 'Internal Server Error',
+        }),
+      ),
+    );
+    const tool = await loadTool({});
+
+    // Call 1 spends the whole ladder: requests at 0, 1, 3, 7, 15 and 31 s.
+    const first = runToolContract(tool, { query: 'aspirin cardiovascular prevention' });
+    await vi.advanceTimersByTimeAsync(61_000);
+    expect(await first).toMatchObject({
+      isError: true,
+      structuredContent: {
+        error: {
+          message: 'NCBI returned HTTP 500 Internal Server Error. (failed after 6 attempts)',
+          data: { reason: 'ncbi_unreachable', endpoint: 'esearch', attempts: 6 },
+        },
+      },
+    });
+    expect(fetchSpy).toHaveBeenCalledTimes(6);
+
+    // Call 2 makes one request and fails without retrying.
+    const second = runToolContract(tool, { query: 'status epilepticus' });
+    await vi.advanceTimersByTimeAsync(1_000);
+    const result = await second;
+
+    expect(fetchSpy).toHaveBeenCalledTimes(7);
+    const failFast =
+      'NCBI returned HTTP 500 Internal Server Error. (failed after 1 attempt, without retrying: the previous esearch call failed on every attempt)';
+    expect(result.structuredContent).toMatchObject({
+      error: {
+        code: JsonRpcErrorCode.ServiceUnavailable,
+        message: failFast,
+        data: {
+          reason: 'ncbi_unreachable',
+          endpoint: 'esearch',
+          attempts: 1,
+          recovery: { hint: SEARCH_OUTAGE_RECOVERY },
+        },
+      },
+    });
+    expect(readCommonMark(contractText(result))).toBe(
+      [
+        `Error: ${failFast}`,
+        `Recovery: ${SEARCH_OUTAGE_RECOVERY}`,
+        '(reason ncbi_unreachable)',
+      ].join('\n\n'),
+    );
+  });
 
   it('reports a request the deadline aborts in flight as ncbi_deadline_exceeded, leading its hint with a retry', async () => {
     const fetchSpy = vi.spyOn(globalThis, 'fetch').mockImplementation(
@@ -3042,10 +3649,11 @@ describe('searchArticlesTool against a failing NCBI backend (issue #174)', () =>
     const { hint } = (
       result.structuredContent as { error: { data: { recovery: { hint: string } } } }
     ).error.data.recovery;
-    // A single search has no batch to reduce: batch size is only a conditional.
-    expect(hint).toMatch(/For a large batch, /);
+    // A single search has no batch to reduce, so its hint names none.
+    expect(hint).toBe(SEARCH_OUTAGE_RECOVERY);
+    expect(hint).not.toMatch(/batch/i);
     expect(hint).not.toMatch(/^Reduce batch size/);
-    expect(contractText(result)).toContain(hint);
+    expect(readCommonMark(contractText(result))).toContain(`Recovery: ${hint}`);
     expect(fetchSpy).toHaveBeenCalledTimes(1);
   });
 
@@ -3277,5 +3885,68 @@ describe('withoutFormattingTags — linear time on adversarial input (issue #260
     }
     // Linear work grows 64× across the span; quadratic grows 4096×.
     expect((times.at(-1) ?? 0) / Math.max(times[0] ?? 0, 0.05)).toBeLessThan(256);
+  });
+});
+
+describe('searchArticlesTool summary links (issue #307)', () => {
+  beforeEach(() => {
+    mockESearch.mockReset();
+    mockESummary.mockReset();
+    mockExtractBriefSummaries.mockReset();
+    mockExtractBriefSummaries.mockImplementation(realExtractBriefSummaries);
+    mockESearch.mockResolvedValue({
+      count: 6,
+      idList: ['20301340', '25905212', '36356174', '42330151', '40825089', '42474064'],
+      retmax: 20,
+      retstart: 0,
+      queryTranslation: 'x',
+    });
+    mockESummary.mockResolvedValue(parseESummaryXml(CHAPTER_DATES_ESUMMARY_XML));
+  });
+
+  const link = (label: string, url: string) =>
+    `⟨strong⟩${label}:⟨/strong⟩ ⟨a href=${url}⟩${url}⟨/a⟩`;
+
+  it('renders every summary PubMed and PMC URL as a CommonMark link to its structuredContent URL', async () => {
+    const result = await runToolContract(searchArticlesTool, { query: 'x', summaryCount: 6 });
+    const { summaries } = result.structuredContent as {
+      summaries: { pubmedUrl: string; pmcUrl?: string }[];
+    };
+    const read = readCommonMark(contractText(result));
+
+    expect(summaries).toHaveLength(6);
+    expect(summaries.filter((s) => s.pmcUrl)).toHaveLength(1);
+    for (const s of summaries) {
+      expect(read).toContain(link('PubMed', s.pubmedUrl));
+      if (s.pmcUrl) expect(read).toContain(link('PMC', s.pmcUrl));
+    }
+    // No label is followed by a URL a reader sees as plain text.
+    expect(read).not.toMatch(/⟨\/strong⟩ https?:\/\//);
+  });
+
+  it('renders a summary URL that cannot be an autolink as text reading back the URL, never a broken link', () => {
+    const pubmedUrl = 'https://pubmed.ncbi.nlm.nih.gov/<b>1</b>/';
+    const pmcUrl = 'https://www.ncbi.nlm.nih.gov/pmc/articles/PMC 1/';
+    const text =
+      textBlocks(
+        searchArticlesTool.format!({
+          query: 'x',
+          offset: 0,
+          pmids: ['1'],
+          summaries: [{ pmid: '1', pmcId: 'PMC1', pmcUrl, pubmedUrl }],
+          searchUrl: 'https://pubmed.ncbi.nlm.nih.gov/?term=x',
+          totalCount: 1,
+        }),
+      )[0]?.text ?? '';
+    const read = readCommonMark(text.slice(text.indexOf('**PMID:**')));
+
+    expect(read).toBe(
+      [
+        '⟨strong⟩PMID:⟨/strong⟩ 1',
+        '⟨strong⟩PMCID:⟨/strong⟩ PMC1',
+        `⟨strong⟩PubMed:⟨/strong⟩ ${pubmedUrl}`,
+        `⟨strong⟩PMC:⟨/strong⟩ ${pmcUrl}`,
+      ].join('\n'),
+    );
   });
 });

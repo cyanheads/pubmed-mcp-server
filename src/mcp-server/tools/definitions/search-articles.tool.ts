@@ -15,8 +15,9 @@
  * are accepted as aliases for `maxResults`, `term` and `queryTerm` for `query`,
  * `retstart` for `offset`, and `sortBy` for `sort`. The total match count rides
  * in `output` so `format()` can state it in the header beside the returned
- * count, and a summary's `docType` is rendered only when it marks something
- * other than an ordinary journal article (`citation`).
+ * count. A summary is the brief-summary row `pubmed_find_related` returns too
+ * (`_summary-row.ts`), and its `docType` is rendered only when it marks
+ * something other than an ordinary journal article (`citation`).
  * @module src/mcp-server/tools/definitions/search-articles.tool
  */
 
@@ -24,7 +25,7 @@ import { tool, z } from '@cyanheads/mcp-ts-core';
 import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
 import { sanitization } from '@cyanheads/mcp-ts-core/utils';
 import { NCBI_SERVICE_ERRORS, QUERY_INPUT_ERRORS } from '@/services/error-contracts.js';
-import { fieldTagKind } from '@/services/ncbi/field-tags.js';
+import { clauseFieldGroup, type FieldTagGroup, fieldTagKind } from '@/services/ncbi/field-tags.js';
 import { getNcbiService } from '@/services/ncbi/ncbi-service.js';
 import { extractBriefSummaries } from '@/services/ncbi/parsing/esummary-parser.js';
 import { decodeHtmlEntities } from '@/services/ncbi/parsing/text-helpers.js';
@@ -36,7 +37,13 @@ import {
   SCHEMA_SEARCH_ACTION,
 } from './_concepts.js';
 import { pageSizeCeiling, pageSizeClampNotice } from './_page-size.js';
-import { escapeMarkdownInline, escapeMarkdownInParagraph, markdownCodeSpan } from './_text.js';
+import { type SummaryRow, summaryRow, summaryRowSchema } from './_summary-row.js';
+import {
+  escapeMarkdownInline,
+  escapeMarkdownInParagraph,
+  markdownAutolink,
+  markdownCodeSpan,
+} from './_text.js';
 import { hasVisibleText } from './_visible-text.js';
 import { FETCH_ARTICLES_MAX_PMIDS } from './fetch-articles.tool.js';
 
@@ -223,6 +230,22 @@ async function filterValues(
  */
 const OFFSET_MAX = 9998;
 
+/** The `sort` orders the tool advertises. */
+const SORT_ORDERS = ['relevance', 'pub_date', 'author', 'journal'] as const;
+
+/**
+ * ESearch's key for each {@link SORT_ORDERS} value. ESearch reads keys
+ * case-insensitively and has no `journal` key — journal order is
+ * `JournalName` — and it answers a key it does not know with its default
+ * order, most recently added first, with no error. (#291)
+ */
+const ESEARCH_SORT_KEYS = {
+  relevance: 'relevance',
+  pub_date: 'pub_date',
+  author: 'Author',
+  journal: 'JournalName',
+} as const satisfies Record<(typeof SORT_ORDERS)[number], string>;
+
 /**
  * The query with every parenthesis and every bracketed PubMed field tag removed
  * — what the blank-term check tests. PubMed searches the content of any other
@@ -253,6 +276,61 @@ function quoteClauses(clauses: string[]): string {
 }
 
 /**
+ * The advice for a clause PubMed matched nothing for, by the
+ * {@link FieldTagGroup} of its field, or `unknown` for an untagged phrase,
+ * whose field cannot be told. MeSH vocabulary resolves through
+ * `pubmed_lookup_mesh`; a journal or a language does not. (#294)
+ */
+const UNMATCHED_CLAUSE_ADVICE = {
+  mesh: 'Resolve the term with pubmed_lookup_mesh and search the `searchTerm` it returns: a supplementary concept, as many drugs are, searches as `"Name"[nm]`, not as a MeSH heading.',
+  journal:
+    'A journal matches by its NLM title abbreviation, such as `N Engl J Med`, or its ISSN; a full title matches only as NLM records it.',
+  language:
+    'A language matches by its English name or three-letter NLM code, such as `english` or `eng`; a two-letter code such as `en` matches nothing.',
+  other: 'Check the spelling.',
+  unknown:
+    'Check the spelling, or resolve the term with pubmed_lookup_mesh before filtering on it.',
+} as const satisfies Record<FieldTagGroup | 'unknown', string>;
+
+/** Added to the MeSH advice when an unmatched clause pairs a heading with a qualifier. */
+const QUALIFIER_ADVICE =
+  'For a `Heading/qualifier` clause, take the qualifier from the `subheadings` pubmed_lookup_mesh lists for the heading under `includeDetails`.';
+
+/**
+ * One sentence per field among the clauses PubMed matched nothing for, in the
+ * order ESearch reports them, naming the clauses and giving that field's
+ * advice. The field is read from ESearch's own report of each clause
+ * ({@link clauseFieldGroup}), never from the caller's text: a quoted clause
+ * keeps its tag, while an unquoted one comes back bare and trimmed, so a bare
+ * phrase that is the `language` sent is the language filter's and any other is
+ * `unknown`. Linear in the clauses.
+ */
+function unmatchedClauseNotices(clauses: string[], language: string | undefined): string[] {
+  const sentLanguage = language?.trim();
+  const byField = Map.groupBy(
+    clauses,
+    (clause) => clauseFieldGroup(clause) ?? (clause === sentLanguage ? 'language' : 'unknown'),
+  );
+  return [...byField].map(([field, fieldClauses]) => {
+    const advice =
+      field === 'mesh' && fieldClauses.some((clause) => clause.includes('/'))
+        ? `${UNMATCHED_CLAUSE_ADVICE.mesh} ${QUALIFIER_ADVICE}`
+        : UNMATCHED_CLAUSE_ADVICE[field];
+    const subject = fieldClauses.length === 1 ? 'that clause' : 'those clauses';
+    return `PubMed matched nothing for ${quoteClauses(fieldClauses)}, so ${subject} contributed no results. ${advice}`;
+  });
+}
+
+/**
+ * The notice for a page that ends at PubMed's 9,999-record window — its next
+ * `offset` would be past {@link OFFSET_MAX} — while `unreachable` matches
+ * remain past it, which no `offset` can page to. (#292)
+ */
+function windowNotice(unreachable: number): string {
+  return `PubMed serves no record past offset ${OFFSET_MAX}, so this page ends at its ${(OFFSET_MAX + 1).toLocaleString('en-US')}-record window and ${unreachable} more matches cannot be reached by \`offset\`; narrow the query or add filters, such as splitting it by \`dateRange\`, to reach them.`;
+}
+
+/**
  * Produces an optional human- and agent-readable hint for the cases where the
  * returned PMIDs alone leave the caller without enough signal to recover.
  *
@@ -260,11 +338,14 @@ function quoteClauses(clauses: string[]): string {
  * collected and joined rather than the first match being returned:
  * - A `dateRange` with one bound filled, which drops the date filter entirely
  * - Field tags PubMed did not recognize (results silently unrestricted)
- * - Phrases PubMed matched nothing for
+ * - Phrases PubMed matched nothing for, advised by each clause's field (#294)
  * - No matches at all (suggest spell-check / removing filters)
  * - Pagination overshoot (offset ≥ totalCount)
+ * - A page reaching PubMed's 9,999-record window with matches left past it,
+ *   which no `offset` can page to (#292)
  * - `maxResults` or `summaryCount` past its per-call cap, served at the cap,
- *   with where the rest continues when the page left some out (#232)
+ *   with where the rest continues when the page left some out (#232); past
+ *   the window, that continuation is the window sentence, stated once
  *
  * The one precedence rule: an unmatched phrase names the exact clause that
  * returned nothing, so it replaces the generic empty-result guidance, which
@@ -281,6 +362,8 @@ function buildNotice(args: {
   maxResults: number;
   /** As requested, before the clamp to {@link SUMMARY_COUNT_MAX}. */
   summaryCount: number;
+  /** The `language` filter as sent, which ESearch reports untagged when it matches nothing. */
+  language?: string;
   partialDateBound?: { name: 'minDate' | 'maxDate'; value: string };
   errorList?: ESearchErrorList;
   warningList?: ESearchWarningList;
@@ -293,6 +376,7 @@ function buildNotice(args: {
     hasFilters,
     maxResults,
     summaryCount,
+    language,
     partialDateBound,
     errorList,
     warningList,
@@ -327,11 +411,7 @@ function buildNotice(args: {
     ...(warningList?.PhraseNotFound ?? []),
     ...(warningList?.QuotedPhraseNotFound ?? []).map(decodeHtmlEntities),
   ];
-  if (unmatchedPhrases.length > 0) {
-    notices.push(
-      `PubMed matched nothing for ${quoteClauses(unmatchedPhrases)}, so that clause contributed no results. Check the spelling, or resolve the term with pubmed_lookup_mesh before filtering on it.`,
-    );
-  }
+  notices.push(...unmatchedClauseNotices(unmatchedPhrases, language));
 
   if (totalCount === 0) {
     if (unmatchedPhrases.length === 0) {
@@ -347,8 +427,15 @@ function buildNotice(args: {
     );
   }
 
+  // Keyed on the tool's own counts, never on ESearch's "start and count
+  // adjusted" message. A page whose next offset is past the window ends it,
+  // short or full, and the schema would reject that offset. (#292)
+  const nextOffset = offset + pmidCount;
+  const pastWindow =
+    nextOffset > OFFSET_MAX && nextOffset < totalCount
+      ? windowNotice(totalCount - nextOffset)
+      : undefined;
   if (maxResults > MAX_RESULTS_CAP) {
-    const nextOffset = offset + pmidCount;
     notices.push(
       pageSizeClampNotice(
         'maxResults',
@@ -356,11 +443,11 @@ function buildNotice(args: {
         MAX_RESULTS_CAP,
         nextOffset >= totalCount
           ? undefined
-          : nextOffset <= OFFSET_MAX
-            ? `Pass \`offset: ${nextOffset}\` for the next page.`
-            : `PubMed serves no record past offset ${OFFSET_MAX}, so narrow the query or add filters to reach the rest.`,
+          : (pastWindow ?? `Pass \`offset: ${nextOffset}\` for the next page.`),
       ),
     );
+  } else if (pastWindow) {
+    notices.push(pastWindow);
   }
   if (summaryCount > SUMMARY_COUNT_MAX) {
     const unsummarized = pmidCount - SUMMARY_COUNT_MAX;
@@ -433,7 +520,18 @@ export const searchArticlesTool = tool('pubmed_search_articles', {
     'https://github.com/cyanheads/pubmed-mcp-server/blob/main/src/mcp-server/tools/definitions/search-articles.tool.ts',
 
   errors: [
-    ...NCBI_SERVICE_ERRORS,
+    // A search NCBI fails names the other search over PubMed records. Only the
+    // recovery is replaced: one entry per reason, and every other definition
+    // spreading these keeps the shared text. (#288)
+    ...NCBI_SERVICE_ERRORS.map((entry) =>
+      entry.reason === 'ncbi_unreachable' || entry.reason === 'ncbi_deadline_exceeded'
+        ? {
+            ...entry,
+            recovery:
+              'Retry after a brief delay, or run the search through pubmed_europepmc_search with `sources: ["MED"]` to keep it to PubMed records. Its MED hits carry PMIDs, but its query syntax differs: PubMed field tags such as `[mh]` do not carry over.',
+          }
+        : entry,
+    ),
     ...QUERY_INPUT_ERRORS,
     {
       reason: 'invalid_date_range',
@@ -502,9 +600,11 @@ export const searchArticlesTool = tool('pubmed_search_articles', {
         `Result offset for pagination (0-based). PubMed serves at most the first ${OFFSET_MAX + 1} records of a result set, so this caps at ${OFFSET_MAX}; narrow the query or add filters to reach anything beyond it.`,
       ),
     sort: z
-      .enum(['relevance', 'pub_date', 'author', 'journal'])
+      .enum(SORT_ORDERS)
       .default('relevance')
-      .describe('Sort order: relevance (default), pub_date (newest first), author, or journal'),
+      .describe(
+        'Sort order: relevance (default), pub_date (publication date, newest first), author (first author A–Z), or journal (journal name A–Z)',
+      ),
     dateRange: z
       .object({
         minDate: z
@@ -544,19 +644,19 @@ export const searchArticlesTool = tool('pubmed_search_articles', {
       .string()
       .optional()
       .describe(
-        'Filter by journal name. An empty string applies no filter; a value of only whitespace, invisible characters, markup, parentheses, brackets, or double quotes is rejected.',
+        'Filter by journal: its NLM title abbreviation (e.g. "N Engl J Med") or ISSN; a full title matches only as NLM records it. An empty string applies no filter; a value of only whitespace, invisible characters, markup, parentheses, brackets, or double quotes is rejected.',
       ),
     meshTerms: z
       .array(z.string())
       .optional()
       .describe(
-        "Filter by MeSH terms. Multiple terms are AND'd — all must match. Empty strings are skipped; an element of only whitespace, invisible characters, markup, parentheses, brackets, or double quotes is rejected.",
+        'Filter by MeSH headings, each searched as `"term"[MeSH Terms]`. Multiple terms are AND\'d — all must match. A supplementary concept, as many drugs are, is not a heading and matches nothing here: search it in `query` as the `searchTerm` pubmed_lookup_mesh returns, such as `"dapagliflozin"[nm]`. Empty strings are skipped; an element of only whitespace, invisible characters, markup, parentheses, brackets, or double quotes is rejected.',
       ),
     language: z
       .string()
       .optional()
       .describe(
-        'Filter by language (e.g. "english"). An empty string applies no filter; a value of only whitespace, invisible characters, markup, parentheses, brackets, or double quotes is rejected.',
+        'Filter by language: its English name or three-letter NLM code (e.g. "english" or "eng"); a two-letter code such as "en" matches nothing. An empty string applies no filter; a value of only whitespace, invisible characters, markup, parentheses, brackets, or double quotes is rejected.',
       ),
     hasAbstract: z.boolean().optional().describe('Only include articles with abstracts'),
     freeFullText: z.boolean().optional().describe('Only include free full text articles'),
@@ -582,65 +682,7 @@ export const searchArticlesTool = tool('pubmed_search_articles', {
     offset: z.number().describe('Result offset used'),
     pmids: z.array(z.string()).describe('PubMed IDs'),
     summaries: z
-      .array(
-        z
-          .object({
-            pmid: z.string().describe('PubMed ID'),
-            title: z.string().optional().describe('Article title'),
-            authors: z
-              .string()
-              .optional()
-              .describe(
-                "Formatted author string — the first three of the record's own authors, then \"et al.\". On an NCBI Bookshelf chapter these are the chapter's authors; the book's editors are reported separately in `editors`.",
-              ),
-            source: z
-              .string()
-              .optional()
-              .describe(
-                'Journal the article appeared in. Absent on an NCBI Bookshelf record, which has no journal — its venue is in `bookTitle` and `publisherName` instead, and `docType` says which kind of record it is.',
-              ),
-            bookTitle: z
-              .string()
-              .optional()
-              .describe(
-                'Title of the book an NCBI Bookshelf record belongs to, e.g. "GeneReviews(®)". Present instead of `source` on a book record; absent on a journal article.',
-              ),
-            publisherName: z
-              .string()
-              .optional()
-              .describe(
-                'Publisher of the book an NCBI Bookshelf record belongs to. Present only on a book record; absent on a journal article.',
-              ),
-            docType: z
-              .string()
-              .optional()
-              .describe(
-                'What PubMed classifies this record as: "chapter" or "book" for an NCBI Bookshelf record, "citation" for an ordinary journal article. Absent when PubMed supplies none.',
-              ),
-            editors: z
-              .array(z.string().describe('One editor, "Surname Initials" as ESummary renders it'))
-              .optional()
-              .describe(
-                "Editors of the containing book, kept out of `authors` so they cannot displace the record's own authors. Absent on a journal article and on a book that credits no editors.",
-              ),
-            pubDate: z
-              .string()
-              .optional()
-              .describe(
-                'Publication date as YYYY-MM-DD; a month- or year-only date reads as the first day of that month or year. On an NCBI Bookshelf chapter (`docType` "chapter") it is the chapter\'s own date — its last revision, otherwise its contribution — not the year its book began.',
-              ),
-            doi: z
-              .string()
-              .optional()
-              .describe(
-                'DOI, cased as NCBI reports it. DOIs are case-insensitive by spec and no case normalization is applied here, so casing can differ from a Europe PMC-sourced `doi` — compare the two case-insensitively.',
-              ),
-            pmcId: z.string().optional().describe('PMC ID'),
-            pmcUrl: z.string().optional().describe('PMC URL'),
-            pubmedUrl: z.string().optional().describe('PubMed URL'),
-          })
-          .describe('Brief article summary'),
-      )
+      .array(summaryRowSchema.describe('Brief article summary'))
       .describe('Brief summaries (empty array when summaryCount is 0)'),
     searchUrl: z.string().describe('PubMed search URL'),
     // A domain field, not enrichment: format() sees only this payload, and the
@@ -665,7 +707,7 @@ export const searchArticlesTool = tool('pubmed_search_articles', {
       .string()
       .optional()
       .describe(
-        'Optional guidance when the result set does not reflect what was asked for — a field tag PubMed ignored, a phrase it matched nothing for, a dateRange dropped for having one bound, no matches at all, paging past the end, or a `maxResults` or `summaryCount` past its per-call cap, served at the cap. Absent when nothing applies.',
+        "Optional guidance when the result set does not reflect what was asked for — a field tag PubMed ignored, a phrase it matched nothing for (with advice by the clause's field), a dateRange dropped for having one bound, no matches at all, paging past the end, a page that ends at PubMed's 9,999-record window with matches past it that no `offset` reaches, or a `maxResults` or `summaryCount` past its per-call cap, served at the cap. Absent when nothing applies.",
       ),
   },
 
@@ -841,28 +883,14 @@ export const searchArticlesTool = tool('pubmed_search_articles', {
         term: effectiveQuery,
         retmax: maxResults,
         retstart: input.offset,
-        sort: input.sort,
+        sort: ESEARCH_SORT_KEYS[input.sort],
         usehistory: summaryCount > 0 ? 'y' : undefined,
       },
       { signal: ctx.signal },
     );
 
     const pmids = esResult.idList;
-    let summaries: {
-      pmid: string;
-      title?: string | undefined;
-      authors?: string | undefined;
-      source?: string | undefined;
-      bookTitle?: string | undefined;
-      publisherName?: string | undefined;
-      docType?: string | undefined;
-      editors?: string[] | undefined;
-      pubDate?: string | undefined;
-      doi?: string | undefined;
-      pmcId?: string | undefined;
-      pmcUrl?: string | undefined;
-      pubmedUrl?: string | undefined;
-    }[] = [];
+    let summaries: SummaryRow[] = [];
 
     if (summaryCount > 0 && pmids.length > 0) {
       const eSummaryParams: Record<string, string | number | undefined> = {
@@ -881,22 +909,7 @@ export const searchArticlesTool = tool('pubmed_search_articles', {
 
       const eSummaryResult = await ncbi.eSummary(eSummaryParams, { signal: ctx.signal });
       if (eSummaryResult) {
-        const briefSummaries = await extractBriefSummaries(eSummaryResult);
-        summaries = briefSummaries.map((s) => ({
-          pmid: s.pmid,
-          title: s.title,
-          authors: s.authors,
-          source: s.source,
-          bookTitle: s.bookTitle,
-          publisherName: s.publisherName,
-          docType: s.docType,
-          editors: s.editors,
-          pubDate: s.pubDate,
-          doi: s.doi,
-          pmcId: s.pmcId,
-          ...(s.pmcId && { pmcUrl: `https://www.ncbi.nlm.nih.gov/pmc/articles/${s.pmcId}/` }),
-          pubmedUrl: `https://pubmed.ncbi.nlm.nih.gov/${s.pmid}/`,
-        }));
+        summaries = (await extractBriefSummaries(eSummaryResult)).map(summaryRow);
       }
     }
 
@@ -925,6 +938,7 @@ export const searchArticlesTool = tool('pubmed_search_articles', {
       hasFilters: Object.keys(appliedFilters).length > 0,
       maxResults: input.maxResults,
       summaryCount: input.summaryCount,
+      ...(language && { language }),
       ...(partialDateBound && { partialDateBound }),
       ...(esResult.errorList && { errorList: esResult.errorList }),
       ...(esResult.warningList && { warningList: esResult.warningList }),
@@ -998,10 +1012,11 @@ export const searchArticlesTool = tool('pubmed_search_articles', {
           lines.push(`**Doc Type:** ${escapeMarkdownInParagraph(s.docType)}`);
         }
         if (s.pubDate) lines.push(`**Published:** ${escapeMarkdownInParagraph(s.pubDate)}`);
+        if (s.epubDate) lines.push(`**Epub:** ${escapeMarkdownInParagraph(s.epubDate)}`);
         if (s.doi) lines.push(`**DOI:** ${escapeMarkdownInParagraph(s.doi)}`);
         if (s.pmcId) lines.push(`**PMCID:** ${s.pmcId}`);
-        if (s.pubmedUrl) lines.push(`**PubMed:** ${s.pubmedUrl}`);
-        if (s.pmcUrl) lines.push(`**PMC:** ${s.pmcUrl}`);
+        lines.push(`**PubMed:** ${markdownAutolink(s.pubmedUrl)}`);
+        if (s.pmcUrl) lines.push(`**PMC:** ${markdownAutolink(s.pmcUrl)}`);
       }
     }
     return [{ type: 'text', text: lines.join('\n') }];

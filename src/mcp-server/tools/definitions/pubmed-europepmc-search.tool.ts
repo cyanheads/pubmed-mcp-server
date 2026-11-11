@@ -44,6 +44,7 @@ import {
   escapeMarkdownBlock,
   escapeMarkdownInline,
   escapeMarkdownInParagraph,
+  markdownAutolink,
   markdownCodeSpan,
   sliceCodeUnits,
 } from './_text.js';
@@ -77,7 +78,16 @@ export const pubmedEuropepmcSearchTool = tool('pubmed_europepmc_search', {
     'https://github.com/cyanheads/pubmed-mcp-server/blob/main/src/mcp-server/tools/definitions/pubmed-europepmc-search.tool.ts',
 
   errors: [
-    ...EUROPEPMC_SERVICE_ERRORS,
+    // Only the outage recovery is this tool's own: it names the other search. (#288)
+    ...EUROPEPMC_SERVICE_ERRORS.map((entry) =>
+      entry.reason === 'europepmc_unreachable'
+        ? {
+            ...entry,
+            recovery:
+              "Retry after a brief delay, or run the search through pubmed_search_articles, which covers the PubMed (`MED`) records in Europe PMC's index but not its preprints, patents, or Agricola records. Its query syntax differs: Europe PMC field tokens such as `AUTH:` do not carry over.",
+          }
+        : entry,
+    ),
     ...QUERY_INPUT_ERRORS,
     {
       reason: 'blank_cursor',
@@ -449,7 +459,7 @@ export const pubmedEuropepmcSearchTool = tool('pubmed_europepmc_search', {
         }
         if (h.license) lines.push(`**License:** ${escapeMarkdownInParagraph(h.license)}`);
         if (typeof h.citedByCount === 'number') lines.push(`**Cited by:** ${h.citedByCount}`);
-        lines.push(`**URL:** ${h.epmcUrl}`);
+        lines.push(`**URL:** ${markdownAutolink(h.epmcUrl)}`);
         if (h.abstractSnippet) {
           // Plain text that opens a line of its own: escaped as prose, line
           // start included. The truncation note takes a paragraph of its own —

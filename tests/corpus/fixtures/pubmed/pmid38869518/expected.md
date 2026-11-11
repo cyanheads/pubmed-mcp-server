@@ -33,8 +33,8 @@
 **PMID:** 38869518
 **DOI:** 10.1007/s00726-024-03401-w
 **PMCID:** PMC11176230
-**PubMed:** https://pubmed.ncbi.nlm.nih.gov/38869518/
-**PMC:** https://www.ncbi.nlm.nih.gov/pmc/articles/PMC11176230/
+**PubMed:** <https://pubmed.ncbi.nlm.nih.gov/38869518/>
+**PMC:** <https://www.ncbi.nlm.nih.gov/pmc/articles/PMC11176230/>
 **Article Dates:** Electronic 2024-06-13
 
 #### Abstract

@@ -21,7 +21,10 @@
  * `error-contract-unthrown` check skips it while still checking the handler's
  * own reasons. Spread a service array only into a tool whose handler lets that
  * service's errors propagate — a tool that catches them all never produces
- * those reasons.
+ * those reasons. A definition may replace one entry's `recovery` by mapping the
+ * array it spreads (`NCBI_SERVICE_ERRORS.map(...)`), where its own hint names a
+ * route that fits only that tool; a second entry with the same reason fails the
+ * linter's `error-contract-reason-unique` check.
  *
  * @module src/services/error-contracts
  */
@@ -46,7 +49,7 @@ export const NCBI_SERVICE_ERRORS = [
   {
     reason: 'ncbi_unreachable',
     code: JsonRpcErrorCode.ServiceUnavailable,
-    when: 'NCBI E-utilities failed on every attempt the retry budget allowed — retries ran out, or the next backoff would overrun the total deadline.',
+    when: 'NCBI E-utilities failed on every attempt the retry budget allowed — retries ran out, the next backoff would overrun the total deadline, or the call made one attempt without retrying because the previous call to the same E-utility had failed on every attempt.',
     recovery: 'Retry after a brief delay; NCBI failed on every attempt this call made.',
     retryable: true,
     thrownBy: 'service',
@@ -197,8 +200,7 @@ export const EUROPEPMC_SERVICE_ERRORS = [
     reason: 'europepmc_unreachable',
     code: JsonRpcErrorCode.ServiceUnavailable,
     when: 'Europe PMC failed on every retry attempt — unreachable, an HTTP 404 or 5xx other than a 504 timeout from its search endpoint, or an empty response with no results.',
-    recovery:
-      'Retry after a brief delay; Europe PMC was unreachable. NCBI PMC and Unpaywall remain available.',
+    recovery: 'Retry after a brief delay; Europe PMC failed on every attempt this call made.',
     retryable: true,
     thrownBy: 'service',
   },
@@ -214,7 +216,7 @@ export const EUROPEPMC_SERVICE_ERRORS = [
   {
     reason: 'europepmc_invalid_input',
     code: JsonRpcErrorCode.ValidationError,
-    when: 'Europe PMC rejected the request input — an error message in place of results; a sort it cannot use (one whose keys are not each a field plus asc/desc, rejected before any request; an empty response to a sort with an undocumented field; or a second HTTP 503 to a sorted search when the same query without the sort is served); or a pagination cursor it cannot read (an empty response on the last attempt the retry budget allows, or a second HTTP 503 when the first page of the same query is served).',
+    when: 'Europe PMC rejected the request input — an error message in place of results; a sort it cannot use (one whose keys are not each a field plus asc/desc, rejected before any request; an empty response to a sort with an undocumented field; or a second HTTP 503 to a search whose sort has an undocumented field when the same query without the sort is served); or a pagination cursor it cannot read (an empty response on the last attempt the retry budget allows, or a second HTTP 503 when the first page of the same query is served).',
     recovery:
       "Fix the rejected input before retrying — the query, the sort, or the cursorMark (pass the previous response's `nextCursorMark` verbatim, or `*` to restart); the same input will most likely be rejected again.",
     retryable: false,

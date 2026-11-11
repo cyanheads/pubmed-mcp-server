@@ -31,6 +31,7 @@ import {
   escapeMarkdownBlock,
   escapeMarkdownInline,
   escapeMarkdownInParagraph,
+  markdownAutolink,
   markdownCodeSpan,
 } from './_text.js';
 
@@ -164,7 +165,17 @@ export const pubmedEuropepmcFetchTool = tool('pubmed_europepmc_fetch', {
     'https://github.com/cyanheads/pubmed-mcp-server/blob/main/src/mcp-server/tools/definitions/pubmed-europepmc-fetch.tool.ts',
 
   errors: [
-    ...EUROPEPMC_SERVICE_ERRORS,
+    // Only the outage recovery is this tool's own: it names the tool that reads
+    // a `MED` record while Europe PMC is down. (#288)
+    ...EUROPEPMC_SERVICE_ERRORS.map((entry) =>
+      entry.reason === 'europepmc_unreachable'
+        ? {
+            ...entry,
+            recovery:
+              "Retry after a brief delay, or pass a `MED` record's `epmcId`, which is its PMID, to pubmed_fetch_articles in `pmids`. That tool reads PubMed only, so it does not reach `PMC`, `PPR`, `PAT`, or `AGR` records.",
+          }
+        : entry,
+    ),
     {
       reason: 'europepmc_disabled',
       code: JsonRpcErrorCode.ConfigurationError,
@@ -391,7 +402,7 @@ export const pubmedEuropepmcFetchTool = tool('pubmed_europepmc_fetch', {
       }
       if (r.license) lines.push(`**License:** ${escapeMarkdownInParagraph(r.license)}`);
       if (typeof r.citedByCount === 'number') lines.push(`**Cited by:** ${r.citedByCount}`);
-      lines.push(`**URL:** ${r.epmcUrl}`);
+      lines.push(`**URL:** ${markdownAutolink(r.epmcUrl)}`);
       // Plain text with no structure of its own, escaped as prose throughout,
       // line starts included. (#255)
       if (r.abstract) lines.push(`\n#### Abstract\n${escapeMarkdownBlock(r.abstract, 'plain')}`);

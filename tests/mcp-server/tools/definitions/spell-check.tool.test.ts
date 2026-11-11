@@ -4,7 +4,7 @@
  */
 
 import type { ContentBlock } from '@cyanheads/mcp-ts-core';
-import { JsonRpcErrorCode, serviceUnavailable } from '@cyanheads/mcp-ts-core/errors';
+import { JsonRpcErrorCode, McpError, serviceUnavailable } from '@cyanheads/mcp-ts-core/errors';
 import { createMockContext, runToolContract } from '@cyanheads/mcp-ts-core/testing';
 import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
 
@@ -74,6 +74,41 @@ describe('spellCheckTool', () => {
         },
       },
     });
+  });
+
+  // pubmed_search_articles names another search in these two hints; no other
+  // definition spreading the shared NCBI contract does. Loaded beside it, as the
+  // server loads every definition, so a rewrite of a shared entry in place shows. (#288)
+  it.each([
+    [
+      'ncbi_unreachable',
+      JsonRpcErrorCode.ServiceUnavailable,
+      'Retry after a brief delay; NCBI failed on every attempt this call made.',
+    ],
+    [
+      'ncbi_deadline_exceeded',
+      JsonRpcErrorCode.Timeout,
+      'Retry after a brief delay; NCBI may be under temporary load. For a large batch, split it into smaller calls.',
+    ],
+  ])('keeps the shared %s recovery, which names no other search', async (reason, code, hint) => {
+    const { searchArticlesTool } = await import(
+      '@/mcp-server/tools/definitions/search-articles.tool.js'
+    );
+    expect(searchArticlesTool.errors?.find((e) => e.reason === reason)?.recovery).toContain(
+      'pubmed_europepmc_search',
+    );
+    mockESpell.mockRejectedValue(new McpError(code, 'NCBI did not answer', { reason }));
+    const result = await runToolContract(spellCheckTool, { query: 'astma' });
+
+    expect(result.isError).toBe(true);
+    expect(result.structuredContent).toMatchObject({
+      error: { code, data: { reason, recovery: { hint } } },
+    });
+    const text = textBlocks(result.content as ContentBlock[])
+      .map((b) => b.text)
+      .join('\n');
+    expect(text).toContain(`Recovery: ${hint}`);
+    expect(text).not.toContain('pubmed_europepmc_search');
   });
 
   it('returns original when no suggestion', async () => {

@@ -3,7 +3,9 @@
  * Orchestrates the API client, request queue, and response handler to provide
  * typed methods for each E-utility endpoint. Every call runs as a retry loop around
  * the shared request queue — each attempt re-queued and re-paced — under one total
- * deadline that covers queue wait, attempts, and backoff. Uses init/accessor pattern.
+ * deadline that covers queue wait, attempts, and backoff. Once a call to an endpoint
+ * fails on every attempt, later calls to that endpoint make one attempt each until
+ * one succeeds. Uses init/accessor pattern.
  * @module src/services/ncbi/ncbi-service
  */
 
@@ -414,6 +416,11 @@ interface LoopOutcome {
   /** The loop's total deadline. */
   deadlineMs: number;
   /**
+   * Whether the loop was held to one attempt because the endpoint's previous call spent
+   * its retries on `ncbi_unreachable`, where it would otherwise have retried. (#287)
+   */
+  failFast: boolean;
+  /**
    * NCBI's diagnostics from the latest attempt that carried any. An expiry that aborts a
    * later attempt in flight or in the queue arrives without them. (#174)
    */
@@ -436,6 +443,7 @@ interface LoopOutcome {
  *   loop's own signal — does. (#174)
  * - Retries exhausted → retries spent: the last attempt's code and message (the
  *   framework appends the attempt count) with `endpoint`, `attempts`, and `ncbiErrors`.
+ *   A fail-fast loop's one attempt also says why it never retried. (#287)
  * - A 429 never retried because its `Retry-After` outlasts the time left or the backoff
  *   cap → the attempt's own error, stamped `ncbi_rate_limited`.
  * - Anything else — a failure that was never retried — passes through unchanged.
@@ -482,7 +490,11 @@ function toServiceError(error: unknown, endpoint: string, loop: LoopOutcome): un
   }
 
   if (typeof data.retryAttempts === 'number') {
-    return retriesSpent(error, error.message, data.retryAttempts, endpoint, error.cause ?? error);
+    const message =
+      loop.failFast && error.cause instanceof McpError
+        ? `${error.cause.message} (failed after 1 attempt, without retrying: the previous ${endpoint} call failed on every attempt)`
+        : error.message;
+    return retriesSpent(error, message, data.retryAttempts, endpoint, error.cause ?? error);
   }
   if (error.code === JsonRpcErrorCode.RateLimited) {
     return new McpError(
@@ -498,8 +510,19 @@ function toServiceError(error: unknown, endpoint: string, loop: LoopOutcome): un
 /**
  * Facade over NCBI's E-utility suite. Each public method corresponds to a
  * single E-utility endpoint.
+ *
+ * One service serves every caller and tenant in the process, so the endpoints it
+ * holds as failing are shared the way the queue's 429 gate is; each
+ * `initNcbiService()` builds a service that holds none. (#287)
  */
 export class NcbiService {
+  /**
+   * Endpoints, by their `runPaced` label, whose latest call ended `ncbi_unreachable`
+   * with its retries spent. A call to one makes a single attempt; any success on that
+   * endpoint removes it.
+   */
+  private readonly failingEndpoints = new Set<string>();
+
   constructor(
     private readonly apiClient: NcbiApiClient,
     private readonly queue: Pacer,
@@ -711,10 +734,10 @@ export class NcbiService {
         this.apiClient.makeExternalRequest(NCBI_PMC_IDCONV_URL, params, signal),
       );
     } catch (error: unknown) {
-      // PMC ID Converter returns 400 (InvalidParams) for malformed inputs and
-      // leaks the upstream HTML/text body into `data.body`. Rewrite the message
-      // with idType-specific guidance and drop the leaky body, keeping the
-      // InvalidParams code every other NCBI 400 carries.
+      // PMC ID Converter returns 400 (InvalidParams) for malformed inputs, with
+      // an HTML/text page as its body. Rewrite the message with idType-specific
+      // guidance, keeping the InvalidParams code every other NCBI 400 carries;
+      // the page stays on the cause, server-side.
       if (error instanceof McpError && error.code === JsonRpcErrorCode.InvalidParams) {
         const hint = ID_CONVERT_FORMAT_HINTS[idtype ?? ''];
         const message = hint
@@ -758,6 +781,13 @@ export class NcbiService {
    * A caller abort rethrows the caller's own reason; every other failure is mapped
    * onto this service's reasons by {@link toServiceError}, after the loop. Once the
    * caller is ruled out, the loop's signal has aborted only if the deadline fired.
+   *
+   * A call to an endpoint in {@link failingEndpoints}, read once as the call starts,
+   * makes one attempt instead of its ladder — unless it had no retries to give up
+   * (`NCBI_MAX_RETRIES=0`, or a budget already spent). A call already running keeps
+   * its ladder. Success removes the endpoint; a call that ends `ncbi_unreachable` with
+   * its retries spent adds it. A caller abort, a deadline expiry, a rate limit, a shed,
+   * and a failure that was never retried leave the set as it was. (#287)
    */
   private async runPaced<T>(
     endpoint: string,
@@ -765,12 +795,14 @@ export class NcbiService {
     execute: (signal: AbortSignal) => Promise<T>,
     budget?: CallBudget,
   ): Promise<T> {
-    const maxRetries = budget?.retriesLeft ?? this.maxRetries;
+    const allowedRetries = budget?.retriesLeft ?? this.maxRetries;
+    const failFast = allowedRetries > 0 && this.failingEndpoints.has(endpoint);
+    const maxRetries = failFast ? 0 : allowedRetries;
     let attempt = 0;
     let loopSignal: AbortSignal | undefined;
     let ncbiErrors: unknown;
     try {
-      return await withRetry(
+      const result = await withRetry(
         ({ signal, remainingMs }) => {
           loopSignal = signal;
           attempt += 1;
@@ -805,13 +837,25 @@ export class NcbiService {
           ...(callerSignal && { signal: callerSignal }),
         },
       );
+      this.failingEndpoints.delete(endpoint);
+      return result;
     } catch (error: unknown) {
       if (callerSignal?.aborted) throw callerSignal.reason;
-      throw toServiceError(error, endpoint, {
+      const failure = toServiceError(error, endpoint, {
         deadlineMs: this.totalDeadlineMs,
         deadlineFired: loopSignal?.aborted === true,
+        failFast,
         ncbiErrors,
       });
+      // Only a retries-spent failure carries `attempts`; one that ends unreachable arms.
+      if (
+        failure instanceof McpError &&
+        failure.data?.reason === 'ncbi_unreachable' &&
+        typeof failure.data.attempts === 'number'
+      ) {
+        this.failingEndpoints.add(endpoint);
+      }
+      throw failure;
     } finally {
       if (budget) budget.retriesLeft -= attempt - 1;
     }

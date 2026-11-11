@@ -52,6 +52,13 @@ const patHit = {
 const renderedText = (result: Parameters<NonNullable<typeof pubmedEuropepmcFetchTool.format>>[0]) =>
   textBlocks(pubmedEuropepmcFetchTool.format!(result))[0]?.text ?? '';
 
+/**
+ * `content[]` text for a handler return. The handler returns `output`'s input
+ * side; the framework parses it against `output` before `format()` sees it.
+ */
+const renderedResult = (result: z.input<typeof pubmedEuropepmcFetchTool.output>) =>
+  renderedText(pubmedEuropepmcFetchTool.output.parse(result));
+
 describe('pubmedEuropepmcFetchTool', () => {
   beforeEach(() => {
     mockFetchRecords.mockReset();
@@ -400,7 +407,7 @@ describe('pubmedEuropepmcFetchTool', () => {
       );
 
       expect(result.records[0]?.title).toBe('[Retracted] *Nature* study');
-      expect(renderedText(result)).toContain('### \\[Retracted\\] \\*Nature\\* study');
+      expect(renderedResult(result)).toContain('### \\[Retracted\\] \\*Nature\\* study');
     });
   });
 
@@ -440,7 +447,7 @@ describe('pubmedEuropepmcFetchTool', () => {
       expect(getEnrichment(ctx).notice).toBeUndefined();
 
       // Both surfaces carry all three records.
-      const text = renderedText(result);
+      const text = renderedResult(result);
       for (const id of ['KR20120031038', 'IND609436151', 'PPR1283828']) {
         expect(result.records.map((r) => r.epmcId)).toContain(id);
         expect(text).toContain(id);
@@ -500,7 +507,7 @@ describe('pubmedEuropepmcFetchTool', () => {
       expect(result.records).toHaveLength(1);
       expect(result.notFound).toEqual([{ source: 'AGR', epmcId: 'IND000000000' }]);
       expect(getEnrichment(ctx).notice).toContain('AGR/IND000000000');
-      expect(renderedText(result)).toContain('AGR/IND000000000');
+      expect(renderedResult(result)).toContain('AGR/IND000000000');
     });
 
     it('notices an entirely unresolved batch without throwing', async () => {
@@ -584,8 +591,8 @@ describe('pubmedEuropepmcFetchTool', () => {
       const tail = LONG_ABSTRACT.trim().slice(-80);
       expect(result.records[0]?.abstract).toBe(LONG_ABSTRACT.trim());
       expect(result.records[0]?.abstract).toContain(tail);
-      expect(renderedText(result)).toContain(LONG_ABSTRACT.trim());
-      expect(renderedText(result)).toContain(tail);
+      expect(renderedResult(result)).toContain(LONG_ABSTRACT.trim());
+      expect(renderedResult(result)).toContain(tail);
     });
 
     it('agrees with the search snippet on an abstract under the budget', async () => {
@@ -613,7 +620,7 @@ describe('pubmedEuropepmcFetchTool', () => {
         ctx,
       );
       expect(result.records[0]?.abstract).toBe(SHORT_ABSTRACT);
-      expect(renderedText(result)).toContain(SHORT_ABSTRACT);
+      expect(renderedResult(result)).toContain(SHORT_ABSTRACT);
     });
   });
 
@@ -969,7 +976,7 @@ describe('pubmedEuropepmcFetchTool whole-response budget (#188)', () => {
       '{"records":[{"source":"PPR","epmcId":"PPR1283828","title":"Preprint one","authors":"Smith J.","pubYear":"2024","isOpenAccess":true,"hasFullTextXml":false,"abstract":"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA","epmcUrl":"https://europepmc.org/article/PPR/PPR1283828"},{"source":"MED","epmcId":"34265844","title":"Indexed article","journal":"Nature","pmid":"34265844","pmcId":"PMC8371605","abstract":"BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB","citedByCount":3,"epmcUrl":"https://europepmc.org/article/MED/34265844"}],"notFound":[{"source":"AGR","epmcId":"IND000000000"}],"notice":"Europe PMC returned no record for 1 of 3 requested pairs: `AGR/IND000000000`. Verify each against its pubmed_europepmc_search hit — a mismatched `source` is the usual cause."}',
     );
     expect(JSON.stringify(result.content)).toBe(
-      '[{"type":"text","text":"## Europe PMC Records\\n**Returned:** 2\\n**Not found:** `AGR/IND000000000`\\n\\n### Preprint one\\n**Source:** PPR | **EPMC ID:** PPR1283828\\n**Authors:** Smith J.\\n**Year:** 2024\\n**Open Access:** yes\\n**Full-text XML in EPMC:** no\\n**URL:** https://europepmc.org/article/PPR/PPR1283828\\n\\n#### Abstract\\nAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA\\n\\n### Indexed article\\n**Source:** MED | **EPMC ID:** 34265844\\n**Journal:** Nature\\n**PMID:** 34265844\\n**PMCID:** PMC8371605\\n**Cited by:** 3\\n**URL:** https://europepmc.org/article/MED/34265844\\n\\n#### Abstract\\nBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB"},{"type":"text","text":"\\n\\n> Europe PMC returned no record for 1 of 3 requested pairs: `AGR/IND000000000`. Verify each against its pubmed_europepmc_search hit — a mismatched `source` is the usual cause."}]',
+      '[{"type":"text","text":"## Europe PMC Records\\n**Returned:** 2\\n**Not found:** `AGR/IND000000000`\\n\\n### Preprint one\\n**Source:** PPR | **EPMC ID:** PPR1283828\\n**Authors:** Smith J.\\n**Year:** 2024\\n**Open Access:** yes\\n**Full-text XML in EPMC:** no\\n**URL:** <https://europepmc.org/article/PPR/PPR1283828>\\n\\n#### Abstract\\nAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA\\n\\n### Indexed article\\n**Source:** MED | **EPMC ID:** 34265844\\n**Journal:** Nature\\n**PMID:** 34265844\\n**PMCID:** PMC8371605\\n**Cited by:** 3\\n**URL:** <https://europepmc.org/article/MED/34265844>\\n\\n#### Abstract\\nBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB"},{"type":"text","text":"\\n\\n> Europe PMC returned no record for 1 of 3 requested pairs: `AGR/IND000000000`. Verify each against its pubmed_europepmc_search hit — a mismatched `source` is the usual cause."}]',
     );
   });
 
@@ -1395,7 +1402,7 @@ describe('pubmedEuropepmcFetchTool record lines that share a paragraph (#261)', 
         '⟨strong⟩Journal:⟨/strong⟩ J_ Med*',
         '⟨strong⟩DOI:⟨/strong⟩ 10.1/5`x',
         '⟨strong⟩License:⟨/strong⟩ cc by` 4~',
-        '⟨strong⟩URL:⟨/strong⟩ https://europepmc.org/article/PPR/PPR1',
+        '⟨strong⟩URL:⟨/strong⟩ ⟨a href=https://europepmc.org/article/PPR/PPR1⟩https://europepmc.org/article/PPR/PPR1⟨/a⟩',
       ].join('\n'),
     );
   });

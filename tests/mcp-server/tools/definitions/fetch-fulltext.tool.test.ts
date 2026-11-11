@@ -4480,7 +4480,7 @@ describe('fetchFulltextTool whole-response budget (issue #100)', () => {
         '### Article PMC1',
         '**Source:** PMC (structured JATS)',
         '**PMCID:** PMC1',
-        '**PMC:** https://www.ncbi.nlm.nih.gov/pmc/articles/PMC1/',
+        '**PMC:** <https://www.ncbi.nlm.nih.gov/pmc/articles/PMC1/>',
         '',
         '#### Abstract',
         'Abs one.',
@@ -10137,8 +10137,8 @@ describe('fetchFulltextTool values sharing a paragraph (issue #261)', () => {
         '⟨strong⟩PMCID:⟨/strong⟩ PMC1',
         '⟨strong⟩PMID:⟨/strong⟩ 1',
         '⟨strong⟩DOI:⟨/strong⟩ 10.1/x_',
-        '⟨strong⟩PMC:⟨/strong⟩ https://www.ncbi.nlm.nih.gov/pmc/articles/PMC1/',
-        '⟨strong⟩PubMed:⟨/strong⟩ https://pubmed.ncbi.nlm.nih.gov/1/',
+        '⟨strong⟩PMC:⟨/strong⟩ ⟨a href=https://www.ncbi.nlm.nih.gov/pmc/articles/PMC1/⟩https://www.ncbi.nlm.nih.gov/pmc/articles/PMC1/⟨/a⟩',
+        '⟨strong⟩PubMed:⟨/strong⟩ ⟨a href=https://pubmed.ncbi.nlm.nih.gov/1/⟩https://pubmed.ncbi.nlm.nih.gov/1/⟨/a⟩',
       ].join('\n'),
     );
     expect(JSON.stringify(result)).toBe(snapshot);
@@ -10228,10 +10228,158 @@ describe('fetchFulltextTool values sharing a paragraph (issue #261)', () => {
       );
     });
 
-    it('keeps an OA URL with no delimiter as raw text', () => {
+    it('renders an OA URL with no delimiter as an autolink too, never as plain text (issue #307)', () => {
       expect(render(unpaywall('https://repo.example.org/paper_1.pdf'))).toContain(
-        '**OA Copy:** https://repo.example.org/paper_1.pdf\n',
+        '**OA Copy:** <https://repo.example.org/paper_1.pdf>\n',
       );
     });
+  });
+});
+
+describe('fetchFulltextTool article links (issue #307)', () => {
+  beforeEach(() => {
+    for (const mock of [
+      mockEFetch,
+      mockIdConvert,
+      mockParsePmcArticle,
+      mockGetUnpaywallService,
+      mockUnpaywallResolve,
+      mockUnpaywallFetchContent,
+      mockGetEpmcService,
+      mockHtmlExtract,
+    ]) {
+      mock.mockReset();
+    }
+    mockGetUnpaywallService.mockReturnValue(undefined);
+    mockGetEpmcService.mockReturnValue(undefined);
+  });
+
+  type FulltextOutput = Parameters<NonNullable<typeof fetchFulltextTool.format>>[0];
+
+  /** The CommonMark reading of `**label:** <url>`, for a URL structuredContent must carry. */
+  const link = (label: string, url: string | undefined) => {
+    if (url === undefined) throw new Error(`structuredContent carries no ${label} URL`);
+    return `⟨strong⟩${label}:⟨/strong⟩ ⟨a href=${url}⟩${url}⟨/a⟩`;
+  };
+
+  const call = async (input: Record<string, unknown>) => {
+    const result = await runToolContract(fetchFulltextTool, input);
+    const { articles } = result.structuredContent as FulltextOutput;
+    const text = textBlocks(result.content as ContentBlock[])
+      .map((b) => b.text)
+      .join('\n');
+    return { articles, read: readCommonMark(text) };
+  };
+
+  /** PMC10455816 through the real JATS parser, as the corpus captured it. */
+  const callPmc = () => {
+    mockParsePmcArticle.mockImplementation(realParsePmcArticle);
+    mockEFetch.mockResolvedValue([{ 'pmc-articleset': [PMC10455816_NODE] }]);
+    return call({ pmcids: ['PMC10455816'] });
+  };
+
+  /** An OA URL with no Markdown delimiter in it, the kind once left as plain text. */
+  const OA_URL = 'https://repo.example.org/paper_1.pdf';
+
+  /** PMID 42 with no PMC copy, served from the Unpaywall OA location. */
+  const callUnpaywall = () => {
+    mockGetUnpaywallService.mockReturnValue({
+      resolve: mockUnpaywallResolve,
+      fetchContent: mockUnpaywallFetchContent,
+    });
+    mockIdConvert.mockResolvedValue([{ 'requested-id': '42', pmid: '42' }]);
+    mockEFetchBy({ pubmedDois: { '42': '10.1000/example' } });
+    mockUnpaywallResolve.mockResolvedValue({
+      kind: 'found',
+      location: { url: OA_URL, host_type: 'repository', license: 'cc-by', version: 'v1' },
+    });
+    mockUnpaywallFetchContent.mockResolvedValue({
+      kind: 'html',
+      fetchedUrl: OA_URL,
+      body: '<html><body><article>Main body</article></body></html>',
+    });
+    mockHtmlExtract.mockResolvedValue({ title: 'A Paper', content: 'Main body', wordCount: 2 });
+    return call({ pmids: ['42'] });
+  };
+
+  it('carries the PMC and PubMed URLs of a PMC article in structuredContent as plain URLs', async () => {
+    const { articles } = await callPmc();
+
+    expect(articles).toHaveLength(1);
+    expect(articles[0]).toMatchObject({
+      source: 'pmc',
+      pmcUrl: 'https://www.ncbi.nlm.nih.gov/pmc/articles/PMC10455816/',
+      pubmedUrl: 'https://pubmed.ncbi.nlm.nih.gov/37629222/',
+    });
+  });
+
+  it('carries the PubMed and OA copy URLs of an Unpaywall article in structuredContent as plain URLs', async () => {
+    const { articles } = await callUnpaywall();
+
+    expect(articles).toHaveLength(1);
+    expect(articles[0]).toMatchObject({
+      source: 'unpaywall',
+      pubmedUrl: 'https://pubmed.ncbi.nlm.nih.gov/42/',
+      sourceUrl: OA_URL,
+    });
+  });
+
+  it('renders the PMC and PubMed URLs of a PMC article as CommonMark links to those URLs', async () => {
+    const { articles, read } = await callPmc();
+    const [article] = articles;
+    if (article?.source !== 'pmc') throw new Error('expected a PMC article');
+
+    expect(read).toContain(
+      [link('PMC', article.pmcUrl), link('PubMed', article.pubmedUrl)].join('\n'),
+    );
+    // No label is followed by a URL a reader sees as plain text.
+    expect(read).not.toMatch(/⟨\/strong⟩ https?:\/\//);
+  });
+
+  it('renders the PubMed, OA copy and Unpaywall URLs of an Unpaywall article as CommonMark links', async () => {
+    const { articles, read } = await callUnpaywall();
+    const [article] = articles;
+    if (article?.source !== 'unpaywall') throw new Error('expected an Unpaywall article');
+
+    expect(read).toContain(link('PubMed', article.pubmedUrl));
+    expect(read).toContain(link('OA Copy', article.sourceUrl));
+    expect(read).toContain(
+      'OA location metadata courtesy of Unpaywall (⟨a href=https://unpaywall.org⟩https://unpaywall.org⟨/a⟩).',
+    );
+    expect(read).not.toMatch(/⟨\/strong⟩ https?:\/\//);
+  });
+
+  it('renders a URL that cannot be an autolink as text reading back the URL, never a broken link', () => {
+    const pmcUrl = 'https://www.ncbi.nlm.nih.gov/pmc/articles/PMC 1/';
+    const pubmedUrl = 'https://pubmed.ncbi.nlm.nih.gov/<b>1</b>/';
+    const sourceUrl = 'https://repo.example.org/a paper.pdf';
+    const text =
+      textBlocks(
+        fetchFulltextTool.format!({
+          articles: [
+            { source: 'pmc', viaSource: 'pmc', pmcId: 'PMC1', pmcUrl, pubmedUrl, sections: [] },
+            {
+              source: 'unpaywall',
+              viaSource: 'unpaywall',
+              contentFormat: 'html-markdown',
+              doi: '10.1/u',
+              pubmedUrl,
+              sourceUrl,
+              content: 'Body',
+            },
+          ],
+          totalReturned: 2,
+        }),
+      )[0]?.text ?? '';
+    const read = readCommonMark(text);
+
+    expect(read).toContain(
+      `⟨strong⟩PMC:⟨/strong⟩ ${pmcUrl}\n⟨strong⟩PubMed:⟨/strong⟩ ${pubmedUrl}`,
+    );
+    expect(read).toContain(
+      `⟨strong⟩PubMed:⟨/strong⟩ ${pubmedUrl}\n⟨strong⟩OA Copy:⟨/strong⟩ ${sourceUrl}`,
+    );
+    // Only the authored Unpaywall link remains a link.
+    expect(read.match(/⟨a href=/g)).toEqual(['⟨a href=']);
   });
 });

@@ -1,8 +1,8 @@
 /**
  * @fileoverview Tests for the text helpers shared by the tool definitions: the
  * surrogate-safe character cut (issue #93), the word-boundary cut built on it
- * (issue #143), and the render-time Markdown escapes (issues #102, #111, #130,
- * #255).
+ * (issue #143), the render-time Markdown escapes (issues #102, #111, #130,
+ * #255), and the autolink a URL renders as (issue #307).
  * @module tests/mcp-server/tools/definitions/_text.test
  */
 
@@ -22,6 +22,7 @@ const {
   escapeMarkdownLineStart,
   escapeMarkdownListItem,
   escapeMarkdownTableCell,
+  markdownAutolink,
   markdownCodeFence,
   markdownCodeSpan,
   sliceAtWordBoundary,
@@ -726,6 +727,56 @@ describe('markdownCodeFence (issue #255)', () => {
     expect(markdownCodeFence('@article{x, title={A}}')).toBe('```');
     expect(markdownCodeFence('title={``A``}')).toBe('```');
     expect(markdownCodeFence('a\n```\nb ```` c')).toBe('`````');
+  });
+});
+
+describe('markdownAutolink (issue #307)', () => {
+  it.each([
+    'https://pubmed.ncbi.nlm.nih.gov/42802242/',
+    'https://www.ncbi.nlm.nih.gov/pmc/articles/PMC13730978/',
+    'https://www.ncbi.nlm.nih.gov/books/NBK1247/',
+    'http://example.org/a_b*c*(d)~e~&amp;f',
+    'HTTPS://EXAMPLE.ORG/X',
+  ])('renders %s as an autolink a CommonMark reader takes for a link to it', (url) => {
+    expect(markdownAutolink(url)).toBe(`<${url}>`);
+    expect(readCommonMark(`**PubMed:** ${markdownAutolink(url)}`)).toBe(
+      `⟨strong⟩PubMed:⟨/strong⟩ ⟨a href=${url}⟩${url}⟨/a⟩`,
+    );
+  });
+
+  it('keeps a character the link target percent-encodes as written in the link text', () => {
+    const url = 'https://x.org/a[b]`c`\\d';
+    expect(readCommonMark(markdownAutolink(url))).toBe(
+      `⟨a href=https://x.org/a%5Bb%5D%60c%60%5Cd⟩${url}⟨/a⟩`,
+    );
+  });
+
+  it.each([
+    ['a space', 'https://www.ncbi.nlm.nih.gov/pmc/articles/PMC 1/'],
+    ['a tag-shaped left angle bracket', 'https://pubmed.ncbi.nlm.nih.gov/<b>1</b>/'],
+    ['a right angle bracket', 'https://pubmed.ncbi.nlm.nih.gov/1>2/'],
+    ['a tab', 'https://pubmed.ncbi.nlm.nih.gov/1\t2/'],
+    ['a scheme other than http(s)', 'ftp://example.org/x'],
+    ['a script scheme', 'javascript:alert(1)'],
+    ['no scheme', 'pubmed.ncbi.nlm.nih.gov/1/'],
+    ['nothing after the scheme', 'https://'],
+  ])(
+    'renders a URL holding %s as escaped text that reads back unchanged, not as a link',
+    (_, url) => {
+      expect(readCommonMark(`**PubMed:** ${markdownAutolink(url)}`)).toBe(
+        `⟨strong⟩PubMed:⟨/strong⟩ ${url}`,
+      );
+    },
+  );
+
+  it('escapes the fallback for a paragraph, so a lone delimiter in it cannot pair with another line', () => {
+    const text = [
+      `**PubMed:** ${markdownAutolink('https://pubmed.ncbi.nlm.nih.gov/a *b/')}`,
+      '**Keywords:** c\\*d*',
+    ].join('\n');
+    expect(readCommonMark(text)).toBe(
+      '⟨strong⟩PubMed:⟨/strong⟩ https://pubmed.ncbi.nlm.nih.gov/a *b/\n⟨strong⟩Keywords:⟨/strong⟩ c*d*',
+    );
   });
 });
 

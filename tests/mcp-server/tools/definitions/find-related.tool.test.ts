@@ -227,7 +227,16 @@ describe('findRelatedTool', () => {
         relationship: 'similar',
         offset: 5,
         totalCount: 6,
-        articles: [{ pmid: '111', title: 'A', authors: 'B', source: 'C', pubDate: '2024' }],
+        articles: [
+          {
+            pmid: '111',
+            title: 'A',
+            authors: 'B',
+            source: 'C',
+            pubDate: '2024',
+            pubmedUrl: 'https://pubmed.ncbi.nlm.nih.gov/111/',
+          },
+        ],
       }),
     );
     const text = blocks[0]?.text ?? '';
@@ -579,7 +588,14 @@ describe('findRelatedTool', () => {
       sourcePmid: '1',
       relationship: 'similar' as const,
       offset: 0,
-      articles: [{ pmid: '2', title: '[click](https://example.test)', authors: 'A *B and C *D' }],
+      articles: [
+        {
+          pmid: '2',
+          title: '[click](https://example.test)',
+          authors: 'A *B and C *D',
+          pubmedUrl: 'https://pubmed.ncbi.nlm.nih.gov/2/',
+        },
+      ],
     };
     const blocks = findRelatedTool.format?.(result as never) as Array<{ text: string }> | undefined;
     const text = blocks?.[0]?.text ?? '';
@@ -685,7 +701,10 @@ describe('findRelatedTool', () => {
     const result = await findRelatedTool.handler(input, ctx);
 
     expect(getEnrichment(ctx).source).toBe('europepmc');
-    expect(result.articles).toEqual([{ pmid: '333' }, { pmid: '444' }]);
+    expect(result.articles).toEqual([
+      { pmid: '333', pubmedUrl: 'https://pubmed.ncbi.nlm.nih.gov/333/' },
+      { pmid: '444', pubmedUrl: 'https://pubmed.ncbi.nlm.nih.gov/444/' },
+    ]);
     // Both the provenance notice and the degradation notice survive (consolidated).
     expect(getEnrichment(ctx).notice).toContain('Europe PMC');
     expect(getEnrichment(ctx).notice).toContain('PMIDs only');
@@ -1579,6 +1598,7 @@ describe('findRelatedTool', () => {
         authors: 'Jones A',
         source: 'Science',
         pubDate: '2023',
+        pubmedUrl: 'https://pubmed.ncbi.nlm.nih.gov/222/',
       },
       {
         pmid: '111',
@@ -1586,6 +1606,7 @@ describe('findRelatedTool', () => {
         authors: 'Smith J',
         source: 'Nature',
         pubDate: '2024',
+        pubmedUrl: 'https://pubmed.ncbi.nlm.nih.gov/111/',
       },
     ]);
   });
@@ -1626,6 +1647,7 @@ describe('findRelatedTool', () => {
       authors: 'Taylor R',
       source: undefined,
       pubDate: undefined,
+      pubmedUrl: 'https://pubmed.ncbi.nlm.nih.gov/222/',
     });
   });
 
@@ -1877,6 +1899,7 @@ describe('findRelatedTool', () => {
             authors: 'Smith J',
             source: 'Nature',
             pubDate: '2024',
+            pubmedUrl: 'https://pubmed.ncbi.nlm.nih.gov/111/',
           },
         ],
       }),
@@ -1886,7 +1909,7 @@ describe('findRelatedTool', () => {
         '# Related Articles for PMID 12345',
         '**Relationship:** similar',
         '**Returned:** 1 of 1 | **Offset:** 0',
-        '- **[PMID 111](https://pubmed.ncbi.nlm.nih.gov/111/)**',
+        '- **[PMID 111](<https://pubmed.ncbi.nlm.nih.gov/111/>)**',
         '  Related Article',
         '  *Smith J*',
         '  Nature, 2024',
@@ -2027,10 +2050,10 @@ describe('findRelatedTool Bookshelf chapter dates (issue #199)', () => {
   const EXPECTED: [string, string][] = [
     ['20301340', '2018-12-20'], // chapter, revised — book PubDate 1993
     ['25905212', '2025-07-03'], // chapter, contributed — book PubDate 2000
-    ['36356174', '2021-09-01'], // chapter, "2021 Sep" — book PubDate 2014
-    ['42330151', '2026-01-01'], // chapter, "2026" — book PubDate 2025 Dec 4
+    ['36356174', '2021-09'], // chapter, "2021 Sep" — book PubDate 2014
+    ['42330151', '2026'], // chapter, "2026" — book PubDate 2025 Dec 4
     ['40825089', '2025-07-02'], // whole book, PubDate "2025 Jul 2"
-    ['42474064', '2026-07-01'], // journal article, PubDate "2026 Jul"
+    ['42474064', '2026-07'], // journal article, PubDate "2026 Jul"
   ];
 
   beforeEach(() => {
@@ -2075,8 +2098,218 @@ describe('findRelatedTool Bookshelf chapter dates (issue #199)', () => {
       properties: { articles: { items: { properties: { pubDate: { description?: string } } } } };
     };
     const description = schema.properties.articles.items.properties.pubDate.description ?? '';
-    expect(description).toContain('YYYY-MM-DD');
+    // At PubMed's own precision. (#293)
+    expect(description).toContain('`2026-12`');
+    expect(description).toContain('`start/end`');
+    expect(description).not.toContain('first day');
     expect(description).toContain('chapter');
+  });
+});
+
+describe('findRelatedTool row identifiers and dates (issues #293, #297)', () => {
+  beforeEach(() => {
+    mockELink.mockReset();
+    mockESummary.mockReset();
+    mockExtractBriefSummaries.mockReset();
+    mockEpmcCitations.mockReset();
+    mockOaSimilar.mockReset();
+    mockGetEpmcService.mockReturnValue(epmcService);
+    mockGetOaService.mockReturnValue(oaService);
+  });
+
+  /** Every content[] line of a row's item — its heading and indented lines — keyed by the row's PMID. */
+  const itemLines = (result: Awaited<ReturnType<typeof runToolContract>>, pmid: string) => {
+    const lines = textBlocks(result.content as ContentBlock[])
+      .map((b) => b.text)
+      .join('\n')
+      .split('\n');
+    const start = lines.findIndex((line) => line.startsWith(`- **[PMID ${pmid}]`));
+    const rest = lines.slice(start + 1);
+    const end = rest.findIndex((line) => !line.startsWith('  '));
+    return [lines[start], ...(end === -1 ? rest : rest.slice(0, end))];
+  };
+
+  /** The identifier fields of each structured row. */
+  const identifiersOf = (result: Awaited<ReturnType<typeof runToolContract>>) =>
+    (result.structuredContent as { articles: Record<string, unknown>[] }).articles.map(
+      ({ pmid, doi, pmcId, pmcUrl, pubmedUrl }) => ({ pmid, doi, pmcId, pmcUrl, pubmedUrl }),
+    );
+
+  it('ESummary served: each row carries the DOI, PMC copy, and PubMed link ESummary states, on both surfaces', async () => {
+    mockELink.mockResolvedValue(eLinkResponse(['20301340', '36356174', '42474064']));
+    mockESummary.mockResolvedValue(parseESummaryXml(CHAPTER_DATES_ESUMMARY_XML));
+    mockExtractBriefSummaries.mockImplementation(realExtractBriefSummaries);
+
+    const result = await runToolContract(findRelatedTool, { pmid: '12345' });
+
+    expect(result.isError).toBeFalsy();
+    expect(identifiersOf(result)).toEqual([
+      { pmid: '20301340', pubmedUrl: 'https://pubmed.ncbi.nlm.nih.gov/20301340/' },
+      {
+        pmid: '36356174',
+        doi: '10.3768/rtipress.2021.rb.0028.2109',
+        pubmedUrl: 'https://pubmed.ncbi.nlm.nih.gov/36356174/',
+      },
+      {
+        pmid: '42474064',
+        doi: '10.3310/KGTO6391',
+        pmcId: 'PMC13403055',
+        pmcUrl: 'https://www.ncbi.nlm.nih.gov/pmc/articles/PMC13403055/',
+        pubmedUrl: 'https://pubmed.ncbi.nlm.nih.gov/42474064/',
+      },
+    ]);
+    const { articles } = result.structuredContent as { articles: Record<string, unknown>[] };
+    expect(articles[1]).not.toHaveProperty('pmcId');
+    expect(articles[1]).not.toHaveProperty('pmcUrl');
+
+    // The PubMed link stays the item heading; the DOI and PMC copy follow it.
+    expect(itemLines(result, '42474064')[0]).toBe(
+      '- **[PMID 42474064](<https://pubmed.ncbi.nlm.nih.gov/42474064/>)** · DOI 10.3310/KGTO6391 · [PMC13403055](<https://www.ncbi.nlm.nih.gov/pmc/articles/PMC13403055/>)',
+    );
+    expect(itemLines(result, '36356174')[0]).toBe(
+      '- **[PMID 36356174](<https://pubmed.ncbi.nlm.nih.gov/36356174/>)** · DOI 10.3768/rtipress.2021.rb.0028.2109',
+    );
+    expect(itemLines(result, '20301340')[0]).toBe(
+      '- **[PMID 20301340](<https://pubmed.ncbi.nlm.nih.gov/20301340/>)**',
+    );
+    expect(readCommonMark(itemLines(result, '42474064')[0] ?? '')).toContain(
+      '⟨strong⟩⟨a href=https://pubmed.ncbi.nlm.nih.gov/42474064/⟩PMID 42474064⟨/a⟩⟨/strong⟩ · DOI 10.3310/KGTO6391 · ⟨a href=https://www.ncbi.nlm.nih.gov/pmc/articles/PMC13403055/⟩PMC13403055⟨/a⟩',
+    );
+  });
+
+  it('renders the DOI as its own text, a tag-shaped `<` included, and keeps it as written in structuredContent', async () => {
+    // A SICI-form DOI whose page segment opens with a letter: unescaped,
+    // `<ii::AID-SIM1>` is a CommonMark autolink that drops both angle brackets.
+    const doi = '10.1002/(SICI)1097-0258(19990115)18:1<ii::AID-SIM1>3.0.CO;2-#';
+    mockELink.mockResolvedValue(eLinkResponse(['333']));
+    mockESummary.mockResolvedValue({ eSummaryResult: {} });
+    mockExtractBriefSummaries.mockResolvedValue([{ pmid: '333', title: 'Row.', doi }]);
+
+    const result = await runToolContract(findRelatedTool, { pmid: '12345' });
+
+    expect(identifiersOf(result)).toEqual([
+      { pmid: '333', doi, pubmedUrl: 'https://pubmed.ncbi.nlm.nih.gov/333/' },
+    ]);
+    const heading = itemLines(result, '333')[0] ?? '';
+    expect(heading).toBe(
+      '- **[PMID 333](<https://pubmed.ncbi.nlm.nih.gov/333/>)** · DOI 10.1002/(SICI)1097-0258(19990115)18:1\\<ii::AID-SIM1>3.0.CO;2-#',
+    );
+    expect(readCommonMark(heading)).toContain(
+      '⟨strong⟩⟨a href=https://pubmed.ncbi.nlm.nih.gov/333/⟩PMID 333⟨/a⟩⟨/strong⟩ · DOI 10.1002/(SICI)1097-0258(19990115)18:1<ii::AID-SIM1>3.0.CO;2-#',
+    );
+  });
+
+  it('ESummary failed: each row is its PMID and PubMed link, with the degradation notice', async () => {
+    mockELink.mockResolvedValue(eLinkResponse(['101', '102']));
+    mockESummary.mockRejectedValue(new McpError(JsonRpcErrorCode.ServiceUnavailable, 'NCBI down'));
+
+    const result = await runToolContract(findRelatedTool, { pmid: '12345' });
+
+    expect(result.isError).toBeFalsy();
+    expect((result.structuredContent as { articles: unknown[] }).articles).toEqual([
+      { pmid: '101', pubmedUrl: 'https://pubmed.ncbi.nlm.nih.gov/101/' },
+      { pmid: '102', pubmedUrl: 'https://pubmed.ncbi.nlm.nih.gov/102/' },
+    ]);
+    expect(itemLines(result, '101')[0]).toBe(
+      '- **[PMID 101](<https://pubmed.ncbi.nlm.nih.gov/101/>)**',
+    );
+    expect((result.structuredContent as { notice?: string }).notice).toContain(
+      'Article metadata is temporarily unavailable',
+    );
+  });
+
+  it.each([
+    {
+      provider: 'europepmc',
+      relationship: 'cited_by',
+      serve: () =>
+        mockEpmcCitations.mockResolvedValue({
+          pmids: ['42926911', '42905372'],
+          hitCount: 2,
+          droppedNoPmid: 0,
+        }),
+    },
+    {
+      provider: 'openalex',
+      relationship: 'similar',
+      serve: () =>
+        mockOaSimilar.mockResolvedValue({ pmids: ['42926911', '42905372'], totalCount: 2 }),
+    },
+  ] as const)(
+    '$provider fallback: rows carry the identifiers from the same ESummary call',
+    async ({ provider, relationship, serve }) => {
+      mockELink.mockRejectedValue(new McpError(JsonRpcErrorCode.ServiceUnavailable, 'NCBI down'));
+      serve();
+      mockESummary.mockResolvedValue({ eSummaryResult: {} });
+      mockExtractBriefSummaries.mockResolvedValue([
+        {
+          pmid: '42926911',
+          title: 'Concordance Between Trial Efficacy and Real-World Effectiveness.',
+          doi: '10.7759/cureus.118487',
+          pmcId: 'PMC13695040',
+        },
+        { pmid: '42905372', title: 'Association study.', doi: '10.1007/s11739-026-04571-z' },
+      ]);
+
+      const result = await runToolContract(findRelatedTool, { pmid: '31535829', relationship });
+
+      expect(result.isError).toBeFalsy();
+      expect(result.structuredContent).toMatchObject({ source: provider });
+      expect(identifiersOf(result)).toEqual([
+        {
+          pmid: '42926911',
+          doi: '10.7759/cureus.118487',
+          pmcId: 'PMC13695040',
+          pmcUrl: 'https://www.ncbi.nlm.nih.gov/pmc/articles/PMC13695040/',
+          pubmedUrl: 'https://pubmed.ncbi.nlm.nih.gov/42926911/',
+        },
+        {
+          pmid: '42905372',
+          doi: '10.1007/s11739-026-04571-z',
+          pubmedUrl: 'https://pubmed.ncbi.nlm.nih.gov/42905372/',
+        },
+      ]);
+      expect(itemLines(result, '42926911')[0]).toBe(
+        '- **[PMID 42926911](<https://pubmed.ncbi.nlm.nih.gov/42926911/>)** · DOI 10.7759/cureus.118487 · [PMC13695040](<https://www.ncbi.nlm.nih.gov/pmc/articles/PMC13695040/>)',
+      );
+    },
+  );
+
+  it('carries the electronic publication date in the meta line, and none where ESummary has none', async () => {
+    mockELink.mockResolvedValue(eLinkResponse(['42802242', '17212296']));
+    mockESummary.mockResolvedValue({ eSummaryResult: {} });
+    mockExtractBriefSummaries.mockResolvedValue([
+      {
+        pmid: '42802242',
+        title: 'Effectiveness of Adding GLP-1 Receptor Agonists.',
+        source: 'Diabetes Obes Metab',
+        docType: 'citation',
+        pubDate: '2026-12',
+        epubDate: '2026-09-27',
+      },
+      {
+        pmid: '17212296',
+        title: "How to search for and use 'grey literature' in research.",
+        source: 'Nurs Times',
+        docType: 'citation',
+        pubDate: '2006-12-12/2007-01-01',
+      },
+    ]);
+
+    const result = await runToolContract(findRelatedTool, { pmid: '12345' });
+
+    const { articles } = result.structuredContent as { articles: Record<string, unknown>[] };
+    expect(articles[0]).toMatchObject({
+      pmid: '42802242',
+      pubDate: '2026-12',
+      epubDate: '2026-09-27',
+    });
+    expect(articles[1]).toMatchObject({ pmid: '17212296', pubDate: '2006-12-12/2007-01-01' });
+    expect(articles[1]).not.toHaveProperty('epubDate');
+    expect(itemLines(result, '42802242').at(-1)).toBe(
+      '  Diabetes Obes Metab, 2026-12, epub 2026-09-27',
+    );
+    expect(itemLines(result, '17212296').at(-1)).toBe('  Nurs Times, 2006-12-12/2007-01-01');
   });
 });
 
@@ -2581,5 +2814,118 @@ describe('findRelatedTool page-size clamp (#232)', () => {
     expect(notice.startsWith(`${CLAMPED} NCBI eLink unavailable`)).toBe(true);
     expect(notice).toContain('Europe PMC paging stopped after 10 pages');
     expect(notice).not.toContain('Pass `offset');
+  });
+});
+
+/**
+ * A caller abort at each upstream step rethrows the abort, never a fallback's
+ * answer or a degraded row set. The handler is called directly: `runToolContract`
+ * settles any result after an abort, a success included, as `RequestCancelled`,
+ * so it cannot tell a rethrow from a degraded success. Every step after the
+ * cancelled one is stubbed to answer, so a step that swallowed the abort would
+ * return a result.
+ */
+describe('findRelatedTool caller cancellation', () => {
+  beforeEach(() => {
+    mockELink.mockReset();
+    mockESummary.mockReset();
+    mockESummary.mockResolvedValue({ eSummaryResult: {} });
+    mockExtractBriefSummaries.mockReset();
+    mockExtractBriefSummaries.mockResolvedValue([]);
+    mockEpmcCitations.mockReset();
+    mockEpmcCitations.mockResolvedValue({ pmids: ['201'], hitCount: 1, droppedNoPmid: 0 });
+    mockEpmcReferences.mockReset();
+    mockEpmcReferences.mockResolvedValue({ pmids: ['301'], hitCount: 1, droppedNoPmid: 0 });
+    mockOaSimilar.mockReset();
+    mockOaSimilar.mockResolvedValue({ pmids: ['401'], totalCount: 1 });
+    mockOaCitedBy.mockReset();
+    mockOaCitedBy.mockResolvedValue({ pmids: ['402'], totalCount: 1 });
+    mockOaReferences.mockReset();
+    mockOaReferences.mockResolvedValue({ pmids: ['403'], totalCount: 1 });
+    mockGetEpmcService.mockReturnValue(epmcService);
+    mockGetOaService.mockReturnValue(oaService);
+  });
+
+  /**
+   * A caller cancellation. `cancel` stands in for the upstream call it lands
+   * on: it aborts the request's signal, then rejects with the abort reason, as
+   * the services do on a caller abort.
+   */
+  const cancellation = () => {
+    const controller = new AbortController();
+    const reason = new DOMException('The caller cancelled the request.', 'AbortError');
+    const cancel = () => {
+      controller.abort(reason);
+      return Promise.reject(reason);
+    };
+    return { cancel, reason, signal: controller.signal };
+  };
+
+  const run = (signal: AbortSignal, args: Record<string, unknown>) =>
+    findRelatedTool.handler(
+      findRelatedTool.input.parse({ pmid: '12345', ...args }),
+      createMockContext({ errors: findRelatedTool.errors, signal }),
+    );
+
+  const ncbiDown = () =>
+    mockELink.mockRejectedValue(
+      new McpError(JsonRpcErrorCode.ServiceUnavailable, 'NCBI down', {
+        reason: 'ncbi_unreachable',
+      }),
+    );
+
+  it('during ELink: tries no fallback', async () => {
+    const { cancel, reason, signal } = cancellation();
+    mockELink.mockImplementation(cancel);
+
+    await expect(run(signal, { relationship: 'cited_by' })).rejects.toBe(reason);
+    expect(mockEpmcCitations).not.toHaveBeenCalled();
+    expect(mockOaCitedBy).not.toHaveBeenCalled();
+    expect(mockESummary).not.toHaveBeenCalled();
+  });
+
+  it('during the Europe PMC fallback: tries no OpenAlex', async () => {
+    const { cancel, reason, signal } = cancellation();
+    ncbiDown();
+    mockEpmcCitations.mockImplementation(cancel);
+
+    await expect(run(signal, { relationship: 'cited_by' })).rejects.toBe(reason);
+    expect(mockOaCitedBy).not.toHaveBeenCalled();
+    expect(mockESummary).not.toHaveBeenCalled();
+  });
+
+  it('during the OpenAlex fallback: never serves the Europe PMC empty answer it holds', async () => {
+    const { cancel, reason, signal } = cancellation();
+    ncbiDown();
+    mockEpmcCitations.mockResolvedValue({ pmids: [], hitCount: 0, droppedNoPmid: 0 });
+    mockOaCitedBy.mockImplementation(cancel);
+
+    await expect(run(signal, { relationship: 'cited_by' })).rejects.toBe(reason);
+  });
+
+  it('during the source ESummary of an empty ELink set: returns no empty answer', async () => {
+    const { cancel, reason, signal } = cancellation();
+    mockELink.mockResolvedValue(eLinkResponse([]));
+    mockESummary.mockImplementation(cancel);
+
+    await expect(run(signal, { relationship: 'similar' })).rejects.toBe(reason);
+  });
+
+  it('during a reference-coverage fallback: tries no further provider', async () => {
+    const { cancel, reason, signal } = cancellation();
+    mockELink.mockResolvedValue(eLinkResponse([], 'pubmed_pubmed_refs'));
+    mockExtractBriefSummaries.mockResolvedValue([{ pmid: '12345', title: 'Source article.' }]);
+    mockEpmcReferences.mockImplementation(cancel);
+
+    await expect(run(signal, { relationship: 'references' })).rejects.toBe(reason);
+    expect(mockOaReferences).not.toHaveBeenCalled();
+  });
+
+  it('during the row ESummary: returns no bare-PMID rows', async () => {
+    const { cancel, reason, signal } = cancellation();
+    mockELink.mockResolvedValue(eLinkResponse(['101', '102']));
+    mockESummary.mockImplementation(cancel);
+
+    await expect(run(signal, {})).rejects.toBe(reason);
   });
 });

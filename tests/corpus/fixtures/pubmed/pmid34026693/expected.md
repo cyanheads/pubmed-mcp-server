@@ -28,8 +28,8 @@
 **PMID:** 34026693
 **DOI:** 10.3389/fped.2021.662953
 **PMCID:** PMC8138581
-**PubMed:** https://pubmed.ncbi.nlm.nih.gov/34026693/
-**PMC:** https://www.ncbi.nlm.nih.gov/pmc/articles/PMC8138581/
+**PubMed:** <https://pubmed.ncbi.nlm.nih.gov/34026693/>
+**PMC:** <https://www.ncbi.nlm.nih.gov/pmc/articles/PMC8138581/>
 **Article Dates:** Electronic 2021-05-07
 
 #### Abstract

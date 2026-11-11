@@ -1,10 +1,16 @@
 /**
  * @fileoverview MeSH eSummary `version=2.0` records captured from NCBI
- * (`esummary.fcgi?db=mesh&version=2.0`, 2026-10-12), keyed by Entrez UID. The
- * bodies of `DS_PaList`, `DS_Subheading`, `Children`, and
- * `DS_HeadingMappedToList` are emptied to keep the file small; every field
- * `pubmed_lookup_mesh` reads is verbatim. `99999999` is how version 2.0 answers
- * a UID it holds no record for, inside an otherwise successful set.
+ * (`esummary.fcgi?db=mesh&version=2.0`, 2026-10-12; `68016449`, a publication
+ * type in the `V` tree, and `68016032`, `68018848`, `81000188`, `68004358`,
+ * 2026-11-10), keyed by Entrez UID. The bodies of `DS_PaList`, `Children`, and
+ * `DS_HeadingMappedToList` are emptied to keep the file small, and so is every
+ * `DS_Subheading` but those of `68000900` (Anti-Bacterial Agents), `68016032`
+ * (Randomized Controlled Trials as Topic), and `68004358` (Drug Therapy), kept
+ * from their 2026-11-10 captures: the other descriptors read as listing no
+ * subheadings, whatever upstream lists. Every
+ * other field `pubmed_lookup_mesh` reads is verbatim. `99999999` is how
+ * version 2.0 answers a UID it holds no record for, inside an otherwise
+ * successful set.
  * @module tests/mcp-server/tools/definitions/_mesh-esummary-fixtures
  */
 
@@ -303,6 +309,29 @@ export const MESH_V2_RECORDS: Readonly<Record<string, string>> = {
 		<string>Bacteriocide</string>
 	</DS_MeshTerms>
 	<DS_Subheading>
+		<string>administration and dosage</string>
+		<string>adverse effects</string>
+		<string>analysis</string>
+		<string>biosynthesis</string>
+		<string>blood</string>
+		<string>cerebrospinal fluid</string>
+		<string>chemical synthesis</string>
+		<string>chemistry</string>
+		<string>classification</string>
+		<string>economics</string>
+		<string>history</string>
+		<string>immunology</string>
+		<string>isolation and purification</string>
+		<string>metabolism</string>
+		<string>pharmacokinetics</string>
+		<string>pharmacology</string>
+		<string>poisoning</string>
+		<string>radiation effects</string>
+		<string>standards</string>
+		<string>supply and distribution</string>
+		<string>therapeutic use</string>
+		<string>toxicity</string>
+		<string>urine</string>
 	</DS_Subheading>
 	<DS_PaPx>
 	</DS_PaPx>
@@ -650,6 +679,224 @@ export const MESH_V2_RECORDS: Readonly<Record<string, string>> = {
 	</DS_HeadingMappedToList>
 	<DS_RecordType>descriptor</DS_RecordType>
 	<DS_MeSHUI>D008687</DS_MeSHUI>
+</DocumentSummary>`,
+  '68016449': `<DocumentSummary uid="68016449">
+	<DS_YearIntroduced>2008(1991)</DS_YearIntroduced>
+	<DS_ScopeNote>A work that reports on a clinical trial that involves at least one test treatment and one control treatment, concurrent enrollment and follow-up of the test- and control-treated groups, and in which the treatments to be administered are selected by a random process, such as the use of a random-numbers table.</DS_ScopeNote>
+	<DS_RegistryNumber></DS_RegistryNumber>
+	<DS_HeadingMappedTo></DS_HeadingMappedTo>
+	<DS_MeshTerms>
+		<string>Randomized Controlled Trial</string>
+	</DS_MeshTerms>
+	<DS_Subheading>
+	</DS_Subheading>
+	<DS_PaPx>
+	</DS_PaPx>
+	<DS_PreviousIndexing>
+	</DS_PreviousIndexing>
+	<DS_SeeRelated>
+	</DS_SeeRelated>
+	<DS_PaList>
+	</DS_PaList>
+	<DS_IdxLinks>
+		<LinksType>
+			<Parent>68018848</Parent>
+			<TreeNum>V03.175.250.500.500</TreeNum>
+			<Children>
+			</Children>
+		</LinksType>
+	</DS_IdxLinks>
+	<DS_EntryDate>1/01/01 00:00</DS_EntryDate>
+	<DS_RevisionDate>1/01/01 00:00</DS_RevisionDate>
+	<DS_HeadingMappedToList>
+	</DS_HeadingMappedToList>
+	<DS_RecordType>descriptor</DS_RecordType>
+	<DS_MeSHUI>D016449</DS_MeSHUI>
+</DocumentSummary>`,
+  '68016032': `<DocumentSummary uid="68016032">
+	<DS_YearIntroduced>2008(1990)</DS_YearIntroduced>
+	<DS_ScopeNote>Works about clinical trials that involve at least one test treatment and one control treatment, concurrent enrollment and follow-up of the test- and control-treated groups, and in which the treatments to be administered are selected by a random process, such as the use of a random-numbers table.</DS_ScopeNote>
+	<DS_RegistryNumber></DS_RegistryNumber>
+	<DS_HeadingMappedTo></DS_HeadingMappedTo>
+	<DS_MeshTerms>
+		<string>Randomized Controlled Trials as Topic</string>
+		<string>Clinical Trials, Randomized</string>
+		<string>Trials, Randomized Clinical</string>
+		<string>Controlled Clinical Trials, Randomized</string>
+	</DS_MeshTerms>
+	<DS_Subheading>
+		<string>classification</string>
+		<string>economics</string>
+		<string>ethics</string>
+		<string>history</string>
+		<string>instrumentation</string>
+		<string>legislation and jurisprudence</string>
+		<string>methods</string>
+		<string>psychology</string>
+		<string>standards</string>
+		<string>statistics and numerical data</string>
+		<string>veterinary</string>
+	</DS_Subheading>
+	<DS_PaPx>
+	</DS_PaPx>
+	<DS_PreviousIndexing>
+		<string>Clinical Trials (1966-1989)</string>
+	</DS_PreviousIndexing>
+	<DS_SeeRelated>
+		<int>68065228</int>
+	</DS_SeeRelated>
+	<DS_PaList>
+	</DS_PaList>
+	<DS_IdxLinks>
+		<LinksType>
+			<Parent>68018849</Parent>
+			<TreeNum>E05.318.372.250.250.365.500</TreeNum>
+			<Children>
+			</Children>
+		</LinksType>
+		<LinksType>
+			<Parent>68018849</Parent>
+			<TreeNum>N05.715.360.330.250.250.365.500</TreeNum>
+			<Children>
+			</Children>
+		</LinksType>
+		<LinksType>
+			<Parent>68018849</Parent>
+			<TreeNum>N06.850.520.450.250.250.365.500</TreeNum>
+			<Children>
+			</Children>
+		</LinksType>
+	</DS_IdxLinks>
+	<DS_EntryDate>1/01/01 00:00</DS_EntryDate>
+	<DS_RevisionDate>1/01/01 00:00</DS_RevisionDate>
+	<DS_HeadingMappedToList>
+	</DS_HeadingMappedToList>
+	<DS_RecordType>descriptor</DS_RecordType>
+	<DS_MeSHUI>D016032</DS_MeSHUI>
+</DocumentSummary>`,
+  '68018848': `<DocumentSummary uid="68018848">
+	<DS_YearIntroduced>2008(1995)</DS_YearIntroduced>
+	<DS_ScopeNote>A work that reports on a clinical trial involving one or more test treatments, at least one control treatment, specified outcome measures for evaluating the studied intervention, and a bias-free method for assigning patients to the test treatment. The treatment may be drugs, devices, or procedures studied for diagnostic, therapeutic, or prophylactic effectiveness. Control measures include placebos, active medicine, no-treatment, dosage forms and regimens, historical comparisons, etc. When randomization using mathematical techniques, such as the use of a random numbers table, is employed to assign patients to test or control treatments, the trial is characterized as a RANDOMIZED CONTROLLED TRIAL.</DS_ScopeNote>
+	<DS_RegistryNumber></DS_RegistryNumber>
+	<DS_HeadingMappedTo></DS_HeadingMappedTo>
+	<DS_MeshTerms>
+		<string>Controlled Clinical Trial</string>
+	</DS_MeshTerms>
+	<DS_Subheading>
+	</DS_Subheading>
+	<DS_PaPx>
+	</DS_PaPx>
+	<DS_PreviousIndexing>
+	</DS_PreviousIndexing>
+	<DS_SeeRelated>
+	</DS_SeeRelated>
+	<DS_PaList>
+	</DS_PaList>
+	<DS_IdxLinks>
+		<LinksType>
+			<Parent>68016430</Parent>
+			<TreeNum>V03.175.250.500</TreeNum>
+			<Children>
+			</Children>
+		</LinksType>
+	</DS_IdxLinks>
+	<DS_EntryDate>1/01/01 00:00</DS_EntryDate>
+	<DS_RevisionDate>1/01/01 00:00</DS_RevisionDate>
+	<DS_HeadingMappedToList>
+	</DS_HeadingMappedToList>
+	<DS_RecordType>descriptor</DS_RecordType>
+	<DS_MeSHUI>D018848</DS_MeSHUI>
+</DocumentSummary>`,
+  '81000188': `<DocumentSummary uid="81000188">
+	<DS_YearIntroduced>1966</DS_YearIntroduced>
+	<DS_ScopeNote>Used with disease headings for the treatment of disease by the administration of drugs, chemicals, and antibiotics. For diet therapy and radiotherapy, use specific subheadings. Excludes immunotherapy for which therapy is used.</DS_ScopeNote>
+	<DS_RegistryNumber></DS_RegistryNumber>
+	<DS_HeadingMappedTo></DS_HeadingMappedTo>
+	<DS_MeshTerms>
+		<string>drug therapy</string>
+		<string>pharmacologic therapy</string>
+		<string>pharmacotherapy</string>
+		<string>chemotherapy</string>
+	</DS_MeshTerms>
+	<DS_Subheading>
+	</DS_Subheading>
+	<DS_PaPx>
+	</DS_PaPx>
+	<DS_PreviousIndexing>
+	</DS_PreviousIndexing>
+	<DS_SeeRelated>
+	</DS_SeeRelated>
+	<DS_PaList>
+	</DS_PaList>
+	<DS_IdxLinks>
+		<LinksType>
+			<Parent>81000628</Parent>
+			<TreeNum>Y11.020</TreeNum>
+			<Children>
+			</Children>
+		</LinksType>
+	</DS_IdxLinks>
+	<DS_EntryDate>1/01/01 00:00</DS_EntryDate>
+	<DS_RevisionDate>1/01/01 00:00</DS_RevisionDate>
+	<DS_HeadingMappedToList>
+	</DS_HeadingMappedToList>
+	<DS_RecordType>qualifier</DS_RecordType>
+	<DS_MeSHUI>Q000188</DS_MeSHUI>
+</DocumentSummary>`,
+  '68004358': `<DocumentSummary uid="68004358">
+	<DS_YearIntroduced></DS_YearIntroduced>
+	<DS_ScopeNote>The use of DRUGS to treat a DISEASE or its symptoms. One example is the use of ANTINEOPLASTIC AGENTS to treat CANCER.</DS_ScopeNote>
+	<DS_RegistryNumber></DS_RegistryNumber>
+	<DS_HeadingMappedTo></DS_HeadingMappedTo>
+	<DS_MeshTerms>
+		<string>Drug Therapy</string>
+		<string>Chemotherapy</string>
+		<string>Chemotherapies</string>
+		<string>Pharmacotherapy</string>
+		<string>Pharmacotherapies</string>
+		<string>Therapy, Drug</string>
+		<string>Drug Therapies</string>
+		<string>Therapies, Drug</string>
+	</DS_MeshTerms>
+	<DS_Subheading>
+		<string>classification</string>
+		<string>economics</string>
+		<string>ethics</string>
+		<string>history</string>
+		<string>instrumentation</string>
+		<string>methods</string>
+		<string>mortality</string>
+		<string>nursing</string>
+		<string>psychology</string>
+		<string>standards</string>
+		<string>statistics and numerical data</string>
+		<string>trends</string>
+		<string>veterinary</string>
+	</DS_Subheading>
+	<DS_PaPx>
+	</DS_PaPx>
+	<DS_PreviousIndexing>
+	</DS_PreviousIndexing>
+	<DS_SeeRelated>
+		<int>68008508</int>
+		<int>68020228</int>
+	</DS_SeeRelated>
+	<DS_PaList>
+	</DS_PaList>
+	<DS_IdxLinks>
+		<LinksType>
+			<Parent>68013812</Parent>
+			<TreeNum>E02.319</TreeNum>
+			<Children>
+			</Children>
+		</LinksType>
+	</DS_IdxLinks>
+	<DS_EntryDate>1/01/01 00:00</DS_EntryDate>
+	<DS_RevisionDate>1/01/01 00:00</DS_RevisionDate>
+	<DS_HeadingMappedToList>
+	</DS_HeadingMappedToList>
+	<DS_RecordType>descriptor</DS_RecordType>
+	<DS_MeSHUI>D004358</DS_MeSHUI>
 </DocumentSummary>`,
   '99999999': `<DocumentSummary uid="99999999">
 <error>cannot get document summary</error>

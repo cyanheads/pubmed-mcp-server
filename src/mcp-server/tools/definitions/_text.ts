@@ -6,7 +6,8 @@
  * heading), one for a value sharing a paragraph with others, one for a table
  * cell, one for a multi-line block of prose such as an abstract or a section,
  * and one for a value that opens a line or a list item — plus the code span and
- * code fence that carry a value verbatim. The prose rules they share with the
+ * code fence that carry a value verbatim and the autolink that renders a URL as
+ * a link to itself. The prose rules they share with the
  * citation formatter live in `src/services/markdown-escape.ts`.
  * @module src/mcp-server/tools/definitions/_text
  */
@@ -462,4 +463,28 @@ export function markdownCodeSpan(value: string): string {
  */
 export function markdownCodeFence(text: string): string {
   return '`'.repeat(Math.max(3, longestBacktickRun(text) + 1));
+}
+
+/**
+ * An absolute `http(s)` URL an autolink can hold: no control character, space,
+ * `<` or `>`, each of which ends one or keeps it from forming.
+ */
+const AUTOLINK_URL_RE = /^https?:\/\/[^\p{Cc} <>]+$/iu;
+
+/**
+ * `url` as a CommonMark autolink, `<url>`: it renders as a link whose text is
+ * the URL `structuredContent` carries, where a bare URL is plain text (CommonMark
+ * has no bare-URL autolink). Its text renders verbatim — no backslash escape
+ * applies inside one — so a reader copies exactly that URL. (#307)
+ *
+ * These URLs are built from upstream identifiers (a PMID, PMCID or Bookshelf
+ * accession) or named by Unpaywall, and nothing upstream of `format()`
+ * validates them. One that cannot form an autolink — a space, control character
+ * or angle bracket in it, or a scheme other than `http(s)` — renders as escaped
+ * text instead, which reads back unchanged but is not a link. The escape is the
+ * paragraph one: each URL line shares a paragraph with the record's other
+ * values. (#261)
+ */
+export function markdownAutolink(url: string): string {
+  return AUTOLINK_URL_RE.test(url) ? `<${url}>` : escapeMarkdownInParagraph(url);
 }

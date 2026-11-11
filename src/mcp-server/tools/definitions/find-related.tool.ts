@@ -3,17 +3,22 @@
  * source article via a provider chain: NCBI ELink (primary) → Europe PMC →
  * OpenAlex. First success wins; results are never merged across sources.
  * Supports offset pagination on the returned window, sized by `maxResults`
- * (`limit` and `pageSize` accepted as aliases); a `maxResults` past the
- * per-call cap is served at the cap with a notice. A served empty answer is a
- * success; only a chain where every eligible provider failed is an error.
- * Every return path carries the total match count in `output`, which `format()`
- * states in the header. A zero-padded source PMID runs as the PMID it spells,
- * so the source never appears among its own related articles.
+ * (`limit` and `pageSize` accepted as aliases, and `relation` for
+ * `relationship`); a `maxResults` past the per-call cap is served at the cap
+ * with a notice. Whichever provider answered, the window's rows come from one
+ * ESummary call, built as `pubmed_search_articles` builds its summaries
+ * (`_summary-row.ts`); when that call fails, each row is its PMID and PubMed
+ * link. A served empty answer is a success; only a chain where every eligible
+ * provider failed is an error. Every return path carries the total match count
+ * in `output`, which `format()` states in the header. A zero-padded source PMID
+ * runs as the PMID it spells, so the source never appears among its own related
+ * articles.
  * @module src/mcp-server/tools/definitions/find-related.tool
  */
 
 import { tool, z } from '@cyanheads/mcp-ts-core';
 import { configurationError, JsonRpcErrorCode, McpError } from '@cyanheads/mcp-ts-core/errors';
+import { markdownLink } from '@cyanheads/mcp-ts-core/utils';
 import { EUROPEPMC_SERVICE_ERRORS, OPENALEX_SERVICE_ERRORS } from '@/services/error-contracts.js';
 import { getEuropePmcService } from '@/services/europe-pmc/europe-pmc-service.js';
 import { getNcbiService } from '@/services/ncbi/ncbi-service.js';
@@ -28,6 +33,7 @@ import {
 import { conceptMeta, EDAM_DATA_RETRIEVAL, SCHEMA_SCHOLARLY_ARTICLE } from './_concepts.js';
 import { pageSizeCeiling, pageSizeClampNotice } from './_page-size.js';
 import { normalizePmid, pmidStringSchema } from './_schemas.js';
+import { summaryRow, summaryRowSchema } from './_summary-row.js';
 import { escapeMarkdownInParagraph, escapeMarkdownLineStart } from './_text.js';
 
 // ─── ELink XML types ─────────────────────────────────────────────────────────
@@ -390,8 +396,9 @@ export const findRelatedTool = tool('pubmed_find_related', {
   ] as const,
 
   // Never advertised; rewritten to the canonical key before the schema parses.
-  // Sibling tools' count names. (#156, #190)
-  inputAliases: { limit: 'maxResults', pageSize: 'maxResults' },
+  // Sibling tools' count names, and `relation`, which on this tool can only mean
+  // the relationship selector. (#156, #190, #290)
+  inputAliases: { limit: 'maxResults', pageSize: 'maxResults', relation: 'relationship' },
 
   input: z.object({
     pmid: pmidStringSchema.describe('Source PubMed ID'),
@@ -425,57 +432,10 @@ export const findRelatedTool = tool('pubmed_find_related', {
     relationship: z.enum(['similar', 'cited_by', 'references']).describe('Relationship type used'),
     offset: z.number().describe('Result offset used'),
     articles: z
-      .array(
-        z
-          .object({
-            pmid: z.string().describe('PubMed ID'),
-            title: z.string().optional().describe('Article title'),
-            authors: z
-              .string()
-              .optional()
-              .describe(
-                "Author string — the first three of the record's own authors, then \"et al.\". On an NCBI Bookshelf chapter these are the chapter's authors; the book's editors are in `editors`.",
-              ),
-            source: z
-              .string()
-              .optional()
-              .describe(
-                'Journal the article appeared in. Absent on an NCBI Bookshelf record, which has no journal — its venue is in `bookTitle` and `publisherName` instead, and `docType` says which kind of record it is.',
-              ),
-            bookTitle: z
-              .string()
-              .optional()
-              .describe(
-                'Title of the book an NCBI Bookshelf record belongs to. Present instead of `source` on a book record; absent on a journal article.',
-              ),
-            publisherName: z
-              .string()
-              .optional()
-              .describe(
-                'Publisher of the book an NCBI Bookshelf record belongs to. Present only on a book record; absent on a journal article.',
-              ),
-            docType: z
-              .string()
-              .optional()
-              .describe(
-                'What PubMed classifies this record as: "chapter" or "book" for an NCBI Bookshelf record, "citation" for an ordinary journal article. Absent when PubMed supplies none.',
-              ),
-            editors: z
-              .array(z.string().describe('One editor, "Surname Initials" as ESummary renders it'))
-              .optional()
-              .describe(
-                "Editors of the containing book, kept out of `authors` so they cannot displace the record's own authors. Absent on a journal article and on a book that credits no editors.",
-              ),
-            pubDate: z
-              .string()
-              .optional()
-              .describe(
-                'Publication date as YYYY-MM-DD; a month- or year-only date reads as the first day of that month or year. On an NCBI Bookshelf chapter (`docType` "chapter") it is the chapter\'s own date — its last revision, otherwise its contribution — not the year its book began.',
-              ),
-          })
-          .describe('Related article with enriched summary'),
-      )
-      .describe('Related articles'),
+      .array(summaryRowSchema.describe('Related article with enriched summary'))
+      .describe(
+        'Related articles, each summarized as `pubmed_search_articles` summarizes a search result. When NCBI eSummary does not answer, each is its `pmid` and `pubmedUrl` alone, with a notice.',
+      ),
     // A domain field, not enrichment: format() sees only this payload, and the
     // header states the total beside the returned count. (#147)
     totalCount: z
@@ -895,20 +855,7 @@ export const findRelatedTool = tool('pubmed_find_related', {
       );
       const briefSummaries = await extractBriefSummaries(summaryResult);
       const summaryMap = new Map(briefSummaries.map((bs) => [bs.pmid, bs]));
-      const articles = window.map((pmid) => {
-        const details = summaryMap.get(pmid);
-        return {
-          pmid,
-          title: details?.title,
-          authors: details?.authors,
-          source: details?.source,
-          bookTitle: details?.bookTitle,
-          publisherName: details?.publisherName,
-          docType: details?.docType,
-          editors: details?.editors,
-          pubDate: details?.pubDate,
-        };
-      });
+      const articles = window.map((pmid) => summaryRow(summaryMap.get(pmid) ?? { pmid }));
       emitNotice(notices, nextOffset);
       return {
         sourcePmid: input.pmid,
@@ -930,7 +877,7 @@ export const findRelatedTool = tool('pubmed_find_related', {
         sourcePmid: input.pmid,
         relationship: input.relationship,
         offset: input.offset,
-        articles: window.map((pmid) => ({ pmid })),
+        articles: window.map((pmid) => summaryRow({ pmid })),
         totalCount,
       };
     }
@@ -950,7 +897,14 @@ export const findRelatedTool = tool('pubmed_find_related', {
       // the paragraph escape: a lone `*` in two of them would pair. (#261)
       const escaped = (part: string | undefined) => (part ? escapeMarkdownInParagraph(part) : '');
       for (const a of result.articles) {
-        lines.push(`- **[PMID ${a.pmid}](https://pubmed.ncbi.nlm.nih.gov/${a.pmid}/)**`);
+        // The item opens on its identifiers: the PubMed link, then the DOI as
+        // text and the PMC copy as a link, so the meta line stays the item's
+        // last. (#297)
+        const identifiers = [`**${markdownLink(`PMID ${a.pmid}`, a.pubmedUrl)}**`];
+        if (a.doi) identifiers.push(`DOI ${escaped(a.doi)}`);
+        if (a.pmcId)
+          identifiers.push(a.pmcUrl ? markdownLink(a.pmcId, a.pmcUrl) : escaped(a.pmcId));
+        lines.push(`- ${identifiers.join(' · ')}`);
         // The title and meta lines open a line of the list item, where a
         // leading `#`, `>` or `- ` would start a heading, quote or nested list,
         // so the line start is escaped as well. (#255)
@@ -963,7 +917,8 @@ export const findRelatedTool = tool('pubmed_find_related', {
         // `citation` is every ordinary journal article; the segment earns its
         // place only when it flags a Bookshelf chapter or book. (#146)
         const docType = a.docType === 'citation' ? undefined : a.docType;
-        const meta = [escaped(a.source), book, escaped(docType), escaped(a.pubDate)]
+        const epub = a.epubDate && `epub ${escaped(a.epubDate)}`;
+        const meta = [escaped(a.source), book, escaped(docType), escaped(a.pubDate), epub]
           .filter(Boolean)
           .join(', ');
         if (meta) lines.push(`  ${escapeMarkdownLineStart(meta)}`);

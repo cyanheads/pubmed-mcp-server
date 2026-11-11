@@ -113,8 +113,8 @@
 **PMCID:** PMC10666927
 **PMID:** 37994903
 **DOI:** 10.7554/eLife.89736
-**PMC:** https://www.ncbi.nlm.nih.gov/pmc/articles/PMC10666927/
-**PubMed:** https://pubmed.ncbi.nlm.nih.gov/37994903/
+**PMC:** <https://www.ncbi.nlm.nih.gov/pmc/articles/PMC10666927/>
+**PubMed:** <https://pubmed.ncbi.nlm.nih.gov/37994903/>
 **Keywords:** reproducible research, scientific rigor, transparency, open science, higher education, curriculum design
 
 **License:** [https://creativecommons.org/licenses/by/4.0/](<https://creativecommons.org/licenses/by/4.0/>)

@@ -28,8 +28,8 @@
 **PMID:** 31844417
 **DOI:** 10.1186/s11658-019-0184-7
 **PMCID:** PMC6894134
-**PubMed:** https://pubmed.ncbi.nlm.nih.gov/31844417/
-**PMC:** https://www.ncbi.nlm.nih.gov/pmc/articles/PMC6894134/
+**PubMed:** <https://pubmed.ncbi.nlm.nih.gov/31844417/>
+**PMC:** <https://www.ncbi.nlm.nih.gov/pmc/articles/PMC6894134/>
 **Article Dates:** Electronic 2019-12-04
 
 #### Comments and Corrections (1)

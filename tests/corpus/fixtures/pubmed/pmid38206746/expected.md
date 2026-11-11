@@ -28,8 +28,8 @@
 **PMID:** 38206746
 **DOI:** 10.1097/MD.0000000000036667
 **PMCID:** PMC10754557
-**PubMed:** https://pubmed.ncbi.nlm.nih.gov/38206746/
-**PMC:** https://www.ncbi.nlm.nih.gov/pmc/articles/PMC10754557/
+**PubMed:** <https://pubmed.ncbi.nlm.nih.gov/38206746/>
+**PMC:** <https://www.ncbi.nlm.nih.gov/pmc/articles/PMC10754557/>
 
 #### Abstract
 RATIONALE: Many studies have shown that first- and second-generation epidermal growth factor receptor tyrosine kinase inhibitors are less effective in patients with epidermal growth factor receptor (EGFR) exon 20 insertion (ex20ins) mutations. The efficacy of third-generation epidermal growth factor receptor tyrosine kinase inhibitors is still under investigation. Although new targeted tyrosine kinase inhibitors and monoclonal antibody-based agents have made significant advances in the treatment of epidermal growth factor receptor exon 20 insertion (EGFR ex20ins) mutation, the efficacy of these novel agents is not quite satisfactory. Platinum- and pemetrexed-based chemotherapy remains the standard first-line treatment for patients harboring EGFR ex20ins mutation.

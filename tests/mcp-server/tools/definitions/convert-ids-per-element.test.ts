@@ -216,6 +216,39 @@ describe('pubmed_convert_ids error envelope from the ID Converter', () => {
     });
     expect(converterRequests()).toHaveLength(1);
   });
+
+  /**
+   * The converter's error page is upstream text the caller cannot act on, so it
+   * stays on the server-side error and leaves both client surfaces. A 403 and a
+   * 501 cover codes other than NotFound; none of the three is retried.
+   */
+  it.each([
+    [404, JsonRpcErrorCode.NotFound],
+    [403, JsonRpcErrorCode.Forbidden],
+    [501, JsonRpcErrorCode.ServiceUnavailable],
+  ])('keeps the body of an HTTP %i off the envelope', async (status, code) => {
+    const sentinel = 'idconv-error-page-sentinel';
+    fetchSpy.mockImplementationOnce(() =>
+      Promise.resolve(new Response(`<html><body>${sentinel}</body></html>`, { status })),
+    );
+
+    const result = await runToolContract(convertIdsTool, { ids: ['PMC3531190'], idType: 'pmcid' });
+
+    expect(result.isError).toBe(true);
+    const { error } = result.structuredContent as {
+      error: { code: number; data: Record<string, unknown> };
+    };
+    expect(error).toMatchObject({ code, data: { host: 'pmc.ncbi.nlm.nih.gov', status } });
+    expect(error.data).not.toHaveProperty('body');
+    expect(error.data).not.toHaveProperty('responseBody');
+    expect(JSON.stringify(result.structuredContent)).not.toContain(sentinel);
+    expect(
+      textBlocks(result.content)
+        .map((b) => b.text)
+        .join('\n'),
+    ).not.toContain(sentinel);
+    expect(converterRequests()).toHaveLength(1);
+  });
 });
 
 /**
@@ -227,11 +260,19 @@ describe('pubmed_convert_ids throttled by the ID Converter', () => {
    * The ID Converter request carries no `api_key`, so the hint may only claim the
    * key raises the E-utilities ceiling. A Retry-After past the backoff cap stops
    * the loop on this one 429, which keeps the header as NCBI sent it: an HTTP date.
+   * The service restamps that 429 with its reason, and the converter's error page
+   * still stays off the envelope.
    */
   it('reports ncbi_rate_limited with a hint that holds for this endpoint', async () => {
     const retryAfter = new Date(Date.now() + 120_000).toUTCString();
+    const sentinel = 'idconv-throttle-page-sentinel';
     fetchSpy.mockImplementationOnce(() =>
-      Promise.resolve(new Response('', { status: 429, headers: { 'retry-after': retryAfter } })),
+      Promise.resolve(
+        new Response(`<html>${sentinel}</html>`, {
+          status: 429,
+          headers: { 'retry-after': retryAfter },
+        }),
+      ),
     );
 
     const result = await runToolContract(convertIdsTool, { ids: ['23193287'], idType: 'pmid' });
@@ -258,6 +299,8 @@ describe('pubmed_convert_ids throttled by the ID Converter', () => {
     );
     expect(text).toContain(`Recovery: ${hint}`);
     expect(text).toContain('reason ncbi_rate_limited');
+    expect(error.data).not.toHaveProperty('body');
+    expect(JSON.stringify(result)).not.toContain(sentinel);
     expect(converterRequests()).toHaveLength(1);
   });
 });

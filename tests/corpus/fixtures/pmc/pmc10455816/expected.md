@@ -31,8 +31,8 @@
 **PMCID:** PMC10455816
 **PMID:** 37629222
 **DOI:** 10.3390/jcm12165180
-**PMC:** https://www.ncbi.nlm.nih.gov/pmc/articles/PMC10455816/
-**PubMed:** https://pubmed.ncbi.nlm.nih.gov/37629222/
+**PMC:** <https://www.ncbi.nlm.nih.gov/pmc/articles/PMC10455816/>
+**PubMed:** <https://pubmed.ncbi.nlm.nih.gov/37629222/>
 **Keywords:** COVID-19, RSNA consensus, typical category, atypical category, indeterminate category, negative category
 
 **License:** [https://creativecommons.org/licenses/by/4.0/](<https://creativecommons.org/licenses/by/4.0/>)

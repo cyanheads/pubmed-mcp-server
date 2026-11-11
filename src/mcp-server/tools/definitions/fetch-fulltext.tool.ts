@@ -87,6 +87,7 @@ import {
   escapeMarkdownListItem,
   escapeMarkdownTableCell,
   isWhitespace,
+  markdownAutolink,
   sliceAtWordBoundary,
 } from './_text.js';
 import { hasVisibleText } from './_visible-text.js';
@@ -3939,19 +3940,6 @@ function markdownUrl(url: string): string {
   return /^https?:\/\/\S+$/i.test(url) ? `[${label}](<${url.replace(/[<>\\]/g, '\\$&')}>)` : label;
 }
 
-/**
- * An upstream URL on a paragraph line, as raw text a reader can copy — or, when
- * it holds a character the paragraph would read as Markdown (`*`, `_`, a
- * backtick), as an autolink, whose text renders verbatim. A backslash escape
- * would leave the copied URL wrong. A value that cannot be an autolink is
- * escaped text instead. (#261)
- */
-function paragraphUrl(url: string): string {
-  const escaped = escapeMarkdownInParagraph(url);
-  if (escaped === url) return url;
-  return /^https?:\/\/[^\s<>]+$/i.test(url) ? `<${url}>` : escaped;
-}
-
 function formatPmcArticle(
   a: z.infer<typeof PmcArticleSchema>,
   lines: string[],
@@ -4021,8 +4009,8 @@ function formatPmcArticle(
   }
   if (a.pmid) meta.push(`**PMID:** ${escapeMarkdownInParagraph(a.pmid)}`);
   if (a.doi) meta.push(`**DOI:** ${escapeMarkdownInParagraph(a.doi)}`);
-  if (a.pmcUrl) meta.push(`**PMC:** ${a.pmcUrl}`);
-  if (a.pubmedUrl) meta.push(`**PubMed:** ${a.pubmedUrl}`);
+  if (a.pmcUrl) meta.push(`**PMC:** ${markdownAutolink(a.pmcUrl)}`);
+  if (a.pubmedUrl) meta.push(`**PubMed:** ${markdownAutolink(a.pubmedUrl)}`);
   if (a.keywords?.length) {
     meta.push(`**Keywords:** ${escapeMarkdownInParagraph(a.keywords.join(', '))}`);
   }
@@ -4227,15 +4215,15 @@ function formatUnpaywallArticle(
   if (a.pmcId) lines.push(`**PMCID:** ${a.pmcId}`);
   if (a.pmid) lines.push(`**PMID:** ${a.pmid}`);
   lines.push(`**DOI:** ${escapeMarkdownInParagraph(a.doi)}`);
-  if (a.pubmedUrl) lines.push(`**PubMed:** ${a.pubmedUrl}`);
-  lines.push(`**OA Copy:** ${paragraphUrl(a.sourceUrl)}`);
+  if (a.pubmedUrl) lines.push(`**PubMed:** ${markdownAutolink(a.pubmedUrl)}`);
+  lines.push(`**OA Copy:** ${markdownAutolink(a.sourceUrl)}`);
   if (a.license) lines.push(`**License:** ${escapeMarkdownInParagraph(a.license)}`);
   if (a.hostType) lines.push(`**Host Type:** ${escapeMarkdownInParagraph(a.hostType)}`);
   if (a.version) lines.push(`**Version:** ${escapeMarkdownInParagraph(a.version)}`);
   if (a.wordCount !== undefined) lines.push(`**Word Count:** ${a.wordCount}`);
   if (a.totalPages !== undefined) lines.push(`**Pages:** ${a.totalPages}`);
   lines.push(
-    `\n> Section structure is not guaranteed for this source. Treat the content as best-effort raw text. OA location metadata courtesy of Unpaywall (https://unpaywall.org).`,
+    `\n> Section structure is not guaranteed for this source. Treat the content as best-effort raw text. OA location metadata courtesy of Unpaywall (<https://unpaywall.org>).`,
   );
   if (truncation) lines.push(truncationNote(truncation));
   // PDF text is prose with no Markdown of its own, so every line of it is

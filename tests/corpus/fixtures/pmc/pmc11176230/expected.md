@@ -32,8 +32,8 @@
 **PMCID:** PMC11176230
 **PMID:** 38869518
 **DOI:** 10.1007/s00726-024-03401-w
-**PMC:** https://www.ncbi.nlm.nih.gov/pmc/articles/PMC11176230/
-**PubMed:** https://pubmed.ncbi.nlm.nih.gov/38869518/
+**PMC:** <https://www.ncbi.nlm.nih.gov/pmc/articles/PMC11176230/>
+**PubMed:** <https://pubmed.ncbi.nlm.nih.gov/38869518/>
 **Keywords:** Creatine, Guanidinoacetate, Kidney transplant recipients, Measured glomerular filtration rate, Epidemiology
 
 **License:** [https://creativecommons.org/licenses/by/4.0/](<https://creativecommons.org/licenses/by/4.0/>)

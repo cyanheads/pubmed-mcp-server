@@ -761,10 +761,23 @@ export interface ParsedBriefSummary {
    * authors in the display string.
    */
   editors?: string[];
-  epubDate?: string; // Standardized YYYY-MM-DD
+  /**
+   * ESummary `EPubDate`, the electronic publication date, read as
+   * {@link pubDate} is. ESummary normally states it to the day (`YYYY-MM-DD`);
+   * a partial date keeps the precision stated. Absent when `EPubDate` is empty.
+   * (#293)
+   */
+  epubDate?: string;
   pmcId?: string;
   pmid: string;
-  pubDate?: string; // Standardized YYYY-MM-DD
+  /**
+   * ESummary `PubDate` as ISO 8601 at the precision PubMed states it — `2026`,
+   * `2026-12`, `2026-09-30` — and a stated range as an interval `start/end`
+   * (`2026-09/2026-10`, `1994/1995`, `2006-12-12/2007-01-01`). A season reads
+   * as its year. On a Bookshelf chapter it is the chapter's own `DocDate`, not
+   * its book's. Every form opens with its year. (#199, #293)
+   */
+  pubDate?: string;
   /** Publisher of the containing book. Absent for journal records. */
   publisherName?: string;
   source?: string;
