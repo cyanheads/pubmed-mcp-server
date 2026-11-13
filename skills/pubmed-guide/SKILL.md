@@ -21,7 +21,7 @@ Biomedical literature: PubMed records (MEDLINE, PubMed Central, NCBI Bookshelf),
 |:--|:--|:--|
 | PMID | digits | `pubmed_search_articles`, `pubmed_lookup_citation`, a `MED` hit of `pubmed_europepmc_search` (its `epmcId` is the PMID) |
 | PMCID | `PMC` + digits | `pmcId` on `pubmed_fetch_articles` records, search summaries, and `pubmed_find_related` rows; `pubmed_convert_ids` |
-| DOI | `10.…/…` | `doi` on `pubmed_fetch_articles` records, search summaries, `pubmed_find_related` rows, and Europe PMC hits |
+| DOI | `10.…/…`; `pubmed_convert_ids` and `pubmed_fetch_fulltext` also read its `https://doi.org/…` link or `doi:` form as the bare DOI | `doi` on `pubmed_fetch_articles` records, search summaries, `pubmed_find_related` rows, and Europe PMC hits |
 | Europe PMC `source` + `epmcId` | `PPR1306463` | `pubmed_europepmc_search` hits only; preprints and patents often carry no PMID or DOI |
 | MeSH record | descriptor name, or the clause in `searchTerm` | `name` and `searchTerm` on `pubmed_lookup_mesh` results |
 | ORCID | `0000-0002-5446-9969` | `orcid` on `pubmed_fetch_articles` authors, when the record carries one |
