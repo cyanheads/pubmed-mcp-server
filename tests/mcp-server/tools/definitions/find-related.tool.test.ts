@@ -1412,6 +1412,7 @@ describe('findRelatedTool', () => {
           new EuropePmcApiClient({ timeoutMs: 20_000 }),
           createEuropePmcRequestQueue(0),
           0,
+          45_000,
         ),
       );
       mockOaReferences.mockResolvedValue({
@@ -2154,7 +2155,7 @@ describe('findRelatedTool row identifiers and dates (issues #293, #297)', () => 
         pmid: '42474064',
         doi: '10.3310/KGTO6391',
         pmcId: 'PMC13403055',
-        pmcUrl: 'https://www.ncbi.nlm.nih.gov/pmc/articles/PMC13403055/',
+        pmcUrl: 'https://pmc.ncbi.nlm.nih.gov/articles/PMC13403055/',
         pubmedUrl: 'https://pubmed.ncbi.nlm.nih.gov/42474064/',
       },
     ]);
@@ -2164,7 +2165,7 @@ describe('findRelatedTool row identifiers and dates (issues #293, #297)', () => 
 
     // The PubMed link stays the item heading; the DOI and PMC copy follow it.
     expect(itemLines(result, '42474064')[0]).toBe(
-      '- **[PMID 42474064](<https://pubmed.ncbi.nlm.nih.gov/42474064/>)** · DOI 10.3310/KGTO6391 · [PMC13403055](<https://www.ncbi.nlm.nih.gov/pmc/articles/PMC13403055/>)',
+      '- **[PMID 42474064](<https://pubmed.ncbi.nlm.nih.gov/42474064/>)** · DOI 10.3310/KGTO6391 · [PMC13403055](<https://pmc.ncbi.nlm.nih.gov/articles/PMC13403055/>)',
     );
     expect(itemLines(result, '36356174')[0]).toBe(
       '- **[PMID 36356174](<https://pubmed.ncbi.nlm.nih.gov/36356174/>)** · DOI 10.3768/rtipress.2021.rb.0028.2109',
@@ -2173,7 +2174,7 @@ describe('findRelatedTool row identifiers and dates (issues #293, #297)', () => 
       '- **[PMID 20301340](<https://pubmed.ncbi.nlm.nih.gov/20301340/>)**',
     );
     expect(readCommonMark(itemLines(result, '42474064')[0] ?? '')).toContain(
-      '⟨strong⟩⟨a href=https://pubmed.ncbi.nlm.nih.gov/42474064/⟩PMID 42474064⟨/a⟩⟨/strong⟩ · DOI 10.3310/KGTO6391 · ⟨a href=https://www.ncbi.nlm.nih.gov/pmc/articles/PMC13403055/⟩PMC13403055⟨/a⟩',
+      '⟨strong⟩⟨a href=https://pubmed.ncbi.nlm.nih.gov/42474064/⟩PMID 42474064⟨/a⟩⟨/strong⟩ · DOI 10.3310/KGTO6391 · ⟨a href=https://pmc.ncbi.nlm.nih.gov/articles/PMC13403055/⟩PMC13403055⟨/a⟩',
     );
   });
 
@@ -2260,7 +2261,7 @@ describe('findRelatedTool row identifiers and dates (issues #293, #297)', () => 
           pmid: '42926911',
           doi: '10.7759/cureus.118487',
           pmcId: 'PMC13695040',
-          pmcUrl: 'https://www.ncbi.nlm.nih.gov/pmc/articles/PMC13695040/',
+          pmcUrl: 'https://pmc.ncbi.nlm.nih.gov/articles/PMC13695040/',
           pubmedUrl: 'https://pubmed.ncbi.nlm.nih.gov/42926911/',
         },
         {
@@ -2270,7 +2271,7 @@ describe('findRelatedTool row identifiers and dates (issues #293, #297)', () => 
         },
       ]);
       expect(itemLines(result, '42926911')[0]).toBe(
-        '- **[PMID 42926911](<https://pubmed.ncbi.nlm.nih.gov/42926911/>)** · DOI 10.7759/cureus.118487 · [PMC13695040](<https://www.ncbi.nlm.nih.gov/pmc/articles/PMC13695040/>)',
+        '- **[PMID 42926911](<https://pubmed.ncbi.nlm.nih.gov/42926911/>)** · DOI 10.7759/cureus.118487 · [PMC13695040](<https://pmc.ncbi.nlm.nih.gov/articles/PMC13695040/>)',
       );
     },
   );

@@ -43,6 +43,9 @@ const { OpenAlexService } = await import('@/services/openalex/openalex-service.j
 const MAX_RETRIES = 2;
 const EXHAUSTED_ATTEMPTS = MAX_RETRIES + 1;
 
+/** `EUROPEPMC_TOTAL_DEADLINE_MS`'s default, the shorter of the two service deadlines. */
+const EUROPEPMC_DEADLINE_MS = 45_000;
+
 /**
  * The error `fetchWithTimeout` throws on a non-2xx. Built from the real
  * `httpErrorFromResponse` — both HTTP helpers route through the same status table and
@@ -68,11 +71,12 @@ beforeEach(() => {
   mockFetchWithTimeout.mockRejectedValue(new Error('unmocked fetchWithTimeout'));
   fetchSpy = vi.spyOn(globalThis, 'fetch').mockRejectedValue(new Error('unmocked fetch'));
   // Fire backoff sleeps immediately so an exhausted retry chain doesn't actually wait.
+  // The total-deadline clocks (NCBI's 60 s, Europe PMC's 45 s) never fire.
   setTimeoutSpy = vi.spyOn(globalThis, 'setTimeout').mockImplementation(((
     fn: () => void,
     ms?: number,
   ) => {
-    if (typeof ms === 'number' && ms >= 50_000) {
+    if (typeof ms === 'number' && ms >= EUROPEPMC_DEADLINE_MS) {
       return 0 as unknown as ReturnType<typeof setTimeout>;
     }
     fn();
@@ -95,7 +99,12 @@ function buildNcbiService() {
 
 function buildEuropePmcService() {
   const client = new EuropePmcApiClient({ timeoutMs: 20_000 });
-  return new EuropePmcService(client, createEuropePmcRequestQueue(0), MAX_RETRIES);
+  return new EuropePmcService(
+    client,
+    createEuropePmcRequestQueue(0),
+    MAX_RETRIES,
+    EUROPEPMC_DEADLINE_MS,
+  );
 }
 
 function buildOpenAlexService() {

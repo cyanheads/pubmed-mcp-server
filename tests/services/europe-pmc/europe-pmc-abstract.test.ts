@@ -21,6 +21,7 @@ describe('EuropePmcService.parseFullTextXml abstract (#204)', () => {
       new EuropePmcApiClient({ timeoutMs: 20000 }),
       createEuropePmcRequestQueue(0),
       0,
+      45000,
     );
     const node = service.parseFullTextXml(
       `<?xml version="1.0" encoding="UTF-8"?>

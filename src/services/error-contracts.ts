@@ -205,6 +205,15 @@ export const EUROPEPMC_SERVICE_ERRORS = [
     thrownBy: 'service',
   },
   {
+    reason: 'europepmc_deadline_exceeded',
+    code: JsonRpcErrorCode.Timeout,
+    when: 'The total Europe PMC request deadline expired before Europe PMC answered successfully — mid-request, while queued, or during a retry backoff.',
+    recovery:
+      "Retry after a brief delay; Europe PMC did not answer within the call's deadline and may be under temporary load.",
+    retryable: true,
+    thrownBy: 'service',
+  },
+  {
     reason: 'europepmc_invalid_response',
     code: JsonRpcErrorCode.SerializationError,
     when: 'Europe PMC returned a body that could not be parsed (invalid JSON or XML).',

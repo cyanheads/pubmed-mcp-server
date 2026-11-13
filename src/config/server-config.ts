@@ -1,6 +1,6 @@
 /**
- * @fileoverview Server-specific configuration for NCBI E-utilities.
- * Lazy-parsed from environment variables. Framework config (transport, logging, etc.)
+ * @fileoverview Server-specific configuration for NCBI E-utilities, Unpaywall, and
+ * Europe PMC. Lazy-parsed from environment variables. Framework config (transport, logging, etc.)
  * is handled by @cyanheads/mcp-ts-core.
  * @module src/config/server-config
  */
@@ -77,6 +77,14 @@ const ServerConfigSchema = z.object({
     .max(120000)
     .default(20000)
     .describe('Per-request HTTP timeout for Europe PMC calls, in ms'),
+  europepmcTotalDeadlineMs: z.coerce
+    .number()
+    .min(5000)
+    .max(600000)
+    .default(45000)
+    .describe(
+      'Total deadline for one Europe PMC call across queue wait, retry attempts, and backoff, in ms',
+    ),
 });
 
 /** The parsed config, with an unset `requestDelayMs` resolved to its keyed or keyless default. */
@@ -104,6 +112,7 @@ export function getServerConfig(): ServerConfig {
       europepmcRequestDelayMs: 'EUROPEPMC_REQUEST_DELAY_MS',
       europepmcMaxRetries: 'EUROPEPMC_MAX_RETRIES',
       europepmcTimeoutMs: 'EUROPEPMC_TIMEOUT_MS',
+      europepmcTotalDeadlineMs: 'EUROPEPMC_TOTAL_DEADLINE_MS',
     });
     /**
      * An API key raises NCBI's rate ceiling from ~3 req/s to ~10 req/s, so an

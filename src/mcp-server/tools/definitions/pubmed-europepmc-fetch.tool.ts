@@ -165,10 +165,10 @@ export const pubmedEuropepmcFetchTool = tool('pubmed_europepmc_fetch', {
     'https://github.com/cyanheads/pubmed-mcp-server/blob/main/src/mcp-server/tools/definitions/pubmed-europepmc-fetch.tool.ts',
 
   errors: [
-    // Only the outage recovery is this tool's own: it names the tool that reads
-    // a `MED` record while Europe PMC is down. (#288)
+    // Only the outage recoveries are this tool's own: they name the tool that
+    // reads a `MED` record while Europe PMC is down. (#288, #305)
     ...EUROPEPMC_SERVICE_ERRORS.map((entry) =>
-      entry.reason === 'europepmc_unreachable'
+      entry.reason === 'europepmc_unreachable' || entry.reason === 'europepmc_deadline_exceeded'
         ? {
             ...entry,
             recovery:

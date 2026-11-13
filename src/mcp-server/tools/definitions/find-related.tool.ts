@@ -81,9 +81,10 @@ const UNCLASSIFIED_ERROR = 'unclassified_error';
  * Label for a provider failure that carries no declared reason, named by its code.
  * NCBI stamps `ncbi_unreachable` on a `ServiceUnavailable` and `ncbi_rate_limited` on
  * a `RateLimited`, and that reason wins; Europe PMC and OpenAlex declare their
- * `*_unreachable` reason for `ServiceUnavailable` only. So an exhausted timeout from
- * any provider, or an exhausted Europe PMC or OpenAlex rate limit, reaches the chain
- * with its code and no reason.
+ * `*_unreachable` reason for `ServiceUnavailable` only, and Europe PMC stamps
+ * `europepmc_deadline_exceeded` on a call that outruns its total deadline. So an
+ * exhausted per-request timeout from any provider, or an exhausted Europe PMC or
+ * OpenAlex rate limit, reaches the chain with its code and no reason.
  */
 const REASON_BY_CODE = new Map<JsonRpcErrorCode, string>([
   [JsonRpcErrorCode.RateLimited, 'rate_limited'],

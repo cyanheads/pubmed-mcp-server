@@ -9,7 +9,10 @@
  *
  * Every call runs as a retry loop around the shared request queue: each attempt
  * re-enters the queue and waits out its start gap, and a backoff sleep holds no
- * concurrency slot, so callers backing off never stall the calls behind them.
+ * concurrency slot, so callers backing off never stall the calls behind them. One
+ * deadline (`EUROPEPMC_TOTAL_DEADLINE_MS`) bounds the whole loop — queue waits,
+ * requests, backoff sleeps, and the first-page probes below — and its expiry
+ * aborts the request in flight and ends the call as `europepmc_deadline_exceeded`.
  *
  * A search's retry boundary covers fetch and response classification, so
  * Europe PMC's intermittent empty `{ version }` envelope is retried like an
@@ -37,6 +40,7 @@ import {
   McpError,
   serializationError,
   serviceUnavailable,
+  timeout,
   validationError,
 } from '@cyanheads/mcp-ts-core/errors';
 import {
@@ -81,24 +85,48 @@ const MAX_BACKOFF_MS = 30_000;
 const isTransient = (error: unknown): boolean =>
   error instanceof McpError && defaultIsTransient(error);
 
+/** What {@link toServiceError} needs to know about the retry loop that threw. */
+interface LoopOutcome {
+  /** Whether the deadline fired — the loop's own signal, never inferred from the error. */
+  deadlineFired: boolean;
+  /** The loop's total deadline. */
+  deadlineMs: number;
+}
+
 /**
- * Reshapes an error whose retries ran out: the last attempt's code and message with
- * the attempt count appended, `label`, `attempts`, and the upstream `retryAfter`, so a
- * 429 still tells the caller how long to wait. Only a `ServiceUnavailable` gains
- * `europepmc_unreachable`; a `Timeout` or `RateLimited` keeps its code with no
- * reason, as the OpenAlex service reports them. Anything never retried — a
- * non-transient failure, or a `Retry-After` longer than the backoff cap — passes
- * through unchanged.
+ * Maps what the retry loop throws onto this service's failure reasons, after the loop.
+ *
+ * - The deadline fired — mid-request, in the queue, mid-backoff, or during a
+ *   first-page probe → `europepmc_deadline_exceeded` (Timeout), with `label` and
+ *   `deadlineMs`.
+ * - The loop stopped because the next backoff would not fit the time left → as
+ *   when retries run out, below. It arrives as the same `retry_deadline_exceeded`
+ *   an expiry does, and its timing cannot tell the two apart (timers can fire
+ *   early), so the loop's own signal does. (#174)
+ * - Retries ran out → the last attempt's code and message with the attempt count
+ *   appended, `label`, `attempts`, and the upstream `retryAfter`, so a 429 still
+ *   tells the caller how long to wait. Only a `ServiceUnavailable` gains
+ *   `europepmc_unreachable`; a `Timeout` or `RateLimited` keeps its code with no
+ *   reason, as the OpenAlex service reports them.
+ * - Anything never retried — a non-transient failure, or a `Retry-After` longer
+ *   than the backoff cap or the time left — passes through unchanged.
  */
-function toServiceError(error: unknown, label: string): unknown {
+function toServiceError(error: unknown, label: string, loop: LoopOutcome): unknown {
   if (!(error instanceof McpError) || typeof error.data?.retryAttempts !== 'number') return error;
+  if (error.data.reason === 'retry_deadline_exceeded' && loop.deadlineFired) {
+    return timeout(
+      `Europe PMC request deadline (${loop.deadlineMs}ms) exceeded`,
+      { reason: 'europepmc_deadline_exceeded', label, deadlineMs: loop.deadlineMs },
+      { cause: error },
+    );
+  }
   const last = error.cause instanceof McpError ? error.cause : error;
   const attempts = error.data.retryAttempts;
   return new McpError(
-    error.code,
+    last.code,
     `${last.message} (failed after ${attempts} attempt${attempts === 1 ? '' : 's'})`,
     {
-      ...(error.code === JsonRpcErrorCode.ServiceUnavailable && {
+      ...(last.code === JsonRpcErrorCode.ServiceUnavailable && {
         reason: 'europepmc_unreachable',
       }),
       label,
@@ -225,7 +253,7 @@ type Http503Suspect = 'cursor' | 'sort' | 'none';
  *
  * All honor `ctx.signal` for cancellation and retry transient failures with
  * capped exponential backoff plus jitter, each attempt paced through the shared
- * request queue.
+ * request queue, within one total deadline per call.
  */
 export class EuropePmcService {
   private readonly orderedXmlParser: XMLParser;
@@ -234,6 +262,7 @@ export class EuropePmcService {
     private readonly client: EuropePmcApiClient,
     private readonly queue: Pacer,
     private readonly maxRetries: number,
+    private readonly totalDeadlineMs: number,
   ) {
     /**
      * EPMC's fullTextXML is JATS Z39.96 — the same DTD PMC uses, consumed by
@@ -279,7 +308,7 @@ export class EuropePmcService {
     return await this.runPaced(
       'search',
       request.signal,
-      (attempt) => this.searchOnce(request, attempt === this.maxRetries + 1),
+      (attempt, signal) => this.searchOnce({ ...request, signal }, attempt === this.maxRetries + 1),
       cursorMark === undefined && (sort === undefined || !sortIsSuspect(sort))
         ? undefined
         : async (error, signal, attempt) => {
@@ -532,8 +561,8 @@ export class EuropePmcService {
     source: EuropePmcSource,
     signal?: AbortSignal,
   ): Promise<EuropePmcFullTextResult> {
-    const outcome = await this.runPaced(`fullTextXml(${epmcId})`, signal, () =>
-      this.client.fullTextXml(epmcId, signal),
+    const outcome = await this.runPaced(`fullTextXml(${epmcId})`, signal, (_attempt, loopSignal) =>
+      this.client.fullTextXml(epmcId, loopSignal),
     );
 
     if (outcome.kind === 'not-available') {
@@ -560,7 +589,7 @@ export class EuropePmcService {
     signal?: AbortSignal,
   ): Promise<EuropePmcRelatedResult> {
     return this.fetchRelatedLinks(
-      () => this.client.citations(pmid, pageSize, page, signal),
+      (loopSignal) => this.client.citations(pmid, pageSize, page, loopSignal),
       'citations',
       pmid,
       (parsed) => ensureArray<EuropePmcRelatedRecord>(parsed.citationList?.citation),
@@ -586,7 +615,7 @@ export class EuropePmcService {
     signal?: AbortSignal,
   ): Promise<EuropePmcRelatedResult> {
     return this.fetchRelatedLinks(
-      () => this.client.references(pmid, pageSize, page, signal),
+      (loopSignal) => this.client.references(pmid, pageSize, page, loopSignal),
       'references',
       pmid,
       (parsed) => ensureArray<EuropePmcRelatedRecord>(parsed.referenceList?.reference),
@@ -601,13 +630,15 @@ export class EuropePmcService {
    * upstream row count and the PubMed-addressable set they actually get back.
    */
   private async fetchRelatedLinks(
-    fetch: () => Promise<string>,
+    fetch: (signal: AbortSignal) => Promise<string>,
     kind: string,
     pmid: string,
     extractRecords: (parsed: EuropePmcLinksResponse) => EuropePmcRelatedRecord[],
     signal?: AbortSignal,
   ): Promise<EuropePmcRelatedResult> {
-    const text = await this.runPaced(`${kind}(${pmid})`, signal, fetch);
+    const text = await this.runPaced(`${kind}(${pmid})`, signal, (_attempt, loopSignal) =>
+      fetch(loopSignal),
+    );
 
     let parsed: EuropePmcLinksResponse;
     try {
@@ -710,36 +741,39 @@ export class EuropePmcService {
   /**
    * Runs one Europe PMC call: a retry loop around the shared request queue, so
    * every attempt re-queues and is re-paced, and a backoff sleep holds no queue
-   * slot. No service-level deadline — Europe PMC requests are cheap individually
-   * and the caller's signal (typically `ctx.signal`) bounds the total chain; that
-   * signal reaches the queue wait and the backoff sleep. `execute` receives the
-   * one-based attempt number.
+   * slot. One deadline covers queue waits, attempts, and backoff. Its signal —
+   * joined with the caller's — reaches the queue wait, the backoff sleep, and
+   * `execute`, which passes it to the HTTP request, so the request in flight when
+   * the deadline fires is aborted then rather than at its own timeout. `execute`
+   * receives the one-based attempt number and that signal.
    *
    * `reclassify`, when given, sees each failed attempt after its queue slot is
-   * released and before the retry decision, with the attempt's signal and its
-   * one-based number. The error it returns is the one the loop judges, so it
-   * can end the retries by returning a non-transient error.
+   * released and before the retry decision, with the same signal and the
+   * attempt's one-based number, so a probe it sends is bounded by the deadline
+   * too. The error it returns is the one the loop judges, so it can end the
+   * retries by returning a non-transient error.
    *
-   * A caller abort rethrows the caller's own reason; an exhausted failure is
-   * reshaped by {@link toServiceError}, after the loop.
+   * A caller abort rethrows the caller's own reason; every other failure is
+   * mapped by {@link toServiceError}, after the loop. Once the caller is ruled
+   * out, the loop's signal has aborted only if the deadline fired.
    */
   private async runPaced<T>(
     label: string,
-    signal: AbortSignal | undefined,
-    execute: (attempt: number) => Promise<T>,
+    callerSignal: AbortSignal | undefined,
+    execute: (attempt: number, signal: AbortSignal) => Promise<T>,
     reclassify?: (error: unknown, signal: AbortSignal, attempt: number) => Promise<unknown>,
   ): Promise<T> {
     let attempt = 0;
+    let loopSignal: AbortSignal | undefined;
     try {
       return await withRetry(
-        ({ signal: attemptSignal }) => {
+        ({ signal }) => {
+          loopSignal = signal;
           const current = ++attempt;
           return this.queue
-            .run(() => execute(current), { signal: attemptSignal })
+            .run(() => execute(current, signal), { signal })
             .catch(async (failure: unknown) => {
-              const error = reclassify
-                ? await reclassify(failure, attemptSignal, current)
-                : failure;
+              const error = reclassify ? await reclassify(failure, signal, current) : failure;
               if (current <= this.maxRetries && isTransient(error)) {
                 logger.warning(
                   `Europe PMC ${label} failed on attempt ${current} of ${this.maxRetries + 1}.`,
@@ -759,14 +793,18 @@ export class EuropePmcService {
         {
           maxRetries: this.maxRetries,
           maxDelayMs: MAX_BACKOFF_MS,
+          deadlineMs: this.totalDeadlineMs,
           isTransient,
           operation: `Europe PMC ${label}`,
-          ...(signal && { signal }),
+          ...(callerSignal && { signal: callerSignal }),
         },
       );
     } catch (error: unknown) {
-      if (signal?.aborted) throw signal.reason;
-      throw toServiceError(error, label);
+      if (callerSignal?.aborted) throw callerSignal.reason;
+      throw toServiceError(error, label, {
+        deadlineFired: loopSignal?.aborted === true,
+        deadlineMs: this.totalDeadlineMs,
+      });
     }
   }
 }
@@ -792,7 +830,12 @@ export function initEuropePmcService(): void {
     ...(config.europepmcEmail && { email: config.europepmcEmail }),
   });
   const queue = createEuropePmcRequestQueue(config.europepmcRequestDelayMs);
-  _service = new EuropePmcService(client, queue, config.europepmcMaxRetries);
+  _service = new EuropePmcService(
+    client,
+    queue,
+    config.europepmcMaxRetries,
+    config.europepmcTotalDeadlineMs,
+  );
   logger.info(
     'Europe PMC service initialized.',
     requestContextService.createRequestContext({
@@ -801,6 +844,7 @@ export function initEuropePmcService(): void {
         requestDelayMs: config.europepmcRequestDelayMs,
         maxRetries: config.europepmcMaxRetries,
         timeoutMs: config.europepmcTimeoutMs,
+        totalDeadlineMs: config.europepmcTotalDeadlineMs,
         hasEmail: !!config.europepmcEmail,
       },
     }),

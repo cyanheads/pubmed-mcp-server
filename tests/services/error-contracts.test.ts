@@ -198,4 +198,39 @@ describe('EUROPEPMC_SERVICE_ERRORS', () => {
     expect(entry?.when).toMatch(/an empty response on the last attempt/);
     expect(entry?.when).not.toMatch(/on every attempt/);
   });
+
+  /** One deadline bounds each call; its expiry is worth retrying, unlike bad input. (#305) */
+  it('declares europepmc_deadline_exceeded as a retryable Timeout wherever the timer lands', () => {
+    const entry = EUROPEPMC_SERVICE_ERRORS.find((e) => e.reason === 'europepmc_deadline_exceeded');
+    expect(entry).toMatchObject({
+      code: JsonRpcErrorCode.Timeout,
+      retryable: true,
+      thrownBy: 'service',
+    });
+    expect(entry?.when).toMatch(/mid-request, while queued, or during a retry backoff/);
+    expect(entry?.recovery).toMatch(/^Retry after a brief delay/);
+  });
+
+  it('keeps every earlier reason with its code and retryability', () => {
+    expect(
+      EUROPEPMC_SERVICE_ERRORS.map(({ reason, code, retryable }) => ({ reason, code, retryable })),
+    ).toEqual([
+      {
+        reason: 'europepmc_unreachable',
+        code: JsonRpcErrorCode.ServiceUnavailable,
+        retryable: true,
+      },
+      { reason: 'europepmc_deadline_exceeded', code: JsonRpcErrorCode.Timeout, retryable: true },
+      {
+        reason: 'europepmc_invalid_response',
+        code: JsonRpcErrorCode.SerializationError,
+        retryable: true,
+      },
+      {
+        reason: 'europepmc_invalid_input',
+        code: JsonRpcErrorCode.ValidationError,
+        retryable: false,
+      },
+    ]);
+  });
 });

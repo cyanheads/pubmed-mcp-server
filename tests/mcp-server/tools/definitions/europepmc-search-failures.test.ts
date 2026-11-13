@@ -13,7 +13,8 @@
 
 import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
 import { runToolContract } from '@cyanheads/mcp-ts-core/testing';
-import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { sanitization } from '@cyanheads/mcp-ts-core/utils';
+import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { EUROPEPMC_SERVICE_ERRORS } from '@/services/error-contracts.js';
 import { readCommonMark, textBlocks } from '../../../_helpers.js';
@@ -103,23 +104,24 @@ function errorOf(result: Awaited<ReturnType<typeof runToolContract>>) {
 }
 
 /**
- * Each tool replaces only the `recovery` of the shared `europepmc_unreachable`
- * entry, by mapping the array it spreads: code, `when`, `retryable`, and
- * `thrownBy` stay shared, and every other Europe PMC entry is the shared one
- * itself (#288).
+ * Each tool replaces only the `recovery` of the shared outage entries,
+ * `europepmc_unreachable` and `europepmc_deadline_exceeded`, by mapping the
+ * array it spreads: code, `when`, `retryable`, and `thrownBy` stay shared, and
+ * every other Europe PMC entry is the shared one itself (#288, #305).
  */
 type DeclaredErrors = readonly { reason: string; recovery: string }[];
 const errorsOf = (definition: { errors?: DeclaredErrors }): DeclaredErrors =>
   definition.errors ?? [];
+const OUTAGE_REASONS: readonly string[] = ['europepmc_unreachable', 'europepmc_deadline_exceeded'];
 
 describe.each([
   ['pubmed_europepmc_search', errorsOf(pubmedEuropepmcSearchTool), SEARCH_UNREACHABLE_HINT],
   ['pubmed_europepmc_fetch', errorsOf(pubmedEuropepmcFetchTool), FETCH_UNREACHABLE_HINT],
 ])('%s outage contract (#288)', (_name, errors, unreachableHint) => {
-  const shared = EUROPEPMC_SERVICE_ERRORS.find((e) => e.reason === 'europepmc_unreachable');
-
-  it('replaces only the recovery of europepmc_unreachable', () => {
-    const entries = errors.filter((e) => e.reason === 'europepmc_unreachable');
+  it.each(OUTAGE_REASONS)('replaces only the recovery of %s', (reason) => {
+    const shared = EUROPEPMC_SERVICE_ERRORS.find((e) => e.reason === reason);
+    expect(shared).toBeDefined();
+    const entries = errors.filter((e) => e.reason === reason);
     expect(entries).toHaveLength(1);
     const { recovery, ...rest } = entries[0] ?? { recovery: undefined };
     const { recovery: sharedRecovery, ...sharedRest } = shared ?? { recovery: undefined };
@@ -129,7 +131,9 @@ describe.each([
   });
 
   it('keeps every other shared Europe PMC entry as is', () => {
-    for (const entry of EUROPEPMC_SERVICE_ERRORS.filter((e) => e !== shared)) {
+    for (const entry of EUROPEPMC_SERVICE_ERRORS.filter(
+      (e) => !OUTAGE_REASONS.includes(e.reason),
+    )) {
       expect(errors.filter((e) => e.reason === entry.reason)).toEqual([entry]);
       expect(errors).toContain(entry);
     }
@@ -145,12 +149,14 @@ const fetchRecords = () =>
 
 beforeEach(() => {
   service = new EuropePmcService(
-    // Above the setTimeout stub's pass-through ceiling, so the request timer never fires.
+    // Both above the setTimeout stub's pass-through ceiling, so the request timer and
+    // the call's total deadline never fire.
     new EuropePmcApiClient({ timeoutMs: 60_000 }),
     createEuropePmcRequestQueue(0),
     MAX_RETRIES,
+    60_000,
   );
-  // Fire retry backoff at once; leave long timers (the request timeout) unarmed.
+  // Fire retry backoff at once; leave long timers (the request timeout, the deadline) unarmed.
   setTimeoutSpy = vi.spyOn(globalThis, 'setTimeout').mockImplementation(((
     fn: () => void,
     ms?: number,
@@ -257,6 +263,74 @@ describe.each([
     expect((structured.hits ?? structured.records)?.length).toBe(1);
     expect(textBlocks(result.content)[0]?.text).toContain('31295471');
     expect(fetchSpy).toHaveBeenCalledTimes(2);
+  });
+});
+
+/**
+ * A Europe PMC that accepts each request and never answers. At the default
+ * settings the call ends at its 45 s deadline as the retryable Timeout
+ * `europepmc_deadline_exceeded`, with each tool's own outage recovery on both
+ * paths, before the 60 s an MCP SDK client waits. Fake clock, so the real 20 s
+ * request timeout and the backoff run.
+ *
+ * The handler's first await loads the sanitizer on its first call in a worker.
+ * Loading it here, on the real clock, keeps the fake-clock advance from returning
+ * before the call arms its first timer. (#305, #306)
+ */
+describe.each([
+  ['pubmed_europepmc_search', () => search({}), SEARCH_UNREACHABLE_HINT],
+  ['pubmed_europepmc_fetch', fetchRecords, FETCH_UNREACHABLE_HINT],
+])('%s against a Europe PMC that never answers (#305)', (_name, run, outageHint) => {
+  beforeAll(async () => {
+    await sanitization.sanitizeString('CRISPR', { context: 'text' });
+  });
+
+  beforeEach(() => {
+    setTimeoutSpy.mockRestore();
+    vi.useFakeTimers();
+    service = new EuropePmcService(
+      new EuropePmcApiClient({ timeoutMs: 20_000 }),
+      createEuropePmcRequestQueue(200),
+      3,
+      45_000,
+    );
+    fetchSpy = vi.spyOn(globalThis, 'fetch').mockImplementation(
+      (_url, init) =>
+        new Promise<Response>((_resolve, reject) => {
+          const signal = init?.signal as AbortSignal;
+          signal.addEventListener('abort', () => reject(signal.reason), { once: true });
+        }),
+    );
+  });
+
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  it('ends the call at the deadline as europepmc_deadline_exceeded, with its outage recovery on both paths', async () => {
+    const t0 = Date.now();
+    let settledAt: number | undefined;
+    const pending = run().finally(() => {
+      settledAt = Date.now() - t0;
+    });
+    await vi.advanceTimersByTimeAsync(45_000);
+    const { error, text } = errorOf(await pending);
+
+    expect(settledAt).toBe(45_000);
+    expect(error).toMatchObject({
+      code: JsonRpcErrorCode.Timeout,
+      message: 'Europe PMC request deadline (45000ms) exceeded',
+      data: {
+        reason: 'europepmc_deadline_exceeded',
+        deadlineMs: 45_000,
+        recovery: { hint: outageHint },
+      },
+    });
+    expect(text).toBe(
+      `Error: ${error.message}\n\nRecovery: ${outageHint}\n\n(reason europepmc_deadline_exceeded)`,
+    );
+    // Two requests run out their own 20 s timeout; the deadline cuts the third.
+    expect(fetchSpy).toHaveBeenCalledTimes(3);
   });
 });
 

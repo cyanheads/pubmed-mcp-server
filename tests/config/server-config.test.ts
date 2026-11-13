@@ -177,6 +177,28 @@ describe('getServerConfig', () => {
     expect(getServerConfig().requestDelayMs).toBe(400);
   });
 
+  /** One Europe PMC call's budget, under the 60 s an MCP SDK client waits by default. (#305) */
+  it.each([
+    ['unset', undefined, 45_000],
+    ['blank', '', 45_000],
+    ['set', '30000', 30_000],
+  ])('reads EUROPEPMC_TOTAL_DEADLINE_MS when %s', async (_case, value, expected) => {
+    vi.stubEnv('EUROPEPMC_TOTAL_DEADLINE_MS', value);
+
+    const getServerConfig = await loadModule();
+    expect(getServerConfig().europepmcTotalDeadlineMs).toBe(expected);
+  });
+
+  it.each(['4999', '600001'])(
+    'rejects EUROPEPMC_TOTAL_DEADLINE_MS=%s, naming the variable',
+    async (value) => {
+      vi.stubEnv('EUROPEPMC_TOTAL_DEADLINE_MS', value);
+
+      const getServerConfig = await loadModule();
+      expect(() => getServerConfig()).toThrow(/EUROPEPMC_TOTAL_DEADLINE_MS/);
+    },
+  );
+
   it('caches the config on repeated calls', async () => {
     delete process.env.NCBI_API_KEY;
     delete process.env.NCBI_TOOL_IDENTIFIER;

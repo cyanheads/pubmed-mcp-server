@@ -78,9 +78,9 @@ export const pubmedEuropepmcSearchTool = tool('pubmed_europepmc_search', {
     'https://github.com/cyanheads/pubmed-mcp-server/blob/main/src/mcp-server/tools/definitions/pubmed-europepmc-search.tool.ts',
 
   errors: [
-    // Only the outage recovery is this tool's own: it names the other search. (#288)
+    // Only the outage recoveries are this tool's own: they name the other search. (#288, #305)
     ...EUROPEPMC_SERVICE_ERRORS.map((entry) =>
-      entry.reason === 'europepmc_unreachable'
+      entry.reason === 'europepmc_unreachable' || entry.reason === 'europepmc_deadline_exceeded'
         ? {
             ...entry,
             recovery:
