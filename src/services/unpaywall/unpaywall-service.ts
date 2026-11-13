@@ -18,6 +18,7 @@ import {
 } from '@cyanheads/mcp-ts-core/utils';
 
 import { getServerConfig } from '@/config/server-config.js';
+import { normalizeDoi } from '@/services/doi.js';
 import { readBody } from '@/services/fetch-redaction.js';
 import {
   UNPAYWALL_API_BASE,
@@ -45,8 +46,8 @@ export class UnpaywallService {
    * Throws `McpError(ServiceUnavailable)` only for network/server failures.
    */
   async resolve(doi: string, signal?: AbortSignal): Promise<UnpaywallResolution> {
-    const normalized = normalizeDoi(doi);
-    if (!normalized) return { kind: 'no-oa', reason: 'Invalid DOI' };
+    const normalized = normalizeDoi(doi.trim());
+    if (!normalized.startsWith('10.')) return { kind: 'no-oa', reason: 'Invalid DOI' };
 
     const url = `${UNPAYWALL_API_BASE}/${encodeURIComponent(normalized)}?email=${encodeURIComponent(this.email)}`;
     const ctx = requestContextService.createRequestContext({
@@ -256,17 +257,6 @@ function hasPdfMagic(bytes: Uint8Array): boolean {
   return (
     bytes.length >= PDF_MAGIC.length && PDF_MAGIC.every((byte, index) => bytes[index] === byte)
   );
-}
-
-/**
- * Strip a leading `doi:` prefix or URL wrapping and return a clean DOI, or
- * undefined when the input can't be coerced into one.
- */
-function normalizeDoi(input: string): string | undefined {
-  const trimmed = input.trim();
-  if (!trimmed) return;
-  const withoutScheme = trimmed.replace(/^doi:/i, '').replace(/^https?:\/\/(dx\.)?doi\.org\//i, '');
-  return withoutScheme.startsWith('10.') ? withoutScheme : undefined;
 }
 
 // ─── Init / Accessor ────────────────────────────────────────────────────────

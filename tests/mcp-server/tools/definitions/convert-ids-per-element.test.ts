@@ -189,6 +189,75 @@ describe('pubmed_convert_ids answers every submitted element (issue #165)', () =
   });
 });
 
+describe('pubmed_convert_ids DOI link and doi: forms (#299)', () => {
+  /** The `ids` the converter was sent, per request. */
+  const sentIds = () =>
+    fetchSpy.mock.calls.map((args: unknown[]) => new URL(String(args[0])).searchParams.get('ids'));
+
+  it.each([
+    'https://doi.org/10.1093/nar/gks1195',
+    'http://dx.doi.org/10.1093/nar/gks1195',
+    'https://doi.org/10.1093%2Fnar%2Fgks1195',
+    'https://doi.org/10.1093/nar/gks1195?utm_source=x',
+    'doi:10.1093/nar/gks1195',
+    'DOI: 10.1093/nar/gks1195',
+  ])('converts %s as the bare DOI, under the spelling sent', async (sent) => {
+    const { result, text } = await convert([sent], 'doi');
+
+    expect(result.records).toEqual([
+      { requestedId: sent, pmid: '23193287', pmcid: 'PMC3531190', doi: GENBANK.doi },
+    ]);
+    expect(sentIds()).toEqual([GENBANK.doi]);
+    expect(requestedColumn(text)).toEqual([sent]);
+  });
+
+  it('gives a link and its bare DOI a converted record each, from one lookup of the bare DOI', async () => {
+    const { result } = await convert(['https://doi.org/10.1093/nar/gks1195', GENBANK.doi], 'doi');
+
+    expect(result.records.map((r) => [r.requestedId, r.pmcid])).toEqual([
+      ['https://doi.org/10.1093/nar/gks1195', 'PMC3531190'],
+      [GENBANK.doi, 'PMC3531190'],
+    ]);
+    expect(result.totalConverted).toBe(2);
+    expect(sentIds()).toEqual([GENBANK.doi]);
+  });
+
+  it.each([
+    'https://example.org/10.1093/nar/gks1195',
+    'urn:doi:10.1093/nar/gks1195',
+    '10.1093%2Fnar%2Fgks1195',
+    'https://doi.org/10.1093/nar%2Cgks1195',
+    'https://doi.org/10.1093/nar%20gks1195',
+  ])('still rejects %s as malformed_id under the spelling sent', async (sent) => {
+    const result = await runToolContract(convertIdsTool, { ids: [sent], idType: 'doi' });
+
+    expect(result.structuredContent).toMatchObject({
+      error: {
+        code: JsonRpcErrorCode.ValidationError,
+        message: `Invalid doi element "${sent}". DOI must start with "10." and contain a "/" (e.g. "10.1093/nar/gks1195"). Remove any whitespace or commas — provide each DOI separately.`,
+        data: { reason: 'malformed_id' },
+      },
+    });
+    expect(fetchSpy).not.toHaveBeenCalled();
+  });
+
+  it('keeps bare DOIs as today: case variants convert, a trailing dot is not found', async () => {
+    const { result } = await convert(
+      ['10.1093/nar/gks1195', '10.1093/NAR/gks1195', '10.1093/nar/gks1195.'],
+      'doi',
+    );
+
+    expect(result.records.map((r) => [r.requestedId, r.pmcid ?? r.errmsg])).toEqual([
+      ['10.1093/nar/gks1195', 'PMC3531190'],
+      ['10.1093/NAR/gks1195', 'PMC3531190'],
+      [
+        '10.1093/nar/gks1195.',
+        'Not in PMC ID Converter. Article may still exist in PubMed — try pubmed_fetch_articles (PMID → DOI) or pubmed_search_articles.',
+      ],
+    ]);
+  });
+});
+
 /**
  * The envelope's `data` reaches the client verbatim, so it names the converter's
  * host, never the request URL whose query carries the operator's email.

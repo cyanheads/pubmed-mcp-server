@@ -1,10 +1,12 @@
 /**
  * @fileoverview Shared Zod schemas reused across tool definitions, plus the
- * normalizer for the PMID form {@link pmidStringSchema} accepts.
+ * normalizer for the PMID form {@link pmidStringSchema} accepts. The DOI schemas
+ * are built on the DOI rules in `src/services/doi.ts`.
  * @module src/mcp-server/tools/definitions/_schemas
  */
 
 import { z } from '@cyanheads/mcp-ts-core';
+import { isDoi, normalizeDoi } from '@/services/doi.js';
 import { EUROPEPMC_ALL_SOURCES } from '@/services/europe-pmc/types.js';
 
 /**
@@ -45,6 +47,18 @@ export const pmcidStringSchema = z
   );
 
 /**
+ * The DOI pattern, with a `test` that decides the strings its source matches by
+ * {@link isDoi}, so validation stays linear in the value's length. Zod's
+ * `.regex()` check calls `test` and advertises `source`, so the JSON Schema
+ * pattern and the rejection's issue are what the plain pattern gives.
+ */
+class DoiPattern extends RegExp {
+  override test(value: string): boolean {
+    return isDoi(value);
+  }
+}
+
+/**
  * Zod string schema for a single DOI: the "10." directory indicator, a
  * registrant prefix, "/", and a suffix.
  *
@@ -57,9 +71,20 @@ export const pmcidStringSchema = z
 export const doiStringSchema = z
   .string()
   .regex(
-    /^10\.[^\s,]+\/[^\s,]+$/,
+    new DoiPattern(/^10\.[^\s,]+\/[^\s,]+$/),
     'DOI must start with "10." and contain a "/" (e.g. "10.1093/nar/gks1195"). Remove any whitespace or commas — provide each DOI separately.',
   );
+
+/**
+ * A DOI as a tool's schema accepts it: a link or `doi:` form is read as the bare
+ * DOI ({@link normalizeDoi}) before {@link doiStringSchema} checks it, so the
+ * handler receives the bare DOI. The fold stays off the advertised schema, which
+ * remains `doiStringSchema`'s plain pattern. (#299)
+ */
+export const doiInputSchema = z.preprocess(
+  (value) => (typeof value === 'string' ? normalizeDoi(value) : value),
+  doiStringSchema,
+);
 
 /**
  * A Europe PMC source code as a tool accepts it: a lower-case code (`med`,

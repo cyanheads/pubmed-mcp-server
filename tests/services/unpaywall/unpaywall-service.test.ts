@@ -117,8 +117,14 @@ describe('UnpaywallService.resolve', () => {
     const inputs = [
       'doi:10.1000/example',
       'DOI:10.1000/example',
+      'DOI: 10.1000/example',
       'https://doi.org/10.1000/example',
       'http://dx.doi.org/10.1000/example',
+      // The shared normalizer decodes a link's path and drops its query. (#299)
+      'https://doi.org/10.1000%2Fexample?utm_source=x',
+      // A DOI read from an upstream record keeps the whitespace around it.
+      ' 10.1000/example\n',
+      '\tdoi:10.1000/example ',
     ];
     for (const input of inputs) await service.resolve(input);
 

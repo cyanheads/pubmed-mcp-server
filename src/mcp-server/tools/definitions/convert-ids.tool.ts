@@ -8,6 +8,7 @@
  */
 
 import { tool, z } from '@cyanheads/mcp-ts-core';
+import { normalizeDoi } from '@/services/doi.js';
 import { NCBI_ID_INPUT_ERRORS, NCBI_SERVICE_ERRORS } from '@/services/error-contracts.js';
 import { getNcbiService } from '@/services/ncbi/ncbi-service.js';
 import { conceptMeta, EDAM_ACCESSION, EDAM_ID_MAPPING } from './_concepts.js';
@@ -46,10 +47,25 @@ const NO_RECORD_ERRMSG =
   'The PMC ID Converter returned no record for this ID. Article may still exist in PubMed — try pubmed_search_articles.';
 
 /**
+ * The form an element is checked and sent in: a PMID's canonical digits (#161),
+ * the bare DOI a DOI link or `doi:` form names (#299), a PMCID as sent.
+ */
+function sentForm(id: string, idType: 'pmid' | 'pmcid' | 'doi'): string {
+  switch (idType) {
+    case 'pmid':
+      return normalizePmid(id);
+    case 'pmcid':
+      return id;
+    case 'doi':
+      return normalizeDoi(id);
+  }
+}
+
+/**
  * The form the PMC ID Converter echoes an identifier in, so each element can be
  * matched to its answer: a PMID's canonical digits, a PMCID PMC-prefixed and
- * upper-cased, a DOI lower-cased — DOIs are case-insensitive, and the converter
- * echoes one casing for DOIs that differ only in case.
+ * upper-cased, a DOI bare and lower-cased — DOIs are case-insensitive, and the
+ * converter echoes one casing for DOIs that differ only in case.
  */
 function matchKey(id: string, idType: 'pmid' | 'pmcid' | 'doi'): string {
   switch (idType) {
@@ -58,7 +74,7 @@ function matchKey(id: string, idType: 'pmid' | 'pmcid' | 'doi'): string {
     case 'pmcid':
       return (/^\d+$/.test(id) ? `PMC${id}` : id).toUpperCase();
     case 'doi':
-      return id.toLowerCase();
+      return normalizeDoi(id).toLowerCase();
   }
 }
 
@@ -77,7 +93,7 @@ export const convertIdsTool = tool('pubmed_convert_ids', {
       .min(1)
       .max(50)
       .describe(
-        'Article identifiers to convert — one identifier per element, all of the same type. Each element is checked against `idType` before the request: `doi` starts with "10." and carries a "/" ("10.1093/nar/gks1195"); `pmid` is digits ("23193287"); `pmcid` is digits with an optional "PMC" prefix ("PMC3531190" or "3531190"). No element may contain a comma or whitespace — a packed value like "23193287,37952131" is rejected, so split it across elements.',
+        'Article identifiers to convert — one identifier per element, all of the same type. Each element is checked against `idType` before the request: `doi` starts with "10." and carries a "/" ("10.1093/nar/gks1195"), or is a DOI link ("https://doi.org/10.1093/nar/gks1195", "http://dx.doi.org/…") or carries the "doi:" scheme ("doi:10.1093/nar/gks1195", a space after the colon allowed), each read as the bare DOI; `pmid` is digits ("23193287"); `pmcid` is digits with an optional "PMC" prefix ("PMC3531190" or "3531190"). No element may otherwise contain a comma or whitespace — a packed value like "23193287,37952131" is rejected, so split it across elements.',
       ),
     idType: z
       .enum(['pmcid', 'pmid', 'doi'])
@@ -125,7 +141,7 @@ export const convertIdsTool = tool('pubmed_convert_ids', {
 
     const elementSchema = ID_ELEMENT_SCHEMAS[input.idType];
     for (const id of input.ids) {
-      const parsed = elementSchema.safeParse(id);
+      const parsed = elementSchema.safeParse(sentForm(id, input.idType));
       if (parsed.success) continue;
       const shown = id.length > MAX_ECHOED_ID_LENGTH ? `${id.slice(0, MAX_ECHOED_ID_LENGTH)}…` : id;
       throw ctx.fail(
@@ -135,8 +151,12 @@ export const convertIdsTool = tool('pubmed_convert_ids', {
     }
 
     // The converter parses `0023193287` as PMID 23193287 yet answers "not found
-    // in PMC" for it, so a PMID is sent in its canonical form. (#161)
-    const ids = input.idType === 'pmid' ? [...new Set(input.ids.map(normalizePmid))] : input.ids;
+    // in PMC" for it, so a PMID is sent in its canonical form (#161); it rejects
+    // a DOI link or `doi:` form outright, so a DOI is sent bare (#299).
+    const ids =
+      input.idType === 'pmcid'
+        ? input.ids
+        : [...new Set(input.ids.map((id) => sentForm(id, input.idType)))];
     const raw = await getNcbiService().idConvert(ids, input.idType, { signal: ctx.signal });
 
     // NCBI returns pmid as a number in JSON — coerce all ID fields to strings
