@@ -8,6 +8,7 @@
  * @module src/services/ncbi/parsing/pmc-article-parser
  */
 
+import { pmcArticleUrl } from '../pmc-article-url.js';
 import type {
   ParsedPmcArticle,
   ParsedPmcAsset,
@@ -2032,7 +2033,7 @@ export function parsePmcArticle(articleNode: JatsNode): ParsedPmcArticle {
     ...(tables.length > 0 && { tables }),
     ...(assets.length > 0 && { assets }),
     ...(articleType && { articleType }),
-    pmcUrl: `https://www.ncbi.nlm.nih.gov/pmc/articles/${normalizedPmcId}/`,
+    pmcUrl: pmcArticleUrl(normalizedPmcId),
     ...(pmid && { pubmedUrl: `https://pubmed.ncbi.nlm.nih.gov/${pmid}/` }),
   };
 }

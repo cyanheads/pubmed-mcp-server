@@ -26,7 +26,7 @@
 **PMCID:** PMC11609225
 **PMID:** 39624286
 **DOI:** 10.1016/j.heliyon.2024.e40335
-**PMC:** <https://www.ncbi.nlm.nih.gov/pmc/articles/PMC11609225/>
+**PMC:** <https://pmc.ncbi.nlm.nih.gov/articles/PMC11609225/>
 **PubMed:** <https://pubmed.ncbi.nlm.nih.gov/39624286/>
 **Keywords:** Fractional-order systems, Nonlinear dynamics, Byzantine attacks, Leader-following consensus, Fractional-order Lyapunov approach
 

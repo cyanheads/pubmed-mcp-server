@@ -29,7 +29,7 @@
 **PMCID:** PMC10799778
 **PMID:** 38244075
 **DOI:** 10.1007/s00253-024-13007-7
-**PMC:** <https://www.ncbi.nlm.nih.gov/pmc/articles/PMC10799778/>
+**PMC:** <https://pmc.ncbi.nlm.nih.gov/articles/PMC10799778/>
 **PubMed:** <https://pubmed.ncbi.nlm.nih.gov/38244075/>
 **Keywords:** Cardiometabolic disease, Gut microbiome, Dietary nutrition
 

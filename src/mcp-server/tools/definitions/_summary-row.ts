@@ -8,6 +8,7 @@
  */
 
 import { z } from '@cyanheads/mcp-ts-core';
+import { pmcArticleUrl } from '@/services/ncbi/pmc-article-url.js';
 import type { ParsedBriefSummary } from '@/services/ncbi/types.js';
 
 /** One row: every field but `pmid` and `pubmedUrl` is absent when ESummary has no value for it. */
@@ -118,7 +119,7 @@ export function summaryRow(summary: ParsedBriefSummary): SummaryRow {
     ...(doi !== undefined && { doi }),
     ...(pmcId !== undefined && {
       pmcId,
-      pmcUrl: `https://www.ncbi.nlm.nih.gov/pmc/articles/${pmcId}/`,
+      pmcUrl: pmcArticleUrl(pmcId),
     }),
     pubmedUrl: `https://pubmed.ncbi.nlm.nih.gov/${pmid}/`,
   };

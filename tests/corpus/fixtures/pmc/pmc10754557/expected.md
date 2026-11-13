@@ -28,7 +28,7 @@
 **PMCID:** PMC10754557
 **PMID:** 38206746
 **DOI:** 10.1097/MD.0000000000036667
-**PMC:** <https://www.ncbi.nlm.nih.gov/pmc/articles/PMC10754557/>
+**PMC:** <https://pmc.ncbi.nlm.nih.gov/articles/PMC10754557/>
 **PubMed:** <https://pubmed.ncbi.nlm.nih.gov/38206746/>
 **Keywords:** EGFR ex20ins mutation, EGFR TKIs, first-line, furmonertinib, lung adenocarcinoma
 

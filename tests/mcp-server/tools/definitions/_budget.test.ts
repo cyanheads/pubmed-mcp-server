@@ -113,7 +113,7 @@ describe('whole-response accounting over an asset-bearing article (issue #130)',
     source: 'pmc',
     viaSource: 'pmc',
     pmcId: 'PMC11726426',
-    pmcUrl: 'https://www.ncbi.nlm.nih.gov/pmc/articles/PMC11726426/',
+    pmcUrl: 'https://pmc.ncbi.nlm.nih.gov/articles/PMC11726426/',
     title: 'Figure-bearing Article',
     sections: [{ title: 'METHODS', text: 'Methods body.' }],
   };

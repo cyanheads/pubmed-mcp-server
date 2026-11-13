@@ -6,6 +6,7 @@
  */
 
 import { type MarkdownPiece, renderMarkdownLine } from '@/services/markdown-escape.js';
+import { pmcArticleUrl } from '../pmc-article-url.js';
 import type {
   ParsedArticle,
   ParsedArticleAuthor,
@@ -1305,7 +1306,7 @@ export function formatRis(article: ParsedArticle): string {
 
   // PMC URL (when available)
   if (article.pmcId) {
-    lines.push(`UR  - https://pmc.ncbi.nlm.nih.gov/articles/${article.pmcId}/`);
+    lines.push(`UR  - ${pmcArticleUrl(article.pmcId)}`);
   }
 
   // Bookshelf URL — where a book record is actually readable

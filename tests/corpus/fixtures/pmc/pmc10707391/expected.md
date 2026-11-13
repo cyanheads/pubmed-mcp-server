@@ -25,7 +25,7 @@
 **PMCID:** PMC10707391
 **PMID:** 38068261
 **DOI:** 10.3390/jcm12237211
-**PMC:** <https://www.ncbi.nlm.nih.gov/pmc/articles/PMC10707391/>
+**PMC:** <https://pmc.ncbi.nlm.nih.gov/articles/PMC10707391/>
 **PubMed:** <https://pubmed.ncbi.nlm.nih.gov/38068261/>
 **Keywords:** cerebral injury, magnetic resonance imaging, monochorionic twins, selective fetal growth restriction, single intrauterine fetal demise, twin anemia polycythemia sequence, twin–twin transfusion syndrome
 

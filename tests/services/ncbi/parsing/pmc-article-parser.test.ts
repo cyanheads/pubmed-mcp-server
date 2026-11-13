@@ -2128,7 +2128,7 @@ describe('parsePmcArticle', () => {
     expect(result.authors).toHaveLength(1);
     expect(result.sections).toHaveLength(1);
     expect(result.articleType).toBe('research-article');
-    expect(result.pmcUrl).toBe('https://www.ncbi.nlm.nih.gov/pmc/articles/PMC1234567/');
+    expect(result.pmcUrl).toBe('https://pmc.ncbi.nlm.nih.gov/articles/PMC1234567/');
     expect(result.pubmedUrl).toBe('https://pubmed.ncbi.nlm.nih.gov/12345/');
   });
 

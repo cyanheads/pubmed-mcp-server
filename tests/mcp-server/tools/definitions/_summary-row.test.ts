@@ -50,7 +50,7 @@ describe('summaryRow', () => {
         epubDate: '2026-09-27',
         doi: '10.1111/dom.71375',
         pmcId: 'PMC13730978',
-        pmcUrl: 'https://www.ncbi.nlm.nih.gov/pmc/articles/PMC13730978/',
+        pmcUrl: 'https://pmc.ncbi.nlm.nih.gov/articles/PMC13730978/',
         pubmedUrl: 'https://pubmed.ncbi.nlm.nih.gov/42802242/',
       },
     ],
@@ -163,7 +163,7 @@ describe('summaryRow over a real ESummary response', () => {
         epubDate: '2026-10-24',
         doi: '10.7759/cureus.118487',
         pmcId: 'PMC13695040',
-        pmcUrl: 'https://www.ncbi.nlm.nih.gov/pmc/articles/PMC13695040/',
+        pmcUrl: 'https://pmc.ncbi.nlm.nih.gov/articles/PMC13695040/',
         pubmedUrl: 'https://pubmed.ncbi.nlm.nih.gov/42926911/',
       },
       {
@@ -189,7 +189,7 @@ describe('summaryRow over a real ESummary response', () => {
         epubDate: '2026-09-27',
         doi: '10.1111/dom.71375',
         pmcId: 'PMC13730978',
-        pmcUrl: 'https://www.ncbi.nlm.nih.gov/pmc/articles/PMC13730978/',
+        pmcUrl: 'https://pmc.ncbi.nlm.nih.gov/articles/PMC13730978/',
         pubmedUrl: 'https://pubmed.ncbi.nlm.nih.gov/42802242/',
       },
     ]);

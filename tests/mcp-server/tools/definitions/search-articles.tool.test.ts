@@ -671,7 +671,7 @@ describe('searchArticlesTool', () => {
         pubDate: '2024-01-01',
         doi: '10.1000/example',
         pmcId: 'PMC12345',
-        pmcUrl: 'https://www.ncbi.nlm.nih.gov/pmc/articles/PMC12345/',
+        pmcUrl: 'https://pmc.ncbi.nlm.nih.gov/articles/PMC12345/',
         pubmedUrl: 'https://pubmed.ncbi.nlm.nih.gov/111/',
       },
     ]);
@@ -2250,7 +2250,7 @@ describe('searchArticlesTool', () => {
             doi: '10.1000/example',
             pmcId: 'PMC12345',
             pubmedUrl: 'https://pubmed.ncbi.nlm.nih.gov/111/',
-            pmcUrl: 'https://www.ncbi.nlm.nih.gov/pmc/articles/PMC12345/',
+            pmcUrl: 'https://pmc.ncbi.nlm.nih.gov/articles/PMC12345/',
           },
         ],
         searchUrl: 'https://pubmed.ncbi.nlm.nih.gov/?term=asthma',
@@ -2266,9 +2266,7 @@ describe('searchArticlesTool', () => {
     expect(blocks[0]?.text).toContain('**DOI:** 10.1000/example');
     expect(blocks[0]?.text).toContain('**PMCID:** PMC12345');
     expect(blocks[0]?.text).toContain('**PubMed:** <https://pubmed.ncbi.nlm.nih.gov/111/>');
-    expect(blocks[0]?.text).toContain(
-      '**PMC:** <https://www.ncbi.nlm.nih.gov/pmc/articles/PMC12345/>',
-    );
+    expect(blocks[0]?.text).toContain('**PMC:** <https://pmc.ncbi.nlm.nih.gov/articles/PMC12345/>');
   });
 });
 
@@ -2553,7 +2551,7 @@ describe('searchArticlesTool summary identifiers (issue #297)', () => {
         pmid: '42474064',
         doi: '10.3310/KGTO6391',
         pmcId: 'PMC13403055',
-        pmcUrl: 'https://www.ncbi.nlm.nih.gov/pmc/articles/PMC13403055/',
+        pmcUrl: 'https://pmc.ncbi.nlm.nih.gov/articles/PMC13403055/',
         pubmedUrl: 'https://pubmed.ncbi.nlm.nih.gov/42474064/',
       },
     ]);
@@ -2569,7 +2567,7 @@ describe('searchArticlesTool summary identifiers (issue #297)', () => {
         '**DOI:** 10.3310/KGTO6391',
         '**PMCID:** PMC13403055',
         '**PubMed:** <https://pubmed.ncbi.nlm.nih.gov/42474064/>',
-        '**PMC:** <https://www.ncbi.nlm.nih.gov/pmc/articles/PMC13403055/>',
+        '**PMC:** <https://pmc.ncbi.nlm.nih.gov/articles/PMC13403055/>',
       ].join('\n'),
     );
     expect(blockOf('36356174')).toContain(
@@ -3503,7 +3501,16 @@ describe('searchArticlesTool against a failing NCBI backend (issue #174)', () =>
     return module.searchArticlesTool;
   }
 
-  beforeEach(() => {
+  /**
+   * The handler's first await, `sanitizeString`, loads `sanitize-html` on its first call
+   * in a worker, and `vi.resetModules()` keeps that load: the framework is external. Under
+   * Bun a cold load can settle after a fake-clock advance has returned, leaving the call's
+   * first timer on a clock nothing moves again. Loading it here, on the real clock, means
+   * every advance below covers timers the call has already armed. (#306)
+   */
+  beforeEach(async () => {
+    const { sanitization } = await import('@cyanheads/mcp-ts-core/utils');
+    await sanitization.sanitizeString('asthma', { context: 'text' });
     vi.useFakeTimers();
   });
 
@@ -3926,7 +3933,7 @@ describe('searchArticlesTool summary links (issue #307)', () => {
 
   it('renders a summary URL that cannot be an autolink as text reading back the URL, never a broken link', () => {
     const pubmedUrl = 'https://pubmed.ncbi.nlm.nih.gov/<b>1</b>/';
-    const pmcUrl = 'https://www.ncbi.nlm.nih.gov/pmc/articles/PMC 1/';
+    const pmcUrl = 'https://pmc.ncbi.nlm.nih.gov/articles/PMC 1/';
     const text =
       textBlocks(
         searchArticlesTool.format!({
