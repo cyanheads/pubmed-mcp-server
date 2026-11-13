@@ -28,8 +28,8 @@ Biomedical literature: PubMed records (MEDLINE, PubMed Central, NCBI Bookshelf),
 
 Crosswalks:
 
-- **PMID → DOI or PMCID:** `pubmed_fetch_articles`, for any PubMed record.
-- **DOI → PMID:** `pubmed_convert_ids` answers only for articles in PMC; `10.1056/NEJMoa1911303` (not in PMC) fails there. Search `10.1056/NEJMoa1911303[doi]` with `pubmed_search_articles` (returns 31535829), or `DOI:"10.1056/NEJMoa1911303"` with `pubmed_europepmc_search`, whose hit carries the PMID.
+- **PMID → DOI or PMCID:** `pubmed_fetch_articles`, for any PubMed record. It takes PMIDs only: a PMC ID or DOI there is rejected with a pointer to `pubmed_convert_ids` or `pubmed_fetch_fulltext`.
+- **DOI → PMID:** `pubmed_convert_ids` takes the bare DOI, its `https://doi.org/…` link, or the `doi:` form, and answers only for articles in PMC; `10.1056/NEJMoa1911303` (not in PMC) fails there. Search `10.1056/NEJMoa1911303[doi]` with `pubmed_search_articles` (returns 31535829), or `DOI:"10.1056/NEJMoa1911303"` with `pubmed_europepmc_search`, whose hit carries the PMID.
 - **ORCID → an author's papers:** `0000-0002-5446-9969[auid]` in `pubmed_search_articles` returned 46 records. It matches only records whose author entry carries that ORCID, however the name is spelled.
 
 ## Gates
@@ -42,7 +42,7 @@ Crosswalks:
 | `"a b"[tiab:~3]` | both words within 3 of each other |
 | `"Name"[mh]`, `[mh:noexp]`, `[majr]` | MeSH heading plus every narrower heading; the heading alone; as a major topic |
 | `"Name"[pa]` | records indexed with any substance that has that pharmacological action |
-| `"Name"[nm]` | records indexed with that supplementary concept (a drug or chemical with no descriptor); no `[mh]` clause matches one |
+| `"Name"[nm]` | records indexed with that supplementary concept (a drug or chemical with no descriptor; a `chemicals` entry on `pubmed_fetch_articles` with a `C` UI); no `[mh]` clause matches one |
 | `"Heading/qualifier"[mh]` | the heading restricted to one subheading, the qualifier taken from the exact match's `subheadings` |
 | `"Randomized Controlled Trial"[pt]` | publication type |
 | `McMurray JJ[au]`, `<orcid>[auid]` | author name; author ORCID |
@@ -69,6 +69,7 @@ Crosswalks:
 ### Citations and full text
 
 - **`cited_by` is not a citation count.** For 31535829, `pubmed_find_related` `cited_by` totals 3,381, iCite's `citationCount` 5,579, and Europe PMC's `citedByCount` 5,400. Report iCite's count or RCR for how cited a paper is; use `cited_by` to list citing PubMed records.
+- **A `sections` filter that matched in part is not a missing section.** When some terms matched an article and others did not, the `notice` names the unmatched terms per article; a results section titled "Findings" misses a filter on "Results". Call again with `overflowMode` `outline`, a small `maxCharacters`, and no `sections` to read the article's headings, then filter by those.
 - **An `unavailable` entry is not proof that no free full text exists.** `unqueriedTiers` names a tier this deployment skipped that could have served it (Unpaywall without `UNPAYWALL_EMAIL`), and `service-error` is an upstream failure: Europe PMC answered PPR829124's full text with HTTP 500 although its search hit set `hasFullTextXml`. Say which tiers answered.
 
 ## Workflows
@@ -77,6 +78,6 @@ Crosswalks:
 
 **Resolve a reference list.** Split each reference into journal, year, volume, first page, and first author, and send them to `pubmed_lookup_citation` 25 at a time. On `matched`, compare `matchedFirstAuthor` and read `warnings`; on `ambiguous`, fetch the `candidatePmids` and pick; on `not_found`, apply the ECitMatch gate, then a `[ti]` search, then `TITLE:"…"` in `pubmed_europepmc_search` for preprints. Format with `pubmed_format_citations`, whose `notices` carry retractions and errata.
 
-**How cited is this paper.** Resolve it to a PMID, then `pubmed_fetch_citation_metrics` for RCR, NIH percentile, and citation count; a paper added this year may not be scored yet (42951449, October 2026). Check `pubmed_fetch_articles` for a retraction before relying on the numbers: 9500320 keeps RCR 41.0 and the 99.8th percentile though its publication types include Retracted Publication. `pubmed_find_related` `cited_by` then lists citing records to read.
+**How cited is this paper.** Resolve it to a PMID, then `pubmed_fetch_citation_metrics` for RCR, NIH percentile, and citation count; a paper added this year may not be scored yet (42951449, October 2026). Check `pubmed_fetch_articles` for a retraction before relying on the numbers: 9500320 keeps RCR 41.0 and the 99.8th percentile though its publication types include Retracted Publication. `pubmed_find_related` `cited_by` then lists citing records to read. For the clinical articles citing it, set `includeClinicalCitations` on `pubmed_fetch_citation_metrics` and pass the `clinicalCitationPmids` to `pubmed_fetch_articles`; the list is uncapped, so ask for it on a few papers at a time.
 
 **A preprint or a record PubMed lacks.** `pubmed_europepmc_search` with `sources` `PPR`; add `AND HAS_FT:Y` to keep records with full text (16 of 69 preprints on dapagliflozin and heart failure). `pubmed_europepmc_fetch` returns the whole abstract; `pubmed_fetch_fulltext` with the DOI returns the body when Europe PMC holds it (`10.21203/rs.3.rs-8604461/v1` did).

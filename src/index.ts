@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 /**
- * @fileoverview PubMed MCP server entry point.
+ * @fileoverview pubmed-mcp-server entry point.
  * @module index
  */
 

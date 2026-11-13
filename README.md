@@ -36,7 +36,7 @@ Biomedical literature from PubMed, PubMed Central, and Europe PMC. Search it, fe
 | Tool | Description |
 |:---|:---|
 | `pubmed_search_articles` | Search PubMed with full query syntax, structured filters, date ranges, and optional summaries |
-| `pubmed_fetch_articles` | Fetch article metadata by PMID: abstract, authors, journal, MeSH terms, databank accessions such as trial registration IDs, grants, a collective author's investigators on request, linked retraction and correction notices |
+| `pubmed_fetch_articles` | Fetch article metadata by PMID: abstract, authors, journal, language and original-language title, MeSH terms and indexed substances, databank accessions such as trial registration IDs, grants, a collective author's investigators on request, linked retraction and correction notices |
 | `pubmed_fetch_fulltext` | Fetch full text by PMID, PMCID, or DOI, falling back from PMC to Europe PMC to Unpaywall |
 | `pubmed_europepmc_search` | Search Europe PMC for preprints, patents, Agricola, and open-access records PubMed doesn't carry |
 | `pubmed_europepmc_fetch` | Fetch complete Europe PMC records, including the untruncated abstract, as `records: [{ source, epmcId }]` |
@@ -74,20 +74,21 @@ Biomedical literature from PubMed, PubMed Central, and Europe PMC. Search it, fe
 
 ### `pubmed_fetch_articles` <sub>tool</sub>
 
-- Up to 200 PMIDs per call; misses are listed in `unavailablePmids`
-- Abstract, authors, journal, DOI, publication types, linked retraction/erratum/comment notices, and links; MeSH terms on by default, grants via `includeGrants`, and the members of a collective author (its `InvestigatorList`, thousands on some consortium trials) via `includeInvestigators`
+- Up to 200 PMIDs per call; misses are listed in `unavailablePmids`. A PMC ID or DOI in `pmids` is rejected with the route to `pubmed_convert_ids` or `pubmed_fetch_fulltext`; `idType` is accepted only as `"pmid"`
+- Abstract, authors, journal, DOI, publication types, `languages`, linked retraction/erratum/comment notices, and links; a record in another language carries its original-language title as `vernacularTitle`, with `title` NLM's English translation; MeSH terms and `chemicals` (the record's indexed substances, each with its MeSH UI and, where NLM assigns one, its registry number) on by default via `includeMesh`, grants via `includeGrants`, and the members of a collective author (its `InvestigatorList`, thousands on some consortium trials) via `includeInvestigators`
 - A retracted, corrected, or questioned article opens with the same notice block as `pubmed_format_citations`, directly under its title
-- `dataBanks` lists the record's trial registrations and data deposits (ClinicalTrials.gov NCT IDs, GenBank and PDB accessions, Dryad DOIs) verbatim; search `pubmed_search_articles` for `<accession>[si]` to find other records citing one
+- `dataBanks` lists the record's trial registrations and data deposits (ClinicalTrials.gov NCT IDs, GenBank and PDB accessions, Dryad DOIs) verbatim; search `pubmed_search_articles` for `<accession>[si]` to find other records citing one; search `"<name>"[nm]` to find other records listing a substance (a `C` UI is a supplementary concept, which no `[mh]` clause matches)
 - `recordType` separates journal articles from Bookshelf chapters and books; opt-in `maxResponseCharacters` defers overflow to `deferred.ids`
 
 ---
 
 ### `pubmed_fetch_fulltext` <sub>tool</sub>
 
-- `pmcids`, `pmids`, and `dois` in any mix, up to 50 distinct identifiers per call: the first 10 are fetched and the rest returned in `overLimit` for a follow-up call. Each is tried against PMC, then Europe PMC, then Unpaywall (needs `UNPAYWALL_EMAIL`); an article several of them name is fetched and returned once, and `viaSource` names the tier that answered
+- `pmcids`, `pmids`, and `dois` in any mix, up to 50 distinct identifiers per call: the first 10 are fetched and the rest returned in `overLimit` for a follow-up call. A DOI may be sent bare, as a resolver link (`https://doi.org/…`), or with the `doi:` scheme; each is read as the bare DOI, which is what the response echoes. Each is tried against PMC, then Europe PMC, then Unpaywall (needs `UNPAYWALL_EMAIL`); an article several of them name is fetched and returned once, and `viaSource` names the tier that answered
 - `source: "pmc"` returns sections (the body, then back matter such as acknowledgments, declarations, and appendices), tables, and figures; `source: "unpaywall"` returns a best-effort HTML or PDF text body
 - Europe PMC full text is fetched for records Europe PMC marks open access, preprints included; articles carry the `licenses` their PMC JATS states
 - Misses carry a typed `reason` and `triedTiers`; `sections`, `maxSections`, `maxCharacters`, `overflowMode`, and `maxResponseCharacters` bound the response, `truncation` reports what was cut, and `sectionCap` names the sections `maxSections` cut
+- A `sections` filter that matches an article only in part adds a notice naming, per article, the terms that matched no section or subsection title there and pointing at `overflowMode: "outline"` to list its headings
 
 ---
 
@@ -111,7 +112,7 @@ Biomedical literature from PubMed, PubMed Central, and Europe PMC. Search it, fe
 ### `pubmed_fetch_citation_metrics` <sub>tool</sub>
 
 - Up to 1,000 PMIDs per call; the first 200 distinct are fetched and the rest returned in `overLimit`, PMIDs NIH iCite has no record for in `unavailablePmids`
-- Relative Citation Ratio (with a provisional flag), NIH percentile, citation count and rates, Approximate Potential to Translate, MeSH category shares, and clinical citations
+- Relative Citation Ratio (with a provisional flag), NIH percentile, citation count and rates, Approximate Potential to Translate, MeSH category shares, and clinical citation counts; `includeClinicalCitations` adds `clinicalCitationPmids`, the PMIDs of the clinical articles citing each record (uncapped, so off by default)
 - iCite does not flag retractions; check `pubmed_fetch_articles` for notices
 - Source: [NIH iCite](https://icite.od.nih.gov/)
 
@@ -159,7 +160,7 @@ Biomedical literature from PubMed, PubMed Central, and Europe PMC. Search it, fe
 
 ### `pubmed_convert_ids` <sub>tool</sub>
 
-- Up to 50 ids per call, all of one declared `idType` (`doi`, `pmid`, `pmcid`); only PMC-indexed articles resolve
+- Up to 50 ids per call, all of one declared `idType` (`doi`, `pmid`, `pmcid`); only PMC-indexed articles resolve. A DOI may be a resolver link or carry the `doi:` scheme; `requestedId` keeps the spelling sent
 - One success or error row per id, in order, so a partial batch never fails
 
 ---
@@ -185,7 +186,7 @@ PubMed-specific:
 - NCBI E-utilities (ESearch, EFetch, ESummary, ELink, ESpell, EInfo, ECitMatch) and the PMC ID Converter, with Europe PMC, OpenAlex, and Unpaywall filling the gaps
 - Shared NCBI request queue: paced request starts, capped concurrency, a cooldown that holds every caller after an NCBI 429, one deadline covering queue wait and retries, and fail-fast for an endpoint whose retries were just spent on an outage: later calls to it make one attempt each until one succeeds
 - XML parsing built for PubMed's inconsistent records: structured abstracts, missing fields, varying date formats
-- Forgiving identifiers: a zero-padded PMID resolves as the PMID it spells in every tool that takes one; `pubmed_fetch_fulltext` also matches DOIs case-insensitively and PMC IDs with or without the `PMC` prefix
+- Forgiving identifiers: a zero-padded PMID resolves as the PMID it spells in every tool that takes one; `pubmed_fetch_fulltext` also matches DOIs case-insensitively and PMC IDs with or without the `PMC` prefix; `pubmed_convert_ids` and `pubmed_fetch_fulltext` read a DOI link or `doi:` form as the bare DOI
 - Hand-rolled citation formatters (APA, MLA, BibTeX, RIS, Vancouver) with no dependencies
 
 Agent-friendly output:
@@ -241,6 +242,7 @@ An [NCBI API key](https://www.ncbi.nlm.nih.gov/account/settings/) in `NCBI_API_K
 | `EUROPEPMC_REQUEST_DELAY_MS` | Minimum gap between Europe PMC request starts, in ms. | `200` |
 | `EUROPEPMC_MAX_RETRIES` | Retry attempts for failed Europe PMC requests. | `3` |
 | `EUROPEPMC_TIMEOUT_MS` | Per-request timeout for Europe PMC calls, in ms. | `20000` |
+| `EUROPEPMC_TOTAL_DEADLINE_MS` | Deadline for one Europe PMC call across queue wait, retries, and backoff, in ms. | `45000` |
 | `MCP_TRANSPORT_TYPE` | Transport: `stdio` or `http`. | `stdio` |
 | `MCP_HTTP_PORT` | HTTP server port. | `3010` |
 | `MCP_SESSION_MODE` | HTTP session mode: `stateless`, `stateful`, or `auto`. | `stateless` |
@@ -301,7 +303,7 @@ The image defaults to HTTP transport, stateless session mode, and logs to `/var/
 | `src/mcp-server/prompts` | Prompt definitions. Research plan prompt. |
 | `src/services/ncbi` | NCBI E-utilities service layer — API client, queue, parser, formatter. |
 | `src/services/europe-pmc` | Europe PMC service — search + `fullTextXML` JATS retrieval. Reuses the NCBI JATS parser. |
-| `src/services/unpaywall` | Unpaywall service — DOI → OA location resolution and content fetch (HTML/PDF). |
+| `src/services/unpaywall` | Unpaywall service — DOI → OA location resolution and content fetch (HTML/PDF). HTML extraction runs off-thread: a worker thread per extraction, a 10 s deadline, two at a time per process. |
 | `src/services/openalex` | OpenAlex service — last-resort provider for `pubmed_find_related`. |
 | `src/config` | Server-specific environment variable parsing and validation with Zod. |
 | `tests/` | Unit and integration tests, mirroring the `src/` structure. |
