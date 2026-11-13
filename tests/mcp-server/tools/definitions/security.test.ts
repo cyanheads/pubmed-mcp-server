@@ -59,6 +59,9 @@ vi.mock('@/services/ncbi/parsing/esummary-parser.js', () => ({
 vi.mock('@/services/unpaywall/unpaywall-service.js', () => ({
   getUnpaywallService: mockGetUnpaywallService,
 }));
+vi.mock('@/services/unpaywall/html-extraction.js', () => ({
+  extractHtml: vi.fn(),
+}));
 vi.mock('@/services/europe-pmc/europe-pmc-service.js', () => ({
   getEuropePmcService: () => mockGetEpmcService(),
 }));
@@ -66,7 +69,6 @@ vi.mock('@cyanheads/mcp-ts-core/utils', async () => {
   const actual = await vi.importActual<Record<string, unknown>>('@cyanheads/mcp-ts-core/utils');
   return {
     ...actual,
-    htmlExtractor: { extract: vi.fn() },
     pdfParser: { extractText: vi.fn() },
   };
 });

@@ -381,3 +381,33 @@ describe('pubmed_fetch_fulltext section text escaping at every depth (#255)', ()
     );
   });
 });
+
+describe('pubmed_fetch_fulltext sections terms that matched nothing beside terms that did (#298)', () => {
+  const recovery =
+    'To list this article\'s headings, call again with `overflowMode: "outline"` and a small `maxCharacters`, without `sections`.';
+
+  it('counts a term matching a title past the schema depth as matched, and names the one that missed', async () => {
+    const { article, ctx, text } = await fetchFulltext({
+      pmcids: ['PMC10727567'],
+      sections: ['Variants', 'zzz'],
+    });
+
+    expect(article.sections.map((s) => s.title)).toEqual(['Results']);
+    expect(article.sections[0]?.subsections?.map((s) => s.title)).toEqual(['Genetics']);
+    expect(getEnrichment(ctx).notice).toBe(
+      `No section or subsection title in PMC10727567 matched the requested term (zzz); the other term matched. ${recovery}`,
+    );
+    // format() renders the article; the notice rides the framework's trailer.
+    expect(text).toContain('##### Genetics');
+  });
+
+  it('names a term no heading carries beside one matching a labelled subsection', async () => {
+    const { article, ctx } = await fetchFulltext({ sections: ['Statistical', 'Discussion'] });
+
+    expect(article.sections.map((s) => s.title)).toEqual(['Methods']);
+    expect(article.sections[0]?.subsections?.map((s) => s.title)).toEqual(['Statistical Analysis']);
+    expect(getEnrichment(ctx).notice).toBe(
+      `No section or subsection title in PMC13546078 matched the requested term (Discussion); the other term matched. ${recovery}`,
+    );
+  });
+});

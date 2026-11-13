@@ -27,7 +27,7 @@
  * @module tests/mcp-server/tools/definitions/fetch-fulltext-routing.test
  */
 
-import { createMockContext, getEnrichment } from '@cyanheads/mcp-ts-core/testing';
+import { createMockContext, getEnrichment, runToolContract } from '@cyanheads/mcp-ts-core/testing';
 import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { textBlocks } from '../../../_helpers.js';
@@ -547,6 +547,110 @@ describe('dois routing through the PMC ID Converter', () => {
     expect(result.articles).toEqual([]);
     expect(result.deferred).toMatchObject({ idType: 'doi', ids: ['10.1093/NAR/GKS1195'] });
     expect(text).toContain('as `dois`: 10.1093/NAR/GKS1195');
+  });
+});
+
+// ─── #299: DOI link and doi: forms ───────────────────────────────────────────
+
+describe('dois sent as a link or with the doi: scheme (#299)', () => {
+  const HINT =
+    'dois.0: DOI must start with "10." and contain a "/" (e.g. "10.1093/nar/gks1195"). Remove any whitespace or commas — provide each DOI separately.';
+
+  it.each([
+    'doi:10.1093/nar/gks1195',
+    'DOI: 10.1093/nar/gks1195',
+    'https://doi.org/10.1093/nar/gks1195',
+    'http://dx.doi.org/10.1093%2Fnar%2Fgks1195?utm_source=x',
+  ])('resolves %s as the bare DOI', async (sent) => {
+    serveGenbank();
+    const { result } = await fetchFulltext({ dois: [sent] });
+
+    expect(result.articles.map((a) => [a.viaSource, a.pmcId])).toEqual([['pmc', 'PMC3531190']]);
+    expect(converterIds()).toEqual([GENBANK.doi]);
+  });
+
+  it('fetches and counts a link and its bare DOI once', async () => {
+    serveGenbank();
+    const { result } = await fetchFulltext({
+      dois: ['https://doi.org/10.1093/nar/gks1195', GENBANK.doi],
+    });
+
+    expect(result.articles.map((a) => a.pmcId)).toEqual(['PMC3531190']);
+    expect(result.totalReturned).toBe(1);
+    expect(converterIds()).toEqual([GENBANK.doi]);
+    expect(pmcEfetchIds()).toEqual(['3531190']);
+  });
+
+  it('reports an unresolvable link under its bare DOI in unavailable[]', async () => {
+    const missing = '10.5555/missing';
+    converter.set(missing, null);
+    const { result, text } = await fetchFulltext({ dois: [`https://doi.org/${missing}`] });
+
+    expect(result.unavailable?.map((u) => [u.id, u.idType])).toEqual([[missing, 'doi']]);
+    expect(epmcQueries()).toEqual([`DOI:"${missing}"`]);
+    expect(unpaywallLookups().map((u) => decodeURIComponent(u.pathname))).toEqual([
+      `/v2/${missing}`,
+    ]);
+    expect(text).toContain(`- [doi] ${missing} — no-oa`);
+  });
+
+  it('hands back a deferred or over-limit link under its bare DOI', async () => {
+    serveGenbank();
+    const deferred = await fetchFulltext({
+      dois: ['doi:10.1093/nar/gks1195'],
+      maxResponseCharacters: 1,
+    });
+    expect(deferred.result.deferred).toMatchObject({ idType: 'doi', ids: [GENBANK.doi] });
+
+    // Ten DOIs no tier knows fill the per-call limit ahead of the link.
+    const first = Array.from({ length: 10 }, (_, i) => `10.5555/n${i}`);
+    const overLimit = await fetchFulltext({ dois: [...first, 'https://doi.org/10.5555/eleventh'] });
+    expect(overLimit.result.overLimit).toEqual({
+      limit: 10,
+      idType: 'doi',
+      ids: ['10.5555/eleventh'],
+    });
+  });
+
+  it.each([
+    ['a lone string', { dois: 'doi:10.1093/nar/gks1195' }],
+    ['a lone string under the singular alias', { doi: 'https://doi.org/10.1093/nar/gks1195' }],
+    ['a JSON-stringified array', { dois: '["doi:10.1093/nar/gks1195"]' }],
+    ['null beside another field', { pmcids: ['PMC3531190'], dois: null }],
+  ])('still validates %s once the framework repairs it', async (_label, input) => {
+    serveGenbank();
+    const result = await runToolContract(fetchFulltextTool, input as never);
+
+    expect(result.isError).toBeFalsy();
+    const { articles } = result.structuredContent as { articles: { pmcId?: string }[] };
+    expect(articles.map((a) => a.pmcId)).toEqual(['PMC3531190']);
+  });
+
+  it.each([
+    'https://example.org/10.1093/nar/gks1195',
+    'urn:doi:10.1093/nar/gks1195',
+    '10.1093%2Fnar%2Fgks1195',
+    'https://doi.org/10.1093/nar%2Cgks1195',
+  ])('rejects %s with the DOI rejection and its recovery hint', async (sent) => {
+    const result = await runToolContract(fetchFulltextTool, { dois: [sent] });
+
+    expect(result.isError).toBe(true);
+    expect(result.structuredContent).toMatchObject({
+      error: {
+        code: -32602,
+        data: {
+          reason: 'invalid_arguments',
+          recovery: { hint: HINT },
+          issues: [{ code: 'invalid_format', path: ['dois', 0] }],
+        },
+      },
+    });
+    expect(
+      textBlocks(result.content)
+        .map((b) => b.text)
+        .join('\n'),
+    ).toContain(HINT);
+    expect(requests()).toEqual([]);
   });
 });
 

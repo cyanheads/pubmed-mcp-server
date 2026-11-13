@@ -5,7 +5,7 @@
 
 import { readFileSync } from 'node:fs';
 import { type ContentBlock, z } from '@cyanheads/mcp-ts-core';
-import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
+import { JsonRpcErrorCode, timeout } from '@cyanheads/mcp-ts-core/errors';
 import { createMockContext, getEnrichment, runToolContract } from '@cyanheads/mcp-ts-core/testing';
 import { XMLParser } from 'fast-xml-parser';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
@@ -50,6 +50,9 @@ vi.mock('@/services/ncbi/parsing/pmc-article-parser.js', () => ({
 vi.mock('@/services/unpaywall/unpaywall-service.js', () => ({
   getUnpaywallService: () => mockGetUnpaywallService(),
 }));
+vi.mock('@/services/unpaywall/html-extraction.js', () => ({
+  extractHtml: mockHtmlExtract,
+}));
 vi.mock('@/services/europe-pmc/europe-pmc-service.js', () => ({
   getEuropePmcService: () => mockGetEpmcService(),
 }));
@@ -57,7 +60,6 @@ vi.mock('@cyanheads/mcp-ts-core/utils', async () => {
   const actual = await vi.importActual<Record<string, unknown>>('@cyanheads/mcp-ts-core/utils');
   return {
     ...actual,
-    htmlExtractor: { extract: mockHtmlExtract },
     pdfParser: { extractText: mockPdfExtractText },
   };
 });
@@ -257,6 +259,26 @@ describe('fetchFulltextTool', () => {
       expect(oneMore.error?.issues[0]?.message).toContain('51 distinct identifiers');
     });
 
+    it('counts a DOI once whether sent bare, as a link, or doi:-prefixed (issue #299)', () => {
+      const bare = Array.from({ length: 10 }, (_, i) => `10.3/${i}`);
+      const atCeiling = {
+        pmcids: Array.from({ length: 40 }, (_, i) => `PMC${i + 1}`),
+        dois: [
+          ...bare,
+          ...bare.map((d) => `https://doi.org/${d}`),
+          ...bare.map((d) => `DOI: ${d}`),
+        ],
+      };
+      expect(fetchFulltextTool.input.safeParse(atCeiling).success).toBe(true);
+
+      const oneMore = fetchFulltextTool.input.safeParse({
+        ...atCeiling,
+        dois: [...atCeiling.dois, 'doi:10.3/x'],
+      });
+      expect(oneMore.success).toBe(false);
+      expect(oneMore.error?.issues[0]?.message).toContain('51 distinct identifiers');
+    });
+
     it('counts the same digits in two fields as two identifiers (issues #192, #222)', () => {
       const parsed = fetchFulltextTool.input.safeParse({
         pmcids: Array.from({ length: 26 }, (_, i) => `PMC${i + 1}`),
@@ -299,6 +321,24 @@ describe('fetchFulltextTool', () => {
       const advertised = new RegExp(pattern as string);
       expect(advertised.test('10.1093/nar/gks1195')).toBe(true);
       expect(advertised.test('10.1002/a,b')).toBe(false);
+    });
+
+    it('advertises dois items as the plain DOI pattern, though a link or doi: form also parses (issue #299)', () => {
+      const schema = z.toJSONSchema(fetchFulltextTool.input, { io: 'input' }) as unknown as {
+        properties: { dois: unknown };
+      };
+      expect(schema.properties.dois).toStrictEqual({
+        type: 'array',
+        items: { type: 'string', pattern: '^10\\.[^\\s,]+\\/[^\\s,]+$' },
+        minItems: 1,
+        maxItems: 50,
+        description: expect.stringMatching(/^DOIs to resolve \(e\.g\. \["10\.21203\/rs/),
+      });
+      expect(
+        fetchFulltextTool.input.parse({
+          dois: ['doi:10.1093/nar/gks1195', 'https://doi.org/10.1093%2FNAR%2Fgks1195'],
+        }).dois,
+      ).toEqual(['10.1093/nar/gks1195', '10.1093/NAR/gks1195']);
     });
 
     it('describes each id field as combinable under the cross-field ceiling and fetch limit (issues #192, #222)', () => {
@@ -391,7 +431,7 @@ describe('fetchFulltextTool', () => {
     it('fetches by PMC IDs and tags articles with viaSource=pmc', async () => {
       mockParsePmcArticle.mockReturnValue({
         pmcId: 'PMC1234567',
-        pmcUrl: 'https://www.ncbi.nlm.nih.gov/pmc/articles/PMC1234567/',
+        pmcUrl: 'https://pmc.ncbi.nlm.nih.gov/articles/PMC1234567/',
         title: 'Full Text Article',
         sections: [{ title: 'Introduction', text: 'Body text.' }],
       });
@@ -423,7 +463,7 @@ describe('fetchFulltextTool', () => {
     it('carries the JATS electronic article locator through to structuredContent (issue #121)', async () => {
       mockParsePmcArticle.mockReturnValue({
         pmcId: 'PMC11711121',
-        pmcUrl: 'https://www.ncbi.nlm.nih.gov/pmc/articles/PMC11711121/',
+        pmcUrl: 'https://pmc.ncbi.nlm.nih.gov/articles/PMC11711121/',
         title: 'Article Number Only',
         journal: { title: 'The Plant Genome', volume: '18', issue: '1', elocationId: 'e20542' },
         sections: [{ title: 'Introduction', text: 'Body text.' }],
@@ -534,7 +574,7 @@ describe('fetchFulltextTool', () => {
     it('normalizes direct PMC IDs and uses POST for large batches', async () => {
       mockParsePmcArticle.mockReturnValue({
         pmcId: 'PMC111',
-        pmcUrl: 'https://www.ncbi.nlm.nih.gov/pmc/articles/PMC111/',
+        pmcUrl: 'https://pmc.ncbi.nlm.nih.gov/articles/PMC111/',
         title: 'Direct PMC Article',
         sections: [{ title: 'Introduction', text: 'Body.' }],
       });
@@ -581,7 +621,7 @@ describe('fetchFulltextTool', () => {
       ]);
       mockParsePmcArticle.mockReturnValue({
         pmcId: 'PMC777',
-        pmcUrl: 'https://www.ncbi.nlm.nih.gov/pmc/articles/PMC777/',
+        pmcUrl: 'https://pmc.ncbi.nlm.nih.gov/articles/PMC777/',
         pmid: '12345',
         title: 'Resolved Article',
         sections: [
@@ -690,7 +730,7 @@ describe('fetchFulltextTool', () => {
       mockEpmcParseFullTextXml.mockReturnValue({ article: [{ body: [] }] });
       mockParsePmcArticle.mockReturnValue({
         pmcId: 'PMC42',
-        pmcUrl: 'https://www.ncbi.nlm.nih.gov/pmc/articles/PMC42/',
+        pmcUrl: 'https://pmc.ncbi.nlm.nih.gov/articles/PMC42/',
         title: 'EPMC-served article',
         sections: [{ title: 'Background', text: 'Body' }],
       });
@@ -798,7 +838,7 @@ describe('fetchFulltextTool', () => {
       // The parser reads no PMCID from a preprint's JATS and returns empty strings.
       mockParsePmcArticle.mockReturnValue({
         pmcId: '',
-        pmcUrl: 'https://www.ncbi.nlm.nih.gov/pmc/articles//',
+        pmcUrl: 'https://pmc.ncbi.nlm.nih.gov/articles//',
         title: 'A preprint Europe PMC serves',
         sections: [{ title: 'Introduction', text: 'Body.' }],
       });
@@ -929,7 +969,7 @@ describe('fetchFulltextTool', () => {
       mockEpmcParseFullTextXml.mockReturnValue({ article: [{ body: [] }] });
       mockParsePmcArticle.mockReturnValue({
         pmcId: 'PMC9999',
-        pmcUrl: 'https://www.ncbi.nlm.nih.gov/pmc/articles/PMC9999/',
+        pmcUrl: 'https://pmc.ncbi.nlm.nih.gov/articles/PMC9999/',
         title: 'EPMC-served PMC article',
         sections: [{ title: 'Introduction', text: 'Body.' }],
       });
@@ -1042,7 +1082,7 @@ describe('fetchFulltextTool', () => {
       mockEpmcParseFullTextXml.mockReturnValue({ article: [{ body: [] }] });
       mockParsePmcArticle.mockReturnValue({
         pmcId: 'PMC42',
-        pmcUrl: 'https://www.ncbi.nlm.nih.gov/pmc/articles/PMC42/',
+        pmcUrl: 'https://pmc.ncbi.nlm.nih.gov/articles/PMC42/',
         title: 'EPMC-recovered article',
         sections: [{ title: 'Introduction', text: 'Body.' }],
       });
@@ -1722,6 +1762,117 @@ describe('fetchFulltextTool', () => {
       ]);
     });
 
+    describe('off-thread HTML extraction (issue #302)', () => {
+      const BODY = '<html><body><article>Main body</article></body></html>';
+      /** What the extractor rejects with when a page runs past its deadline. */
+      const DEADLINE_MESSAGE =
+        'HTML extraction did not finish within its 10 s deadline and was stopped';
+
+      /** PMIDs 42 and 43, each with its own DOI and landing page. */
+      const twoLandingPages = () => {
+        mockIdConvert.mockResolvedValue([
+          { 'requested-id': '42', pmid: '42' },
+          { 'requested-id': '43', pmid: '43' },
+        ]);
+        mockEFetchBy({ pubmedDois: { '42': '10.1000/slow', '43': '10.1000/fast' } });
+        mockUnpaywallResolve.mockImplementation(async (doi: string) => ({
+          kind: 'found',
+          location: { url: `https://repo.example.org/${doi.split('/')[1]}` },
+        }));
+        mockUnpaywallFetchContent.mockImplementation(async (location: { url: string }) => ({
+          kind: 'html',
+          fetchedUrl: location.url,
+          body: BODY,
+        }));
+      };
+
+      it('hands the fetched HTML, its URL, and the call’s signal to the extractor', async () => {
+        mockIdConvert.mockResolvedValue([{ 'requested-id': '42', pmid: '42' }]);
+        mockEFetchBy({ pubmedDois: { '42': '10.1000/example' } });
+        mockUnpaywallResolve.mockResolvedValue({
+          kind: 'found',
+          location: { url: 'https://repo.example.org/paper' },
+        });
+        mockUnpaywallFetchContent.mockResolvedValue({
+          kind: 'html',
+          fetchedUrl: 'https://repo.example.org/paper?view=full',
+          body: BODY,
+        });
+        mockHtmlExtract.mockResolvedValue({ content: 'Main body' });
+
+        const ctx = createMockContext({ errors: fetchFulltextTool.errors });
+        const input = fetchFulltextTool.input.parse({ pmids: ['42'] });
+        await fetchFulltextTool.handler(input, ctx);
+
+        expect(mockHtmlExtract).toHaveBeenCalledExactlyOnceWith(
+          BODY,
+          'https://repo.example.org/paper?view=full',
+          ctx.signal,
+        );
+      });
+
+      it('ends only the id whose extraction ran past its deadline, as parse-failed with the deadline in its detail', async () => {
+        twoLandingPages();
+        mockHtmlExtract.mockImplementation(async (_html: string, url: string) => {
+          if (url.endsWith('/slow')) {
+            throw timeout(DEADLINE_MESSAGE, { reason: 'html_extraction_deadline' });
+          }
+          return { title: 'Fast paper', content: 'Fast body' };
+        });
+
+        const ctx = createMockContext({ errors: fetchFulltextTool.errors });
+        const input = fetchFulltextTool.input.parse({ pmids: ['42', '43'] });
+        const result = await fetchFulltextTool.handler(input, ctx);
+
+        expect(result.articles).toEqual([
+          expect.objectContaining({ source: 'unpaywall', pmid: '43', content: 'Fast body' }),
+        ]);
+        expect(result.unavailable).toEqual([
+          {
+            id: '42',
+            idType: 'pmid',
+            reason: 'parse-failed',
+            triedTiers: [
+              { tier: 'pmc', outcome: 'not-attempted', detail: 'PMID has no PMC counterpart' },
+              { tier: 'europepmc', outcome: 'not-attempted', detail: 'EUROPEPMC_ENABLED=false' },
+              { tier: 'unpaywall', outcome: 'parse-failed', detail: DEADLINE_MESSAGE },
+            ],
+            unqueriedTiers: ['europepmc'],
+          },
+        ]);
+        const text = textBlocks(fetchFulltextTool.format!(result))
+          .map((block) => block.text)
+          .join('\n');
+        expect(text).toContain(`unpaywall:parse-failed (${DEADLINE_MESSAGE})`);
+        expect(text).toContain('Fast body');
+      });
+
+      it('rethrows the caller’s cancellation when the signal aborts mid-extraction', async () => {
+        twoLandingPages();
+        const extracting = Promise.withResolvers<void>();
+        mockHtmlExtract.mockImplementation(
+          (_html: string, _url: string, signal: AbortSignal) =>
+            new Promise((_resolve, reject) => {
+              signal.addEventListener('abort', () => reject(signal.reason), { once: true });
+              extracting.resolve();
+            }),
+        );
+        const controller = new AbortController();
+        const reason = new DOMException('The client went away', 'AbortError');
+
+        const ctx = createMockContext({
+          errors: fetchFulltextTool.errors,
+          signal: controller.signal,
+        });
+        const input = fetchFulltextTool.input.parse({ pmids: ['42', '43'] });
+        const call = fetchFulltextTool.handler(input, ctx);
+        await extracting.promise;
+        controller.abort(reason);
+
+        await expect(call).rejects.toBe(reason);
+      });
+    });
+
     it('combines PMC hits with Unpaywall fallback in a single response', async () => {
       mockIdConvert.mockResolvedValue([
         { 'requested-id': '1', pmid: '1', pmcid: 'PMC100' },
@@ -1729,7 +1880,7 @@ describe('fetchFulltextTool', () => {
       ]);
       mockParsePmcArticle.mockReturnValue({
         pmcId: 'PMC100',
-        pmcUrl: 'https://www.ncbi.nlm.nih.gov/pmc/articles/PMC100/',
+        pmcUrl: 'https://pmc.ncbi.nlm.nih.gov/articles/PMC100/',
         pmid: '1',
         title: 'PMC Hit',
         sections: [{ title: 'Introduction', text: 'Body.' }],
@@ -2293,7 +2444,7 @@ describe('fetchFulltextTool', () => {
       mockEpmcParseFullTextXml.mockReturnValue({ article: [{ body: [] }] });
       mockParsePmcArticle.mockReturnValue({
         pmcId: 'PMC42',
-        pmcUrl: 'https://www.ncbi.nlm.nih.gov/pmc/articles/PMC42/',
+        pmcUrl: 'https://pmc.ncbi.nlm.nih.gov/articles/PMC42/',
         title: 'EPMC-served article',
         sections: [{ title: 'Methods', text: 'Methods body' }],
         doi: '10.1/x',
@@ -2430,7 +2581,7 @@ describe('fetchFulltextTool', () => {
       ]);
       mockParsePmcArticle.mockReturnValue({
         pmcId: 'PMC13060058',
-        pmcUrl: 'https://www.ncbi.nlm.nih.gov/pmc/articles/PMC13060058/',
+        pmcUrl: 'https://pmc.ncbi.nlm.nih.gov/articles/PMC13060058/',
         pmid: '41959413',
         doi: '10.1101/2025.09.12.675873',
         title: 'Converter-resolved article',
@@ -2471,7 +2622,7 @@ describe('fetchFulltextTool', () => {
       ]);
       mockParsePmcArticle.mockReturnValue({
         pmcId: 'PMC500',
-        pmcUrl: 'https://www.ncbi.nlm.nih.gov/pmc/articles/PMC500/',
+        pmcUrl: 'https://pmc.ncbi.nlm.nih.gov/articles/PMC500/',
         doi: '10.1/inpmc',
         title: 'In PMC',
         sections: [{ title: 'Introduction', text: 'Body.' }],
@@ -2579,7 +2730,7 @@ describe('fetchFulltextTool', () => {
       // an error). (#206)
       mockParsePmcArticle.mockReturnValue({
         pmcId: 'PMC3531190',
-        pmcUrl: 'https://www.ncbi.nlm.nih.gov/pmc/articles/PMC3531190/',
+        pmcUrl: 'https://pmc.ncbi.nlm.nih.gov/articles/PMC3531190/',
         title: 'Article with real sections',
         sections: [
           { title: 'Introduction', text: 'Intro body.' },
@@ -2617,7 +2768,7 @@ describe('fetchFulltextTool', () => {
     it('does not emit a notice when the sections filter matches', async () => {
       mockParsePmcArticle.mockReturnValue({
         pmcId: 'PMC3531190',
-        pmcUrl: 'https://www.ncbi.nlm.nih.gov/pmc/articles/PMC3531190/',
+        pmcUrl: 'https://pmc.ncbi.nlm.nih.gov/articles/PMC3531190/',
         title: 'Article with real sections',
         sections: [
           { title: 'Introduction', text: 'Intro body.' },
@@ -2647,7 +2798,7 @@ describe('fetchFulltextTool', () => {
       // that actually filtered.
       mockParsePmcArticle.mockReturnValue({
         pmcId: 'PMC3531190',
-        pmcUrl: 'https://www.ncbi.nlm.nih.gov/pmc/articles/PMC3531190/',
+        pmcUrl: 'https://pmc.ncbi.nlm.nih.gov/articles/PMC3531190/',
         title: 'Article with real sections',
         sections: [
           { title: 'Introduction', text: 'Intro body.' },
@@ -2672,7 +2823,7 @@ describe('fetchFulltextTool', () => {
     it('does not emit a notice when no sections filter is provided', async () => {
       mockParsePmcArticle.mockReturnValue({
         pmcId: 'PMC3531190',
-        pmcUrl: 'https://www.ncbi.nlm.nih.gov/pmc/articles/PMC3531190/',
+        pmcUrl: 'https://pmc.ncbi.nlm.nih.gov/articles/PMC3531190/',
         title: 'Article',
         sections: [{ title: 'Introduction', text: 'Intro body.' }],
       });
@@ -2691,7 +2842,7 @@ describe('fetchFulltextTool', () => {
       // than the section filter.
       mockParsePmcArticle.mockReturnValue({
         pmcId: 'PMC3531190',
-        pmcUrl: 'https://www.ncbi.nlm.nih.gov/pmc/articles/PMC3531190/',
+        pmcUrl: 'https://pmc.ncbi.nlm.nih.gov/articles/PMC3531190/',
         title: 'Metadata-only article',
         sections: [],
       });
@@ -2733,7 +2884,7 @@ describe('fetchFulltextTool', () => {
       mockEpmcParseFullTextXml.mockReturnValue({ article: [{ body: [] }] });
       mockParsePmcArticle.mockReturnValue({
         pmcId: 'PMC42',
-        pmcUrl: 'https://www.ncbi.nlm.nih.gov/pmc/articles/PMC42/',
+        pmcUrl: 'https://pmc.ncbi.nlm.nih.gov/articles/PMC42/',
         title: 'EPMC-served article',
         sections: [{ title: 'Background', text: 'Body' }],
       });
@@ -2777,7 +2928,7 @@ describe('fetchFulltextTool', () => {
       mockEpmcParseFullTextXml.mockReturnValue({ article: [{ body: [] }] });
       mockParsePmcArticle.mockReturnValue({
         pmcId: 'PMC42',
-        pmcUrl: 'https://www.ncbi.nlm.nih.gov/pmc/articles/PMC42/',
+        pmcUrl: 'https://pmc.ncbi.nlm.nih.gov/articles/PMC42/',
         title: 'EPMC-served article',
         sections: [{ title: 'Background', text: 'Body' }],
       });
@@ -2796,6 +2947,263 @@ describe('fetchFulltextTool', () => {
         'requested section filter (NoSuchSection) for article PMC42',
       );
     });
+  });
+
+  describe('section-filter terms that matched nothing beside terms that did (#298)', () => {
+    /** The recovery sentence closing the notice, for one article or several. */
+    const listHeadings = (whose: string) =>
+      `To list ${whose} headings, call again with \`overflowMode: "outline"\` and a small \`maxCharacters\`, without \`sections\`.`;
+
+    /** PMC3531190's top-level headings, which carry no conclusion. */
+    const PMC3531190 = {
+      pmcId: 'PMC3531190',
+      pmcUrl: 'https://pmc.ncbi.nlm.nih.gov/articles/PMC3531190/',
+      title: 'Article with an introduction',
+      sections: [
+        { title: 'INTRODUCTION', text: 'Intro body.' },
+        { title: 'MATERIALS AND METHODS', text: 'Methods body.' },
+        { title: 'DISCUSSION', text: 'Discussion body.' },
+      ],
+    };
+
+    /** PMC13749732 titles its results "Findings". */
+    const PMC13749732 = {
+      pmcId: 'PMC13749732',
+      pmcUrl: 'https://pmc.ncbi.nlm.nih.gov/articles/PMC13749732/',
+      title: 'Qualitative study',
+      sections: [
+        { title: 'Background', text: 'Background body.' },
+        { title: 'Methods', text: 'Methods body.' },
+        { title: 'Findings', text: 'Findings body.' },
+        { title: 'Conclusion', text: 'Conclusion body.' },
+      ],
+    };
+
+    /** PMC EFetch answering with one `<article>` per entry in `articles`, in order. */
+    function servePmc(...articles: object[]) {
+      for (const article of articles) mockParsePmcArticle.mockReturnValueOnce(article);
+      mockEFetch.mockResolvedValue([{ 'pmc-articleset': articles.map(() => ({ article: [] })) }]);
+    }
+
+    function noticeOf(result: Awaited<ReturnType<typeof runToolContract>>): string | undefined {
+      return (result.structuredContent as { notice?: string }).notice;
+    }
+
+    function textOf(result: Awaited<ReturnType<typeof runToolContract>>): string {
+      return textBlocks(result.content as ContentBlock[])
+        .map((b) => b.text)
+        .join('\n');
+    }
+
+    function titlesOf(
+      result: Awaited<ReturnType<typeof runToolContract>>,
+    ): (string | undefined)[][] {
+      const { articles } = result.structuredContent as { articles: { sections: DeepSection[] }[] };
+      return articles.map((a) => a.sections.map((s) => s.title));
+    }
+
+    it('names the terms that matched no title in an article that kept a section', async () => {
+      servePmc(PMC3531190);
+
+      const result = await runToolContract(fetchFulltextTool, {
+        pmcids: ['PMC3531190'],
+        sections: ['introduction', 'conclusion', 'zzz'],
+      });
+
+      expect(titlesOf(result)).toEqual([['INTRODUCTION']]);
+      const notice = `No section or subsection title in PMC3531190 matched the requested terms (conclusion, zzz); the other term matched. ${listHeadings("this article's")}`;
+      expect(noticeOf(result)).toBe(notice);
+      expect(textOf(result)).toContain(notice);
+    });
+
+    it('names one unmatched term in the singular, beside the one that matched', async () => {
+      servePmc(PMC13749732);
+
+      const result = await runToolContract(fetchFulltextTool, {
+        pmcids: ['PMC13749732'],
+        sections: ['Methods', 'Results'],
+      });
+
+      expect(titlesOf(result)).toEqual([['Methods']]);
+      const notice = `No section or subsection title in PMC13749732 matched the requested term (Results); the other term matched. ${listHeadings("this article's")}`;
+      expect(noticeOf(result)).toBe(notice);
+      expect(textOf(result)).toContain(notice);
+    });
+
+    it('names each article its own unmatched terms, and keeps the all-terms notice for an article every term missed', async () => {
+      servePmc(PMC3531190, PMC13749732);
+
+      const result = await runToolContract(fetchFulltextTool, {
+        pmcids: ['PMC3531190', 'PMC13749732'],
+        sections: ['introduction', 'results', 'zzz'],
+      });
+
+      expect(titlesOf(result)).toEqual([['INTRODUCTION'], []]);
+      const notice = noticeOf(result);
+      expect(notice).toBe(
+        `No section or subsection title, at any nesting depth, matched the requested section filter (introduction, results, zzz) for article PMC13749732. The full text was retrieved but every section, back matter included, was filtered out. Retry without \`sections\`, or filter on broader headings such as Introduction, Methods, Results, or Discussion. No section or subsection title in PMC3531190 matched the requested terms (results, zzz); the other term matched. ${listHeadings("this article's")}`,
+      );
+      expect(textOf(result)).toContain(notice);
+    });
+
+    it('lists several articles in the order articles lists them, under one closing sentence', async () => {
+      // PMC EFetch answers in the reverse of the request order.
+      servePmc(PMC13749732, PMC3531190);
+
+      const result = await runToolContract(fetchFulltextTool, {
+        pmcids: ['PMC3531190', 'PMC13749732'],
+        sections: ['methods', 'discussion', 'findings'],
+      });
+
+      expect(titlesOf(result)).toEqual([
+        ['MATERIALS AND METHODS', 'DISCUSSION'],
+        ['Methods', 'Findings'],
+      ]);
+      const notice = `No section or subsection title in PMC3531190 matched the requested term (findings); the other terms matched. No section or subsection title in PMC13749732 matched the requested term (discussion); the other terms matched. ${listHeadings("these articles'")}`;
+      expect(noticeOf(result)).toBe(notice);
+      expect(textOf(result)).toContain(notice);
+    });
+
+    it('counts a term matching a nested subsection or only a back-matter title as matched', async () => {
+      servePmc({
+        pmcId: 'PMC9575052',
+        pmcUrl: 'https://pmc.ncbi.nlm.nih.gov/articles/PMC9575052/',
+        title: 'Article with nested results',
+        sections: [
+          { title: 'INTRODUCTION', text: 'Intro body.' },
+          {
+            title: 'RESULTS',
+            text: 'Results body.',
+            subsections: [{ title: 'Demographics', text: 'Demographics body.' }],
+          },
+        ],
+        backSections: [{ title: 'Acknowledgments', text: 'We thank the lab.' }],
+      });
+
+      const result = await runToolContract(fetchFulltextTool, {
+        pmcids: ['PMC9575052'],
+        sections: ['Demographics', 'acknowledg', 'zzz'],
+      });
+
+      expect(titlesOf(result)).toEqual([['RESULTS', 'Acknowledgments']]);
+      expect(noticeOf(result)).toBe(
+        `No section or subsection title in PMC9575052 matched the requested term (zzz); the other terms matched. ${listHeadings("this article's")}`,
+      );
+    });
+
+    it('does not name a term whose only match maxSections cut', async () => {
+      servePmc(PMC3531190);
+
+      const result = await runToolContract(fetchFulltextTool, {
+        pmcids: ['PMC3531190'],
+        sections: ['introduction', 'discussion'],
+        maxSections: 1,
+      });
+
+      expect(titlesOf(result)).toEqual([['INTRODUCTION']]);
+      const notice = noticeOf(result);
+      expect(notice).toContain('`maxSections` (1) kept the first 1 of 2 top-level sections');
+      expect(notice).not.toContain('matched the requested term');
+    });
+
+    it('emits no section-filter notice when every term matches', async () => {
+      servePmc(PMC3531190);
+
+      const result = await runToolContract(fetchFulltextTool, {
+        pmcids: ['PMC3531190'],
+        sections: ['introduction', 'discussion'],
+      });
+
+      expect(titlesOf(result)).toEqual([['INTRODUCTION', 'DISCUSSION']]);
+      expect(noticeOf(result)).toBeUndefined();
+    });
+
+    it('names the unmatched terms for a Europe PMC-served article', async () => {
+      mockGetEpmcService.mockReturnValue({
+        search: mockEpmcSearch,
+        fullTextXml: mockEpmcFullTextXml,
+        parseFullTextXml: mockEpmcParseFullTextXml,
+      });
+      mockIdConvert.mockResolvedValue([{ 'requested-id': '42', pmid: '42' }]);
+      mockEpmcSearch.mockResolvedValue({
+        hits: [{ id: '42', source: 'MED', pmid: '42', pmcid: 'PMC42', doi: '10.1/x', ...OA_PMC42 }],
+        hitCount: 1,
+        cursorMark: '*',
+      });
+      mockEpmcFullTextXml.mockResolvedValue({
+        kind: 'found',
+        xml: '<article/>',
+        epmcId: 'PMC42',
+        source: 'MED',
+      });
+      mockEpmcParseFullTextXml.mockReturnValue({ article: [{ body: [] }] });
+      mockParsePmcArticle.mockReturnValue({
+        pmcId: 'PMC42',
+        pmcUrl: 'https://pmc.ncbi.nlm.nih.gov/articles/PMC42/',
+        title: 'EPMC-served article',
+        sections: [{ title: 'Background', text: 'Body' }],
+      });
+
+      const result = await runToolContract(fetchFulltextTool, {
+        pmids: ['42'],
+        sections: ['background', 'zzz'],
+      });
+
+      const { articles } = result.structuredContent as { articles: { viaSource: string }[] };
+      expect(articles.map((a) => a.viaSource)).toEqual(['europepmc']);
+      expect(titlesOf(result)).toEqual([['Background']]);
+      const notice = `No section or subsection title in PMC42 matched the requested term (zzz); the other term matched. ${listHeadings("this article's")}`;
+      expect(noticeOf(result)).toBe(notice);
+      expect(textOf(result)).toContain(notice);
+    });
+
+    it.each([
+      [
+        'every term missed',
+        ['zzz'],
+        'matched the requested section filter',
+        'matched the requested section filter (zzz) for article PMC3531190.',
+        'PMC3531190, PMC13749732',
+      ],
+      [
+        'some terms missed',
+        ['methods', 'zzz'],
+        'matched the requested term',
+        'No section or subsection title in PMC3531190 matched the requested term (zzz)',
+        'title in PMC13749732',
+      ],
+    ])(
+      'names no article maxResponseCharacters deferred when %s',
+      async (_label, sections, sentence, keptMiss, deferredMiss) => {
+        const both = () => servePmc(PMC3531190, PMC13749732);
+        both();
+        const probe = await runToolContract(fetchFulltextTool, {
+          pmcids: ['PMC3531190', 'PMC13749732'],
+          sections,
+          maxResponseCharacters: 1,
+        });
+        // Nothing fits under a one-character ceiling, so both articles are deferred.
+        const { deferred } = probe.structuredContent as {
+          deferred: { ids: string[]; nextDeferredCharacters: number };
+        };
+        expect(deferred.ids).toEqual(['PMC3531190', 'PMC13749732']);
+        expect(noticeOf(probe)).not.toContain(sentence);
+
+        // A ceiling the first article fits returns it and defers the second.
+        both();
+        const result = await runToolContract(fetchFulltextTool, {
+          pmcids: ['PMC3531190', 'PMC13749732'],
+          sections,
+          maxResponseCharacters: deferred.nextDeferredCharacters,
+        });
+        expect((result.structuredContent as { deferred: { ids: string[] } }).deferred.ids).toEqual([
+          'PMC13749732',
+        ]);
+        expect(noticeOf(result)).toContain(keptMiss);
+        expect(noticeOf(result)).not.toContain(deferredMiss);
+        expect(textOf(result)).toContain(keptMiss);
+      },
+    );
   });
 
   describe('Europe PMC query shapes (issue #85)', () => {
@@ -2880,7 +3288,7 @@ describe('fetchFulltextTool', () => {
     function withBodylessPmcArticle(pmcId: string, doi: string) {
       mockParsePmcArticle.mockReturnValue({
         pmcId,
-        pmcUrl: `https://www.ncbi.nlm.nih.gov/pmc/articles/${pmcId}/`,
+        pmcUrl: `https://pmc.ncbi.nlm.nih.gov/articles/${pmcId}/`,
         doi,
         title: 'Publisher blocks XML download',
         abstract: 'Abstract text.',
@@ -3002,7 +3410,7 @@ describe('fetchFulltextTool', () => {
       mockEpmcParseFullTextXml.mockReturnValue({ article: [{ front: [] }] });
       mockParsePmcArticle.mockReturnValue({
         pmcId: 'PMC42',
-        pmcUrl: 'https://www.ncbi.nlm.nih.gov/pmc/articles/PMC42/',
+        pmcUrl: 'https://pmc.ncbi.nlm.nih.gov/articles/PMC42/',
         title: 'EPMC front matter only',
         sections: [],
       });
@@ -3285,7 +3693,7 @@ describe('fetchFulltextTool', () => {
     function stagePmcArticle(sections: unknown[]) {
       mockParsePmcArticle.mockReturnValue({
         pmcId: 'PMC81',
-        pmcUrl: 'https://www.ncbi.nlm.nih.gov/pmc/articles/PMC81/',
+        pmcUrl: 'https://pmc.ncbi.nlm.nih.gov/articles/PMC81/',
         pmid: '4242',
         doi: '10.1000/budget',
         title: 'Budgeted Article',
@@ -3575,7 +3983,7 @@ describe('fetchFulltextTool', () => {
       mockEpmcParseFullTextXml.mockReturnValue({ article: [{ body: [] }] });
       mockParsePmcArticle.mockReturnValue({
         pmcId: 'PMC42',
-        pmcUrl: 'https://www.ncbi.nlm.nih.gov/pmc/articles/PMC42/',
+        pmcUrl: 'https://pmc.ncbi.nlm.nih.gov/articles/PMC42/',
         title: 'EPMC-served article',
         sections: [
           { title: 'Background', text: 'A'.repeat(500) },
@@ -3675,7 +4083,7 @@ describe('fetchFulltextTool', () => {
       ]);
       mockParsePmcArticle.mockReturnValue({
         pmcId: 'PMC100',
-        pmcUrl: 'https://www.ncbi.nlm.nih.gov/pmc/articles/PMC100/',
+        pmcUrl: 'https://pmc.ncbi.nlm.nih.gov/articles/PMC100/',
         pmid: '1',
         title: 'PMC Hit',
         sections: [
@@ -3858,7 +4266,7 @@ describe('fetchFulltextTool', () => {
               source: 'pmc',
               viaSource: 'pmc',
               pmcId: 'PMC1',
-              pmcUrl: 'https://www.ncbi.nlm.nih.gov/pmc/articles/PMC1/',
+              pmcUrl: 'https://pmc.ncbi.nlm.nih.gov/articles/PMC1/',
               title: 'Article',
               pmid: '12345',
               pubmedUrl: 'https://pubmed.ncbi.nlm.nih.gov/12345/',
@@ -3978,7 +4386,7 @@ describe('fetchFulltextTool', () => {
                 source: 'pmc',
                 viaSource: 'pmc',
                 pmcId: 'PMC1',
-                pmcUrl: 'https://www.ncbi.nlm.nih.gov/pmc/articles/PMC1/',
+                pmcUrl: 'https://pmc.ncbi.nlm.nih.gov/articles/PMC1/',
                 title: 'Article',
                 affiliations: ['1 Division of Gastroenterology', 'Example University'],
                 sections: [],
@@ -4253,7 +4661,7 @@ describe('fetchFulltextTool', () => {
                 source: 'pmc',
                 viaSource: 'pmc',
                 pmcId: 'PMC1',
-                pmcUrl: 'https://www.ncbi.nlm.nih.gov/pmc/articles/PMC1/',
+                pmcUrl: 'https://pmc.ncbi.nlm.nih.gov/articles/PMC1/',
                 title: 'Real Article',
                 authors: [],
                 affiliations: [],
@@ -4277,7 +4685,7 @@ describe('fetchFulltextTool', () => {
       source: 'pmc' as const,
       viaSource: 'pmc' as const,
       pmcId: 'PMC1',
-      pmcUrl: 'https://www.ncbi.nlm.nih.gov/pmc/articles/PMC1/',
+      pmcUrl: 'https://pmc.ncbi.nlm.nih.gov/articles/PMC1/',
       title: 'Article',
       authors: [
         { lastName: 'Smith', givenNames: 'Jane' },
@@ -4440,7 +4848,7 @@ describe('fetchFulltextTool whole-response budget (issue #100)', () => {
     for (const a of articles) {
       mockParsePmcArticle.mockReturnValueOnce({
         pmcId: a.pmcId,
-        pmcUrl: `https://www.ncbi.nlm.nih.gov/pmc/articles/${a.pmcId}/`,
+        pmcUrl: `https://pmc.ncbi.nlm.nih.gov/articles/${a.pmcId}/`,
         title: a.title ?? `Article ${a.pmcId}`,
         ...(a.abstract !== undefined && { abstract: a.abstract }),
         sections: a.sections,
@@ -4470,7 +4878,7 @@ describe('fetchFulltextTool whole-response budget (issue #100)', () => {
     const text = textBlocks(fetchFulltextTool.format!(result))[0]?.text ?? '';
 
     expect(JSON.stringify(result)).toBe(
-      '{"articles":[{"source":"pmc","viaSource":"pmc","pmcId":"PMC1","pmcUrl":"https://www.ncbi.nlm.nih.gov/pmc/articles/PMC1/","title":"Article PMC1","abstract":"Abs one.","sections":[{"title":"Intro","text":"Body one."}]}],"totalReturned":1}',
+      '{"articles":[{"source":"pmc","viaSource":"pmc","pmcId":"PMC1","pmcUrl":"https://pmc.ncbi.nlm.nih.gov/articles/PMC1/","title":"Article PMC1","abstract":"Abs one.","sections":[{"title":"Intro","text":"Body one."}]}],"totalReturned":1}',
     );
     expect(text).toBe(
       [
@@ -4480,7 +4888,7 @@ describe('fetchFulltextTool whole-response budget (issue #100)', () => {
         '### Article PMC1',
         '**Source:** PMC (structured JATS)',
         '**PMCID:** PMC1',
-        '**PMC:** <https://www.ncbi.nlm.nih.gov/pmc/articles/PMC1/>',
+        '**PMC:** <https://pmc.ncbi.nlm.nih.gov/articles/PMC1/>',
         '',
         '#### Abstract',
         'Abs one.',
@@ -4613,7 +5021,7 @@ describe('fetchFulltextTool whole-response budget (issue #100)', () => {
     const stageMixed = () => {
       mockParsePmcArticle.mockReturnValue({
         pmcId: 'PMC100',
-        pmcUrl: 'https://www.ncbi.nlm.nih.gov/pmc/articles/PMC100/',
+        pmcUrl: 'https://pmc.ncbi.nlm.nih.gov/articles/PMC100/',
         pmid: '1',
         title: 'PMC Hit',
         sections: [{ title: 'Intro', text: 'A'.repeat(300) }],
@@ -5092,7 +5500,7 @@ describe('fetchFulltextTool output-only ceilings (issue #223)', () => {
     for (const a of ARTICLES) {
       mockParsePmcArticle.mockReturnValueOnce({
         ...structuredClone(a),
-        pmcUrl: `https://www.ncbi.nlm.nih.gov/pmc/articles/${a.pmcId}/`,
+        pmcUrl: `https://pmc.ncbi.nlm.nih.gov/articles/${a.pmcId}/`,
       });
     }
   }
@@ -5556,7 +5964,7 @@ describe('fetchFulltextTool deep section nesting (issue #112)', () => {
   function stageDeepArticle() {
     mockParsePmcArticle.mockReturnValue({
       pmcId: 'PMC9575052',
-      pmcUrl: 'https://www.ncbi.nlm.nih.gov/pmc/articles/PMC9575052/',
+      pmcUrl: 'https://pmc.ncbi.nlm.nih.gov/articles/PMC9575052/',
       title: 'Deeply Nested Article',
       sections: [
         {
@@ -5646,7 +6054,7 @@ describe('fetchFulltextTool deep section nesting (issue #112)', () => {
   it('leaves a two-level article unchanged in shape and rendering', async () => {
     mockParsePmcArticle.mockReturnValue({
       pmcId: 'PMC11391094',
-      pmcUrl: 'https://www.ncbi.nlm.nih.gov/pmc/articles/PMC11391094/',
+      pmcUrl: 'https://pmc.ncbi.nlm.nih.gov/articles/PMC11391094/',
       title: 'Shallow Article',
       sections: [
         {
@@ -5777,7 +6185,7 @@ describe('fetchFulltextTool JATS tables (issue #111)', () => {
   function stageArticle(article: Record<string, unknown>) {
     mockParsePmcArticle.mockReturnValue({
       pmcId: 'PMC11391094',
-      pmcUrl: 'https://www.ncbi.nlm.nih.gov/pmc/articles/PMC11391094/',
+      pmcUrl: 'https://pmc.ncbi.nlm.nih.gov/articles/PMC11391094/',
       title: 'Table-bearing Article',
       sections: [
         { title: 'METHODS', text: 'Methods body.' },
@@ -6174,14 +6582,14 @@ describe('fetchFulltextTool JATS tables (issue #111)', () => {
     mockParsePmcArticle
       .mockReturnValueOnce({
         pmcId: 'PMC1189076',
-        pmcUrl: 'https://www.ncbi.nlm.nih.gov/pmc/articles/PMC1189076/',
+        pmcUrl: 'https://pmc.ncbi.nlm.nih.gov/articles/PMC1189076/',
         title: 'First graphic-only deposit',
         sections: [{ title: 'METHODS', text: 'Methods body.' }],
         tables: [PMC1189076_TABLE],
       })
       .mockReturnValueOnce({
         pmcId: 'PMC1183531',
-        pmcUrl: 'https://www.ncbi.nlm.nih.gov/pmc/articles/PMC1183531/',
+        pmcUrl: 'https://pmc.ncbi.nlm.nih.gov/articles/PMC1183531/',
         title: 'Second graphic-only deposit',
         sections: [{ title: 'RESULTS', text: 'Results body.' }],
         tables: [PMC1183531_TABLE],
@@ -6250,7 +6658,7 @@ describe('fetchFulltextTool JATS tables (issue #111)', () => {
     const sections = [{ title: 'METHODS', text: 'Methods body.' }];
     const base = {
       pmcId: 'PMC11391094',
-      pmcUrl: 'https://www.ncbi.nlm.nih.gov/pmc/articles/PMC11391094/',
+      pmcUrl: 'https://pmc.ncbi.nlm.nih.gov/articles/PMC11391094/',
       title: 'Table-bearing Article',
       sections,
     };
@@ -6293,7 +6701,7 @@ describe('fetchFulltextTool JATS tables (issue #111)', () => {
     };
     mockParsePmcArticle.mockReturnValue({
       pmcId: 'PMC9575052',
-      pmcUrl: 'https://www.ncbi.nlm.nih.gov/pmc/articles/PMC9575052/',
+      pmcUrl: 'https://pmc.ncbi.nlm.nih.gov/articles/PMC9575052/',
       title: 'Deeply Nested Article',
       sections: [
         {
@@ -6354,7 +6762,7 @@ describe('fetchFulltextTool JATS tables (issue #111)', () => {
     mockEpmcParseFullTextXml.mockReturnValue({ article: [{ body: [] }] });
     mockParsePmcArticle.mockReturnValue({
       pmcId: 'PMC42',
-      pmcUrl: 'https://www.ncbi.nlm.nih.gov/pmc/articles/PMC42/',
+      pmcUrl: 'https://pmc.ncbi.nlm.nih.gov/articles/PMC42/',
       title: 'EPMC article with a table',
       sections: [{ title: 'METHODS', text: 'Methods body.' }],
       tables: [TABLE_IN_SECTION],
@@ -6382,7 +6790,7 @@ describe('fetchFulltextTool nested sections filter (issue #126)', () => {
   function stageNestedArticle() {
     mockParsePmcArticle.mockReturnValue({
       pmcId: 'PMC9575052',
-      pmcUrl: 'https://www.ncbi.nlm.nih.gov/pmc/articles/PMC9575052/',
+      pmcUrl: 'https://pmc.ncbi.nlm.nih.gov/articles/PMC9575052/',
       title: 'Nested Article',
       sections: [
         { title: 'Introduction', text: 'Intro body.' },
@@ -6613,7 +7021,7 @@ describe('fetchFulltextTool JATS assets (issue #130)', () => {
   function stageArticle(article: Record<string, unknown>) {
     mockParsePmcArticle.mockReturnValue({
       pmcId: 'PMC11726426',
-      pmcUrl: 'https://www.ncbi.nlm.nih.gov/pmc/articles/PMC11726426/',
+      pmcUrl: 'https://pmc.ncbi.nlm.nih.gov/articles/PMC11726426/',
       title: 'Figure-bearing Article',
       sections: MARKED_SECTIONS,
       ...article,
@@ -6747,7 +7155,7 @@ describe('fetchFulltextTool JATS assets (issue #130)', () => {
   it('returns a byte-identical response under includeAssets: false', async () => {
     const base = {
       pmcId: 'PMC11726426',
-      pmcUrl: 'https://www.ncbi.nlm.nih.gov/pmc/articles/PMC11726426/',
+      pmcUrl: 'https://pmc.ncbi.nlm.nih.gov/articles/PMC11726426/',
       title: 'Figure-bearing Article',
     };
     // The pre-lift response for this input is exactly the response for the same
@@ -7087,14 +7495,14 @@ describe('fetchFulltextTool JATS assets (issue #130)', () => {
     mockParsePmcArticle
       .mockReturnValueOnce({
         pmcId: 'PMC11726426',
-        pmcUrl: 'https://www.ncbi.nlm.nih.gov/pmc/articles/PMC11726426/',
+        pmcUrl: 'https://pmc.ncbi.nlm.nih.gov/articles/PMC11726426/',
         title: 'Cheap assets',
         sections: [{ title: 'METHODS', text: 'M'.repeat(10) }],
         assets: [cheap],
       })
       .mockReturnValueOnce({
         pmcId: 'PMC10827061',
-        pmcUrl: 'https://www.ncbi.nlm.nih.gov/pmc/articles/PMC10827061/',
+        pmcUrl: 'https://pmc.ncbi.nlm.nih.gov/articles/PMC10827061/',
         title: 'Costly assets',
         sections: [{ title: 'METHODS', text: 'M'.repeat(10) }],
         assets: [costly],
@@ -7126,13 +7534,13 @@ describe('fetchFulltextTool JATS assets (issue #130)', () => {
     mockParsePmcArticle
       .mockReturnValueOnce({
         pmcId: 'PMC12753918',
-        pmcUrl: 'https://www.ncbi.nlm.nih.gov/pmc/articles/PMC12753918/',
+        pmcUrl: 'https://pmc.ncbi.nlm.nih.gov/articles/PMC12753918/',
         title: 'No assets',
         sections: [{ title: 'METHODS', text: 'Short.' }],
       })
       .mockReturnValueOnce({
         pmcId: 'PMC11726426',
-        pmcUrl: 'https://www.ncbi.nlm.nih.gov/pmc/articles/PMC11726426/',
+        pmcUrl: 'https://pmc.ncbi.nlm.nih.gov/articles/PMC11726426/',
         title: 'Asset-heavy',
         sections: [{ title: 'METHODS', text: 'Short.' }],
         assets: [heavy],
@@ -7203,7 +7611,7 @@ describe('fetchFulltextTool JATS assets (issue #130)', () => {
     mockEpmcParseFullTextXml.mockReturnValue({ article: [{ body: [] }] });
     mockParsePmcArticle.mockReturnValue({
       pmcId: 'PMC42',
-      pmcUrl: 'https://www.ncbi.nlm.nih.gov/pmc/articles/PMC42/',
+      pmcUrl: 'https://pmc.ncbi.nlm.nih.gov/articles/PMC42/',
       title: 'EPMC article with a figure',
       sections: MARKED_SECTIONS,
       assets: [FIGURE_IN_SECTION, FIGURE_NO_SECTION],
@@ -7250,7 +7658,7 @@ describe('fetchFulltextTool JATS assets (issue #130)', () => {
     mockEpmcParseFullTextXml.mockReturnValue({ article: [{ body: [] }] });
     mockParsePmcArticle.mockReturnValue({
       pmcId: 'PMC42',
-      pmcUrl: 'https://www.ncbi.nlm.nih.gov/pmc/articles/PMC42/',
+      pmcUrl: 'https://pmc.ncbi.nlm.nih.gov/articles/PMC42/',
       title: 'EPMC article with a figure',
       sections: MARKED_SECTIONS,
       assets: [FIGURE_IN_SECTION, FIGURE_NO_SECTION],
@@ -7278,7 +7686,7 @@ describe('fetchFulltextTool JATS assets (issue #130)', () => {
     };
     mockParsePmcArticle.mockReturnValue({
       pmcId: 'PMC9575052',
-      pmcUrl: 'https://www.ncbi.nlm.nih.gov/pmc/articles/PMC9575052/',
+      pmcUrl: 'https://pmc.ncbi.nlm.nih.gov/articles/PMC9575052/',
       title: 'Deeply Nested Article',
       sections: [
         {
@@ -7326,7 +7734,7 @@ describe('fetchFulltextTool JATS assets (issue #130)', () => {
     const ocr = '```\nTHE JOURNAL OF BIOLOGICAL CHEMISTRY\n   Vol. 247, No. 12\n```';
     mockParsePmcArticle.mockReturnValue({
       pmcId: 'PMC9663051',
-      pmcUrl: 'https://www.ncbi.nlm.nih.gov/pmc/articles/PMC9663051/',
+      pmcUrl: 'https://pmc.ncbi.nlm.nih.gov/articles/PMC9663051/',
       title: 'Legacy OCR deposit',
       sections: [{ text: ocr }],
     });
@@ -7429,7 +7837,7 @@ describe('fetchFulltextTool word-boundary cuts and subsection budgets (issue #14
   function stageSections(sections: unknown[], pmcId = 'PMC13546078') {
     mockParsePmcArticle.mockReturnValue({
       pmcId,
-      pmcUrl: `https://www.ncbi.nlm.nih.gov/pmc/articles/${pmcId}/`,
+      pmcUrl: `https://pmc.ncbi.nlm.nih.gov/articles/${pmcId}/`,
       title: 'Bariatric surgery versus GLP-1 receptor agonists',
       abstract: 'Background: Obesity, a major global health issue.',
       sections,
@@ -7766,7 +8174,7 @@ describe('fetchFulltextTool word-boundary cuts and subsection budgets (issue #14
       for (const a of staged) {
         mockParsePmcArticle.mockReturnValueOnce({
           pmcId: a.pmcId,
-          pmcUrl: `https://www.ncbi.nlm.nih.gov/pmc/articles/${a.pmcId}/`,
+          pmcUrl: `https://pmc.ncbi.nlm.nih.gov/articles/${a.pmcId}/`,
           title: `Article ${a.pmcId}`,
           sections: a.sections,
         });
@@ -7830,7 +8238,7 @@ describe('fetchFulltextTool word-boundary cuts and subsection budgets (issue #14
     function stageWithBack(sections: unknown[], backSections?: unknown[]) {
       mockParsePmcArticle.mockReturnValue({
         pmcId: 'PMC13546078',
-        pmcUrl: 'https://www.ncbi.nlm.nih.gov/pmc/articles/PMC13546078/',
+        pmcUrl: 'https://pmc.ncbi.nlm.nih.gov/articles/PMC13546078/',
         title: 'Bariatric surgery versus GLP-1 receptor agonists',
         sections,
         ...(backSections && { backSections }),
@@ -8097,7 +8505,7 @@ describe('fetchFulltextTool outline allotment at every level (issue #252)', () =
   function stage(sections: unknown[], backSections?: unknown[]) {
     mockParsePmcArticle.mockReturnValue({
       pmcId: 'PMC9293434',
-      pmcUrl: 'https://www.ncbi.nlm.nih.gov/pmc/articles/PMC9293434/',
+      pmcUrl: 'https://pmc.ncbi.nlm.nih.gov/articles/PMC9293434/',
       title: 'Pregabalin poisoning',
       sections,
       ...(backSections && { backSections }),
@@ -8391,7 +8799,7 @@ describe('fetchFulltextTool section headings match the truncation ledger (issue 
   function stageSections(sections: unknown[]) {
     mockParsePmcArticle.mockReturnValue({
       pmcId: 'PMC13546078',
-      pmcUrl: 'https://www.ncbi.nlm.nih.gov/pmc/articles/PMC13546078/',
+      pmcUrl: 'https://pmc.ncbi.nlm.nih.gov/articles/PMC13546078/',
       title: 'Heading Article',
       abstract: 'Background: Obesity, a major global health issue.',
       sections,
@@ -8501,7 +8909,7 @@ describe('fetchFulltextTool blank section selectors (issue #186)', () => {
   function stageArticle() {
     mockParsePmcArticle.mockReturnValue({
       pmcId: 'PMC10164684',
-      pmcUrl: 'https://www.ncbi.nlm.nih.gov/pmc/articles/PMC10164684/',
+      pmcUrl: 'https://pmc.ncbi.nlm.nih.gov/articles/PMC10164684/',
       title: 'Blank Selector Article',
       sections: [
         { title: 'INTRODUCTION', text: 'Intro body.' },
@@ -8826,7 +9234,7 @@ describe('fetchFulltextTool back matter (issue #206)', () => {
     function stage(article: Record<string, unknown> = {}) {
       mockParsePmcArticle.mockReturnValue({
         pmcId: 'PMC10707391',
-        pmcUrl: 'https://www.ncbi.nlm.nih.gov/pmc/articles/PMC10707391/',
+        pmcUrl: 'https://pmc.ncbi.nlm.nih.gov/articles/PMC10707391/',
         title: 'Cerebral MRI in monochorionic twins',
         sections: BODY,
         backSections: BACK,
@@ -9982,7 +10390,7 @@ describe('fetchFulltextTool sections past maxSections (issue #268)', () => {
   it('names untitled and labelled sections as the body headings do, escaped', async () => {
     mockParsePmcArticle.mockReturnValue({
       pmcId: 'PMC2',
-      pmcUrl: 'https://www.ncbi.nlm.nih.gov/pmc/articles/PMC2/',
+      pmcUrl: 'https://pmc.ncbi.nlm.nih.gov/articles/PMC2/',
       title: 'Unusual headings',
       sections: [
         { title: 'Kept', text: 'Kept text.' },
@@ -10031,7 +10439,7 @@ describe('fetchFulltextTool values sharing a paragraph (issue #261)', () => {
     source: 'pmc',
     viaSource: 'pmc',
     pmcId: 'PMC1',
-    pmcUrl: 'https://www.ncbi.nlm.nih.gov/pmc/articles/PMC1/',
+    pmcUrl: 'https://pmc.ncbi.nlm.nih.gov/articles/PMC1/',
     pmid: '1',
     pubmedUrl: 'https://pubmed.ncbi.nlm.nih.gov/1/',
     title: 'HLA-B*57:01 carriers',
@@ -10137,7 +10545,7 @@ describe('fetchFulltextTool values sharing a paragraph (issue #261)', () => {
         '⟨strong⟩PMCID:⟨/strong⟩ PMC1',
         '⟨strong⟩PMID:⟨/strong⟩ 1',
         '⟨strong⟩DOI:⟨/strong⟩ 10.1/x_',
-        '⟨strong⟩PMC:⟨/strong⟩ ⟨a href=https://www.ncbi.nlm.nih.gov/pmc/articles/PMC1/⟩https://www.ncbi.nlm.nih.gov/pmc/articles/PMC1/⟨/a⟩',
+        '⟨strong⟩PMC:⟨/strong⟩ ⟨a href=https://pmc.ncbi.nlm.nih.gov/articles/PMC1/⟩https://pmc.ncbi.nlm.nih.gov/articles/PMC1/⟨/a⟩',
         '⟨strong⟩PubMed:⟨/strong⟩ ⟨a href=https://pubmed.ncbi.nlm.nih.gov/1/⟩https://pubmed.ncbi.nlm.nih.gov/1/⟨/a⟩',
       ].join('\n'),
     );
@@ -10308,7 +10716,7 @@ describe('fetchFulltextTool article links (issue #307)', () => {
     expect(articles).toHaveLength(1);
     expect(articles[0]).toMatchObject({
       source: 'pmc',
-      pmcUrl: 'https://www.ncbi.nlm.nih.gov/pmc/articles/PMC10455816/',
+      pmcUrl: 'https://pmc.ncbi.nlm.nih.gov/articles/PMC10455816/',
       pubmedUrl: 'https://pubmed.ncbi.nlm.nih.gov/37629222/',
     });
   });
@@ -10350,7 +10758,7 @@ describe('fetchFulltextTool article links (issue #307)', () => {
   });
 
   it('renders a URL that cannot be an autolink as text reading back the URL, never a broken link', () => {
-    const pmcUrl = 'https://www.ncbi.nlm.nih.gov/pmc/articles/PMC 1/';
+    const pmcUrl = 'https://pmc.ncbi.nlm.nih.gov/articles/PMC 1/';
     const pubmedUrl = 'https://pubmed.ncbi.nlm.nih.gov/<b>1</b>/';
     const sourceUrl = 'https://repo.example.org/a paper.pdf';
     const text =

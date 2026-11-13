@@ -16,7 +16,9 @@
  *     then run the chain. DOIs with no PMC counterpart fall through to EPMC
  *     search-by-DOI → fullTextXML, then Unpaywall (EPMC-only OA, preprints).
  *     DOIs are case-insensitive: every casing of one DOI runs the chain once,
- *     and `unavailable[]` reports each casing as the caller wrote it.
+ *     and `unavailable[]` reports each casing as the caller wrote it. A DOI link
+ *     or `doi:` form is read as its bare DOI before any of this, so the bare DOI
+ *     is the spelling reported. (#299)
  *
  * The singular `pmcid`, `pmcId`, `pmid`, and `doi` are unadvertised aliases of
  * these fields, and a lone string under any of them reads as a one-element
@@ -45,7 +47,7 @@
 
 import { type Context, tool, z } from '@cyanheads/mcp-ts-core';
 import { JsonRpcErrorCode, serializationError } from '@cyanheads/mcp-ts-core/errors';
-import { htmlExtractor, pdfParser } from '@cyanheads/mcp-ts-core/utils';
+import { pdfParser } from '@cyanheads/mcp-ts-core/utils';
 import { getServerConfig } from '@/config/server-config.js';
 import { NCBI_SERVICE_ERRORS } from '@/services/error-contracts.js';
 import {
@@ -66,6 +68,7 @@ import type {
   XmlPubmedArticle,
   XmlPubmedArticleSet,
 } from '@/services/ncbi/types.js';
+import { extractHtml } from '@/services/unpaywall/html-extraction.js';
 import type {
   UnpaywallContent,
   UnpaywallLocation,
@@ -78,7 +81,7 @@ import {
 import { buildDeferralNotice, fitWholeItems } from './_budget.js';
 import { conceptMeta, EDAM_DATA_RETRIEVAL, SCHEMA_SCHOLARLY_ARTICLE } from './_concepts.js';
 import { outlineShares } from './_outline-shares.js';
-import { doiStringSchema, normalizePmid, pmcidStringSchema, pmidStringSchema } from './_schemas.js';
+import { doiInputSchema, normalizePmid, pmcidStringSchema, pmidStringSchema } from './_schemas.js';
 import {
   escapeMarkdownBlock,
   escapeMarkdownInline,
@@ -108,10 +111,19 @@ function withPmcPrefix(id: string): string {
   return id.startsWith('PMC') ? id : `PMC${id}`;
 }
 
+/**
+ * The `sections` filter's matching rule for one heading: a lower-cased term
+ * matches when it is a substring of the heading, case-insensitively. The heading
+ * is lower-cased once, however many terms it is tested against.
+ */
+function sectionTitleMatcher(title: string): (lowerTerm: string) => boolean {
+  const lowered = title.toLowerCase();
+  return (lowerTerm) => lowered.includes(lowerTerm);
+}
+
 /** Case-insensitive substring match of one section heading against the filter. */
 function matchesSectionFilter(title: string | undefined, lowerFilter: string[]): boolean {
-  const lowered = title?.toLowerCase();
-  return lowered !== undefined && lowerFilter.some((f) => lowered.includes(f));
+  return title !== undefined && lowerFilter.some(sectionTitleMatcher(title));
 }
 
 function lowerCase(s: string): string {
@@ -453,6 +465,53 @@ function isSectionFilterMiss(
 }
 
 /**
+ * How a `sections` filter missed in one article: no term matched there, so the
+ * filter emptied it (`all`), or some terms matched and these did not (`some`).
+ * (#80, #298)
+ */
+type SectionFilterMiss = { kind: 'all' } | { kind: 'some'; terms: string[] };
+
+/** A {@link SectionFilterMiss} under the id the article is reported by. */
+type ArticleSectionFilterMiss = SectionFilterMiss & { id: string };
+
+/**
+ * The `sections` terms that match no section, subsection, or back-matter title
+ * at any depth, by the filter's own rule ({@link sectionTitleMatcher}). Read on
+ * the tree before `maxSections` slices it, so a term whose only match the cap
+ * cut counts as matched — `sectionCap` names that cut. (#298)
+ */
+function unmatchedSectionTerms(sections: ParsedSection[], terms: string[]): string[] {
+  const matchers: ((lowerTerm: string) => boolean)[] = [];
+  const collect = (nodes: ParsedSection[]) => {
+    for (const { title, subsections } of nodes) {
+      if (title !== undefined) matchers.push(sectionTitleMatcher(title));
+      collect(subsections ?? []);
+    }
+  };
+  collect(sections);
+  return terms.filter((term) => {
+    const lowerTerm = lowerCase(term);
+    return !matchers.some((matches) => matches(lowerTerm));
+  });
+}
+
+/**
+ * How the `sections` filter missed in an article, given the article before and
+ * after {@link applyPmcFilters}, or `undefined` when there is no filter or every
+ * term matched. Shared by the PMC and Europe PMC stages. (#80, #298)
+ */
+function findSectionFilterMiss(
+  before: ParsedPmcArticle,
+  after: ParsedPmcArticle,
+  sectionFilter: string[] | undefined,
+): SectionFilterMiss | undefined {
+  if (!sectionFilter?.length) return;
+  if (isSectionFilterMiss(before, after, sectionFilter)) return { kind: 'all' };
+  const terms = unmatchedSectionTerms(before.sections, sectionFilter);
+  return terms.length > 0 ? { kind: 'some', terms } : undefined;
+}
+
+/**
  * True when the upstream JATS carried no body sections at all — front matter and
  * abstract only. Publishers that block full-text XML download still return an
  * `<article>` with a populated `<front>`, so the parsed article looks like a hit
@@ -504,6 +563,26 @@ function buildSectionFilterMissNotice(affectedIds: string[], sectionFilter: stri
   const subject =
     affectedIds.length === 1 ? `article ${affectedIds[0]}` : `articles ${affectedIds.join(', ')}`;
   return `No section or subsection title, at any nesting depth, matched the requested section filter (${terms}) for ${subject}. The full text was retrieved but every section, back matter included, was filtered out. Retry without \`sections\`, or filter on broader headings such as Introduction, Methods, Results, or Discussion.`;
+}
+
+/**
+ * Compose the notice for articles a `sections` filter matched only in part: one
+ * sentence per article naming the terms that matched no title in it, in the
+ * order given, then the call that lists an article's headings. Without it a
+ * term that missed reads as a section the article lacks — a results section
+ * titled "Findings" looks absent to a filter on Results. Terms read as the
+ * all-terms notice reads them. (#298)
+ */
+function buildUnmatchedTermsNotice(
+  misses: { id: string; terms: string[] }[],
+  termCount: number,
+): string {
+  const sentences = misses.map(({ id, terms }) => {
+    const others = termCount - terms.length;
+    return `No section or subsection title in ${id} matched the requested ${terms.length === 1 ? 'term' : 'terms'} (${terms.join(', ')}); the other ${others === 1 ? 'term' : 'terms'} matched.`;
+  });
+  const whose = misses.length === 1 ? "this article's" : "these articles'";
+  return `${sentences.join(' ')} To list ${whose} headings, call again with \`overflowMode: "outline"\` and a small \`maxCharacters\`, without \`sections\`.`;
 }
 
 /**
@@ -912,7 +991,7 @@ const UnavailableReasonSchema = z
     'service-error',
   ])
   .describe(
-    'Why no full text was returned — the most specific signal any tier that answered reported. not-found: upstream returned no record for this ID. no-pmc-fallback-disabled: every tier was skipped (`triedTiers` is all `not-attempted`) — typically because EPMC (`EUROPEPMC_ENABLED`) and Unpaywall (`UNPAYWALL_EMAIL`) are not configured. no-epmc-fulltext: EPMC indexed the record but publishes no fullTextXML. no-body: the record was retrieved but carries front matter and abstract only, with no body sections — use `pubmed_fetch_articles` for the metadata. no-doi: the DOI lookup ran and this record has none, so Unpaywall could not be queried. doi-lookup-failed: the DOI lookup itself errored, so whether a DOI exists is unknown and Unpaywall was never reached — retry the request; unlike no-doi this is a transient failure, not a settled answer. no-oa: Unpaywall has no OA copy. fetch-failed: download failed. parse-failed: extraction empty. service-error: upstream server failure (threw, timed out, or returned malformed data). A reason never means the chain ran to completion — read `unqueriedTiers` for that.',
+    'Why no full text was returned — the most specific signal any tier that answered reported. not-found: upstream returned no record for this ID. no-pmc-fallback-disabled: every tier was skipped (`triedTiers` is all `not-attempted`) — typically because EPMC (`EUROPEPMC_ENABLED`) and Unpaywall (`UNPAYWALL_EMAIL`) are not configured. no-epmc-fulltext: EPMC indexed the record but publishes no fullTextXML. no-body: the record was retrieved but carries front matter and abstract only, with no body sections — use `pubmed_fetch_articles` for the metadata. no-doi: the DOI lookup ran and this record has none, so Unpaywall could not be queried. doi-lookup-failed: the DOI lookup itself errored, so whether a DOI exists is unknown and Unpaywall was never reached — retry the request; unlike no-doi this is a transient failure, not a settled answer. no-oa: Unpaywall has no OA copy. fetch-failed: download failed. parse-failed: the OA copy downloaded, but extraction returned no text, failed, or (HTML) ran past its 10 s deadline — the unpaywall tier `detail` says which. service-error: upstream server failure (threw, timed out, or returned malformed data). A reason never means the chain ran to completion — read `unqueriedTiers` for that.',
   );
 
 const UnqueriedTierSchema = z
@@ -933,7 +1012,7 @@ const TierOutcomeSchema = z
     'service-error',
   ])
   .describe(
-    'Per-tier outcome. not-attempted: tier was skipped. miss: tier returned no record. no-fulltext: EPMC indexed the record but publishes no fullTextXML. no-body: the tier returned a record with front matter and abstract but no body sections, so the chain continued. no-doi: the DOI lookup ran and this record has none, so Unpaywall could not be queried. doi-lookup-failed: the DOI lookup itself errored, so whether a DOI exists is unknown and Unpaywall was never reached — retry the request. no-oa: Unpaywall reports no open-access copy. fetch-failed: OA copy download failed. parse-failed: extraction produced empty content. service-error: tier service threw.',
+    'Per-tier outcome. not-attempted: tier was skipped. miss: tier returned no record. no-fulltext: EPMC indexed the record but publishes no fullTextXML. no-body: the tier returned a record with front matter and abstract but no body sections, so the chain continued. no-doi: the DOI lookup ran and this record has none, so Unpaywall could not be queried. doi-lookup-failed: the DOI lookup itself errored, so whether a DOI exists is unknown and Unpaywall was never reached — retry the request. no-oa: Unpaywall reports no open-access copy. fetch-failed: OA copy download failed. parse-failed: the OA copy downloaded, but extraction returned no text, failed, or (HTML) ran past its 10 s deadline — `detail` says which. service-error: tier service threw.',
   );
 
 const TriedTierSchema = z
@@ -1981,8 +2060,10 @@ export const fetchFulltextTool = tool('pubmed_fetch_fulltext', {
         .describe(
           `PubMed IDs. Combinable with \`pmcids\` and \`dois\` — up to ${MAX_IDENTIFIERS} distinct identifiers across the three; the first ${FETCH_LIMIT} are fetched per call, the rest returned in \`overLimit\`. Articles in PMC are returned as structured JATS; articles not in PMC fall through to Europe PMC (when EPMC has a \`fullTextXML\`), then to Unpaywall when \`UNPAYWALL_EMAIL\` is set and a DOI is available.`,
         ),
+      // A link or `doi:` form reaches the handler as its bare DOI, so every id
+      // the chain keys, counts, and echoes is the bare DOI. (#299)
       dois: z
-        .array(doiStringSchema)
+        .array(doiInputSchema)
         .min(1)
         .max(MAX_IDENTIFIERS)
         .optional()
@@ -2091,12 +2172,13 @@ export const fetchFulltextTool = tool('pubmed_fetch_fulltext', {
     overLimit: OverLimitSchema.optional(),
   }),
 
-  // Recovery guidance for seven cases — a `sections` filter that removed every
-  // section (#80), a record the chain could only retrieve as front matter
-  // (#86), a table returned with no cell values (#111), a body the per-article
-  // character budget shortened (#81), top-level sections `maxSections` cut
-  // (#268), articles the whole-response budget withheld (#100), and
-  // identifiers past the per-call fetch limit (#222).
+  // Recovery guidance for eight cases — a `sections` filter that removed every
+  // section (#80), `sections` terms that matched nothing in an article other
+  // terms matched (#298), a record the chain could only retrieve as front
+  // matter (#86), a table returned with no cell values (#111), a body the
+  // per-article character budget shortened (#81), top-level sections
+  // `maxSections` cut (#268), articles the whole-response budget withheld
+  // (#100), and identifiers past the per-call fetch limit (#222).
   // Agent-facing context surfaced via ctx.enrich.notice() to structuredContent
   // and content[]; absent when none applies.
   enrichment: {
@@ -2104,7 +2186,7 @@ export const fetchFulltextTool = tool('pubmed_fetch_fulltext', {
       .string()
       .optional()
       .describe(
-        'Optional guidance for a partial or empty body. A `sections`-filter miss names the requested terms and affected article id(s) and suggests retrying without `sections` or using broader headings. A metadata-only record names the id(s) the chain could retrieve as front matter only and points at `pubmed_fetch_articles` for the abstract. A table returned with no cell values names the affected table(s), the article each came from, and why the cells cannot be recovered. A budgeted response names the characters returned versus carried and points at `truncation`. A `maxSections` cap that dropped sections names, per article, how many it kept of how many and the titles it left out, and points at `sections` or a larger cap. A response-wide budget that deferred articles names the ids to re-request. Identifiers past the per-call limit are named with the field to resend each under. Absent when none of those applies.',
+        'Optional guidance for a partial or empty body. A `sections`-filter miss names the requested terms and affected article id(s) and suggests retrying without `sections` or using broader headings. A `sections` filter that matched in an article only in part names, per article, the terms that matched no title there and points at `overflowMode: "outline"` for its headings. Both name returned articles only. A metadata-only record names the id(s) the chain could retrieve as front matter only and points at `pubmed_fetch_articles` for the abstract. A table returned with no cell values names the affected table(s), the article each came from, and why the cells cannot be recovered. A budgeted response names the characters returned versus carried and points at `truncation`. A `maxSections` cap that dropped sections names, per article, how many it kept of how many and the titles it left out, and points at `sections` or a larger cap. A response-wide budget that deferred articles names the ids to re-request. Identifiers past the per-call limit are named with the field to resend each under. Absent when none of those applies.',
       ),
     truncated: z
       .boolean()
@@ -2168,10 +2250,10 @@ export const fetchFulltextTool = tool('pubmed_fetch_fulltext', {
     // `dois` entry that named it — so a PMC miss can still reach Unpaywall
     // without another lookup, whichever field owns the record.
     const doiByPmcRecord = new Map<string, string>();
-    // Ids of returned articles whose `sections` filter removed every section —
-    // collected across the PMC and EPMC stages to drive one recovery notice via
-    // ctx.enrich.notice (#80).
-    const sectionFilterMisses: string[] = [];
+    // Articles whose `sections` filter removed every section, or matched only some
+    // of its terms — collected across the PMC and EPMC stages to drive their
+    // recovery notices via ctx.enrich.notice (#80, #298).
+    const sectionFilterMisses: ArticleSectionFilterMiss[] = [];
     // Input ids whose PMC or EPMC record carried no body sections at all. Those
     // records are not full-text hits, so the chain continues past them; ids still
     // unrecovered at the end drive the metadata-only recovery notice (#86).
@@ -2292,7 +2374,8 @@ export const fetchFulltextTool = tool('pubmed_fetch_fulltext', {
     // DOIs are case-insensitive, and the converter echoes one casing in
     // `requested-id` for DOIs that differ only in case, so every casing of a
     // DOI shares one chain, keyed by the first spelling submitted, and
-    // converter records are matched to it case-insensitively. (#166)
+    // converter records are matched to it case-insensitively. (#166) A link or
+    // `doi:` form is already its bare DOI here, so it shares that chain. (#299)
     const chainKeyByDoi = new Map<string, string>();
     for (const doi of fetched.dois) {
       const key = chainKeyByDoi.get(doi.toLowerCase()) ?? doi;
@@ -2418,9 +2501,8 @@ export const fetchFulltextTool = tool('pubmed_fetch_fulltext', {
           }
           const before = withBackMatter(parsedArticle);
           const { article: after, pastCap } = applyPmcFilters(before, filters);
-          if (isSectionFilterMiss(before, after, filters.sections)) {
-            sectionFilterMisses.push(articleDisplayId(after));
-          }
+          const filterMiss = findSectionFilterMiss(before, after, filters.sections);
+          if (filterMiss) sectionFilterMisses.push({ id: articleDisplayId(after), ...filterMiss });
           if (pastCap.length > 0) {
             sectionCapArticles.push({ id: articleDisplayId(after), omittedSections: pastCap });
           }
@@ -2785,9 +2867,12 @@ export const fetchFulltextTool = tool('pubmed_fetch_fulltext', {
     const articleRank = new Map(articles.map((a, i) => [articleDisplayId(a), i]));
     const rankOf = (id: string) => articleRank.get(id) ?? articleRank.size;
     truncatedArticles.sort((a, b) => rankOf(a.id) - rankOf(b.id));
-    sectionFilterMisses.sort((a, b) => rankOf(a) - rankOf(b));
     // Listed for the returned articles alone: a deferred article's entry leaves
-    // the response with it, as its body accounting does. (#268)
+    // the response with it, as its body accounting does — the deferral notice
+    // names it instead. (#268, #298)
+    const filterMisses = sectionFilterMisses
+      .filter((m) => articleRank.has(m.id))
+      .sort((a, b) => rankOf(a.id) - rankOf(b.id));
     const cappedArticles = sectionCapArticles
       .filter((a) => articleRank.has(a.id))
       .sort((a, b) => rankOf(a.id) - rankOf(b.id));
@@ -2836,8 +2921,13 @@ export const fetchFulltextTool = tool('pubmed_fetch_fulltext', {
     // Only the last ctx.enrich.notice survives, so the applicable fragments are
     // collected and emitted once.
     const notices: string[] = [];
-    if (sectionFilterMisses.length > 0) {
-      notices.push(buildSectionFilterMissNotice(sectionFilterMisses, sectionFilter.terms));
+    const emptiedIds = filterMisses.filter((m) => m.kind === 'all').map((m) => m.id);
+    if (emptiedIds.length > 0) {
+      notices.push(buildSectionFilterMissNotice(emptiedIds, sectionFilter.terms));
+    }
+    const partialMisses = filterMisses.filter((m) => m.kind === 'some');
+    if (partialMisses.length > 0) {
+      notices.push(buildUnmatchedTermsNotice(partialMisses, sectionFilter.terms.length));
     }
     const unrecoveredBodyless = [...bodylessInputIds].filter((id) => !recoveredIds.has(id));
     if (unrecoveredBodyless.length > 0) notices.push(buildBodylessNotice(unrecoveredBodyless));
@@ -3162,8 +3252,8 @@ interface EpmcStageOutput {
   remaining: FallbackCandidate[];
   /** Top-level sections `maxSections` cut from EPMC-served articles. (#268) */
   sectionCapArticles: z.infer<typeof SectionCapArticleSchema>[];
-  /** Ids of EPMC-served articles whose `sections` filter removed every section. */
-  sectionFilterMisses: string[];
+  /** EPMC-served articles whose `sections` filter removed every section or missed some terms. */
+  sectionFilterMisses: ArticleSectionFilterMiss[];
   /** Character accounting for EPMC-served articles the budget shortened. */
   truncatedArticles: z.infer<typeof TruncatedArticleSchema>[];
 }
@@ -3191,7 +3281,7 @@ async function runEpmcStage(
     c: FallbackCandidate;
     outcome: EpmcCandidateOutcome;
     article?: z.infer<typeof PmcArticleSchema>;
-    sectionFilterMiss?: boolean;
+    sectionFilterMiss?: SectionFilterMiss;
     /** Character accounting when the budget shortened this article. (#81) */
     truncation?: z.infer<typeof TruncatedArticleSchema>;
     omittedSections?: number;
@@ -3278,8 +3368,8 @@ async function runEpmcStage(
       ...hit,
       outcome: { kind: 'hit' },
       article: fetched.article,
-      sectionFilterMiss: fetched.sectionFilterMiss,
       omittedSections: fetched.omittedSections,
+      ...(fetched.sectionFilterMiss && { sectionFilterMiss: fetched.sectionFilterMiss }),
       ...(fetched.truncation && { truncation: fetched.truncation }),
       ...(fetched.sectionCap && { sectionCap: fetched.sectionCap }),
     };
@@ -3291,7 +3381,7 @@ async function runEpmcStage(
   const articleInputIds = new Map<z.infer<typeof PmcArticleSchema>, string>();
   const remaining: FallbackCandidate[] = [];
   const outcomes = new Map<string, EpmcCandidateOutcome>();
-  const sectionFilterMisses: string[] = [];
+  const sectionFilterMisses: ArticleSectionFilterMiss[] = [];
   const truncatedArticles: z.infer<typeof TruncatedArticleSchema>[] = [];
   const sectionCapArticles: z.infer<typeof SectionCapArticleSchema>[] = [];
   let omittedSections = 0;
@@ -3300,7 +3390,7 @@ async function runEpmcStage(
     candidateId: string,
     run: {
       article: z.infer<typeof PmcArticleSchema>;
-      sectionFilterMiss?: boolean;
+      sectionFilterMiss?: SectionFilterMiss;
       truncation?: z.infer<typeof TruncatedArticleSchema>;
       omittedSections?: number;
       sectionCap?: z.infer<typeof SectionCapArticleSchema>;
@@ -3308,7 +3398,9 @@ async function runEpmcStage(
   ) => {
     articles.push(run.article);
     articleInputIds.set(run.article, candidateId);
-    if (run.sectionFilterMiss) sectionFilterMisses.push(articleDisplayId(run.article));
+    if (run.sectionFilterMiss) {
+      sectionFilterMisses.push({ id: articleDisplayId(run.article), ...run.sectionFilterMiss });
+    }
     if (run.truncation) truncatedArticles.push(run.truncation);
     if (run.sectionCap) sectionCapArticles.push(run.sectionCap);
     omittedSections += run.omittedSections ?? 0;
@@ -3375,7 +3467,7 @@ type EpmcFetchResult =
   | {
       kind: 'article';
       article: z.infer<typeof PmcArticleSchema>;
-      sectionFilterMiss: boolean;
+      sectionFilterMiss?: SectionFilterMiss;
       omittedSections: number;
       truncation?: z.infer<typeof TruncatedArticleSchema>;
       sectionCap?: z.infer<typeof SectionCapArticleSchema>;
@@ -3430,7 +3522,7 @@ async function fetchEpmcArticle(
 
     const beforeFilter = withBackMatter(parsedArticle);
     const { article: parsed, pastCap } = applyPmcFilters(beforeFilter, args.input);
-    const sectionFilterMiss = isSectionFilterMiss(beforeFilter, parsed, args.input.sections);
+    const sectionFilterMiss = findSectionFilterMiss(beforeFilter, parsed, args.input.sections);
     const budgeted = applyPmcBudget(
       parsed,
       args.budget,
@@ -3460,7 +3552,7 @@ async function fetchEpmcArticle(
 
     return {
       kind: 'article',
-      sectionFilterMiss,
+      ...(sectionFilterMiss && { sectionFilterMiss }),
       article,
       omittedSections: budgeted.omittedSections,
       ...(budgeted.truncation && {
@@ -3599,10 +3691,7 @@ async function resolveUnpaywall(
 
   try {
     if (content.kind === 'html') {
-      const extracted = await htmlExtractor.extract(content.body, {
-        url: content.fetchedUrl,
-        format: 'markdown',
-      });
+      const extracted = await extractHtml(content.body, content.fetchedUrl, ctx.signal);
       const body = extracted.content.trim();
       if (!body) {
         return {
@@ -3644,6 +3733,8 @@ async function resolveUnpaywall(
       text,
     );
   } catch (error: unknown) {
+    // A caller abort ends the call. An extractor failure, or HTML extraction
+    // stopped at its deadline, ends only this id, with the error as the detail.
     if (ctx.signal.aborted) throw error;
     const detail = error instanceof Error ? error.message : String(error);
     ctx.log.warning('Unpaywall content extraction failed', { pmid, doi, detail });
