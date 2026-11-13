@@ -166,14 +166,23 @@ function cpuMsSince(start: NodeJS.CpuUsage): number {
  * times a batch of 40k/`size` calls and divides by the count, so a small input
  * still reads well above the clock's resolution. A linear-time table calls it once
  * per size and checks the result against its bound before timing the next size.
+ *
+ * `until`, when given, ends the readings at the first least it accepts. It must
+ * accept every value below one it accepts — an upper bound — so the verdict
+ * matches the least of all three while a passing size costs one reading.
  */
-export function cpuMsPerCall(size: number, run: () => void): number {
+export function cpuMsPerCall(
+  size: number,
+  run: () => void,
+  until?: (leastMs: number) => boolean,
+): number {
   const calls = callsPerReading(size);
   let least = Number.POSITIVE_INFINITY;
   for (let reading = 0; reading < 3; reading++) {
     const start = process.threadCpuUsage();
     for (let call = 0; call < calls; call++) run();
     least = Math.min(least, cpuMsSince(start) / calls);
+    if (until?.(least)) break;
   }
   return least;
 }

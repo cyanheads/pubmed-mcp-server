@@ -687,14 +687,24 @@ describe('journal names and page strings format in linear time (#227, #228)', ()
       ...baseArticle,
       journalInfo: { ...baseArticle.journalInfo!, ...shape(n) },
     });
+    const maxMsPerCall = 200;
+    const maxGrowth = 256;
+    const withinBound = (ms: number) => ms < maxMsPerCall;
     /** Per-call CPU time at `n` characters, checked against the bound before the next size runs. */
-    const msPerCall = (n: number) => {
-      const ms = cpuMsPerCall(n, every(at(n)));
-      expect(ms).toBeLessThan(200);
+    const msPerCall = (n: number, until?: (ms: number) => boolean) => {
+      const ms = cpuMsPerCall(n, every(at(n)), until);
+      expect(ms).toBeLessThan(maxMsPerCall);
       return ms;
     };
+    // The least of three readings, as the denominator of the growth check.
     const t5k = msPerCall(5_000);
-    const t320k = msPerCall(320_000);
-    expect(t320k / t5k).toBeLessThan(256);
+    /**
+     * Past 5k a reading within the bounds settles its size, as more readings can only lower
+     * the least. The 4x steps fail a quadratic within seconds, before it reaches 320k.
+     */
+    msPerCall(20_000, withinBound);
+    msPerCall(80_000, withinBound);
+    const t320k = msPerCall(320_000, (ms) => withinBound(ms) && ms / t5k < maxGrowth);
+    expect(t320k / t5k).toBeLessThan(maxGrowth);
   });
 });
