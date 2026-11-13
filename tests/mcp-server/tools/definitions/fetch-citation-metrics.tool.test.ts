@@ -35,14 +35,20 @@ const { fetchCitationMetricsTool } = await import(
 );
 
 type Structured = {
-  records: { pmid: string; title?: string; rcrProvisional?: boolean }[];
+  records: {
+    pmid: string;
+    title?: string;
+    rcrProvisional?: boolean;
+    clinicalCitationCount?: number;
+    clinicalCitationPmids?: string[];
+  }[];
   unavailablePmids?: string[];
   overLimit?: { limit: number; pmids: string[] };
   notice?: string;
 };
 
-async function call(pmids: string[]) {
-  const result = await runToolContract(fetchCitationMetricsTool, { pmids });
+async function call(pmids: string[], options: { includeClinicalCitations?: boolean } = {}) {
+  const result = await runToolContract(fetchCitationMetricsTool, { pmids, ...options });
   const text = textBlocks(result.content as ContentBlock[])
     .map((b) => b.text)
     .join('\n');
@@ -77,6 +83,148 @@ describe('description', () => {
     );
     expect(description).toContain(
       'iCite does not flag retractions — a retracted article keeps its metrics — so check pubmed_fetch_articles for retraction notices',
+    );
+  });
+});
+
+describe('default response', () => {
+  it.each([
+    ['omitted', {}],
+    ['false', { includeClinicalCitations: false }],
+  ])('keeps the default response byte for byte with the flag %s', async (_label, options) => {
+    stubIciteFetch();
+    const { result, text } = await call(['23456789'], options);
+
+    expect(JSON.stringify(result.structuredContent)).toBe(
+      JSON.stringify({
+        records: [
+          {
+            pmid: '23456789',
+            title:
+              'Hospital volume is associated with survival but not multimodality therapy in Medicare patients with advanced head and neck cancer.',
+            year: 2013,
+            journal: 'Cancer',
+            doi: '10.1002/cncr.27976',
+            isResearchArticle: true,
+            isClinical: false,
+            relativeCitationRatio: 1.972190464032035,
+            rcrProvisional: false,
+            nihPercentile: 73,
+            citationCount: 53,
+            citationsPerYear: 4.076923076923077,
+            expectedCitationsPerYear: 2.0672055520378247,
+            fieldCitationRate: 5.24475244958888,
+            apt: 0.75,
+            human: 1,
+            animal: 0,
+            molecularCellular: 0,
+            citedByClinicalArticle: true,
+            clinicalCitationCount: 3,
+          },
+        ],
+      }),
+    );
+    expect(text).toBe(
+      [
+        '## NIH iCite Citation Metrics',
+        'Source: [NIH iCite](https://icite.od.nih.gov/)',
+        '**Records:** 1',
+        '',
+        '### PMID 23456789',
+        '**Title:** Hospital volume is associated with survival but not multimodality therapy in Medicare patients with advanced head and neck cancer.',
+        '**Year:** 2013 | **Journal:** Cancer | **DOI:** 10.1002/cncr.27976',
+        '**Research article:** Yes | **Clinical:** No',
+        '**Relative Citation Ratio:** 1.972190464032035 | **RCR provisional:** No | **NIH percentile:** 73',
+        '**Citations:** 53 | **Citations per year:** 4.076923076923077 | **Expected citations per year:** 2.0672055520378247 | **Field citation rate:** 5.24475244958888',
+        '**APT:** 0.75 | **Human:** 1 | **Animal:** 0 | **Molecular/cellular:** 0',
+        '**Cited by a clinical article:** Yes | **Clinical citations:** 3',
+      ].join('\n'),
+    );
+  });
+});
+
+describe('includeClinicalCitations', () => {
+  const CITING_LINE = '**Clinical citing PMIDs:** 25488965, 41057590, 29180076';
+
+  it('defaults to false and accepts only a boolean', () => {
+    const { input } = fetchCitationMetricsTool;
+    expect(input.parse({ pmids: ['1'] }).includeClinicalCitations).toBe(false);
+    expect(input.safeParse({ pmids: ['1'], includeClinicalCitations: 'true' }).success).toBe(false);
+  });
+
+  it("lists each record's clinical citing PMIDs in iCite's order on both surfaces", async () => {
+    stubIciteFetch();
+    const { result, structured, text } = await call(['23456789', '1', '42791233'], {
+      includeClinicalCitations: true,
+    });
+
+    expect(result.isError).toBeFalsy();
+    expect(structured.records.map((r) => r.pmid)).toEqual(['23456789', '1', '42791233']);
+    expect(structured.records[0]?.clinicalCitationPmids).toEqual([
+      '25488965',
+      '41057590',
+      '29180076',
+    ]);
+    // 1 is cited by no clinical article; 42791233 is not scored.
+    expect(structured.records[1]).not.toHaveProperty('clinicalCitationPmids');
+    expect(structured.records[2]).not.toHaveProperty('clinicalCitationPmids');
+
+    const lines = text.split('\n');
+    expect(lines.filter((line) => line.startsWith('**Clinical citing PMIDs:**'))).toEqual([
+      CITING_LINE,
+    ]);
+    // The list closes its record's block, after the clinical count.
+    const at = lines.indexOf(CITING_LINE);
+    expect(lines.slice(at - 1, at + 3)).toEqual([
+      '**Cited by a clinical article:** Yes | **Clinical citations:** 3',
+      CITING_LINE,
+      '',
+      '### PMID 1',
+    ]);
+  });
+
+  it('returns one PMID per counted clinical citation, every one a PMID', async () => {
+    stubIciteFetch();
+    const { structured, text } = await call(['14907713'], { includeClinicalCitations: true });
+    const [record] = structured.records;
+
+    expect(record?.clinicalCitationCount).toBe(1045);
+    expect(record?.clinicalCitationPmids).toEqual(
+      (sampleRow('14907713').cited_by_clin as number[]).map(String),
+    );
+    expect(record?.clinicalCitationPmids?.every((pmid) => /^[1-9]\d*$/.test(pmid))).toBe(true);
+    expect(text).toContain(
+      `**Clinical citing PMIDs:** ${record?.clinicalCitationPmids?.join(', ')}`,
+    );
+  });
+
+  it('carries no list for a flagged record whose cited_by_clin is null', async () => {
+    const row = { ...sampleRow('23456789'), citedByClinicalArticle: true, cited_by_clin: null };
+    stubIciteFetch(pubsFrom(new Map([['23456789', row]])));
+    const { structured, text } = await call(['23456789'], { includeClinicalCitations: true });
+
+    expect(structured.records[0]).not.toHaveProperty('clinicalCitationPmids');
+    expect(structured.records[0]).not.toHaveProperty('clinicalCitationCount');
+    expect(text).not.toContain('**Clinical citing PMIDs:**');
+  });
+
+  it('sends the same single request as a call without it', async () => {
+    const fetchMock = stubIciteFetch();
+    await call(['23456789', '1'], { includeClinicalCitations: true });
+    await call(['23456789', '1']);
+
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+    expect(fetchedUrl(fetchMock, 0).href).toBe(fetchedUrl(fetchMock, 1).href);
+  });
+
+  it('answers an unknown PMID with the same empty result and notice', async () => {
+    stubIciteFetch();
+    const { structured } = await call(['99999999'], { includeClinicalCitations: true });
+
+    expect(structured.records).toEqual([]);
+    expect(structured.unavailablePmids).toEqual(['99999999']);
+    expect(structured.notice).toMatch(
+      /^NIH iCite has no record for any of the requested PMIDs: 99999999\. /,
     );
   });
 });

@@ -51,6 +51,22 @@ function clinicalCitationCount(raw: IciteRawRecord): number | undefined {
 }
 
 /**
+ * `cited_by_clin` as PMID strings, in iCite's order (iCite sends integers).
+ * Absent unless it is a non-empty list of PMIDs: a list holding anything else
+ * is dropped whole, like any mistyped value, and its count stays as counted.
+ */
+function clinicalCitationPmids(raw: IciteRawRecord): string[] | undefined {
+  if (!Array.isArray(raw.cited_by_clin) || raw.cited_by_clin.length === 0) return;
+  const pmids: string[] = [];
+  for (const entry of raw.cited_by_clin) {
+    const pmid = typeof entry === 'number' ? String(entry) : entry;
+    if (typeof pmid !== 'string' || !CANONICAL_PMID_RE.test(pmid)) return;
+    pmids.push(pmid);
+  }
+  return pmids;
+}
+
+/**
  * Map one raw record to an {@link IciteRecord}, dropping every null or
  * mistyped value. `provisional` is kept only beside an RCR: iCite reports
  * `false` for a record with no RCR at all, which would read as a final RCR that
@@ -84,6 +100,7 @@ function normalizeRecord(raw: IciteRawRecord): IciteRecord | undefined {
     ...present('molecularCellular', finite(raw.molecular_cellular)),
     ...present('citedByClinicalArticle', flag(raw.citedByClinicalArticle)),
     ...present('clinicalCitationCount', clinicalCitationCount(raw)),
+    ...present('clinicalCitationPmids', clinicalCitationPmids(raw)),
   };
 }
 

@@ -12,9 +12,9 @@ export const ICITE_API_BASE = 'https://icite.od.nih.gov/api';
 /**
  * The `fl` allowlist every request sends. iCite drops a misspelled field name
  * without an error, and a request naming no valid field answers with a larger
- * default record, so the list is fixed here and pinned by a test. `cited_by_clin`
- * is fetched only to count it; the unbounded `cited_by` and `references` arrays
- * are never requested.
+ * default record, so the list is fixed here and pinned by a test. `cited_by_clin`,
+ * the clinical citing PMIDs, is counted on every record and returned on request;
+ * the unbounded `cited_by` and `references` arrays are never requested.
  */
 export const ICITE_FIELDS = [
   'pmid',
@@ -92,6 +92,8 @@ export interface IciteRecord {
   citedByClinicalArticle?: boolean;
   /** Length of `cited_by_clin`; `0` when it is null and `citedByClinicalArticle` is false. */
   clinicalCitationCount?: number;
+  /** `cited_by_clin` as PMID strings, in iCite's order; absent when iCite lists none. */
+  clinicalCitationPmids?: string[];
   doi?: string;
   expectedCitationsPerYear?: number;
   fieldCitationRate?: number;

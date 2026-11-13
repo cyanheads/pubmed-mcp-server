@@ -77,7 +77,7 @@ describe('record normalization', () => {
     return record;
   }
 
-  it('maps a fully scored row to every field, counting cited_by_clin', async () => {
+  it('maps a fully scored row to every field, counting cited_by_clin and keeping its PMIDs', async () => {
     expect(await fetchOne('23456789')).toEqual({
       pmid: '23456789',
       title:
@@ -100,6 +100,7 @@ describe('record normalization', () => {
       molecularCellular: 0,
       citedByClinicalArticle: true,
       clinicalCitationCount: 3,
+      clinicalCitationPmids: ['25488965', '41057590', '29180076'],
     });
   });
 
@@ -121,7 +122,68 @@ describe('record normalization', () => {
       molecularCellular: 0,
       citedByClinicalArticle: true,
       clinicalCitationCount: 1045,
+      clinicalCitationPmids: (sampleRow('14907713').cited_by_clin as number[]).map(String),
     });
+  });
+
+  it('keeps the clinical citing PMIDs in the order iCite lists them, one per counted citation', async () => {
+    const record = await fetchOne('14907713');
+    // Neither numeric nor lexicographic order: iCite's own.
+    expect(record?.clinicalCitationPmids?.slice(0, 4)).toEqual([
+      '11684527',
+      '1084',
+      '2254711',
+      '23025591',
+    ]);
+    expect(record?.clinicalCitationPmids).toHaveLength(1045);
+    expect(record?.clinicalCitationCount).toBe(1045);
+  });
+
+  it.each([
+    ['citedByClinicalArticle: false', false],
+    ['citedByClinicalArticle: true', true],
+  ])('lists no PMIDs for an empty cited_by_clin beside %s', async (_label, cited) => {
+    const rows = new Map([
+      ['23456789', { ...sampleRow('23456789'), citedByClinicalArticle: cited, cited_by_clin: [] }],
+    ]);
+    stubIciteFetch(pubsFrom(rows));
+    const [record] = await makeService().fetchRecords(['23456789'], createMockContext());
+
+    expect(record).toMatchObject({ citedByClinicalArticle: cited, clinicalCitationCount: 0 });
+    expect(record).not.toHaveProperty('clinicalCitationPmids');
+  });
+
+  it('keeps a list beside an absent citedByClinicalArticle, whose count stays unknown', async () => {
+    const { citedByClinicalArticle: _flag, ...row } = sampleRow('23456789');
+    stubIciteFetch(pubsFrom(new Map([['23456789', row]])));
+    const [record] = await makeService().fetchRecords(['23456789'], createMockContext());
+
+    expect(record?.clinicalCitationPmids).toEqual(['25488965', '41057590', '29180076']);
+    expect(record).not.toHaveProperty('clinicalCitationCount');
+  });
+
+  it('reads a digit-string entry as the PMID it spells', async () => {
+    const rows = new Map([
+      ['23456789', { ...sampleRow('23456789'), cited_by_clin: [25488965, '41057590'] }],
+    ]);
+    stubIciteFetch(pubsFrom(rows));
+    const [record] = await makeService().fetchRecords(['23456789'], createMockContext());
+    expect(record?.clinicalCitationPmids).toEqual(['25488965', '41057590']);
+  });
+
+  it.each([
+    ['a null entry', [25488965, null]],
+    ['a zero', [25488965, 0]],
+    ['a fraction', [25488965, 1.5]],
+    ['a zero-padded string', [25488965, '041057590']],
+    ['an object', [25488965, { pmid: 41057590 }]],
+  ])('drops the whole list when it holds %s, keeping its count', async (_label, list) => {
+    const rows = new Map([['23456789', { ...sampleRow('23456789'), cited_by_clin: list }]]);
+    stubIciteFetch(pubsFrom(rows));
+    const [record] = await makeService().fetchRecords(['23456789'], createMockContext());
+
+    expect(record).toMatchObject({ citedByClinicalArticle: true, clinicalCitationCount: 2 });
+    expect(record).not.toHaveProperty('clinicalCitationPmids');
   });
 
   it.each([
@@ -145,11 +207,13 @@ describe('record normalization', () => {
 
   it('reads a null cited_by_clin beside citedByClinicalArticle: false as zero clinical citations', async () => {
     expect(sampleRow('1')).toMatchObject({ citedByClinicalArticle: false, cited_by_clin: null });
-    expect(await fetchOne('1')).toMatchObject({
+    const record = await fetchOne('1');
+    expect(record).toMatchObject({
       citedByClinicalArticle: false,
       clinicalCitationCount: 0,
       relativeCitationRatio: 3.0710986551182264,
     });
+    expect(record).not.toHaveProperty('clinicalCitationPmids');
   });
 
   it('returns an unscored row with its identity and content fields only', async () => {
@@ -172,7 +236,7 @@ describe('record normalization', () => {
     expect((await fetchOne('41304192'))?.title).toBe(sampleRow('41304192').title);
   });
 
-  it('leaves the clinical count unknown when the flag is set but the list is null, and drops mistyped values', async () => {
+  it('leaves the clinical count unknown and lists no PMIDs when the flag is set but the list is null, and drops mistyped values', async () => {
     const rows = new Map([
       [
         '23456789',
@@ -191,6 +255,7 @@ describe('record normalization', () => {
     expect(record).toMatchObject({ citedByClinicalArticle: true, citationCount: 53 });
     for (const key of [
       'clinicalCitationCount',
+      'clinicalCitationPmids',
       'relativeCitationRatio',
       'rcrProvisional',
       'year',

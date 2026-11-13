@@ -1,9 +1,10 @@
 /**
  * @fileoverview Citation-metrics tool over NIH iCite: the Relative Citation
  * Ratio, NIH percentile, citation counts and rates, and translation scores for
- * a batch of PMIDs, one iCite request per call. PMIDs past the per-call limit
- * come back unfetched in `overLimit`; PMIDs iCite has no record for come back in
- * `unavailablePmids`, never as an error.
+ * a batch of PMIDs, with the clinical citing PMIDs on request, one iCite request
+ * per call. PMIDs past the per-call limit come back unfetched in `overLimit`;
+ * PMIDs iCite has no record for come back in `unavailablePmids`, never as an
+ * error.
  * @module src/mcp-server/tools/definitions/fetch-citation-metrics.tool
  */
 
@@ -124,6 +125,12 @@ const MetricsRecordSchema = z
       .describe(
         'Clinical articles citing this one: 0 when `citedByClinicalArticle` is false, absent when that flag is.',
       ),
+    clinicalCitationPmids: z
+      .array(z.string())
+      .optional()
+      .describe(
+        "PMIDs of the clinical articles citing this one, in iCite's order, uncapped; pubmed_fetch_articles returns their records. Present only when `includeClinicalCitations` is set and iCite lists any.",
+      ),
   })
   .describe('NIH iCite citation metrics for one PubMed article');
 
@@ -147,7 +154,7 @@ const OverLimitSchema = z
 type MetricsRecord = z.infer<typeof MetricsRecordSchema>;
 
 export const fetchCitationMetricsTool = tool('pubmed_fetch_citation_metrics', {
-  description: `Fetch NIH iCite citation metrics for PubMed articles: the Relative Citation Ratio (RCR), NIH percentile, citation count, citations per year, expected and field citation rates, the Approximate Potential to Translate (APT), the human, animal, and molecular/cellular shares of each article's MeSH terms, and how many clinical articles cite it. RCR is a field- and year-normalized citation rate benchmarked to NIH-funded papers, whose median RCR is 1.0; iCite computes none for the most recent papers and marks recent ones provisional. iCite does not flag retractions — a retracted article keeps its metrics — so check pubmed_fetch_articles for retraction notices before relying on a record. Up to ${MAX_PMIDS} PMIDs per call; the first ${FETCH_LIMIT} distinct PMIDs are fetched and the rest returned in \`overLimit\`. PMIDs iCite has no record for are listed in \`unavailablePmids\`.`,
+  description: `Fetch NIH iCite citation metrics for PubMed articles: the Relative Citation Ratio (RCR), NIH percentile, citation count, citations per year, expected and field citation rates, the Approximate Potential to Translate (APT), the human, animal, and molecular/cellular shares of each article's MeSH terms, and how many clinical articles cite it (set \`includeClinicalCitations\` for their PMIDs). RCR is a field- and year-normalized citation rate benchmarked to NIH-funded papers, whose median RCR is 1.0; iCite computes none for the most recent papers and marks recent ones provisional. iCite does not flag retractions — a retracted article keeps its metrics — so check pubmed_fetch_articles for retraction notices before relying on a record. Up to ${MAX_PMIDS} PMIDs per call; the first ${FETCH_LIMIT} distinct PMIDs are fetched and the rest returned in \`overLimit\`. PMIDs iCite has no record for are listed in \`unavailablePmids\`.`,
   annotations: { readOnlyHint: true, openWorldHint: true },
   _meta: conceptMeta([SCHEMA_SCHOLARLY_ARTICLE, EDAM_DATA_RETRIEVAL, EDAM_PUBMED_ID]),
   sourceUrl:
@@ -165,6 +172,12 @@ export const fetchCitationMetricsTool = tool('pubmed_fetch_citation_metrics', {
       .max(MAX_PMIDS)
       .describe(
         `PubMed IDs to look up (e.g. ["23456789"]). The first ${FETCH_LIMIT} distinct PMIDs are fetched; the rest are returned in \`overLimit\`. Leading zeros are ignored, so "00023456789" and "23456789" name one article.`,
+      ),
+    includeClinicalCitations: z
+      .boolean()
+      .default(false)
+      .describe(
+        'Include `clinicalCitationPmids`: the PMIDs of the clinical articles citing each record. Off by default because the list is uncapped: a widely used clinical instrument is cited by thousands, at about 11 characters of JSON each — PMID 1202204 (the Mini-Mental State Examination) lists 9,969, adding about 109,000 characters to its record.',
       ),
   }),
 
@@ -205,7 +218,7 @@ export const fetchCitationMetricsTool = tool('pubmed_fetch_citation_metrics', {
     const unavailable: string[] = [];
     for (const { pmid, sent } of fetched) {
       const record = byPmid.get(pmid);
-      if (record) records.push(toOutputRecord(record));
+      if (record) records.push(toOutputRecord(record, input.includeClinicalCitations));
       else unavailable.push(sent);
     }
 
@@ -276,15 +289,19 @@ function isIcitePmid(pmid: string): boolean {
   return pmid !== '0' && Number(pmid) <= ICITE_MAX_PMID;
 }
 
-/** The service record with its title and journal made display-ready. */
-function toOutputRecord(record: IciteRecord): MetricsRecord {
-  const { title: rawTitle, journal: rawJournal, ...rest } = record;
+/**
+ * The service record with its title and journal made display-ready, carrying its
+ * clinical citing PMIDs only when the call asked for them.
+ */
+function toOutputRecord(record: IciteRecord, includeClinicalCitations: boolean): MetricsRecord {
+  const { title: rawTitle, journal: rawJournal, clinicalCitationPmids, ...rest } = record;
   const title = rawTitle ? toDisplayText(rawTitle) : '';
   const journal = rawJournal ? toDisplayText(rawJournal) : '';
   return {
     ...rest,
     ...(title && { title }),
     ...(journal && { journal }),
+    ...(includeClinicalCitations && clinicalCitationPmids && { clinicalCitationPmids }),
   };
 }
 
@@ -353,13 +370,16 @@ const yesNo = (value: boolean | undefined): string =>
 const escaped = (value: string | undefined): string =>
   value === undefined ? NOT_AVAILABLE : escapeMarkdownInParagraph(value);
 
-/** The `content[]` block for one record: every field, `Not available` where iCite has none. */
+/**
+ * The `content[]` block for one record: every field, `Not available` where iCite
+ * has none, and the clinical citing PMIDs when the record carries them.
+ */
 function recordLines(r: MetricsRecord): string[] {
   const rcr =
     r.relativeCitationRatio === undefined
       ? `**Relative Citation Ratio:** ${NOT_AVAILABLE}`
       : `**Relative Citation Ratio:** ${r.relativeCitationRatio} | **RCR provisional:** ${yesNo(r.rcrProvisional)}`;
-  return [
+  const lines = [
     `### PMID ${r.pmid}`,
     `**Title:** ${escaped(r.title)}`,
     `**Year:** ${shown(r.year)} | **Journal:** ${escaped(r.journal)} | **DOI:** ${escaped(r.doi)}`,
@@ -369,4 +389,8 @@ function recordLines(r: MetricsRecord): string[] {
     `**APT:** ${shown(r.apt)} | **Human:** ${shown(r.human)} | **Animal:** ${shown(r.animal)} | **Molecular/cellular:** ${shown(r.molecularCellular)}`,
     `**Cited by a clinical article:** ${yesNo(r.citedByClinicalArticle)} | **Clinical citations:** ${shown(r.clinicalCitationCount)}`,
   ];
+  if (r.clinicalCitationPmids) {
+    lines.push(`**Clinical citing PMIDs:** ${r.clinicalCitationPmids.join(', ')}`);
+  }
+  return lines;
 }
