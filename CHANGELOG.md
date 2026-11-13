@@ -2,6 +2,10 @@
 
 All notable changes to this project. Each entry links to its full per-version file in [changelog/](changelog/).
 
+## [2.12.2](changelog/2.12.x/2.12.2.md) — 2026-11-13 · 🛡️ Security
+
+pubmed_fetch_articles returns languages, original-language titles, and indexed substances. DOI links and doi: forms are accepted as DOIs, Europe PMC calls end at a 45 s total deadline, Unpaywall HTML extraction runs off the serving thread, and DOI validation runs in linear time.
+
 ## [2.12.1](changelog/2.12.x/2.12.1.md) — 2026-11-11
 
 pubmed_lookup_mesh labels every record with its recordType and searchTerm clause, and pubmed_search_articles honors the journal sort and reports the 9,999-record window. Summary dates carry PubMed's precision, a failing NCBI endpoint gets one attempt per call, and article links in content[] render as links.

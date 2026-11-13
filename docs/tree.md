@@ -1,6 +1,6 @@
 # pubmed-mcp-server - Directory Structure
 
-Generated on: 2026-11-11 08:05:07
+Generated on: 2026-11-13 13:51:39
 
 ```text
 pubmed-mcp-server/
@@ -218,6 +218,7 @@ pubmed-mcp-server/
 │   │   │   ├── api-client.ts
 │   │   │   ├── field-tags.ts
 │   │   │   ├── ncbi-service.ts
+│   │   │   ├── pmc-article-url.ts
 │   │   │   ├── request-queue.ts
 │   │   │   ├── response-handler.ts
 │   │   │   └── types.ts
@@ -226,8 +227,11 @@ pubmed-mcp-server/
 │   │   │   ├── openalex-service.ts
 │   │   │   └── types.ts
 │   │   ├── unpaywall/
+│   │   │   ├── html-extraction.ts
+│   │   │   ├── html-extraction.worker.ts
 │   │   │   ├── types.ts
 │   │   │   └── unpaywall-service.ts
+│   │   ├── doi.ts
 │   │   ├── error-contracts.ts
 │   │   ├── fetch-redaction.ts
 │   │   └── markdown-escape.ts
@@ -421,6 +425,9 @@ pubmed-mcp-server/
 │   │   ├── openalex/
 │   │   │   └── openalex-service.test.ts
 │   │   ├── unpaywall/
+│   │   │   ├── fixtures/
+│   │   │   │   └── extraction-fixture.worker.ts
+│   │   │   ├── html-extraction.test.ts
 │   │   │   └── unpaywall-service.test.ts
 │   │   ├── error-contracts.test.ts
 │   │   ├── markdown-escape.test.ts
