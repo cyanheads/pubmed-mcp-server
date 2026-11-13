@@ -10,6 +10,7 @@ import type {
   ParsedArticleDate,
   ParsedBookEditor,
   ParsedBookInfo,
+  ParsedChemical,
   ParsedCommentsCorrection,
   ParsedDataBank,
   ParsedGrant,
@@ -25,6 +26,7 @@ import type {
   XmlAuthor,
   XmlAuthorList,
   XmlBookDocument,
+  XmlChemicalList,
   XmlCommentsCorrectionsList,
   XmlDataBankList,
   XmlGrant,
@@ -303,6 +305,36 @@ export function extractMeshTerms(meshHeadingListXml?: XmlMeshHeadingList): Parse
       isMajorTopic: isMajorRoot || isMajorDescriptor || isMajorAnyQualifier,
     };
   });
+}
+
+/**
+ * Extracts the substances a record is indexed for, in upstream order. A
+ * substance name is NLM-controlled, so it reads as parsed, like a MeSH
+ * descriptor. `registryNumber` is omitted where NCBI gives its placeholder `0`
+ * and kept as written otherwise, all-digit values included — the response
+ * handler leaves the element uncoerced. (#295)
+ * @param chemicalListXml - The XML ChemicalList element.
+ */
+function extractChemicals(chemicalListXml?: XmlChemicalList): ParsedChemical[] {
+  return ensureArray(chemicalListXml?.Chemical).map((chemical): ParsedChemical => {
+    const registryNumber = getText(chemical.RegistryNumber);
+    return {
+      name: getText(chemical.NameOfSubstance),
+      ui: getAttribute(chemical.NameOfSubstance, 'UI'),
+      ...(registryNumber && registryNumber !== '0' && { registryNumber }),
+    };
+  });
+}
+
+/**
+ * Every `Language` of a journal article or Bookshelf record — NLM codes, in
+ * upstream order. A lone code arrives as a list too: the response handler
+ * declares both paths arrays. (#295)
+ */
+function extractLanguages(languageXml: XmlArticle['Language']): string[] {
+  return ensureArray<unknown>(languageXml)
+    .map((language) => getText(language))
+    .filter(Boolean);
 }
 
 /**
@@ -597,13 +629,18 @@ export function parseFullArticle(
   const keywords = extractKeywords(medlineCitation?.KeywordList ?? article?.KeywordList);
   const articleDates = extractArticleDates(article);
   const meshTerms = includeMesh ? extractMeshTerms(medlineCitation?.MeshHeadingList) : undefined;
+  const chemicals = includeMesh ? extractChemicals(medlineCitation?.ChemicalList) : undefined;
   const grantList = includeGrants ? extractGrants(article?.GrantList) : undefined;
   const dataBanks = extractDataBanks(article?.DataBankList);
+  const languages = extractLanguages(article?.Language);
+  const vernacularTitle = getDecodedText(article?.VernacularTitle) || undefined;
 
   return {
     recordType: 'journal-article',
     pmid: extractPmid(medlineCitation) ?? '',
     title: getDecodedText(article?.ArticleTitle),
+    ...(vernacularTitle !== undefined && { vernacularTitle }),
+    ...(languages.length > 0 && { languages }),
     ...(abstractText !== undefined && { abstractText }),
     ...(affiliations.length > 0 && { affiliations }),
     authors,
@@ -613,6 +650,7 @@ export function parseFullArticle(
     ...(commentsCorrections.length > 0 && { commentsCorrections }),
     ...(keywords.length > 0 && { keywords }),
     ...(meshTerms !== undefined && meshTerms.length > 0 && { meshTerms }),
+    ...(chemicals !== undefined && chemicals.length > 0 && { chemicals }),
     ...(grantList !== undefined && grantList.length > 0 && { grantList }),
     ...(dataBanks.length > 0 && { dataBanks }),
     ...(doi !== undefined && { doi }),
@@ -744,6 +782,8 @@ export function parseFullBookArticle(xmlBookArticle: XmlPubmedBookArticle): Pars
 
   const abstractText = extractAbstractText(bookDocument?.Abstract);
   const keywords = extractKeywords(bookDocument?.KeywordList);
+  const languages = extractLanguages(bookDocument?.Language);
+  const vernacularTitle = getDecodedText(bookDocument?.VernacularTitle) || undefined;
   const publicationTypes = ensureArray(bookDocument?.PublicationType)
     .map((pubType) => getText(pubType))
     .filter(Boolean);
@@ -771,6 +811,8 @@ export function parseFullBookArticle(xmlBookArticle: XmlPubmedBookArticle): Pars
     recordType: chapterTitle ? 'book-chapter' : 'book',
     pmid: getText(bookDocument?.PMID),
     ...(title !== undefined && { title }),
+    ...(vernacularTitle !== undefined && { vernacularTitle }),
+    ...(languages.length > 0 && { languages }),
     ...(abstractText !== undefined && { abstractText }),
     ...(affiliations.length > 0 && { affiliations }),
     authors,

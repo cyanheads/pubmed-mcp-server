@@ -3,7 +3,8 @@
  * through the contract boundary on both surfaces: a collective author's own affiliation
  * (#212) and its investigators (#216), journal fields the record does not carry (#213), a
  * grant with no `GrantID` (#214), databank accessions (#257), the linking ISSN (#253),
- * and text NCBI double-encodes (#255). The EFetch body runs through the production
+ * text NCBI double-encodes (#255), and substances, languages, and the original-language
+ * title (#295). The EFetch body runs through the production
  * response handler and article parser; only the NCBI service call is replaced.
  * @module tests/mcp-server/tools/definitions/fetch-articles.record-fields.test
  */
@@ -14,6 +15,7 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { readCommonMark } from '../../../_helpers.js';
 import {
   articleSetXml,
+  GENEREVIEWS_CHAPTER_XML,
   parseArticleSetXml,
 } from '../../../services/ncbi/parsing/_book-fixtures.js';
 import {
@@ -477,5 +479,213 @@ describe('text NCBI double-encodes (#255)', () => {
     ).citations;
     expect(entry?.citations.bibtex).toContain('R\\&D');
     expect(entry?.citations.bibtex).not.toContain('&amp;');
+  });
+});
+
+describe('substances, languages and the original-language title (#295)', () => {
+  interface IndexedOut extends ArticleOut {
+    chemicals?: { name: string; registryNumber?: string; ui: string }[];
+    languages?: string[];
+    meshTerms?: unknown[];
+    vernacularTitle?: string;
+  }
+
+  const JOURNAL =
+    '<JournalIssue CitedMedium="Internet"><Volume>381</Volume><PubDate><Year>2019</Year></PubDate></JournalIssue><Title>The New England journal of medicine</Title>';
+  /** A journal record with `article` closing its Article and `citation` following it. */
+  const indexed = (pmid: string, article: string, citation = '') =>
+    record(pmid, JOURNAL).replace('</Article>', `${article}</Article>${citation}`);
+
+  /** PMID 31535829 (DAPA-HF), verbatim: five `D` entries carrying `0`, then the drug. */
+  const DAPA_HF_CHEMICALS =
+    '<ChemicalList><Chemical><RegistryNumber>0</RegistryNumber><NameOfSubstance UI="D001559">Benzhydryl Compounds</NameOfSubstance></Chemical><Chemical><RegistryNumber>0</RegistryNumber><NameOfSubstance UI="D002317">Cardiovascular Agents</NameOfSubstance></Chemical><Chemical><RegistryNumber>0</RegistryNumber><NameOfSubstance UI="D005960">Glucosides</NameOfSubstance></Chemical><Chemical><RegistryNumber>0</RegistryNumber><NameOfSubstance UI="D006442">Glycated Hemoglobin</NameOfSubstance></Chemical><Chemical><RegistryNumber>0</RegistryNumber><NameOfSubstance UI="D000077203">Sodium-Glucose Transporter 2 Inhibitors</NameOfSubstance></Chemical><Chemical><RegistryNumber>1ULL0QJ8UC</RegistryNumber><NameOfSubstance UI="C529054">dapagliflozin</NameOfSubstance></Chemical></ChemicalList>';
+  const DAPA_HF = indexed(
+    '31535829',
+    '<Language>eng</Language>',
+    `${DAPA_HF_CHEMICALS}<MeshHeadingList><MeshHeading><DescriptorName UI="D005960" MajorTopicYN="N">Glucosides</DescriptorName></MeshHeading></MeshHeadingList>`,
+  );
+  /** A one-substance list holding PMID 39701097's Irinotecan entry, whose UNII is all digits. */
+  const IRINOTECAN_ALONE = indexed(
+    '39701097',
+    '<Language>eng</Language>',
+    '<ChemicalList><Chemical><RegistryNumber>7673326042</RegistryNumber><NameOfSubstance UI="D000077146">Irinotecan</NameOfSubstance></Chemical></ChemicalList>',
+  );
+  /** PMID 34463784's Language and VernacularTitle, verbatim, under its bracketed English title. */
+  const GERMAN = indexed(
+    '34463784',
+    '<Language>ger</Language><VernacularTitle>Neues zur Diagnostik und Therapie der Herzinsuffizienz.</VernacularTitle>',
+  ).replace('A Pilot Study.', '[Heart failure: news in diagnostics and therapy].');
+  /** PMID 41939518's VernacularTitle, verbatim: character references and an `<i>` species name. */
+  const FRENCH = indexed(
+    '41939518',
+    '<Language>fre</Language><VernacularTitle>Vascularite c&#xe9;r&#xe9;brale &#xe0; <i>Mycobacterium tuberculosis</i>: &#xe0; propos d&#x2019;un cas p&#xe9;diatrique.</VernacularTitle>',
+  );
+
+  /** The rendered substances block, heading included. */
+  const substancesOf = (text: string) => {
+    const start = text.indexOf('#### Substances');
+    if (start === -1) return '';
+    const end = text.indexOf('\n#### ', start + 1);
+    return text.slice(start, end === -1 ? undefined : end);
+  };
+
+  it("returns the six substances of PMID 31535829 on both surfaces, in NCBI's order", async () => {
+    stage(DAPA_HF);
+    const { article, text } = await fetchArticles('31535829');
+    const out = article as IndexedOut;
+    expect(out.chemicals).toStrictEqual([
+      { name: 'Benzhydryl Compounds', ui: 'D001559' },
+      { name: 'Cardiovascular Agents', ui: 'D002317' },
+      { name: 'Glucosides', ui: 'D005960' },
+      { name: 'Glycated Hemoglobin', ui: 'D006442' },
+      { name: 'Sodium-Glucose Transporter 2 Inhibitors', ui: 'D000077203' },
+      { name: 'dapagliflozin', ui: 'C529054', registryNumber: '1ULL0QJ8UC' },
+    ]);
+    expect(out.languages).toStrictEqual(['eng']);
+    expect(out).not.toHaveProperty('vernacularTitle');
+
+    expect(substancesOf(text).split('\n')).toStrictEqual([
+      '#### Substances',
+      'Find other records listing a substance with `pubmed_search_articles` for `"<name>"[nm]`.',
+      '- Benzhydryl Compounds [D001559]',
+      '- Cardiovascular Agents [D002317]',
+      '- Glucosides [D005960]',
+      '- Glycated Hemoglobin [D006442]',
+      '- Sodium-Glucose Transporter 2 Inhibitors [D000077203]',
+      '- dapagliflozin [C529054] — Registry Number: 1ULL0QJ8UC',
+    ]);
+    expect(text).toContain('\n**Language:** eng\n');
+    expect(text).not.toContain('Original Title');
+    // After the MeSH terms, as the rest of the record's indexing.
+    expect(text.indexOf('#### MeSH Terms')).toBeLessThan(text.indexOf('#### Substances'));
+  });
+
+  it('returns a lone substance with an all-digit registry number as a one-entry list of strings', async () => {
+    stage(IRINOTECAN_ALONE);
+    const { article, text } = await fetchArticles('39701097');
+    expect((article as IndexedOut).chemicals).toStrictEqual([
+      { name: 'Irinotecan', ui: 'D000077146', registryNumber: '7673326042' },
+    ]);
+    expect(substancesOf(text)).toContain(
+      '\n- Irinotecan [D000077146] — Registry Number: 7673326042',
+    );
+  });
+
+  it('returns neither meshTerms nor chemicals under includeMesh: false', async () => {
+    stage(DAPA_HF);
+    const declined = await fetchArticles('31535829', { includeMesh: false });
+    expect(declined.article).not.toHaveProperty('meshTerms');
+    expect(declined.article).not.toHaveProperty('chemicals');
+    expect(declined.text).not.toContain('#### MeSH Terms');
+    expect(declined.text).not.toContain('#### Substances');
+    // Languages are not indexing, and stay.
+    expect((declined.article as IndexedOut).languages).toStrictEqual(['eng']);
+
+    stage(DAPA_HF);
+    const kept = (await fetchArticles('31535829')).article as IndexedOut;
+    expect(kept.meshTerms).toHaveLength(1);
+    expect(kept.chemicals).toHaveLength(6);
+  });
+
+  it('returns the German original title under the translated heading (PMID 34463784)', async () => {
+    stage(GERMAN);
+    const { article, text } = await fetchArticles('34463784');
+    const out = article as IndexedOut;
+    expect(out.languages).toStrictEqual(['ger']);
+    expect(out.vernacularTitle).toBe('Neues zur Diagnostik und Therapie der Herzinsuffizienz.');
+    expect(out).not.toHaveProperty('chemicals');
+
+    expect(text).toContain(
+      '\n### \\[Heart failure: news in diagnostics and therapy\\].\n**Original Title:** Neues zur Diagnostik und Therapie der Herzinsuffizienz.\n',
+    );
+    expect(text).toContain('\n**Language:** ger\n');
+    expect(text).not.toContain('#### Substances');
+    const read = readCommonMark(text);
+    expect(read).toContain(
+      '⟨strong⟩Original Title:⟨/strong⟩ Neues zur Diagnostik und Therapie der Herzinsuffizienz.',
+    );
+  });
+
+  it("lists both languages of PMID 43020712 in NCBI's order", async () => {
+    stage(indexed('43020712', '<Language>eng</Language><Language>spa</Language>'));
+    const { article, text } = await fetchArticles('43020712');
+    expect((article as IndexedOut).languages).toStrictEqual(['eng', 'spa']);
+    expect(text).toContain('\n**Language:** eng, spa\n');
+  });
+
+  it("returns PMID 41939518's original title with its markup flattened on both surfaces", async () => {
+    stage(FRENCH);
+    const { article, text } = await fetchArticles('41939518');
+    const title =
+      'Vascularite cérébrale à Mycobacterium tuberculosis: à propos d’un cas pédiatrique.';
+    expect((article as IndexedOut).vernacularTitle).toBe(title);
+    expect(text).toContain(`**Original Title:** ${title}\n`);
+  });
+
+  it('carries languages but never chemicals on a Bookshelf record', async () => {
+    stage(GENEREVIEWS_CHAPTER_XML);
+    const { article, text } = await fetchArticles('20301425');
+    expect((article as IndexedOut).languages).toStrictEqual(['eng']);
+    expect(article).not.toHaveProperty('chemicals');
+    expect(article).not.toHaveProperty('vernacularTitle');
+    expect(text).toContain('\n**Language:** eng\n');
+  });
+
+  it('has no languages key, and no Language line, for a record listing none', async () => {
+    stage(GENEREVIEWS_CHAPTER_XML.replace('<Language>eng</Language>', ''));
+    const { article, text } = await fetchArticles('20301425');
+    expect(article).not.toHaveProperty('languages');
+    expect(text).not.toContain('**Language:**');
+  });
+
+  it('counts the three fields in the maxResponseCharacters size of their article', async () => {
+    const both = indexed(
+      '31535829',
+      '<Language>ger</Language><VernacularTitle>Neues zur Diagnostik und Therapie der Herzinsuffizienz.</VernacularTitle>',
+      DAPA_HF_CHEMICALS,
+    );
+    stage(both);
+    const { article } = await fetchArticles('31535829');
+    const { chemicals, languages, vernacularTitle, ...without } = article as IndexedOut;
+    expect([chemicals?.length, languages, vernacularTitle]).toStrictEqual([
+      6,
+      ['ger'],
+      'Neues zur Diagnostik und Therapie der Herzinsuffizienz.',
+    ]);
+
+    stage(both);
+    const result = await runToolContract(fetchArticlesTool, {
+      pmids: ['31535829'],
+      includeGrants: true,
+      maxResponseCharacters: JSON.stringify(without).length,
+    });
+    const structured = result.structuredContent as {
+      articles: unknown[];
+      deferred: { ids: string[]; nextDeferredCharacters: number };
+    };
+    expect(structured.articles).toStrictEqual([]);
+    expect(structured.deferred.ids).toStrictEqual(['31535829']);
+    expect(structured.deferred.nextDeferredCharacters).toBe(JSON.stringify(article).length);
+  });
+
+  it('renders a substance name, registry number and original title that read as Markdown back as written', async () => {
+    stage(
+      indexed(
+        '40000295',
+        '<Language>ger</Language><VernacularTitle>Über _Aedes_ und *Culex* [x](y).</VernacularTitle>',
+        '<ChemicalList><Chemical><RegistryNumber>EC 3.1.1.-</RegistryNumber><NameOfSubstance UI="C000001">*N*-acetyl [x](y)</NameOfSubstance></Chemical><Chemical><RegistryNumber>0</RegistryNumber><NameOfSubstance UI="D000002"># 2,4-D</NameOfSubstance></Chemical></ChemicalList>',
+      ),
+    );
+    const { article, text } = await fetchArticles('40000295');
+    const out = article as IndexedOut;
+    expect(out.vernacularTitle).toBe('Über _Aedes_ und *Culex* [x](y).');
+    expect(out.chemicals?.map((c) => c.name)).toStrictEqual(['*N*-acetyl [x](y)', '# 2,4-D']);
+
+    const read = readCommonMark(text);
+    expect(read).toContain('⟨strong⟩Original Title:⟨/strong⟩ Über _Aedes_ und *Culex* [x](y).');
+    expect(read).toContain('*N*-acetyl [x](y) [C000001] — Registry Number: EC 3.1.1.-');
+    expect(read).toContain('# 2,4-D [D000002]');
+    // The record's own headings are h2, h3 and h4, and its only links its URLs.
+    expect(read).not.toMatch(/⟨em⟩|⟨a href=y⟩|⟨heading_open h1⟩/);
   });
 });

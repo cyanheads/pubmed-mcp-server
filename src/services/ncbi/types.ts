@@ -74,6 +74,7 @@ export interface ParseFullArticleOptions {
    * record reports the indexed `Journal/ISSN` only. (#253)
    */
   includeIssnLinking?: boolean;
+  /** Read the record's indexing: `MeshHeadingList` into `meshTerms`, `ChemicalList` into `chemicals`. (#295) */
   includeMesh?: boolean;
 }
 
@@ -205,10 +206,12 @@ export interface XmlArticle {
   GrantList?: XmlGrantList;
   Journal?: XmlJournal;
   KeywordList?: XmlKeywordList[] | XmlKeywordList; // Can have multiple KeywordList elements
-  Language?: XmlTextElement[] | XmlTextElement; // Array of languages
+  /** NLM language codes (`eng`, `ger`), one or more in NCBI's order. */
+  Language?: XmlTextElement[] | XmlTextElement | string[] | string;
   Pagination?: XmlPagination;
   PublicationTypeList?: XmlPublicationTypeList;
-  // Other elements like VernacularTitle, etc.
+  /** The title in the article's own language; `ArticleTitle` is then NLM's English translation. */
+  VernacularTitle?: XmlTextElement | string;
 }
 
 /**
@@ -285,10 +288,27 @@ export interface XmlCommentsCorrectionsList {
   CommentsCorrections?: XmlCommentsCorrections[] | XmlCommentsCorrections;
 }
 
+/**
+ * One `ChemicalList/Chemical`: a substance the record is indexed for. The DTD
+ * requires both children and the `UI` attribute. `RegistryNumber` arrives as
+ * the text NCBI wrote — the placeholder `0` and an all-digit UNII included —
+ * since the response handler exempts it from numeric coercion. (#295)
+ */
+export interface XmlChemical {
+  NameOfSubstance?: XmlTextElement & { '@_UI'?: string };
+  RegistryNumber?: XmlTextElement | string;
+}
+
+/** `MedlineCitation/ChemicalList` — journal articles only; a Bookshelf record has none. */
+export interface XmlChemicalList {
+  Chemical: XmlChemical[] | XmlChemical;
+}
+
 export interface XmlMedlineCitation {
   '@_Owner'?: string; // e.g., 'NLM', 'NASA', 'PIP', 'KIE', 'HSR', 'HMD', 'NOTNLM'
   '@_Status'?: string; // e.g., 'MEDLINE', 'PubMed-not-MEDLINE', 'In-Data-Review', 'In-Process', 'Publisher', 'Completed'
   Article?: XmlArticle;
+  ChemicalList?: XmlChemicalList;
   CitationSubset?: XmlTextElement[] | XmlTextElement;
   CommentsCorrectionsList?: XmlCommentsCorrectionsList;
   DateCompleted?: XmlArticleDate;
@@ -370,12 +390,13 @@ export interface XmlBookDocument {
   ContributionDate?: XmlArticleDate;
   DateRevised?: XmlArticleDate;
   KeywordList?: XmlKeywordList[] | XmlKeywordList;
-  Language?: XmlTextElement[] | XmlTextElement;
+  /** Zero or more, unlike a journal article's one or more. */
+  Language?: XmlTextElement[] | XmlTextElement | string[] | string;
   LocationLabel?: XmlTextElement[] | XmlTextElement;
   Pagination?: XmlPagination;
   PMID: XmlPMID;
   PublicationType?: XmlPublicationType[] | XmlPublicationType;
-  VernacularTitle?: XmlTextElement;
+  VernacularTitle?: XmlTextElement | string;
 }
 
 export interface XmlPubmedBookArticle {
@@ -480,6 +501,18 @@ export interface ParsedMeshTerm {
   qualifiers?: ParsedMeshQualifier[];
 }
 
+/**
+ * One substance from `ChemicalList`: `name` is `NameOfSubstance`, `ui` its MeSH
+ * UI (a `D` descriptor or a `C` supplementary concept), `registryNumber` the
+ * `RegistryNumber` as written. `registryNumber` is absent where NCBI gives its
+ * placeholder `0`. (#295)
+ */
+export interface ParsedChemical {
+  name: string;
+  registryNumber?: string;
+  ui: string;
+}
+
 export interface ParsedGrant {
   acronym?: string;
   agency?: string;
@@ -576,6 +609,12 @@ export interface ParsedArticle {
   /** Set on `book-chapter` and `book` records only. */
   book?: ParsedBookInfo;
   /**
+   * Every `ChemicalList/Chemical`, in upstream order. Read under `includeMesh`
+   * only; journal articles only, as the DTD gives a Bookshelf record no such
+   * list. (#295)
+   */
+  chemicals?: ParsedChemical[];
+  /**
    * Linked notices, `Cites` entries excluded, in upstream order. Journal
    * articles only: the DTD gives a Bookshelf record no such list.
    */
@@ -599,6 +638,11 @@ export interface ParsedArticle {
    */
   journalInfo?: ParsedJournalInfo;
   keywords?: string[];
+  /**
+   * Every `Language`, NLM codes in upstream order (`["eng", "spa"]`). Absent
+   * only on a Bookshelf record that lists none. (#295)
+   */
+  languages?: string[];
   meshTerms?: ParsedMeshTerm[];
   pmcId?: string;
   pmid: string;
@@ -607,7 +651,8 @@ export interface ParsedArticle {
   recordType: ParsedRecordType;
   /** Chapter title, or the book title on a whole-book record. */
   title?: string;
-  // Add other fields as needed, e.g., language, publication status
+  /** `VernacularTitle` — the title in the record's own language. Absent when NCBI gives none. (#295) */
+  vernacularTitle?: string;
 }
 
 // ─── ESummary Types ─────────────────────────────────────────────────────────

@@ -25,11 +25,12 @@
 **Journal:** Medicine, (Medicine (Baltimore)), 2023 Dec 29, **102**(52), e36667, pii: e36667, eISSN 1536-5964
 **Record Type:** journal-article
 **Type:** Review, Case Reports, Journal Article
+**Language:** eng
 **PMID:** 38206746
 **DOI:** 10.1097/MD.0000000000036667
 **PMCID:** PMC10754557
 **PubMed:** <https://pubmed.ncbi.nlm.nih.gov/38206746/>
-**PMC:** <https://www.ncbi.nlm.nih.gov/pmc/articles/PMC10754557/>
+**PMC:** <https://pmc.ncbi.nlm.nih.gov/articles/PMC10754557/>
 
 #### Abstract
 RATIONALE: Many studies have shown that first- and second-generation epidermal growth factor receptor tyrosine kinase inhibitors are less effective in patients with epidermal growth factor receptor (EGFR) exon 20 insertion (ex20ins) mutations. The efficacy of third-generation epidermal growth factor receptor tyrosine kinase inhibitors is still under investigation. Although new targeted tyrosine kinase inhibitors and monoclonal antibody-based agents have made significant advances in the treatment of epidermal growth factor receptor exon 20 insertion (EGFR ex20ins) mutation, the efficacy of these novel agents is not quite satisfactory. Platinum- and pemetrexed-based chemotherapy remains the standard first-line treatment for patients harboring EGFR ex20ins mutation.
@@ -59,6 +60,17 @@ CONCLUSION: The present study indicates that furmonertinib may be a first-line t
 - Indoles [D007211] (major)
 - Pyridines [D011725] (major)
 - Pyrimidines [D011743] (major)
+
+#### Substances
+Find other records listing a substance with `pubmed_search_articles` for `"<name>"[nm]`.
+- aflutinib [C000705711] — Registry Number: A49A7A5YN4
+- Tyrosine Kinase Inhibitors [D000092004]
+- Protein Kinase Inhibitors [D047428]
+- ErbB Receptors [D066246] — Registry Number: EC 2.7.10.1
+- EGFR protein, human [C512478] — Registry Number: EC 2.7.10.1
+- Indoles [D007211]
+- Pyridines [D011725]
+- Pyrimidines [D011743]
 
 <!-- pubmed_format_citations {"pmids":["38206746"],"format":["apa","mla","bibtex","ris","vancouver"]} -->
 # PubMed Citations

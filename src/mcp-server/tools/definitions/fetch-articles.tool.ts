@@ -1,8 +1,9 @@
 /**
  * @fileoverview PubMed fetch tool. Fetches full article metadata by PubMed IDs,
- * including abstracts, authors, journal info, MeSH terms, databank accessions,
- * and linked retraction and correction notices. A zero-padded PMID is fetched and matched as the PMID
- * it spells; `ids` is accepted as an alias for `pmids`.
+ * including abstracts, authors, journal info, languages and the original-language
+ * title, MeSH terms and substances, databank accessions, and linked retraction and
+ * correction notices. A zero-padded PMID is fetched and matched as the PMID it
+ * spells; `ids` is accepted as an alias for `pmids`, and `idType` only as `"pmid"`.
  * @module src/mcp-server/tools/definitions/fetch-articles.tool
  */
 
@@ -11,6 +12,7 @@ import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
 import { NCBI_SERVICE_ERRORS } from '@/services/error-contracts.js';
 import { getNcbiService } from '@/services/ncbi/ncbi-service.js';
 import { parseArticleSet } from '@/services/ncbi/parsing/article-parser.js';
+import { pmcArticleUrl } from '@/services/ncbi/pmc-article-url.js';
 import { buildDeferralNotice, fitWholeItems } from './_budget.js';
 import {
   conceptMeta,
@@ -248,6 +250,25 @@ const MeshTermSchema = z
   })
   .describe('MeSH descriptor term');
 
+const ChemicalSchema = z
+  .object({
+    name: z
+      .string()
+      .describe('Substance name, verbatim from NCBI `NameOfSubstance` (e.g. "dapagliflozin").'),
+    ui: z
+      .string()
+      .describe(
+        'MeSH unique ID of the substance: a `D` descriptor or a `C` supplementary concept (e.g. "C529054").',
+      ),
+    registryNumber: z
+      .string()
+      .optional()
+      .describe(
+        'Registry number as NCBI writes it — a UNII, CAS, or EC number (e.g. "1ULL0QJ8UC", "7673326042", "EC 2.7.10.1"). Absent where NCBI gives its placeholder `0`.',
+      ),
+  })
+  .describe('One substance the record is indexed for');
+
 const GrantSchema = z
   .object({
     grantId: z.string().optional().describe('Grant identifier'),
@@ -336,6 +357,18 @@ const FetchedArticleSchema = z
       .describe(
         'Article title — the chapter title on a `book-chapter`, and the book title on a `book` record, where it repeats `book.title`.',
       ),
+    vernacularTitle: z
+      .string()
+      .optional()
+      .describe(
+        "The title in the article's own language, from NCBI's `VernacularTitle` (e.g. \"Neues zur Diagnostik und Therapie der Herzinsuffizienz.\"). On such a record `title` is NLM's English translation, usually in square brackets. Absent when NCBI gives none, as on most English-language records.",
+      ),
+    languages: z
+      .array(z.string())
+      .optional()
+      .describe(
+        'Languages the article is published in, as NLM three-letter codes in NCBI\'s order (e.g. ["eng"], ["ger"], ["eng", "spa"]). A record in another language can still carry an English title and abstract: NLM translates the title, and the abstract may be the English one. Absent only on a Bookshelf record that lists none.',
+      ),
     abstractText: z.string().optional().describe('Abstract text'),
     affiliations: z
       .array(z.string())
@@ -375,6 +408,12 @@ const FetchedArticleSchema = z
       ),
     keywords: z.array(z.string()).optional().describe('Keywords'),
     meshTerms: z.array(MeshTermSchema).optional().describe('MeSH terms'),
+    chemicals: z
+      .array(ChemicalSchema)
+      .optional()
+      .describe(
+        'Substances the record is indexed for, from NCBI\'s `ChemicalList`, in NCBI\'s order. A drug indexed as a supplementary concept can appear here and nowhere in `meshTerms` (PMID 31535829 lists dapagliflozin, `C529054`, which none of its MeSH terms names). To find the records listing a substance, search `pubmed_search_articles` for `"<name>"[nm]`; a `C` UI is a supplementary concept, which no `[mh]` clause matches. Returned with `meshTerms` under `includeMesh`. Absent when the record lists none, and never set on `book-chapter` or `book` records.',
+      ),
     grantList: z.array(GrantSchema).optional().describe('Grant information'),
     dataBanks: z
       .array(DataBankSchema)
@@ -417,12 +456,48 @@ const DeferredSchema = z
     'Continuation state for articles the whole-response budget withheld. Present only when `maxResponseCharacters` deferred at least one article.',
   );
 
+/** Where a PMC ID or DOI sent to this tool goes instead — the `pmids` and `idType` rejections both end with it. */
+const OTHER_ID_ROUTE =
+  'Convert PMC IDs and DOIs to PMIDs with pubmed_convert_ids, or pass them to pubmed_fetch_fulltext as pmcids or dois.';
+
+const PMC_ID_SHAPE = /^PMC\d+$/i;
+
+/**
+ * The rejection for a `pmids` element shaped like a PMC ID or a DOI, or
+ * `undefined` for any other value. The shared PMID message tells a caller to
+ * remove non-digit characters, which turns `PMC3531190` into PMID 3531190, an
+ * unrelated article (PMC3531190 is PMID 23193287).
+ */
+function otherIdRejection(value: unknown): string | undefined {
+  if (typeof value !== 'string') return;
+  if (PMC_ID_SHAPE.test(value)) {
+    return `This is a PMC ID, not a PMID: its digits are not the article's PMID. ${OTHER_ID_ROUTE}`;
+  }
+  if (value.startsWith('10.') && value.includes('/')) {
+    return `This is a DOI, not a PMID. ${OTHER_ID_ROUTE}`;
+  }
+  return;
+}
+
+/**
+ * A `pmids` element. Advertised exactly as {@link pmidStringSchema}, whose
+ * message every value takes except a PMC ID or DOI, which is routed to the
+ * tools that read one. `pmidStringSchema` itself stays as it is: the tools that
+ * share it include `pubmed_convert_ids` and `pubmed_fetch_fulltext`, where that
+ * route would be wrong.
+ */
+const pmidElementSchema = z.string().regex(/^\d+$/, {
+  error: (issue) =>
+    otherIdRejection(issue.input) ??
+    pmidStringSchema.safeParse(issue.input).error?.issues[0]?.message,
+});
+
 /** PMIDs one `pubmed_fetch_articles` call accepts. */
 export const FETCH_ARTICLES_MAX_PMIDS = 200;
 
 export const fetchArticlesTool = tool('pubmed_fetch_articles', {
   description:
-    'Fetch full article metadata by PubMed IDs. Returns detailed article information including abstract, authors, journal, MeSH terms, linked retraction, erratum, and comment notices, and databank accessions such as trial registration IDs; grants and the members of a collective author are opt-in (`includeGrants`, `includeInvestigators`). Set `maxResponseCharacters` to bound the whole response: articles past the ceiling are deferred whole and listed in `deferred.ids` for a follow-up call.',
+    'Fetch full article metadata by PubMed IDs. Returns detailed article information including abstract, authors, journal, language and original-language title, MeSH terms and indexed substances, linked retraction, erratum, and comment notices, and databank accessions such as trial registration IDs; grants and the members of a collective author are opt-in (`includeGrants`, `includeInvestigators`). Set `maxResponseCharacters` to bound the whole response: articles past the ceiling are deferred whole and listed in `deferred.ids` for a follow-up call.',
   annotations: { readOnlyHint: true, openWorldHint: true },
   _meta: conceptMeta([SCHEMA_SCHOLARLY_ARTICLE, EDAM_DATA_RETRIEVAL, EDAM_PUBMED_ID]),
   sourceUrl:
@@ -444,11 +519,24 @@ export const fetchArticlesTool = tool('pubmed_fetch_articles', {
 
   input: z.object({
     pmids: z
-      .array(pmidStringSchema)
+      .array(pmidElementSchema)
       .min(1)
       .max(FETCH_ARTICLES_MAX_PMIDS)
       .describe('PubMed IDs to fetch'),
-    includeMesh: z.boolean().default(true).describe('Include MeSH terms'),
+    // Accepted for the `pubmed_convert_ids` call shape and never read: "pmid"
+    // states what `pmids` already holds. (#243)
+    idType: z
+      .literal('pmid', {
+        error: `pubmed_fetch_articles takes PMIDs only, so idType accepts only "pmid". ${OTHER_ID_ROUTE}`,
+      })
+      .optional()
+      .describe(
+        'Optional. Only "pmid" is accepted: this tool takes PubMed IDs. Convert PMC IDs and DOIs with `pubmed_convert_ids` first, or pass them to `pubmed_fetch_fulltext`.',
+      ),
+    includeMesh: z
+      .boolean()
+      .default(true)
+      .describe("Include the record's indexing: `meshTerms` and its substance list, `chemicals`"),
     includeGrants: z.boolean().default(false).describe('Include grant information'),
     includeInvestigators: z
       .boolean()
@@ -532,7 +620,7 @@ export const fetchArticlesTool = tool('pubmed_fetch_articles', {
       ...parsed,
       pubmedUrl: `https://pubmed.ncbi.nlm.nih.gov/${parsed.pmid}/`,
       ...(parsed.pmcId && {
-        pmcUrl: `https://www.ncbi.nlm.nih.gov/pmc/articles/${parsed.pmcId}/`,
+        pmcUrl: pmcArticleUrl(parsed.pmcId),
       }),
     }));
 
@@ -608,6 +696,11 @@ export const fetchArticlesTool = tool('pubmed_fetch_articles', {
       // Render-time only — `structuredContent.articles[].title` keeps the
       // plain-text value the NCBI parser produced. (#102)
       lines.push(`\n### ${escapeMarkdownInline(a.title ?? a.pmid ?? 'Unknown')}`);
+      // The heading of a record in another language is NLM's translation; the
+      // original sits directly under it. (#295)
+      if (a.vernacularTitle) {
+        lines.push(`**Original Title:** ${escapeMarkdownInParagraph(a.vernacularTitle)}`);
+      }
 
       // A retraction or correction qualifies everything below it, so it leads,
       // ahead of name lists that grow with the record. The full list further
@@ -729,6 +822,9 @@ export const fetchArticlesTool = tool('pubmed_fetch_articles', {
       if (a.publicationTypes?.length) {
         lines.push(`**Type:** ${escapeMarkdownInParagraph(a.publicationTypes.join(', '))}`);
       }
+      if (a.languages?.length) {
+        lines.push(`**Language:** ${escapeMarkdownInParagraph(a.languages.join(', '))}`);
+      }
       if (a.pmid) lines.push(`**PMID:** ${a.pmid}`);
       if (a.doi) lines.push(`**DOI:** ${escapeMarkdownInParagraph(a.doi)}`);
       if (a.pmcId) lines.push(`**PMCID:** ${a.pmcId}`);
@@ -790,6 +886,20 @@ export const fetchArticlesTool = tool('pubmed_fetch_articles', {
                 .join(', ')})`
             : '';
           lines.push(`- ${descriptor}${major}${qualifiers}`);
+        }
+      }
+      if (a.chemicals?.length) {
+        lines.push(
+          `\n#### Substances`,
+          'Find other records listing a substance with `pubmed_search_articles` for `"<name>"[nm]`.',
+        );
+        for (const c of a.chemicals) {
+          // The name opens the list item, so its line start is escaped too.
+          const name = escapeMarkdownLineStart(escapeMarkdownInParagraph(c.name));
+          const registry = c.registryNumber
+            ? ` — Registry Number: ${escapeMarkdownInParagraph(c.registryNumber)}`
+            : '';
+          lines.push(`- ${name} [${escapeMarkdownInParagraph(c.ui)}]${registry}`);
         }
       }
       if (a.grantList?.length) {

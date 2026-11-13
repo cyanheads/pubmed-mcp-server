@@ -26,11 +26,12 @@
 **Journal:** Heliyon, 2024 Nov 30, **10**(22), e40335, pii: e40335, ISSN 2405-8440
 **Record Type:** journal-article
 **Type:** Journal Article
+**Language:** eng
 **PMID:** 39624286
 **DOI:** 10.1016/j.heliyon.2024.e40335
 **PMCID:** PMC11609225
 **PubMed:** <https://pubmed.ncbi.nlm.nih.gov/39624286/>
-**PMC:** <https://www.ncbi.nlm.nih.gov/pmc/articles/PMC11609225/>
+**PMC:** <https://pmc.ncbi.nlm.nih.gov/articles/PMC11609225/>
 **Article Dates:** Electronic 2024-11-13
 
 #### Comments and Corrections (1)

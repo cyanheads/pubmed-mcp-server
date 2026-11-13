@@ -1559,3 +1559,159 @@ describe('text NCBI double-encodes, decoded one layer (#255)', () => {
     expect(lactmed.keywords?.[0]).toBe('carboplatin & breastfeeding');
   });
 });
+
+// ─── Substances, languages and the vernacular title (#295) ───────────────────
+//
+// Through the production response handler: a lone `Chemical` or `Language`
+// collapses to a scalar unless its path is declared an array, a
+// `RegistryNumber` of `0` or all digits is coerced to a number unless its path
+// is declared verbatim, and inline markup in a title is flattened before parse.
+
+describe('chemicals, languages and vernacularTitle (#295)', () => {
+  const parseOne = (xml: string, options?: Parameters<typeof parseArticleSet>[1]) => {
+    const [record] = parseArticleSet(parseArticleSetXml(articleSetXml(xml)), options);
+    if (!record) throw new Error('no record parsed');
+    return record;
+  };
+
+  /** PMID 31535829 (DAPA-HF), verbatim: five `D` entries carrying `0`, then the drug. */
+  const DAPA_HF_CHEMICALS =
+    '<ChemicalList><Chemical><RegistryNumber>0</RegistryNumber><NameOfSubstance UI="D001559">Benzhydryl Compounds</NameOfSubstance></Chemical><Chemical><RegistryNumber>0</RegistryNumber><NameOfSubstance UI="D002317">Cardiovascular Agents</NameOfSubstance></Chemical><Chemical><RegistryNumber>0</RegistryNumber><NameOfSubstance UI="D005960">Glucosides</NameOfSubstance></Chemical><Chemical><RegistryNumber>0</RegistryNumber><NameOfSubstance UI="D006442">Glycated Hemoglobin</NameOfSubstance></Chemical><Chemical><RegistryNumber>0</RegistryNumber><NameOfSubstance UI="D000077203">Sodium-Glucose Transporter 2 Inhibitors</NameOfSubstance></Chemical><Chemical><RegistryNumber>1ULL0QJ8UC</RegistryNumber><NameOfSubstance UI="C529054">dapagliflozin</NameOfSubstance></Chemical></ChemicalList>';
+  /** PMID 30831668, verbatim: a one-substance list. */
+  const ONE_CHEMICAL =
+    '<ChemicalList><Chemical><RegistryNumber>0</RegistryNumber><NameOfSubstance UI="D000509">alpha-Fetoproteins</NameOfSubstance></Chemical></ChemicalList>';
+  /** PMID 39701097, verbatim: Irinotecan's UNII is all digits. */
+  const IRINOTECAN_CHEMICALS =
+    '<ChemicalList><Chemical><RegistryNumber>7673326042</RegistryNumber><NameOfSubstance UI="D000077146">Irinotecan</NameOfSubstance></Chemical><Chemical><RegistryNumber>U3P01618RT</RegistryNumber><NameOfSubstance UI="D005472">Fluorouracil</NameOfSubstance></Chemical><Chemical><RegistryNumber>0</RegistryNumber><NameOfSubstance UI="D008081">Liposomes</NameOfSubstance></Chemical><Chemical><RegistryNumber>31YO63LBSN</RegistryNumber><NameOfSubstance UI="D000077594">Nivolumab</NameOfSubstance></Chemical><Chemical><RegistryNumber>Q573I9DVLP</RegistryNumber><NameOfSubstance UI="D002955">Leucovorin</NameOfSubstance></Chemical></ChemicalList>';
+
+  /** {@link JOURNAL_ARTICLE_XML} with `list` as its ChemicalList, in DTD position. */
+  const withChemicals = (list: string) =>
+    JOURNAL_ARTICLE_XML.replace('</MedlineJournalInfo>', `</MedlineJournalInfo>${list}`);
+  /** {@link JOURNAL_ARTICLE_XML} with `languages` for its Language and `vernacular` as its VernacularTitle. */
+  const withLanguages = (languages: string, vernacular?: string) =>
+    JOURNAL_ARTICLE_XML.replace('<Language>eng</Language>', languages).replace(
+      '</PublicationTypeList>',
+      `</PublicationTypeList>${vernacular === undefined ? '' : `<VernacularTitle>${vernacular}</VernacularTitle>`}`,
+    );
+
+  describe('chemicals', () => {
+    it("lists the six substances of PMID 31535829 in NCBI's order, the placeholder 0 omitted", () => {
+      expect(parseOne(withChemicals(DAPA_HF_CHEMICALS)).chemicals).toStrictEqual([
+        { name: 'Benzhydryl Compounds', ui: 'D001559' },
+        { name: 'Cardiovascular Agents', ui: 'D002317' },
+        { name: 'Glucosides', ui: 'D005960' },
+        { name: 'Glycated Hemoglobin', ui: 'D006442' },
+        { name: 'Sodium-Glucose Transporter 2 Inhibitors', ui: 'D000077203' },
+        { name: 'dapagliflozin', ui: 'C529054', registryNumber: '1ULL0QJ8UC' },
+      ]);
+    });
+
+    it('returns a one-entry array for a one-substance list (PMID 30831668)', () => {
+      expect(parseOne(withChemicals(ONE_CHEMICAL)).chemicals).toStrictEqual([
+        { name: 'alpha-Fetoproteins', ui: 'D000509' },
+      ]);
+    });
+
+    it('keeps an all-digit registry number as the string NCBI wrote (PMID 39701097)', () => {
+      const chemicals = parseOne(withChemicals(IRINOTECAN_CHEMICALS)).chemicals ?? [];
+      expect(chemicals[0]).toStrictEqual({
+        name: 'Irinotecan',
+        ui: 'D000077146',
+        registryNumber: '7673326042',
+      });
+      expect(chemicals.map((c) => c.registryNumber)).toStrictEqual([
+        '7673326042',
+        'U3P01618RT',
+        undefined,
+        '31YO63LBSN',
+        'Q573I9DVLP',
+      ]);
+    });
+
+    it('reads them with the MeSH terms, under includeMesh only', () => {
+      const xml = withChemicals(DAPA_HF_CHEMICALS);
+      expect(parseOne(xml).chemicals).toHaveLength(6);
+      expect(parseOne(xml, { includeMesh: true }).chemicals).toHaveLength(6);
+      const declined = parseOne(xml, { includeMesh: false });
+      expect(declined).not.toHaveProperty('chemicals');
+      expect(declined).not.toHaveProperty('meshTerms');
+    });
+
+    it('has no chemicals key on a record without a ChemicalList, or on a Bookshelf record', () => {
+      expect(parseOne(JOURNAL_ARTICLE_XML)).not.toHaveProperty('chemicals');
+      expect(parseOne(GENEREVIEWS_CHAPTER_XML)).not.toHaveProperty('chemicals');
+    });
+  });
+
+  describe('languages', () => {
+    it('reads a lone Language as a one-entry list', () => {
+      expect(parseOne(JOURNAL_ARTICLE_XML).languages).toStrictEqual(['eng']);
+      expect(parseOne(withLanguages('<Language>ger</Language>')).languages).toStrictEqual(['ger']);
+    });
+
+    it("keeps two languages in NCBI's order (PMID 43020712)", () => {
+      expect(
+        parseOne(withLanguages('<Language>eng</Language><Language>spa</Language>')).languages,
+      ).toStrictEqual(['eng', 'spa']);
+    });
+
+    it("reads a Bookshelf record's languages, and omits the key when it lists none", () => {
+      expect(parseOne(GENEREVIEWS_CHAPTER_XML).languages).toStrictEqual(['eng']);
+      const unlisted = parseOne(GENEREVIEWS_CHAPTER_XML.replace('<Language>eng</Language>', ''));
+      expect(unlisted).not.toHaveProperty('languages');
+    });
+  });
+
+  describe('vernacularTitle', () => {
+    it('reads the German title of PMID 34463784 beside its bracketed English one', () => {
+      const record = parseOne(
+        withLanguages(
+          '<Language>ger</Language>',
+          'Neues zur Diagnostik und Therapie der Herzinsuffizienz.',
+        ),
+      );
+      expect(record.vernacularTitle).toBe(
+        'Neues zur Diagnostik und Therapie der Herzinsuffizienz.',
+      );
+      expect(record.languages).toStrictEqual(['ger']);
+    });
+
+    it('flattens inline markup and decodes character references (PMID 41939518)', () => {
+      const record = parseOne(
+        withLanguages(
+          '<Language>fre</Language>',
+          'Vascularite c&#xe9;r&#xe9;brale &#xe0; <i>Mycobacterium tuberculosis</i>: &#xe0; propos d&#x2019;un cas p&#xe9;diatrique.',
+        ),
+      );
+      expect(record.vernacularTitle).toBe(
+        'Vascularite cérébrale à Mycobacterium tuberculosis: à propos d’un cas pédiatrique.',
+      );
+    });
+
+    it('decodes a double-encoded entity one layer, as ArticleTitle is (#74)', () => {
+      expect(
+        parseOne(withLanguages('<Language>ger</Language>', 'F&amp;amp;E in der Praxis.'))
+          .vernacularTitle,
+      ).toBe('F&E in der Praxis.');
+    });
+
+    it('has no vernacularTitle key when the record carries none or an empty one', () => {
+      expect(parseOne(JOURNAL_ARTICLE_XML)).not.toHaveProperty('vernacularTitle');
+      expect(parseOne(withLanguages('<Language>ger</Language>', ''))).not.toHaveProperty(
+        'vernacularTitle',
+      );
+    });
+
+    it("reads a Bookshelf record's VernacularTitle", () => {
+      const record = parseOne(
+        GENEREVIEWS_CHAPTER_XML.replace(
+          '<Language>eng</Language>',
+          '<VernacularTitle>Brustkrebs.</VernacularTitle><Language>ger</Language>',
+        ),
+      );
+      expect(record.vernacularTitle).toBe('Brustkrebs.');
+      expect(record.languages).toStrictEqual(['ger']);
+      expect(parseOne(GENEREVIEWS_CHAPTER_XML)).not.toHaveProperty('vernacularTitle');
+    });
+  });
+});

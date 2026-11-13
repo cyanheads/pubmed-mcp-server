@@ -25,11 +25,12 @@
 **Journal:** Frontiers in pediatrics, (Front Pediatr), 2021, **9**, 662953, pii: 662953, ISSN 2296-2360
 **Record Type:** journal-article
 **Type:** Journal Article
+**Language:** eng
 **PMID:** 34026693
 **DOI:** 10.3389/fped.2021.662953
 **PMCID:** PMC8138581
 **PubMed:** <https://pubmed.ncbi.nlm.nih.gov/34026693/>
-**PMC:** <https://www.ncbi.nlm.nih.gov/pmc/articles/PMC8138581/>
+**PMC:** <https://pmc.ncbi.nlm.nih.gov/articles/PMC8138581/>
 **Article Dates:** Electronic 2021-05-07
 
 #### Abstract

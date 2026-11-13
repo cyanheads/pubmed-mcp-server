@@ -8,9 +8,11 @@ import { z } from '@cyanheads/mcp-ts-core';
 import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
 import { createMockContext, getEnrichment, runToolContract } from '@cyanheads/mcp-ts-core/testing';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { pmidStringSchema } from '@/mcp-server/tools/definitions/_schemas.js';
 
 import {
   bunMarkdown,
+  cpuMsPerCall,
   readCommonMark,
   renderedHtml,
   renderedText,
@@ -172,7 +174,7 @@ describe('fetchArticlesTool', () => {
     expect(result.totalReturned).toBe(1);
     expect(result.articles[0]?.pmid).toBe('12345');
     expect(result.articles[0]?.pubmedUrl).toBe('https://pubmed.ncbi.nlm.nih.gov/12345/');
-    expect(result.articles[0]?.pmcUrl).toBe('https://www.ncbi.nlm.nih.gov/pmc/articles/PMC999/');
+    expect(result.articles[0]?.pmcUrl).toBe('https://pmc.ncbi.nlm.nih.gov/articles/PMC999/');
     // notice is absent on a successful fetch (issue #58)
     expect(getEnrichment(ctx).notice).toBeUndefined();
   });
@@ -412,7 +414,7 @@ describe('fetchArticlesTool', () => {
             publicationTypes: ['Review'],
             doi: '10.1000/example',
             pubmedUrl: 'https://pubmed.ncbi.nlm.nih.gov/12345/',
-            pmcUrl: 'https://www.ncbi.nlm.nih.gov/pmc/articles/PMC12345/',
+            pmcUrl: 'https://pmc.ncbi.nlm.nih.gov/articles/PMC12345/',
             keywords: ['asthma', 'airway'],
             meshTerms: [
               {
@@ -435,9 +437,7 @@ describe('fetchArticlesTool', () => {
     expect(blocks[0]?.text).toContain('Nat Rev, 2024, **12**(3), 45-52');
     expect(blocks[0]?.text).toContain('**Type:** Review');
     expect(blocks[0]?.text).toContain('**DOI:** 10.1000/example');
-    expect(blocks[0]?.text).toContain(
-      '**PMC:** <https://www.ncbi.nlm.nih.gov/pmc/articles/PMC12345/>',
-    );
+    expect(blocks[0]?.text).toContain('**PMC:** <https://pmc.ncbi.nlm.nih.gov/articles/PMC12345/>');
     expect(blocks[0]?.text).toContain('**Keywords:** asthma, airway');
     expect(blocks[0]?.text).toContain('#### MeSH Terms');
     expect(blocks[0]?.text).toContain('- Asthma (major) (therapy (major))');
@@ -482,7 +482,7 @@ describe('fetchArticlesTool', () => {
       doi: '10.1136/jcp-2022-208731',
       pmcId: 'PMC10000',
       pubmedUrl: 'https://pubmed.ncbi.nlm.nih.gov/36813558/',
-      pmcUrl: 'https://www.ncbi.nlm.nih.gov/pmc/articles/PMC10000/',
+      pmcUrl: 'https://pmc.ncbi.nlm.nih.gov/articles/PMC10000/',
       articleDates: [{ dateType: 'Electronic', year: '2023', month: '02', day: '22' }],
       grantList: [
         { grantId: 'R01 EY05922', acronym: 'EY', agency: 'NEI NIH HHS', country: 'United States' },
@@ -2469,7 +2469,7 @@ describe('fetchArticlesTool record links (issue #307)', () => {
       {
         pmid: '42474064',
         pubmedUrl: 'https://pubmed.ncbi.nlm.nih.gov/42474064/',
-        pmcUrl: 'https://www.ncbi.nlm.nih.gov/pmc/articles/PMC13403055/',
+        pmcUrl: 'https://pmc.ncbi.nlm.nih.gov/articles/PMC13403055/',
         accession: undefined,
       },
       {
@@ -2503,7 +2503,7 @@ describe('fetchArticlesTool record links (issue #307)', () => {
   });
 
   it('renders a URL that cannot be an autolink as text reading back the URL, never a broken link', () => {
-    const pmcUrl = 'https://www.ncbi.nlm.nih.gov/pmc/articles/PMC 1/';
+    const pmcUrl = 'https://pmc.ncbi.nlm.nih.gov/articles/PMC 1/';
     const pubmedUrl = 'https://pubmed.ncbi.nlm.nih.gov/<b>1</b>/';
     const text =
       textBlocks(
@@ -2527,5 +2527,219 @@ describe('fetchArticlesTool record links (issue #307)', () => {
       `⟨strong⟩PubMed:⟨/strong⟩ ${pubmedUrl}\n⟨strong⟩PMC:⟨/strong⟩ ${pmcUrl}`,
     );
     expect(read).not.toContain('⟨a href');
+  });
+});
+
+/** A rejected call as a client receives it: the error envelope and the content[] text. */
+async function rejectedCall(args: Record<string, unknown>) {
+  const result = await runToolContract(fetchArticlesTool, args as never);
+  expect(result.isError).toBe(true);
+  const { error } = result.structuredContent as {
+    error: {
+      code: number;
+      message: string;
+      data: { reason: string; recovery?: { hint?: string } };
+    };
+  };
+  const text = result.content.flatMap((b) => (b.type === 'text' ? [b.text] : [])).join('\n');
+  return { error, text };
+}
+
+describe('fetchArticlesTool idType (issue #243)', () => {
+  beforeEach(() => {
+    mockEFetch.mockReset();
+    mockEFetch.mockResolvedValue({
+      PubmedArticleSet: parseArticleSetXml(articleSetXml(JOURNAL_ARTICLE_XML)),
+    });
+  });
+
+  it('answers the pubmed_convert_ids call shape with idType "pmid" as it answers pmids alone', async () => {
+    const shaped = await runToolContract(fetchArticlesTool, {
+      idType: 'pmid',
+      ids: ['42474064'],
+    } as never);
+    const plain = await runToolContract(fetchArticlesTool, { pmids: ['42474064'] });
+
+    expect(shaped.isError).toBeFalsy();
+    const { articles } = shaped.structuredContent as { articles: { pmid: string }[] };
+    expect(articles.map((a) => a.pmid)).toStrictEqual(['42474064']);
+    expect(shaped.structuredContent).toStrictEqual(plain.structuredContent);
+    expect(shaped.content).toStrictEqual(plain.content);
+    expect(mockEFetch).toHaveBeenCalledTimes(2);
+    expect(mockEFetch.mock.calls[0]).toStrictEqual(mockEFetch.mock.calls[1]);
+  });
+
+  it.each([
+    ['doi', '10.1056/NEJMoa1911303'],
+    ['pmcid', 'PMC3531190'],
+  ])(
+    'rejects idType "%s" before any request, routing to the tools that take one',
+    async (idType, id) => {
+      const { error, text } = await rejectedCall({ idType, ids: [id] });
+
+      expect(error.code).toBe(JsonRpcErrorCode.InvalidParams);
+      expect(error.data.reason).toBe('invalid_arguments');
+      for (const surface of [error.message, error.data.recovery?.hint ?? '', text]) {
+        expect(surface).toContain('pubmed_convert_ids');
+        expect(surface).toContain('pubmed_fetch_fulltext');
+        expect(surface).not.toContain('Unrecognized key');
+      }
+      expect(mockEFetch).not.toHaveBeenCalled();
+    },
+  );
+
+  it('rejects idType "pmcid" over a bare-digit PMC ID, which reads as an unrelated PMID', async () => {
+    // PMC3531190 is PMID 23193287; PMID 3531190 is a different, 1986 article.
+    const { error } = await rejectedCall({ idType: 'pmcid', ids: ['3531190'] });
+
+    expect(error.code).toBe(JsonRpcErrorCode.InvalidParams);
+    expect(error.message).toContain(
+      'idType: pubmed_fetch_articles takes PMIDs only, so idType accepts only "pmid". Convert PMC IDs and DOIs to PMIDs with pubmed_convert_ids, or pass them to pubmed_fetch_fulltext as pmcids or dois.',
+    );
+    // The ids are well-formed PMIDs; idType alone is refused.
+    expect(error.message).not.toContain('pmids.0');
+    expect(mockEFetch).not.toHaveBeenCalled();
+  });
+
+  it('rejects "PMID", which pubmed_convert_ids rejects too, with the same recovery', async () => {
+    const { error } = await rejectedCall({ idType: 'PMID', pmids: ['42474064'] });
+    expect(error.code).toBe(JsonRpcErrorCode.InvalidParams);
+    expect(error.data.recovery?.hint).toContain('idType accepts only "pmid"');
+    expect(error.data.recovery?.hint).toContain('pubmed_convert_ids');
+    expect(mockEFetch).not.toHaveBeenCalled();
+  });
+
+  it('advertises idType as one optional const, leaving pmids the only required key', () => {
+    const schema = z.toJSONSchema(fetchArticlesTool.input, { io: 'input' }) as unknown as {
+      properties: Record<string, unknown>;
+      required: string[];
+    };
+    expect(schema.properties.idType).toStrictEqual({
+      type: 'string',
+      const: 'pmid',
+      description: expect.stringContaining('Only "pmid" is accepted'),
+    });
+    expect(schema.required).toStrictEqual(['pmids']);
+  });
+});
+
+describe('fetchArticlesTool pmids rejection for a PMC ID or DOI', () => {
+  beforeEach(() => {
+    mockEFetch.mockReset();
+  });
+
+  const messageFor = (value: string) =>
+    fetchArticlesTool.input.safeParse({ pmids: [value] }).error?.issues[0]?.message ?? '';
+  const sharedMessageFor = (value: string) =>
+    pmidStringSchema.safeParse(value).error?.issues[0]?.message;
+
+  it.each(['PMC3531190', 'pmc3531190'])(
+    'names %s a PMC ID and routes it, never advising to strip the prefix',
+    (value) => {
+      const message = messageFor(value);
+      expect(message).toBe(
+        "This is a PMC ID, not a PMID: its digits are not the article's PMID. Convert PMC IDs and DOIs to PMIDs with pubmed_convert_ids, or pass them to pubmed_fetch_fulltext as pmcids or dois.",
+      );
+      expect(message).not.toContain('non-digit');
+    },
+  );
+
+  it('names a DOI a DOI and routes it', () => {
+    expect(messageFor('10.1056/NEJMoa1911303')).toBe(
+      'This is a DOI, not a PMID. Convert PMC IDs and DOIs to PMIDs with pubmed_convert_ids, or pass them to pubmed_fetch_fulltext as pmcids or dois.',
+    );
+  });
+
+  it.each([
+    'abc',
+    '13054692 ',
+    '13054692,20502474',
+    'PMID:13054692',
+    'PMC',
+    'PMC 3531190',
+    'PMC3531190x',
+    '10.1056',
+    'https://doi.org/10.1056/NEJMoa1911303',
+  ])('keeps the shared PMID message for %j', (value) => {
+    expect(messageFor(value)).toBe(sharedMessageFor(value));
+    expect(messageFor(value)).toMatch(/^PMID must be a numeric identifier/);
+  });
+
+  it('routes each element of a batch by its own shape through the real argument parse', async () => {
+    const { error, text } = await rejectedCall({
+      ids: ['PMC3531190', '10.1056/NEJMoa1911303', 'abc', '42474064'],
+    });
+
+    expect(error.code).toBe(JsonRpcErrorCode.InvalidParams);
+    expect(error.data.reason).toBe('invalid_arguments');
+    for (const surface of [error.message, text]) {
+      expect(surface).toContain('pmids.0: This is a PMC ID, not a PMID');
+      expect(surface).toContain('pmids.1: This is a DOI, not a PMID');
+      expect(surface).toContain('pmids.2: PMID must be a numeric identifier');
+      expect(surface).not.toContain('pmids.3');
+    }
+    expect(mockEFetch).not.toHaveBeenCalled();
+  });
+
+  it('advertises pmids exactly as before: only the rejection text differs', () => {
+    const schema = z.toJSONSchema(fetchArticlesTool.input, { io: 'input' }) as unknown as {
+      properties: Record<string, unknown>;
+    };
+    expect(schema.properties.pmids).toStrictEqual({
+      minItems: 1,
+      maxItems: 200,
+      type: 'array',
+      items: { type: 'string', pattern: '^\\d+$' },
+      description: 'PubMed IDs to fetch',
+    });
+  });
+
+  describe('linear time on adversarial input', () => {
+    /**
+     * Each row names the message the value must get: the PMC ID route, the DOI
+     * route, the shared one, or none.
+     */
+    it.each<[string, (n: number) => string, 'pmc' | 'doi' | 'shared' | 'none']>([
+      ['PMC then a digit run', (n) => `PMC${'1'.repeat(n)}`, 'pmc'],
+      ['PMC then a digit run ending in a letter', (n) => `PMC${'1'.repeat(n)}x`, 'shared'],
+      ['a DOI-shaped value with the shared message', (n) => `10.${'a'.repeat(n)}`, 'shared'],
+      ['a DOI-shaped value with the DOI route', (n) => `10.${'/'.repeat(n)}`, 'doi'],
+      ['a long digit run', (n) => '1'.repeat(n), 'none'],
+      ['a digit run ending in a letter', (n) => `${'1'.repeat(n)}x`, 'shared'],
+      ['one long line ending in a break', (n) => `${'§1 x'.repeat(n / 4)}\ny`, 'shared'],
+      ['line breaks throughout', (n) => '  \r\n'.repeat(n / 4), 'shared'],
+    ])(
+      'scales linearly from 5k to 320k characters: %s',
+      (_label, build, kind) => {
+        // Zod builds an issue's message when it is first read, so the timed call
+        // reads it: a bare safeParse would never run the shape checks.
+        const messageOf = (value: string) =>
+          fetchArticlesTool.input.safeParse({ pmids: [value] }).error?.issues[0]?.message;
+        const kindOf = (value: string) => {
+          const message = messageOf(value);
+          if (message === undefined) return 'none';
+          if (message.startsWith('This is a PMC ID')) return 'pmc';
+          if (message.startsWith('This is a DOI')) return 'doi';
+          return message.startsWith('PMID must be a numeric identifier') ? 'shared' : message;
+        };
+        const run = (value: string) => () => messageOf(value);
+        // Doubling from 5k, each size checked against its message and the absolute
+        // bound before the next runs, with the 5k baseline timed again beside it.
+        const base = build(5_000);
+        const baselines: number[] = [];
+        let largest = 0;
+        for (let n = 5_000; n <= 320_000; n *= 2) {
+          const value = build(n);
+          expect(kindOf(value)).toBe(kind);
+          baselines.push(cpuMsPerCall(5_000, run(base)));
+          largest = cpuMsPerCall(n, run(value));
+          expect(largest).toBeLessThan(200);
+        }
+        // Linear work grows 64× across the span; quadratic grows 4096×. The least
+        // growth over the baselines read beside each size is the one asserted.
+        expect(largest / Math.max(...baselines, 0.0005)).toBeLessThan(256);
+      },
+      0,
+    );
   });
 });

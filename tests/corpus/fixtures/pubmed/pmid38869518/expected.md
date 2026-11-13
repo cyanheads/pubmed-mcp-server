@@ -30,11 +30,12 @@
 **Journal:** Amino acids, (Amino Acids), 2024 Jun 13, **56**(1), 42, pii: 42, eISSN 1438-2199
 **Record Type:** journal-article
 **Type:** Journal Article, Comparative Study
+**Language:** eng
 **PMID:** 38869518
 **DOI:** 10.1007/s00726-024-03401-w
 **PMCID:** PMC11176230
 **PubMed:** <https://pubmed.ncbi.nlm.nih.gov/38869518/>
-**PMC:** <https://www.ncbi.nlm.nih.gov/pmc/articles/PMC11176230/>
+**PMC:** <https://pmc.ncbi.nlm.nih.gov/articles/PMC11176230/>
 **Article Dates:** Electronic 2024-06-13
 
 #### Abstract
@@ -57,6 +58,13 @@ Creatine is a natural nitrogenous organic acid that is integral to energy metabo
 - Transplant Recipients [D066027]
 - Case-Control Studies [D016022]
 - Creatinine [D003404] (urine [Q000652], blood [Q000097])
+
+#### Substances
+Find other records listing a substance with `pubmed_search_articles` for `"<name>"[nm]`.
+- Creatine [D003401] — Registry Number: MU72812GK0
+- glycocyamine [C004946] — Registry Number: GO52O1A04E
+- Glycine [D005998] — Registry Number: TE7660XO1C
+- Creatinine [D003404] — Registry Number: AYI8EX34EU
 
 #### Grants
 - A-1003 — Top Institute Food and Nutrition

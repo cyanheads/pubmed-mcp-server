@@ -909,4 +909,85 @@ describe('NCBI_ARRAY_JPATHS single-element normalization (#138)', () => {
       expect(isList(parsed, jpath), jpath).toBe(true);
     }
   });
+
+  it('normalizes a one-substance ChemicalList and a lone Language on both record kinds (#295)', () => {
+    // PMID 30831668 lists one substance; PMID 34463784 one language.
+    const xml =
+      '<?xml version="1.0"?><PubmedArticleSet><PubmedArticle><MedlineCitation><PMID>34463784</PMID>' +
+      '<Article><ArticleTitle>[Heart failure].</ArticleTitle><Language>ger</Language>' +
+      '<VernacularTitle>Neues zur Diagnostik und Therapie der Herzinsuffizienz.</VernacularTitle></Article>' +
+      '<ChemicalList><Chemical><RegistryNumber>0</RegistryNumber>' +
+      '<NameOfSubstance UI="D002317">Cardiovascular Agents</NameOfSubstance></Chemical></ChemicalList>' +
+      '</MedlineCitation></PubmedArticle><PubmedBookArticle><BookDocument><PMID>20301295</PMID>' +
+      '<Book><BookTitle>GeneReviews</BookTitle></Book><Language>eng</Language></BookDocument>' +
+      '</PubmedBookArticle></PubmedArticleSet>';
+
+    const parsed = parse(xml);
+    const citation = 'PubmedArticleSet.PubmedArticle.MedlineCitation';
+    for (const jpath of [
+      `${citation}.ChemicalList.Chemical`,
+      `${citation}.Article.Language`,
+      'PubmedArticleSet.PubmedBookArticle.BookDocument.Language',
+    ]) {
+      expect(isList(parsed, jpath), jpath).toBe(true);
+    }
+    expect(at(parsed, `${citation}.Article.Language`)).toEqual(['ger']);
+    // A title is one element, never a list.
+    expect(at(parsed, `${citation}.Article.VernacularTitle`)).toBe(
+      'Neues zur Diagnostik und Therapie der Herzinsuffizienz.',
+    );
+  });
+});
+
+// ─── ChemicalList RegistryNumber kept as written (#295) ──────────────────────
+
+describe('RegistryNumber is exempt from numeric coercion (#295)', () => {
+  const chemical = (registryNumber: string, ui: string, name: string) =>
+    `<Chemical><RegistryNumber>${registryNumber}</RegistryNumber><NameOfSubstance UI="${ui}">${name}</NameOfSubstance></Chemical>`;
+
+  const parseChemicals = (chemicals: string) => {
+    const set = createHandler().parseAndHandleResponse<{
+      PubmedArticleSet: {
+        PubmedArticle: {
+          MedlineCitation: {
+            ChemicalList: { Chemical: { RegistryNumber: unknown }[] | { RegistryNumber: unknown } };
+            PMID: unknown;
+          };
+        }[];
+      };
+    }>(
+      `<?xml version="1.0"?><PubmedArticleSet><PubmedArticle><MedlineCitation><PMID>39701097</PMID><ChemicalList>${chemicals}</ChemicalList></MedlineCitation></PubmedArticle></PubmedArticleSet>`,
+      'efetch',
+      { retmode: 'xml' },
+    ).PubmedArticleSet;
+    const citation = set.PubmedArticle[0]?.MedlineCitation;
+    const entries = [citation?.ChemicalList.Chemical ?? []].flat();
+    return { citation, registryNumbers: entries.map((c) => c.RegistryNumber) };
+  };
+
+  it("keeps NCBI's placeholder 0 and an all-digit UNII as the text NCBI wrote", () => {
+    // PMID 39701097: Irinotecan's UNII is all digits; PMID 31535829's D entries carry 0.
+    const { registryNumbers } = parseChemicals(
+      chemical('7673326042', 'D000077146', 'Irinotecan') +
+        chemical('0', 'D000970', 'Antineoplastic Agents') +
+        chemical('1ULL0QJ8UC', 'C529054', 'dapagliflozin') +
+        chemical('EC 2.7.10.1', 'D066246', 'ErbB Receptors') +
+        chemical('50-00-0', 'D005557', 'Formaldehyde') +
+        chemical('007', 'C000000', 'leading zeros'),
+    );
+    expect(registryNumbers).toStrictEqual([
+      '7673326042',
+      '0',
+      '1ULL0QJ8UC',
+      'EC 2.7.10.1',
+      '50-00-0',
+      '007',
+    ]);
+  });
+
+  it('still coerces the PMID beside it', () => {
+    expect(parseChemicals(chemical('0', 'D000970', 'Antineoplastic Agents')).citation?.PMID).toBe(
+      39701097,
+    );
+  });
 });

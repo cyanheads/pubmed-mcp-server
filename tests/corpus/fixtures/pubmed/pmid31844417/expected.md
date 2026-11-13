@@ -25,11 +25,12 @@
 **Journal:** Cellular & molecular biology letters, (Cell Mol Biol Lett), 2019, **24**, 66, pii: 66, eISSN 1689-1392
 **Record Type:** journal-article
 **Type:** Journal Article, Retracted Publication
+**Language:** eng
 **PMID:** 31844417
 **DOI:** 10.1186/s11658-019-0184-7
 **PMCID:** PMC6894134
 **PubMed:** <https://pubmed.ncbi.nlm.nih.gov/31844417/>
-**PMC:** <https://www.ncbi.nlm.nih.gov/pmc/articles/PMC6894134/>
+**PMC:** <https://pmc.ncbi.nlm.nih.gov/articles/PMC6894134/>
 **Article Dates:** Electronic 2019-12-04
 
 #### Comments and Corrections (1)
@@ -71,6 +72,15 @@ CONCLUSION: These findings indicate new functions and mechanisms for miR-582-3p 
 - RNA, Small Interfering [D034741] (genetics [Q000235], metabolism [Q000378])
 - Signal Transduction [D015398]
 - THP-1 Cells [D000074084]
+
+#### Substances
+Find other records listing a substance with `pubmed_search_articles` for `"<name>"[nm]`.
+- CCNB2 protein, human [C503758]
+- Cyclin B2 [D056765]
+- MIRN582 microRNA, human [C000593706]
+- MicroRNAs [D035683]
+- RNA, Small Interfering [D034741]
+- Luciferases [D008156] — Registry Number: EC 1.13.12.-
 
 <!-- pubmed_format_citations {"pmids":["31844417"],"format":["apa","mla","bibtex","ris","vancouver"]} -->
 # PubMed Citations

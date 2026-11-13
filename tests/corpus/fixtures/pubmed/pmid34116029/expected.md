@@ -54,11 +54,12 @@
 **Journal:** Gastroenterology, 2021 Sep, **161**(3), 865-878.e8, pii: S0016-5085(21)03087-0, eISSN 1528-0012
 **Record Type:** journal-article
 **Type:** Journal Article, Research Support, Non-U.S. Gov't, Video-Audio Media
+**Language:** eng
 **PMID:** 34116029
 **DOI:** 10.1053/j.gastro.2021.05.059
 **PMCID:** PMC7617121
 **PubMed:** <https://pubmed.ncbi.nlm.nih.gov/34116029/>
-**PMC:** <https://www.ncbi.nlm.nih.gov/pmc/articles/PMC7617121/>
+**PMC:** <https://pmc.ncbi.nlm.nih.gov/articles/PMC7617121/>
 **Article Dates:** Electronic 2021-06-08
 
 #### Comments and Corrections (1)
