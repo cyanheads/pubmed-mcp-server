@@ -9,6 +9,7 @@
  */
 
 import { tool, z } from '@cyanheads/mcp-ts-core';
+import { startCallDeadline } from '@/services/call-deadline.js';
 import { ICITE_SERVICE_ERRORS } from '@/services/error-contracts.js';
 import { getIciteService } from '@/services/icite/icite-service.js';
 import { ICITE_MAX_PMID, type IciteRecord } from '@/services/icite/types.js';
@@ -204,13 +205,15 @@ export const fetchCitationMetricsTool = tool('pubmed_fetch_citation_metrics', {
   },
 
   async handler(input, ctx) {
+    const deadline = startCallDeadline();
     ctx.log.info('Executing pubmed_fetch_citation_metrics', { pmidCount: input.pmids.length });
 
     const { fetched, overLimit } = splitAtFetchLimit(input.pmids);
     // `0` and out-of-range values are never sent: iCite reads a list holding no
     // PMID it accepts as a request for its first 1,000 records. They are misses.
     const sendable = fetched.map((entry) => entry.pmid).filter(isIcitePmid);
-    const found = sendable.length > 0 ? await getIciteService().fetchRecords(sendable, ctx) : [];
+    const found =
+      sendable.length > 0 ? await getIciteService().fetchRecords(sendable, ctx, deadline) : [];
 
     // iCite answers in lexicographic PMID order; the response follows the request.
     const byPmid = new Map(found.map((record) => [record.pmid, record]));

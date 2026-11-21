@@ -7,7 +7,7 @@ import { readFileSync } from 'node:fs';
 import { z } from '@cyanheads/mcp-ts-core';
 import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
 import { createMockContext, getEnrichment, runToolContract } from '@cyanheads/mcp-ts-core/testing';
-import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { pmidStringSchema } from '@/mcp-server/tools/definitions/_schemas.js';
 
 import {
@@ -2566,7 +2566,12 @@ describe('fetchArticlesTool idType (issue #243)', () => {
     expect(shaped.structuredContent).toStrictEqual(plain.structuredContent);
     expect(shaped.content).toStrictEqual(plain.content);
     expect(mockEFetch).toHaveBeenCalledTimes(2);
-    expect(mockEFetch.mock.calls[0]).toStrictEqual(mockEFetch.mock.calls[1]);
+    // Each call starts its own deadline, so the two requests match in all else. (#310)
+    const [shapedCall, plainCall] = mockEFetch.mock.calls;
+    expect(shapedCall).toStrictEqual([
+      plainCall?.[0],
+      { ...plainCall?.[1], deadline: { expiresAt: expect.any(Number), totalMs: 50_000 } },
+    ]);
   });
 
   it.each([
@@ -2741,5 +2746,139 @@ describe('fetchArticlesTool pmids rejection for a PMC ID or DOI', () => {
       },
       0,
     );
+  });
+});
+
+/**
+ * EFetch answering a valid request with HTTP 400 and a body that opens the
+ * `PubmedArticleSet` result document, then runs into a stylesheet fragment, with
+ * no `<ERROR>`. Drives the real NcbiService, NcbiApiClient, and
+ * NcbiResponseHandler behind a stubbed global fetch, with zero-delay backoff.
+ * (#314)
+ */
+describe('fetchArticlesTool on an EFetch 400 carrying a truncated result document (issue #314)', () => {
+  const TRUNCATED_SET =
+    '<?xml version="1.0" ?>\n<!DOCTYPE PubmedArticleSet PUBLIC "-//NLM//DTD PubMedArticle, 1st January 2025//EN" "https://dtd.nlm.nih.gov/ncbi/pubmed/out/pubmed_250101.dtd">\n<PubmedArticleSet>in-top:1em;\n      line-height:1.5;\n      padding-left:3ch;\n    }\n    .usa-list:last-child{\n      margin-bottom:0;\n    }\n';
+  const UNREACHABLE_HINT =
+    'Retry after a brief delay; NCBI failed on every attempt this call made.';
+
+  let fetchSpy: ReturnType<typeof vi.spyOn> | undefined;
+  let setTimeoutSpy: ReturnType<typeof vi.spyOn>;
+
+  beforeEach(async () => {
+    const { NcbiService } = await vi.importActual<typeof import('@/services/ncbi/ncbi-service.js')>(
+      '@/services/ncbi/ncbi-service.js',
+    );
+    const { NcbiApiClient } = await import('@/services/ncbi/api-client.js');
+    const { NcbiResponseHandler } = await import('@/services/ncbi/response-handler.js');
+    const { createPacer } = await import('@cyanheads/mcp-ts-core/utils');
+    const service = new NcbiService(
+      new NcbiApiClient({ toolIdentifier: 'test', timeoutMs: 5000 }),
+      createPacer({ name: 'ncbi-test' }),
+      new NcbiResponseHandler(),
+      2,
+      60_000,
+    );
+    mockEFetch.mockReset();
+    mockEFetch.mockImplementation((...args: Parameters<typeof service.eFetch>) =>
+      service.eFetch(...args),
+    );
+    /**
+     * Fire backoff sleeps (30 s at most) at once; leave the deadline timers unarmed: the
+     * tool call's 50 s, armed at what is left of it, and the service's 60 s. (#310)
+     */
+    setTimeoutSpy = vi.spyOn(globalThis, 'setTimeout').mockImplementation(((
+      fn: () => void,
+      ms?: number,
+    ) => {
+      if (typeof ms !== 'number' || ms < 40_000) fn();
+      return 0 as unknown as ReturnType<typeof setTimeout>;
+    }) as unknown as typeof setTimeout);
+  });
+
+  afterEach(() => {
+    fetchSpy?.mockRestore();
+    fetchSpy = undefined;
+    setTimeoutSpy.mockRestore();
+  });
+
+  function stubFetch(...replies: Array<{ body: string; status: number }>) {
+    let call = 0;
+    fetchSpy = vi.spyOn(globalThis, 'fetch').mockImplementation(() => {
+      const reply = replies[Math.min(call++, replies.length - 1)] as (typeof replies)[number];
+      return Promise.resolve(new Response(reply.body, { status: reply.status }));
+    });
+  }
+
+  it('ends a persistent one as ncbi_unreachable with its recovery on both surfaces, no markup', async () => {
+    stubFetch({ body: TRUNCATED_SET, status: 400 });
+
+    const { error, text } = await rejectedCall({ pmids: ['33301246'] });
+
+    expect(error).toMatchObject({
+      code: JsonRpcErrorCode.ServiceUnavailable,
+      message: expect.stringMatching(/\(failed after 3 attempts\)$/),
+      data: {
+        reason: 'ncbi_unreachable',
+        endpoint: 'efetch',
+        attempts: 3,
+        recovery: { hint: UNREACHABLE_HINT },
+      },
+    });
+    expect(text).toContain(`Recovery: ${UNREACHABLE_HINT}`);
+    expect(text).toContain('(reason ncbi_unreachable');
+    for (const surface of [error.message, JSON.stringify(error.data), text]) {
+      expect(surface).not.toMatch(/<|line-height|PubmedArticleSet/);
+    }
+    expect(error.data).not.toHaveProperty('ncbiErrors');
+    expect(fetchSpy).toHaveBeenCalledTimes(3);
+  });
+
+  it('returns the article when the retry is served, after exactly 2 requests', async () => {
+    stubFetch(
+      { body: TRUNCATED_SET, status: 400 },
+      { body: articleSetXml(JOURNAL_ARTICLE_XML), status: 200 },
+    );
+
+    const result = await runToolContract(fetchArticlesTool, { pmids: ['42474064'] });
+
+    expect(result.isError).toBeFalsy();
+    const structured = result.structuredContent as { articles: Array<{ pmid: string }> };
+    expect(structured.articles.map((a) => a.pmid)).toEqual(['42474064']);
+    expect(textBlocks(result.content)[0]?.text).toContain('42474064');
+    expect(fetchSpy).toHaveBeenCalledTimes(2);
+  });
+});
+
+describe('fetchArticlesTool call deadline (issue #310)', () => {
+  const STARTED_AT = Date.UTC(2026, 0, 1);
+
+  beforeEach(() => {
+    mockEFetch.mockReset();
+    vi.useFakeTimers({ toFake: ['Date'] });
+    vi.setSystemTime(STARTED_AT);
+  });
+
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  it('passes EFetch the deadline the call starts, beside ctx.signal', async () => {
+    mockEFetch.mockResolvedValue({
+      PubmedArticleSet: parseArticleSetXml(articleSetXml(JOURNAL_ARTICLE_XML)),
+    });
+    const ctx = createMockContext({ errors: fetchArticlesTool.errors });
+    const input = fetchArticlesTool.input.parse({ pmids: ['42474064'] });
+    await fetchArticlesTool.handler(input, ctx);
+
+    expect(mockEFetch).toHaveBeenCalledTimes(1);
+    const options = mockEFetch.mock.lastCall?.[1];
+    expect(options).toEqual({
+      retmode: 'xml',
+      usePost: false,
+      signal: ctx.signal,
+      deadline: { expiresAt: STARTED_AT + 50_000, totalMs: 50_000 },
+    });
+    expect(options.signal).toBe(ctx.signal);
   });
 });

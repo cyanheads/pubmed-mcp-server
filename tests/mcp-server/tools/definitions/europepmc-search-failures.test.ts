@@ -105,14 +105,25 @@ function errorOf(result: Awaited<ReturnType<typeof runToolContract>>) {
 
 /**
  * Each tool replaces only the `recovery` of the shared outage entries,
- * `europepmc_unreachable` and `europepmc_deadline_exceeded`, by mapping the
- * array it spreads: code, `when`, `retryable`, and `thrownBy` stay shared, and
- * every other Europe PMC entry is the shared one itself (#288, #305).
+ * `europepmc_unreachable`, `europepmc_deadline_exceeded`, and
+ * `europepmc_timed_out`, by mapping the array it spreads: code, `when`,
+ * `retryable`, and `thrownBy` stay shared, and every other Europe PMC entry —
+ * `europepmc_rate_limited` among them — is the shared one itself (#288, #305,
+ * #315).
  */
 type DeclaredErrors = readonly { reason: string; recovery: string }[];
 const errorsOf = (definition: { errors?: DeclaredErrors }): DeclaredErrors =>
   definition.errors ?? [];
-const OUTAGE_REASONS: readonly string[] = ['europepmc_unreachable', 'europepmc_deadline_exceeded'];
+const OUTAGE_REASONS: readonly string[] = [
+  'europepmc_unreachable',
+  'europepmc_deadline_exceeded',
+  'europepmc_timed_out',
+];
+
+/** The shared recovery of `europepmc_rate_limited`, which neither tool replaces. */
+const RATE_LIMITED_HINT = EUROPEPMC_SERVICE_ERRORS.find(
+  (e) => e.reason === 'europepmc_rate_limited',
+)?.recovery;
 
 describe.each([
   ['pubmed_europepmc_search', errorsOf(pubmedEuropepmcSearchTool), SEARCH_UNREACHABLE_HINT],
@@ -150,18 +161,22 @@ const fetchRecords = () =>
 beforeEach(() => {
   service = new EuropePmcService(
     // Both above the setTimeout stub's pass-through ceiling, so the request timer and
-    // the call's total deadline never fire.
+    // Europe PMC's total deadline never fire.
     new EuropePmcApiClient({ timeoutMs: 60_000 }),
     createEuropePmcRequestQueue(0),
     MAX_RETRIES,
     60_000,
   );
-  // Fire retry backoff at once; leave long timers (the request timeout, the deadline) unarmed.
+  /**
+   * Fire retry backoff at once; leave long timers unarmed: the request timeout,
+   * Europe PMC's deadline, and the tool call's 50 s deadline, whose timer is armed
+   * for what is left of it once the handler reaches Europe PMC — a few ms under 50 s.
+   */
   setTimeoutSpy = vi.spyOn(globalThis, 'setTimeout').mockImplementation(((
     fn: () => void,
     ms?: number,
   ) => {
-    if (typeof ms !== 'number' || ms < 50_000) fn();
+    if (typeof ms !== 'number' || ms < 40_000) fn();
     return 0 as unknown as ReturnType<typeof setTimeout>;
   }) as unknown as typeof setTimeout);
 });
@@ -216,20 +231,31 @@ describe.each([
     expect(fetchSpy).toHaveBeenCalledTimes(EXHAUSTED);
   });
 
-  it('keeps a 429 RateLimited with its retryAfter on both paths (#152)', async () => {
+  /**
+   * A 429 keeps RateLimited and the `retryAfter` it named, and carries the shared
+   * recovery — wait as long as `retryAfter` says — rather than this tool's outage
+   * route, which says to retry after a brief delay. (#152, #315)
+   */
+  it('ends a persistent 429 as europepmc_rate_limited with its retryAfter on both paths', async () => {
     stubFetch([{ status: 429, headers: { 'retry-after': '5' } }]);
     const { error, text } = errorOf(await run());
 
     expect(error.code).toBe(JsonRpcErrorCode.RateLimited);
     expect(error.data?.retryAfter).toBe('5');
-    // `europepmc_unreachable` is declared for ServiceUnavailable only.
-    expect(error.data?.reason).toBeUndefined();
-    expect(text).not.toContain('europepmc_unreachable');
+    expect(error.data?.reason).toBe('europepmc_rate_limited');
+    expect(error.data?.recovery?.hint).toBe(RATE_LIMITED_HINT);
+    expect(error.message).toMatch(
+      new RegExp(`Status: 429.*\\(failed after ${EXHAUSTED} attempts\\)$`),
+    );
+    // The framework's closing line carries the wait too, as a code span.
+    expect(text).toBe(
+      `Error: ${error.message}\n\nRecovery: ${RATE_LIMITED_HINT}\n\n(reason europepmc_rate_limited · retry after ⟨code_inline:5⟩)`,
+    );
     expect(text).not.toContain(unreachableHint);
     expect(fetchSpy).toHaveBeenCalledTimes(EXHAUSTED);
   });
 
-  it('keeps a persistent 504 as Timeout, without the unreachable reason (#152)', async () => {
+  it('ends a persistent 504 as europepmc_timed_out with its outage recovery on both paths (#152, #315)', async () => {
     stubFetch([{ status: 504, body: 'Gateway Timeout' }]);
     const { error, text } = errorOf(await run());
 
@@ -237,7 +263,11 @@ describe.each([
     expect(error.message).toMatch(
       new RegExp(`Status: 504.*\\(failed after ${EXHAUSTED} attempts\\)$`),
     );
-    expect(error.data?.reason).toBeUndefined();
+    expect(error.data?.reason).toBe('europepmc_timed_out');
+    expect(error.data?.recovery?.hint).toBe(unreachableHint);
+    expect(text).toBe(
+      `Error: ${error.message}\n\nRecovery: ${unreachableHint}\n\n(reason europepmc_timed_out)`,
+    );
     expect(text).not.toContain('europepmc_unreachable');
     expect(fetchSpy).toHaveBeenCalledTimes(EXHAUSTED);
   });

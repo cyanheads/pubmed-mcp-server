@@ -2,8 +2,10 @@
  * @fileoverview `pubmed_find_related` over the real OpenAlex service and client, with
  * only `fetch` faked: an OpenAlex body that is not JSON reaches the tool as
  * `openalex_invalid_response` once retries run out — in `data.attempted[]` of a fully
- * failed chain and in the `coverageFailures` of a references coverage check (#182).
- * NCBI and Europe PMC are stubbed at their accessors to route the chain.
+ * failed chain and in the `coverageFailures` of a references coverage check (#182); a
+ * hung OpenAlex is cut at its share of the call's deadline as
+ * `openalex_deadline_exceeded` (#310). NCBI and Europe PMC are stubbed at their
+ * accessors to route the chain.
  * @module tests/mcp-server/tools/definitions/find-related-openalex-reason.test
  */
 
@@ -12,6 +14,7 @@ import { JsonRpcErrorCode, McpError } from '@cyanheads/mcp-ts-core/errors';
 import { runToolContract } from '@cyanheads/mcp-ts-core/testing';
 import { afterEach, beforeEach, describe, expect, it, type MockInstance, vi } from 'vitest';
 
+import type { CallDeadline } from '@/services/call-deadline.js';
 import type { ParsedBriefSummary } from '@/services/ncbi/types.js';
 import type { OpenAlexService as OpenAlexServiceType } from '@/services/openalex/openalex-service.js';
 
@@ -45,6 +48,8 @@ const { findRelatedTool } = await import('@/mcp-server/tools/definitions/find-re
 
 /** One retry after the initial attempt. */
 const MAX_RETRIES = 1;
+/** `EUROPEPMC_TOTAL_DEADLINE_MS`'s default, which OpenAlex borrows. */
+const OPENALEX_DEADLINE_MS = 45_000;
 const realSetTimeout = globalThis.setTimeout;
 let fetchSpy: MockInstance<typeof fetch>;
 
@@ -80,7 +85,11 @@ beforeEach(() => {
     }
     return realSetTimeout(fn, ms);
   }) as unknown as typeof setTimeout);
-  openAlex = new OpenAlexService(new OpenAlexApiClient({ timeoutMs: 20_000 }), MAX_RETRIES);
+  openAlex = new OpenAlexService(
+    new OpenAlexApiClient({ timeoutMs: 20_000 }),
+    MAX_RETRIES,
+    OPENALEX_DEADLINE_MS,
+  );
 });
 
 afterEach(() => {
@@ -153,5 +162,83 @@ describe('pubmed_find_related reports an OpenAlex non-JSON body as openalex_inva
     expect(structured.notice).toContain('OpenAlex (openalex_invalid_response) did not answer');
     expect(textOf(result)).toContain('OpenAlex (openalex_invalid_response)');
     expect(fetchSpy).toHaveBeenCalledTimes(MAX_RETRIES + 1);
+  });
+});
+
+/**
+ * The real OpenAlex service against a host that accepts the request and never answers,
+ * on a faked clock, behind an NCBI that hangs the same way (#310). Its request is aborted
+ * when the share of the call's deadline it was handed runs out, and it reports that
+ * share's length.
+ */
+describe('pubmed_find_related cuts a hung OpenAlex at its share of the call deadline (#310)', () => {
+  const STARTED_AT = Date.UTC(2026, 0, 1);
+
+  beforeEach(() => {
+    // This suite runs every timer on the faked clock, not the file's pass-through stub.
+    vi.restoreAllMocks();
+    vi.useFakeTimers({ now: STARTED_AT });
+    fetchSpy = vi.spyOn(globalThis, 'fetch').mockImplementation(
+      (_input, init) =>
+        new Promise((_, reject) => {
+          init?.signal?.addEventListener('abort', () => reject(init.signal?.reason));
+        }),
+    );
+  });
+
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  it('ends a hung similar chain at 37.5 s, OpenAlex reporting openalex_deadline_exceeded for its 12.5 s share', async () => {
+    mockELink.mockImplementation(
+      (_params: unknown, options: { deadline: CallDeadline }) =>
+        new Promise((_, reject) => {
+          setTimeout(
+            () =>
+              reject(
+                new McpError(
+                  JsonRpcErrorCode.Timeout,
+                  `NCBI request deadline (${options.deadline.totalMs}ms) exceeded`,
+                  { reason: 'ncbi_deadline_exceeded' },
+                ),
+              ),
+            options.deadline.expiresAt - Date.now(),
+          );
+        }),
+    );
+
+    let settledAt = Number.NaN;
+    const settled = runToolContract(findRelatedTool, {
+      pmid: '31452104',
+      relationship: 'similar',
+    }).finally(() => {
+      settledAt = Date.now() - STARTED_AT;
+    });
+    await vi.runAllTimersAsync();
+    const result = await settled;
+
+    expect(settledAt).toBe(37_500);
+    expect(result.isError).toBe(true);
+    const error = (
+      result.structuredContent as {
+        error: { data: { reason: string; attempted: unknown[] } };
+      }
+    ).error;
+    expect(error.data.reason).toBe('all_providers_failed');
+    expect(error.data.attempted).toEqual([
+      {
+        provider: 'ncbi',
+        reason: 'ncbi_deadline_exceeded',
+        message: 'NCBI request deadline (25000ms) exceeded',
+      },
+      {
+        provider: 'openalex',
+        reason: 'openalex_deadline_exceeded',
+        message: 'OpenAlex request deadline (12500ms) exceeded',
+      },
+    ]);
+    // One request, aborted in flight when the share ran out: no retry after it.
+    expect(fetchSpy).toHaveBeenCalledTimes(1);
   });
 });

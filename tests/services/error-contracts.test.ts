@@ -75,10 +75,38 @@ describe('NCBI_SERVICE_ERRORS', () => {
         'ncbi_invalid_response',
         'ncbi_rate_limited',
         'ncbi_resource_not_found',
+        'ncbi_timed_out',
         'ncbi_unreachable',
         'queue_full',
       ].sort(),
     );
+  });
+
+  /**
+   * A loop that stops on a Timeout without its deadline firing is told apart from an
+   * expiry, which keeps `ncbi_deadline_exceeded`. NCBI's client reports a request its
+   * per-request timeout ended as `ncbi_unreachable`, so this reason never claims it.
+   */
+  it('declares ncbi_timed_out as a retryable Timeout the last attempt ended on, whichever way the loop stopped', () => {
+    const entry = NCBI_SERVICE_ERRORS.find((e) => e.reason === 'ncbi_timed_out');
+    expect(entry).toMatchObject({
+      code: JsonRpcErrorCode.Timeout,
+      retryable: true,
+      thrownBy: 'service',
+    });
+    expect(entry?.when).toMatch(/HTTP 504/);
+    expect(entry?.when).toMatch(/retries ran out/);
+    expect(entry?.when).toMatch(/next backoff would overrun the total deadline/);
+    expect(entry?.when).toMatch(/Retry-After NCBI named outlasts the time left/);
+    expect(entry?.when).not.toMatch(/per-request timeout/);
+    expect(entry?.recovery).toMatch(/^Retry after a brief delay/);
+  });
+
+  it('names the Retry-After exit and the per-request timeout under ncbi_unreachable', () => {
+    const entry = NCBI_SERVICE_ERRORS.find((e) => e.reason === 'ncbi_unreachable');
+    expect(entry?.when).toMatch(/Retry-After NCBI named outlasts the time left/);
+    expect(entry?.when).toMatch(/per-request timeout/);
+    expect(entry?.when).toMatch(/other than 501 and 504/);
   });
 
   it('declares ncbi_rate_limited as a retryable RateLimited whose hint names the operator key', () => {
@@ -114,9 +142,15 @@ describe('NCBI_SERVICE_ERRORS', () => {
     expect(entry?.recovery).not.toMatch(/across all retry attempts/);
   });
 
-  it('describes ncbi_deadline_exceeded as an expiry wherever the timer lands', () => {
+  it('describes ncbi_deadline_exceeded as an expiry wherever the timer lands, under either deadline', () => {
     const entry = NCBI_SERVICE_ERRORS.find((e) => e.reason === 'ncbi_deadline_exceeded');
-    expect(entry?.when).toMatch(/mid-request, while queued, or during a retry backoff/);
+    expect(entry?.when).toMatch(
+      /mid-request, while queued, during a retry backoff, or before the next request could be sent/,
+    );
+    expect(entry?.when).toMatch(
+      /the total NCBI request deadline, or the time the tool call had left/,
+    );
+    expect(entry?.when).toMatch(/`deadlineMs` names its length/);
   });
 
   it('classifies ncbi_resource_not_found as non-retryable NotFound', () => {
@@ -144,7 +178,7 @@ describe('NCBI_SERVICE_ERRORS', () => {
 describe('ICITE_SERVICE_ERRORS', () => {
   const entryFor = (reason: string) => ICITE_SERVICE_ERRORS.find((e) => e.reason === reason);
 
-  it('declares the three reasons the iCite service stamps, all ServiceUnavailable, the unrequested record not retryable', () => {
+  it('declares the reasons the iCite service stamps, the unrequested record alone not retryable', () => {
     expect(
       ICITE_SERVICE_ERRORS.map(({ reason, code, retryable }) => ({ reason, code, retryable })),
     ).toEqual([
@@ -153,6 +187,8 @@ describe('ICITE_SERVICE_ERRORS', () => {
         code: JsonRpcErrorCode.ServiceUnavailable,
         retryable: true,
       },
+      { reason: 'icite_deadline_exceeded', code: JsonRpcErrorCode.Timeout, retryable: true },
+      { reason: 'icite_timed_out', code: JsonRpcErrorCode.Timeout, retryable: true },
       {
         reason: 'icite_invalid_response',
         code: JsonRpcErrorCode.ServiceUnavailable,
@@ -186,6 +222,88 @@ describe('ICITE_SERVICE_ERRORS', () => {
     expect(entry?.recovery).toMatch(/same PMIDs/);
     expect(entry?.recovery).toMatch(/smaller batches/);
   });
+
+  /**
+   * A deadline that fired is told apart from attempts that ended on a timeout, and
+   * `deadlineMs` names the deadline that fired. (#310)
+   */
+  it('declares icite_deadline_exceeded as the expiry wherever it lands, naming whose deadline deadlineMs is', () => {
+    const entry = entryFor('icite_deadline_exceeded');
+    expect(entry?.when).toMatch(
+      /mid-request, during a retry backoff, or before the request was sent/,
+    );
+    expect(entry?.when).toMatch(/`deadlineMs`/);
+    expect(entry?.when).toMatch(/the tool call's own, or iCite's total deadline/);
+    expect(entry?.recovery).toMatch(/^Retry after a brief delay/);
+  });
+
+  it('declares icite_timed_out as the last attempt timing out, whichever way the loop stopped', () => {
+    const entry = entryFor('icite_timed_out');
+    expect(entry?.when).toMatch(/per-request timeout/);
+    expect(entry?.when).toMatch(/HTTP 504/);
+    expect(entry?.when).toMatch(/retries ran out, or the next backoff would overrun the deadline/);
+    expect(entry?.recovery).toMatch(/^Retry after a brief delay/);
+  });
+
+  it('describes icite_unreachable as every attempt failing, whichever way the loop stopped', () => {
+    const entry = entryFor('icite_unreachable');
+    expect(entry?.when).toMatch(/failed on every attempt the retry budget allowed/);
+    expect(entry?.when).toMatch(/retries ran out, or the next backoff would overrun the deadline/);
+  });
+
+  it('every entry has a recovery hint of at least 5 words (lint-enforced)', () => {
+    for (const entry of ICITE_SERVICE_ERRORS) {
+      const wordCount = entry.recovery.trim().split(/\s+/).length;
+      expect(wordCount, `recovery for ${entry.reason}`).toBeGreaterThanOrEqual(5);
+    }
+  });
+});
+
+describe('OPENALEX_SERVICE_ERRORS', () => {
+  const entryFor = (reason: string) => OPENALEX_SERVICE_ERRORS.find((e) => e.reason === reason);
+
+  it('keeps every reason with its code and retryability', () => {
+    expect(
+      OPENALEX_SERVICE_ERRORS.map(({ reason, code, retryable }) => ({ reason, code, retryable })),
+    ).toEqual([
+      {
+        reason: 'openalex_unreachable',
+        code: JsonRpcErrorCode.ServiceUnavailable,
+        retryable: true,
+      },
+      { reason: 'openalex_deadline_exceeded', code: JsonRpcErrorCode.Timeout, retryable: true },
+      {
+        reason: 'openalex_invalid_response',
+        code: JsonRpcErrorCode.ServiceUnavailable,
+        retryable: true,
+      },
+    ]);
+  });
+
+  /** One deadline bounds every request an OpenAlex call makes; `deadlineMs` names it. (#310) */
+  it('declares openalex_deadline_exceeded as the expiry wherever it lands, naming whose deadline deadlineMs is', () => {
+    const entry = entryFor('openalex_deadline_exceeded');
+    expect(entry?.when).toMatch(
+      /mid-request, during a retry backoff, or before a request was sent/,
+    );
+    expect(entry?.when).toMatch(/every request the call makes/);
+    expect(entry?.when).toMatch(/the tool call's own, or OpenAlex's total deadline/);
+    expect(entry?.recovery).toMatch(/^Retry after a brief delay/);
+  });
+
+  it('describes openalex_unreachable by every way the attempts can stop', () => {
+    const entry = entryFor('openalex_unreachable');
+    expect(entry?.when).toMatch(/on every attempt the retry budget allowed/);
+    expect(entry?.when).toMatch(/next backoff would overrun the deadline/);
+    expect(entry?.when).toMatch(/30-second backoff cap/);
+  });
+
+  it('every entry has a recovery hint of at least 5 words (lint-enforced)', () => {
+    for (const entry of OPENALEX_SERVICE_ERRORS) {
+      const wordCount = entry.recovery.trim().split(/\s+/).length;
+      expect(wordCount, `recovery for ${entry.reason}`).toBeGreaterThanOrEqual(5);
+    }
+  });
 });
 
 describe('EUROPEPMC_SERVICE_ERRORS', () => {
@@ -211,7 +329,38 @@ describe('EUROPEPMC_SERVICE_ERRORS', () => {
     expect(entry?.recovery).toMatch(/^Retry after a brief delay/);
   });
 
-  it('keeps every earlier reason with its code and retryability', () => {
+  /**
+   * A call runs under Europe PMC's own deadline or the tool call's, whichever ends
+   * first, and one started with none of the tool call's left sends nothing; the
+   * text holds for every way it ends. (#310)
+   */
+  it('describes europepmc_deadline_exceeded for both deadlines a call can run under', () => {
+    const entry = EUROPEPMC_SERVICE_ERRORS.find((e) => e.reason === 'europepmc_deadline_exceeded');
+    expect(entry?.when).toMatch(/Europe PMC's own total request deadline/);
+    expect(entry?.when).toMatch(/the tool call's deadline/);
+    expect(entry?.when).toMatch(/no request was sent/);
+    expect(entry?.when).toContain('`deadlineMs`');
+    expect(entry?.when).not.toMatch(/^The total Europe PMC request deadline/);
+  });
+
+  /**
+   * A 5xx whose Retry-After the loop will not wait out ends the call unretried,
+   * under the reason declared for its code. (#310)
+   */
+  it.each([
+    ['europepmc_unreachable', /HTTP 5xx other than a 504 whose Retry-After/],
+    ['europepmc_timed_out', /HTTP 504 whose Retry-After/],
+  ])(
+    'describes %s as also ending on a Retry-After the call will not wait out',
+    (reason, retryAfter) => {
+      const entry = EUROPEPMC_SERVICE_ERRORS.find((e) => e.reason === reason);
+      expect(entry?.when).toMatch(retryAfter);
+      expect(entry?.when).toMatch(/outlasts the time left or the 30-second backoff cap/);
+      expect(entry?.when).toMatch(/without retrying/);
+    },
+  );
+
+  it('keeps every reason with its code and retryability', () => {
     expect(
       EUROPEPMC_SERVICE_ERRORS.map(({ reason, code, retryable }) => ({ reason, code, retryable })),
     ).toEqual([
@@ -221,6 +370,8 @@ describe('EUROPEPMC_SERVICE_ERRORS', () => {
         retryable: true,
       },
       { reason: 'europepmc_deadline_exceeded', code: JsonRpcErrorCode.Timeout, retryable: true },
+      { reason: 'europepmc_timed_out', code: JsonRpcErrorCode.Timeout, retryable: true },
+      { reason: 'europepmc_rate_limited', code: JsonRpcErrorCode.RateLimited, retryable: true },
       {
         reason: 'europepmc_invalid_response',
         code: JsonRpcErrorCode.SerializationError,
@@ -232,5 +383,39 @@ describe('EUROPEPMC_SERVICE_ERRORS', () => {
         retryable: false,
       },
     ]);
+  });
+
+  /**
+   * A Timeout that ends the loop — retries spent, or the next backoff would not
+   * fit — is told apart from a deadline that fired, which keeps its own reason.
+   * Both timeout sources are named. (#315)
+   */
+  it('describes europepmc_timed_out as the last attempt timing out, whichever way the loop stopped', () => {
+    const entry = EUROPEPMC_SERVICE_ERRORS.find((e) => e.reason === 'europepmc_timed_out');
+    expect(entry?.thrownBy).toBe('service');
+    expect(entry?.when).toMatch(/per-request timeout/);
+    expect(entry?.when).toMatch(/HTTP 504/);
+    expect(entry?.when).toMatch(/retries ran out/);
+    expect(entry?.when).toMatch(/next backoff would overrun the total deadline/);
+    expect(entry?.recovery).toMatch(/^Retry after a brief delay/);
+  });
+
+  /** A 429 names how long to wait; the hint says to honor it. (#315) */
+  it('declares europepmc_rate_limited with a recovery that honors retryAfter', () => {
+    const entry = EUROPEPMC_SERVICE_ERRORS.find((e) => e.reason === 'europepmc_rate_limited');
+    expect(entry?.thrownBy).toBe('service');
+    expect(entry?.when).toMatch(/HTTP 429/);
+    expect(entry?.when).toMatch(/30-second backoff cap/);
+    expect(entry?.when).toMatch(/outlasts the time left/);
+    expect(entry?.recovery).toContain('`retryAfter`');
+    expect(entry?.recovery).toMatch(/HTTP date/);
+    expect(entry?.recovery).not.toMatch(/brief delay/);
+  });
+
+  it('every entry has a recovery hint of at least 5 words (lint-enforced)', () => {
+    for (const entry of EUROPEPMC_SERVICE_ERRORS) {
+      const wordCount = entry.recovery.trim().split(/\s+/).length;
+      expect(wordCount, `recovery for ${entry.reason}`).toBeGreaterThanOrEqual(5);
+    }
   });
 });

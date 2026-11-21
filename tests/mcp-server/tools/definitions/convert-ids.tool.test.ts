@@ -6,7 +6,7 @@
 import type { ContentBlock } from '@cyanheads/mcp-ts-core';
 import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
 import { createMockContext, runToolContract } from '@cyanheads/mcp-ts-core/testing';
-import { describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { textBlocks } from '../../../_helpers.js';
 
@@ -389,5 +389,35 @@ describe('convertIdsTool', () => {
       expect(text).toContain('**Converted:** 1/2');
       expect(text).toContain('pubmed_fetch_articles');
     });
+  });
+});
+
+describe('convertIdsTool call deadline (issue #310)', () => {
+  const STARTED_AT = Date.UTC(2026, 0, 1);
+
+  beforeEach(() => {
+    mockIdConvert.mockReset();
+    vi.useFakeTimers({ toFake: ['Date'] });
+    vi.setSystemTime(STARTED_AT);
+  });
+
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  it('passes the ID Converter the deadline the call starts, beside ctx.signal', async () => {
+    mockIdConvert.mockResolvedValue([]);
+    const ctx = createMockContext({ errors: convertIdsTool.errors });
+    const input = convertIdsTool.input.parse({ ids: ['23193287'], idType: 'pmid' });
+    await convertIdsTool.handler(input, ctx);
+
+    expect(mockIdConvert).toHaveBeenCalledTimes(1);
+    const [ids, idType, options] = mockIdConvert.mock.lastCall ?? [];
+    expect([ids, idType]).toEqual([['23193287'], 'pmid']);
+    expect(options).toEqual({
+      signal: ctx.signal,
+      deadline: { expiresAt: STARTED_AT + 50_000, totalMs: 50_000 },
+    });
+    expect(options.signal).toBe(ctx.signal);
   });
 });

@@ -20,6 +20,10 @@ vi.mock('@cyanheads/mcp-ts-core/utils', async () => {
 const { OpenAlexApiClient } = await import('@/services/openalex/api-client.js');
 const { OpenAlexService } = await import('@/services/openalex/openalex-service.js');
 const { OPENALEX_SERVICE_ERRORS } = await import('@/services/error-contracts.js');
+/** The framework helper the module mock replaces, for cases that run its timeouts. */
+const { fetchWithTimeout: realFetchWithTimeout } = await vi.importActual<
+  typeof import('@cyanheads/mcp-ts-core/utils')
+>('@cyanheads/mcp-ts-core/utils');
 
 function jsonResponse(body: unknown, init: ResponseInit = {}) {
   return new Response(JSON.stringify(body), {
@@ -66,7 +70,33 @@ function makeWork(oaId: string, pmid: string | null, extra: Record<string, unkno
 
 function makeService() {
   const client = new OpenAlexApiClient({ timeoutMs: 20000 });
-  return new OpenAlexService(client, 0 /* no retries in tests */);
+  return new OpenAlexService(client, 0 /* no retries in tests */, 45_000);
+}
+
+/** Answers with `body` after `afterMs`, or never, until the request's signal aborts. */
+function reply(init: RequestInit | undefined, body?: unknown, afterMs = 0): Promise<Response> {
+  return new Promise((resolve, reject) => {
+    const signal = init?.signal as AbortSignal;
+    signal.addEventListener('abort', () => reject(signal.reason), { once: true });
+    if (body !== undefined) setTimeout(() => resolve(jsonResponse(body)), afterMs);
+  });
+}
+
+/** Run a call under the fake clock; return what it threw and the instant it settled. */
+async function settleTimed(call: Promise<unknown>) {
+  const start = Date.now();
+  let settledAfterMs: number | undefined;
+  const outcome = call.then(
+    () => {
+      throw new Error('expected the call to fail');
+    },
+    (error: unknown) => {
+      settledAfterMs = Date.now() - start;
+      return error;
+    },
+  );
+  await vi.runAllTimersAsync();
+  return { error: await outcome, settledAfterMs };
 }
 
 describe('OpenAlexService.similar', () => {
@@ -706,10 +736,289 @@ describe('a body read failure keeps the request URL out of its message', () => {
   });
 });
 
+/**
+ * One total deadline bounds each OpenAlex call — every request, attempt, and backoff
+ * the public method makes — and the tool call's deadline, passed beside the signal,
+ * shortens it when that leaves less time. The real `fetchWithTimeout` runs over a
+ * stubbed `fetch` under the fake clock. (#310)
+ */
+describe('OpenAlex total deadline (#310)', () => {
+  /** `EUROPEPMC_TOTAL_DEADLINE_MS`'s default, which OpenAlex borrows. */
+  const TOTAL_DEADLINE_MS = 45_000;
+  const WORK = {
+    id: 'https://openalex.org/W1234',
+    related_works: ['https://openalex.org/W500'],
+    referenced_works: ['https://openalex.org/W501'],
+  };
+  const fetchStub = vi.fn<typeof fetch>();
+
+  const service = (maxRetries = 3) =>
+    new OpenAlexService(
+      new OpenAlexApiClient({ timeoutMs: 20_000 }),
+      maxRetries,
+      TOTAL_DEADLINE_MS,
+    );
+  const deadlineWith = (leftMs: number, totalMs: number) => ({
+    expiresAt: Date.now() + leftMs,
+    totalMs,
+  });
+
+  /** Which client call a request belongs to. */
+  function routeOf(input: string | URL | Request): 'work' | 'citedBy' | 'resolve' {
+    const url = decodeURIComponent(input instanceof Request ? input.url : String(input));
+    if (url.includes('/works/pmid:')) return 'work';
+    if (url.includes('filter=cites:')) return 'citedBy';
+    return 'resolve';
+  }
+
+  /** Every request hangs until its signal aborts. */
+  const hangEverything = () => fetchStub.mockImplementation((_input, init) => reply(init));
+
+  beforeEach(() => {
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout', 'Date'] });
+    vi.spyOn(Math, 'random').mockReturnValue(0.5);
+    fetchStub.mockReset();
+    mockFetchWithTimeout.mockReset();
+    mockFetchWithTimeout.mockImplementation(realFetchWithTimeout);
+    vi.stubGlobal('fetch', fetchStub);
+  });
+
+  afterEach(() => {
+    vi.useRealTimers();
+    vi.unstubAllGlobals();
+    vi.restoreAllMocks();
+  });
+
+  it('settles an all-hung call at its total deadline as openalex_deadline_exceeded', async () => {
+    hangEverything();
+    const { error, settledAfterMs } = await settleTimed(service().similar('31295471', 10));
+
+    expect(error).toBeInstanceOf(McpError);
+    expect(error).toMatchObject({
+      code: JsonRpcErrorCode.Timeout,
+      message: `OpenAlex request deadline (${TOTAL_DEADLINE_MS}ms) exceeded`,
+      data: {
+        reason: 'openalex_deadline_exceeded',
+        label: 'getWorkByPmid(31295471)',
+        deadlineMs: TOTAL_DEADLINE_MS,
+      },
+    });
+    expect(settledAfterMs).toBe(TOTAL_DEADLINE_MS);
+    // 20 s + 1 s backoff + 20 s + 2 s backoff leave the third attempt the last 2 s.
+    expect(fetchStub).toHaveBeenCalledTimes(3);
+  });
+
+  it('runs a service built by initOpenAlexService under the configured total deadline', async () => {
+    hangEverything();
+    const mod = await import('@/services/openalex/openalex-service.js');
+    mod.initOpenAlexService();
+    const { error, settledAfterMs } = await settleTimed(
+      mod.getOpenAlexService().references('31295471', 10),
+    );
+
+    expect(error).toMatchObject({
+      data: { reason: 'openalex_deadline_exceeded', deadlineMs: TOTAL_DEADLINE_MS },
+    });
+    expect(settledAfterMs).toBe(TOTAL_DEADLINE_MS);
+  });
+
+  it('settles at the instant a tool call deadline runs out when it leaves less time, reporting its length', async () => {
+    hangEverything();
+    const { error, settledAfterMs } = await settleTimed(
+      service().citedBy('31295471', 10, undefined, deadlineWith(30_000, 60_000)),
+    );
+
+    expect(error).toMatchObject({
+      code: JsonRpcErrorCode.Timeout,
+      message: 'OpenAlex request deadline (60000ms) exceeded',
+      data: { reason: 'openalex_deadline_exceeded', deadlineMs: 60_000 },
+    });
+    expect(settledAfterMs).toBe(30_000);
+    // A 20 s attempt, 1 s of backoff, and the second attempt cut at 30 s.
+    expect(fetchStub).toHaveBeenCalledTimes(2);
+  });
+
+  it('still ends at its own total deadline, reporting its length, when the call has more time left', async () => {
+    hangEverything();
+    const { error, settledAfterMs } = await settleTimed(
+      service().references('31295471', 10, undefined, deadlineWith(120_000, 120_000)),
+    );
+
+    expect(error).toMatchObject({
+      data: { reason: 'openalex_deadline_exceeded', deadlineMs: TOTAL_DEADLINE_MS },
+    });
+    expect(settledAfterMs).toBe(TOTAL_DEADLINE_MS);
+  });
+
+  it('holds every request a method sends to the one deadline set when the method starts', async () => {
+    // The work lookup answers at 10 s; resolving its related works then hangs.
+    fetchStub.mockImplementation((input, init) =>
+      routeOf(input) === 'work' ? reply(init, WORK, 10_000) : reply(init),
+    );
+    const { error, settledAfterMs } = await settleTimed(service().similar('31295471', 10));
+
+    expect(error).toMatchObject({
+      data: {
+        reason: 'openalex_deadline_exceeded',
+        label: 'resolveRelatedWorks(31295471)',
+        deadlineMs: TOTAL_DEADLINE_MS,
+      },
+    });
+    expect(settledAfterMs).toBe(TOTAL_DEADLINE_MS);
+    expect(fetchStub.mock.calls.map(([input]) => routeOf(input))).toEqual([
+      'work',
+      'resolve',
+      'resolve',
+    ]);
+  });
+
+  it('cuts a cited-by page walk at the tool call deadline, past the first page', async () => {
+    // A full first page with no PubMed PMIDs, so the walk goes on to page 2.
+    const firstPage = {
+      results: Array.from({ length: 10 }, (_, i) => makeWork(`W${700 + i}`, null)),
+      meta: { count: 50 },
+    };
+    let pages = 0;
+    // The work lookup answers at 5 s, page 1 at 12 s, and page 2 hangs.
+    fetchStub.mockImplementation((input, init) => {
+      if (routeOf(input) === 'work') return reply(init, WORK, 5_000);
+      return ++pages === 1 ? reply(init, firstPage, 7_000) : reply(init);
+    });
+    const { error, settledAfterMs } = await settleTimed(
+      service().citedBy('31295471', 10, undefined, deadlineWith(30_000, 60_000)),
+    );
+
+    expect(error).toMatchObject({
+      data: {
+        reason: 'openalex_deadline_exceeded',
+        label: `getCitedBy(${WORK.id}, page 2)`,
+        deadlineMs: 60_000,
+      },
+    });
+    expect(settledAfterMs).toBe(30_000);
+  });
+
+  it('sends nothing more once an earlier request of the method spent the deadline', async () => {
+    // The work lookup answers 1 ms before the deadline runs out.
+    fetchStub.mockImplementation((input, init) =>
+      routeOf(input) === 'work' ? reply(init, WORK, 19_999) : reply(init),
+    );
+    const { error } = await settleTimed(
+      service().references('31295471', 10, undefined, deadlineWith(20_000, 60_000)),
+    );
+
+    expect(error).toMatchObject({
+      data: {
+        reason: 'openalex_deadline_exceeded',
+        label: 'resolveReferencedWorks(31295471)',
+        deadlineMs: 60_000,
+      },
+    });
+    expect(fetchStub.mock.calls.map(([input]) => routeOf(input))).toEqual(['work']);
+  });
+
+  it.each([0, 1])(
+    'sends nothing and arms no timer on a deadline with %i ms left',
+    async (leftMs) => {
+      // A work lookup that answers at once: a call that sent it would resolve, not fail.
+      fetchStub.mockImplementation(async () => jsonResponse(null));
+      const error = await service()
+        .similar('31295471', 10, undefined, deadlineWith(leftMs, 60_000))
+        .catch((e: unknown) => e);
+
+      expect(error).toMatchObject({
+        code: JsonRpcErrorCode.Timeout,
+        data: { reason: 'openalex_deadline_exceeded', deadlineMs: 60_000 },
+      });
+      expect(fetchStub).not.toHaveBeenCalled();
+      expect(vi.getTimerCount()).toBe(0);
+    },
+  );
+
+  it("rethrows the caller's own abort reason under a deadline, never the deadline", async () => {
+    hangEverything();
+    const controller = new AbortController();
+    const reason = new DOMException('The client went away', 'AbortError');
+    const call = service()
+      .citedBy('31295471', 10, controller.signal, deadlineWith(30_000, 60_000))
+      .catch((e: unknown) => e);
+    await vi.advanceTimersByTimeAsync(100);
+    controller.abort(reason);
+
+    expect(await call).toBe(reason);
+    expect(fetchStub).toHaveBeenCalledOnce();
+  });
+
+  it("rethrows the caller's own abort reason on a spent deadline, sending nothing and arming no timer", async () => {
+    // A work lookup that answers at once: a call that sent it would resolve, not fail.
+    fetchStub.mockImplementation(async () => jsonResponse(null));
+    const reason = new DOMException('The client went away', 'AbortError');
+    const error = await service()
+      .similar('31295471', 10, AbortSignal.abort(reason), deadlineWith(0, 60_000))
+      .catch((e: unknown) => e);
+
+    expect(error).toBe(reason);
+    expect(fetchStub).not.toHaveBeenCalled();
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
+  it('reports a timeout as an exhausted Timeout, never retry_deadline_exceeded, when the next backoff would not fit', async () => {
+    hangEverything();
+    // The first attempt times out at 20 s with 500 ms left: a 1 s backoff cannot fit.
+    const { error } = await settleTimed(
+      service().similar('31295471', 10, undefined, deadlineWith(20_500, 60_000)),
+    );
+
+    expect(error).toBeInstanceOf(McpError);
+    const err = error as McpError;
+    expect(err.code).toBe(JsonRpcErrorCode.Timeout);
+    expect(err.message).toMatch(/\(failed after 1 attempt\)$/);
+    expect(err.data).toEqual({ label: 'getWorkByPmid(31295471)', attempts: 1 });
+    expect(fetchStub).toHaveBeenCalledOnce();
+  });
+});
+
 describe('initOpenAlexService / getOpenAlexService', () => {
   afterEach(() => {
     vi.unstubAllEnvs();
     vi.resetModules();
+    vi.useRealTimers();
+    vi.unstubAllGlobals();
+    vi.restoreAllMocks();
+    mockFetchWithTimeout.mockReset();
+  });
+
+  it('runs on the Europe PMC per-request timeout and retry count, not NCBI’s', async () => {
+    vi.stubEnv('EUROPEPMC_TIMEOUT_MS', '5000');
+    vi.stubEnv('EUROPEPMC_MAX_RETRIES', '1');
+    vi.stubEnv('NCBI_TIMEOUT_MS', '8000');
+    vi.stubEnv('NCBI_MAX_RETRIES', '4');
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout', 'Date'] });
+    vi.spyOn(Math, 'random').mockReturnValue(0.5);
+    const t0 = Date.now();
+    const starts: number[] = [];
+    vi.stubGlobal(
+      'fetch',
+      vi.fn<typeof fetch>((_input, init) => {
+        starts.push(Date.now() - t0);
+        return reply(init);
+      }),
+    );
+    mockFetchWithTimeout.mockImplementation(realFetchWithTimeout);
+    // Fresh modules, so the server config is parsed from the stubbed environment.
+    vi.resetModules();
+    const mod = await import('@/services/openalex/openalex-service.js');
+    mod.initOpenAlexService();
+
+    const { error, settledAfterMs } = await settleTimed(
+      mod.getOpenAlexService().similar('31295471', 10),
+    );
+
+    expect(error).toMatchObject({ code: JsonRpcErrorCode.Timeout });
+    expect((error as McpError).data).toEqual({ label: 'getWorkByPmid(31295471)', attempts: 2 });
+    // Two 5 s attempts with the 1 s backoff between them.
+    expect(starts).toEqual([0, 6_000]);
+    expect(settledAfterMs).toBe(11_000);
   });
 
   it('constructs the service and is accessible via accessor', async () => {

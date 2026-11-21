@@ -10,6 +10,7 @@
 import type * as WorkerThreads from 'node:worker_threads';
 import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
 import { afterAll, afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import type { CallDeadline } from '@/services/call-deadline.js';
 
 /** Whether the next worker loads the stand-in body instead of the real one. */
 const fixture = vi.hoisted(() => ({ active: false }));
@@ -330,6 +331,175 @@ describe('extractHtml', () => {
       await expect(
         extractHtml('failure', `https://fixture.test${path}`, new AbortController().signal),
       ).rejects.toThrow(message);
+    });
+
+    describe('under a tool call deadline (issue #310)', () => {
+      /** The rejection of an extraction the deadline left no time to start. */
+      const notStarted = {
+        code: JsonRpcErrorCode.Timeout,
+        message: "HTML extraction was not started: the tool call's deadline left it no time",
+        data: { reason: 'html_extraction_deadline' },
+      };
+      /** A tool call deadline with `leftMs` to run from now. */
+      const deadlineIn = (leftMs: number): CallDeadline => ({
+        expiresAt: Date.now() + leftMs,
+        totalMs: leftMs,
+      });
+      const settledError = (promise: Promise<unknown>) => promise.catch((error: unknown) => error);
+
+      beforeEach(() => {
+        vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout', 'Date'] });
+      });
+
+      it('rejects with the not-started Timeout, starting no worker and arming no timer, when the deadline is already spent', async () => {
+        const run = settledError(
+          extractHtml(
+            'spent',
+            'https://fixture.test/silent',
+            new AbortController().signal,
+            deadlineIn(0),
+          ),
+        );
+
+        expect(spawnCalls()).toHaveLength(0);
+        expect(vi.getTimerCount()).toBe(0);
+        expect(await run).toMatchObject(notStarted);
+      });
+
+      it('rejects with the caller’s reason, starting no worker and arming no timer, when the signal has already aborted and the deadline is spent', async () => {
+        const reason = new Error('already cancelled');
+        const run = settledError(
+          extractHtml(
+            'spent-and-aborted',
+            'https://fixture.test/silent',
+            AbortSignal.abort(reason),
+            deadlineIn(0),
+          ),
+        );
+
+        expect(spawnCalls()).toHaveLength(0);
+        expect(vi.getTimerCount()).toBe(0);
+        expect(await run).toBe(reason);
+      });
+
+      it('rejects a queued extraction with the not-started Timeout once the deadline runs out before a slot opens, starting no worker for it', async () => {
+        const controllers = ['held-0', 'held-1', 'waits'].map(() => new AbortController());
+        const held = ['held-0', 'held-1'].map((id, i) =>
+          settledError(extractHtml(id, BUSY, controllers[i]!.signal)),
+        );
+        const queued = settledError(
+          extractHtml('waits', BUSY, controllers[2]!.signal, deadlineIn(5_000)),
+        );
+        const state = tracked(queued);
+        try {
+          await Promise.all([running('held-0'), running('held-1')]);
+          vi.advanceTimersByTime(4_999);
+          await turn();
+          expect(state.settled).toBe(false);
+
+          vi.advanceTimersByTime(1);
+          await turn();
+          expect(state.settled).toBe(true);
+          expect(await queued).toMatchObject(notStarted);
+          expect(startedIds()).toEqual(['held-0', 'held-1']);
+          // Only the two running workers' own 10 s timers remain.
+          expect(vi.getTimerCount()).toBe(2);
+        } finally {
+          for (const controller of controllers) controller.abort(new Error('test finished'));
+          await Promise.all([...held, queued]);
+        }
+      });
+
+      it('starts no worker for a queued extraction granted a slot once the deadline is spent, rejecting with the not-started Timeout', async () => {
+        const controllers = ['first', 'second', 'late'].map(() => new AbortController());
+        const [first, second] = ['first', 'second'].map((id, i) =>
+          settledError(extractHtml(id, BUSY, controllers[i]!.signal)),
+        );
+        const late = settledError(
+          extractHtml('late', BUSY, controllers[2]!.signal, deadlineIn(5_000)),
+        );
+        try {
+          await Promise.all([running('first'), running('second')]);
+          // The first slot frees with 1 ms of the deadline left: too little to start in.
+          vi.advanceTimersByTime(4_999);
+          controllers[0]!.abort(new Error('test finished'));
+          await first;
+
+          expect(startedIds()).toEqual(['first', 'second']);
+          expect(await late).toMatchObject(notStarted);
+        } finally {
+          for (const controller of controllers) controller.abort(new Error('test finished'));
+          await Promise.all([first, second, late]);
+        }
+      });
+
+      it('rejects a queued extraction with the caller’s reason when its signal aborts before the deadline runs out', async () => {
+        const controllers = ['busy-0', 'busy-1', 'cancelled'].map(() => new AbortController());
+        const held = ['busy-0', 'busy-1'].map((id, i) =>
+          settledError(extractHtml(id, BUSY, controllers[i]!.signal)),
+        );
+        const queued = settledError(
+          extractHtml('cancelled', BUSY, controllers[2]!.signal, deadlineIn(5_000)),
+        );
+        const reason = new Error('cancelled while queued');
+        try {
+          await Promise.all([running('busy-0'), running('busy-1')]);
+          controllers[2]!.abort(reason);
+
+          expect(await queued).toBe(reason);
+          expect(startedIds()).toEqual(['busy-0', 'busy-1']);
+        } finally {
+          for (const controller of controllers) controller.abort(new Error('test finished'));
+          await Promise.all([...held, queued]);
+        }
+      });
+
+      it('stops a worker still running when a deadline shorter than its 10 s bound runs out, rejecting with the stopped message', async () => {
+        const controller = new AbortController();
+        const run = settledError(extractHtml('cut', BUSY, controller.signal, deadlineIn(3_000)));
+        const state = tracked(run);
+        try {
+          await running('cut');
+          vi.advanceTimersByTime(2_999);
+          await turn();
+          expect(state.settled).toBe(false);
+
+          vi.advanceTimersByTime(1);
+          // The stop timer has fired, and no other is armed.
+          expect(vi.getTimerCount()).toBe(0);
+          expect(await run).toMatchObject({
+            code: JsonRpcErrorCode.Timeout,
+            message: "HTML extraction was stopped: the tool call's deadline ran out",
+            data: { reason: 'html_extraction_deadline' },
+          });
+          expect(spawned()[0]?.threadId).toBe(-1);
+        } finally {
+          controller.abort(new Error('test finished'));
+          await run;
+        }
+      });
+
+      it('keeps the 10 s bound and its message when the deadline has more time left than that', async () => {
+        const run = extractHtml(
+          'roomy',
+          BUSY,
+          new AbortController().signal,
+          deadlineIn(HTML_EXTRACTION_DEADLINE_MS + 5_000),
+        );
+        const state = tracked(run);
+        await running('roomy');
+
+        vi.advanceTimersByTime(HTML_EXTRACTION_DEADLINE_MS - 1);
+        await turn();
+        expect(state.settled).toBe(false);
+
+        vi.advanceTimersByTime(1);
+        await expect(run).rejects.toMatchObject({
+          code: JsonRpcErrorCode.Timeout,
+          message: 'HTML extraction did not finish within its 10 s deadline and was stopped',
+          data: { reason: 'html_extraction_deadline' },
+        });
+      });
     });
   });
 });

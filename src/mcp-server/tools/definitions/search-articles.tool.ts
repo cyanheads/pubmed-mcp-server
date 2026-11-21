@@ -24,6 +24,7 @@
 import { tool, z } from '@cyanheads/mcp-ts-core';
 import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
 import { sanitization } from '@cyanheads/mcp-ts-core/utils';
+import { startCallDeadline } from '@/services/call-deadline.js';
 import { NCBI_SERVICE_ERRORS, QUERY_INPUT_ERRORS } from '@/services/error-contracts.js';
 import { clauseFieldGroup, type FieldTagGroup, fieldTagKind } from '@/services/ncbi/field-tags.js';
 import { getNcbiService } from '@/services/ncbi/ncbi-service.js';
@@ -524,7 +525,9 @@ export const searchArticlesTool = tool('pubmed_search_articles', {
     // recovery is replaced: one entry per reason, and every other definition
     // spreading these keeps the shared text. (#288)
     ...NCBI_SERVICE_ERRORS.map((entry) =>
-      entry.reason === 'ncbi_unreachable' || entry.reason === 'ncbi_deadline_exceeded'
+      entry.reason === 'ncbi_unreachable' ||
+      entry.reason === 'ncbi_timed_out' ||
+      entry.reason === 'ncbi_deadline_exceeded'
         ? {
             ...entry,
             recovery:
@@ -749,6 +752,7 @@ export const searchArticlesTool = tool('pubmed_search_articles', {
   },
 
   async handler(input, ctx) {
+    const deadline = startCallDeadline();
     ctx.log.info('Executing pubmed_search', { query: input.query });
     const ncbi = getNcbiService();
 
@@ -886,7 +890,7 @@ export const searchArticlesTool = tool('pubmed_search_articles', {
         sort: ESEARCH_SORT_KEYS[input.sort],
         usehistory: summaryCount > 0 ? 'y' : undefined,
       },
-      { signal: ctx.signal },
+      { signal: ctx.signal, deadline },
     );
 
     const pmids = esResult.idList;
@@ -907,7 +911,10 @@ export const searchArticlesTool = tool('pubmed_search_articles', {
         eSummaryParams.id = pmids.slice(0, summaryCount).join(',');
       }
 
-      const eSummaryResult = await ncbi.eSummary(eSummaryParams, { signal: ctx.signal });
+      const eSummaryResult = await ncbi.eSummary(eSummaryParams, {
+        signal: ctx.signal,
+        deadline,
+      });
       if (eSummaryResult) {
         summaries = (await extractBriefSummaries(eSummaryResult)).map(summaryRow);
       }
@@ -1010,6 +1017,10 @@ export const searchArticlesTool = tool('pubmed_search_articles', {
         // place only when it flags a Bookshelf chapter or book. (#146)
         if (s.docType && s.docType !== 'citation') {
           lines.push(`**Doc Type:** ${escapeMarkdownInParagraph(s.docType)}`);
+        }
+        // Every code, in the line form `pubmed_fetch_articles` uses. (#309)
+        if (s.languages?.length) {
+          lines.push(`**Language:** ${escapeMarkdownInParagraph(s.languages.join(', '))}`);
         }
         if (s.pubDate) lines.push(`**Published:** ${escapeMarkdownInParagraph(s.pubDate)}`);
         if (s.epubDate) lines.push(`**Epub:** ${escapeMarkdownInParagraph(s.epubDate)}`);

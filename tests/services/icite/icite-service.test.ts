@@ -391,19 +391,203 @@ describe('failures and retries', () => {
     expect((error as McpError).data?.reason).toBeUndefined();
   });
 
-  it('settles a stalled upstream within the total deadline as a Timeout', async () => {
+  it('settles a stalled upstream at the total deadline as icite_deadline_exceeded', async () => {
     const fetchMock = stubIciteFetch(hangingUntilAborted);
     const start = Date.now();
     const error = await settle(makeService(3).fetchRecords(['23456789'], createMockContext()));
 
     expect(error).toMatchObject({
       code: JsonRpcErrorCode.Timeout,
-      data: { reason: 'retry_deadline_exceeded', deadlineMs: ICITE_DEADLINE_MS },
+      message: `NIH iCite request deadline (${ICITE_DEADLINE_MS}ms) exceeded`,
+      data: { reason: 'icite_deadline_exceeded', deadlineMs: ICITE_DEADLINE_MS },
     });
-    expect(Date.now() - start).toBeLessThanOrEqual(ICITE_DEADLINE_MS);
+    expect(Date.now() - start).toBe(ICITE_DEADLINE_MS);
     // 20 s + 20 s per-attempt timeouts with backoff between leave the third
     // attempt only what remains of the deadline; there is no fourth.
     expect(fetchMock).toHaveBeenCalledTimes(3);
+  });
+
+  /**
+   * The tool call's deadline, passed down beside the caller's signal: the call runs
+   * under it or under iCite's own deadline, whichever leaves less time, and an
+   * expiry reports the length of the one that fired. (#310)
+   */
+  describe('under a tool call deadline', () => {
+    /** A deadline `totalMs` long with `leftMs` of it left. */
+    const deadlineWith = (leftMs: number, totalMs: number) => ({
+      expiresAt: Date.now() + leftMs,
+      totalMs,
+    });
+
+    /** Run a call under the fake clock; return what it threw and the instant it settled. */
+    async function settleTimed(call: Promise<unknown>) {
+      const start = Date.now();
+      let settledAfterMs: number | undefined;
+      const outcome = call.then(
+        () => {
+          throw new Error('expected the call to fail');
+        },
+        (error: unknown) => {
+          settledAfterMs = Date.now() - start;
+          return error;
+        },
+      );
+      await vi.runAllTimersAsync();
+      return { error: await outcome, settledAfterMs };
+    }
+
+    it('settles at the instant the deadline runs out when it leaves less time than iCite’s own', async () => {
+      const fetchMock = stubIciteFetch(hangingUntilAborted);
+      const { error, settledAfterMs } = await settleTimed(
+        makeService(3).fetchRecords(
+          ['23456789'],
+          createMockContext(),
+          deadlineWith(30_000, 60_000),
+        ),
+      );
+
+      expect(error).toMatchObject({
+        code: JsonRpcErrorCode.Timeout,
+        message: 'NIH iCite request deadline (60000ms) exceeded',
+        data: { reason: 'icite_deadline_exceeded', deadlineMs: 60_000 },
+      });
+      expect(settledAfterMs).toBe(30_000);
+      // A 20 s attempt, 1 s of backoff, and the second attempt cut at 30 s.
+      expect(fetchMock).toHaveBeenCalledTimes(2);
+    });
+
+    it('still ends at iCite’s own deadline, reporting its length, when the call has more time left', async () => {
+      stubIciteFetch(hangingUntilAborted);
+      const { error, settledAfterMs } = await settleTimed(
+        makeService(3).fetchRecords(
+          ['23456789'],
+          createMockContext(),
+          deadlineWith(120_000, 120_000),
+        ),
+      );
+
+      expect(error).toMatchObject({
+        code: JsonRpcErrorCode.Timeout,
+        data: { reason: 'icite_deadline_exceeded', deadlineMs: ICITE_DEADLINE_MS },
+      });
+      expect(settledAfterMs).toBe(ICITE_DEADLINE_MS);
+    });
+
+    it.each([0, 1])(
+      'sends nothing and arms no timer on a deadline with %i ms left',
+      async (leftMs) => {
+        const fetchMock = stubIciteFetch();
+        const error = await makeService(3)
+          .fetchRecords(['23456789'], createMockContext(), deadlineWith(leftMs, 60_000))
+          .catch((e: unknown) => e);
+
+        expect(error).toMatchObject({
+          code: JsonRpcErrorCode.Timeout,
+          message: 'NIH iCite request deadline (60000ms) exceeded',
+          data: { reason: 'icite_deadline_exceeded', deadlineMs: 60_000 },
+        });
+        expect(fetchMock).not.toHaveBeenCalled();
+        expect(vi.getTimerCount()).toBe(0);
+      },
+    );
+
+    it("passes a caller's cancellation through, never as the deadline", async () => {
+      const controller = new AbortController();
+      const fetchMock = stubIciteFetch(hangingUntilAborted);
+      const call = makeService(3)
+        .fetchRecords(
+          ['23456789'],
+          createMockContext({ signal: controller.signal }),
+          deadlineWith(30_000, 60_000),
+        )
+        .catch((e: unknown) => e);
+      await vi.advanceTimersByTimeAsync(100);
+      controller.abort();
+      const error = await call;
+
+      expect(fetchMock).toHaveBeenCalledOnce();
+      expect(error).toMatchObject({ code: JsonRpcErrorCode.RequestCancelled });
+      expect((error as McpError).data?.reason).toBeUndefined();
+    });
+
+    it("passes a caller's cancellation through when the deadline is spent too", async () => {
+      const controller = new AbortController();
+      controller.abort();
+      stubIciteFetch(hangingUntilAborted);
+      const error = await settle(
+        makeService(3).fetchRecords(
+          ['23456789'],
+          createMockContext({ signal: controller.signal }),
+          deadlineWith(0, 60_000),
+        ),
+      );
+
+      expect(error).toMatchObject({ code: JsonRpcErrorCode.RequestCancelled });
+      expect((error as McpError).data?.reason).toBeUndefined();
+    });
+  });
+
+  /**
+   * Attempts that end on a Timeout while the deadline has not fired — retries spent,
+   * or the next backoff would not fit the time left — are `icite_timed_out`, and the
+   * framework's `retry_deadline_exceeded` never reaches the caller. (#310)
+   */
+  describe('attempts that time out', () => {
+    it('reports per-request timeouts on every attempt as icite_timed_out once retries run out', async () => {
+      const fetchMock = stubIciteFetch(hangingUntilAborted);
+      const error = await settle(makeService(1).fetchRecords(['23456789'], createMockContext()));
+
+      expect(error).toMatchObject({
+        code: JsonRpcErrorCode.Timeout,
+        data: { reason: 'icite_timed_out', retryAttempts: 2, errorSource: 'FetchTimeout' },
+      });
+      expect((error as McpError).message).toMatch(/\(failed after 2 attempts\)$/);
+      expect(fetchMock).toHaveBeenCalledTimes(2);
+    });
+
+    it('reports an HTTP 504 on every attempt as icite_timed_out', async () => {
+      const fetchMock = stubIciteFetch(() => new Response('gateway timeout', { status: 504 }));
+      const error = await settle(makeService(2).fetchRecords(['23456789'], createMockContext()));
+
+      expect(error).toMatchObject({
+        code: JsonRpcErrorCode.Timeout,
+        data: { reason: 'icite_timed_out', retryAttempts: 3, status: 504 },
+      });
+      expect(fetchMock).toHaveBeenCalledTimes(3);
+    });
+
+    it('reports a timeout as icite_timed_out when the next backoff would not fit the time left', async () => {
+      const fetchMock = stubIciteFetch(hangingUntilAborted);
+      // The first attempt times out at 20 s with 500 ms left: a 1 s backoff cannot fit.
+      const error = await settle(
+        makeService(3).fetchRecords(['23456789'], createMockContext(), {
+          expiresAt: Date.now() + 20_500,
+          totalMs: 60_000,
+        }),
+      );
+
+      expect(error).toMatchObject({
+        code: JsonRpcErrorCode.Timeout,
+        data: { reason: 'icite_timed_out', retryAttempts: 1, errorSource: 'FetchTimeout' },
+      });
+      expect((error as McpError).message).toMatch(/\(failed after 1 attempt\)$/);
+      expect(fetchMock).toHaveBeenCalledOnce();
+    });
+
+    it('reports an HTTP 5xx as icite_unreachable when the next backoff would not fit the time left', async () => {
+      stubIciteFetch(() => new Response('upstream down', { status: 503 }));
+      const error = await settle(
+        makeService(3).fetchRecords(['23456789'], createMockContext(), {
+          expiresAt: Date.now() + 500,
+          totalMs: 60_000,
+        }),
+      );
+
+      expect(error).toMatchObject({
+        code: JsonRpcErrorCode.ServiceUnavailable,
+        data: { reason: 'icite_unreachable', retryAttempts: 1, status: 503 },
+      });
+    });
   });
 
   it("passes a caller's cancellation through without stamping a reason or retrying", async () => {
@@ -419,6 +603,43 @@ describe('failures and retries', () => {
     expect(fetchMock).toHaveBeenCalledOnce();
     expect(error).toMatchObject({ code: JsonRpcErrorCode.RequestCancelled });
     expect((error as McpError).data?.reason).toBeUndefined();
+  });
+
+  describe('a service built by initIciteService', () => {
+    afterEach(() => {
+      vi.unstubAllEnvs();
+      vi.resetModules();
+    });
+
+    it('runs on the Europe PMC per-request timeout and retry count, not NCBI’s', async () => {
+      vi.stubEnv('EUROPEPMC_TIMEOUT_MS', '5000');
+      vi.stubEnv('EUROPEPMC_MAX_RETRIES', '1');
+      vi.stubEnv('NCBI_TIMEOUT_MS', '8000');
+      vi.stubEnv('NCBI_MAX_RETRIES', '4');
+      // Fresh modules, so the server config is parsed from the stubbed environment.
+      vi.resetModules();
+      const mod = await import('@/services/icite/icite-service.js');
+      mod.initIciteService();
+      const t0 = Date.now();
+      const starts: number[] = [];
+      const fetchMock = stubIciteFetch((url, init) => {
+        starts.push(Date.now() - t0);
+        return hangingUntilAborted(url, init);
+      });
+
+      const error = await settle(
+        mod.getIciteService().fetchRecords(['23456789'], createMockContext()),
+      );
+
+      expect(error).toMatchObject({
+        code: JsonRpcErrorCode.Timeout,
+        data: { reason: 'icite_timed_out', retryAttempts: 2, errorSource: 'FetchTimeout' },
+      });
+      // Two 5 s attempts with the 1 s backoff between them.
+      expect(fetchMock).toHaveBeenCalledTimes(2);
+      expect(starts).toEqual([0, 6_000]);
+      expect(Date.now() - t0).toBe(11_000);
+    });
   });
 });
 

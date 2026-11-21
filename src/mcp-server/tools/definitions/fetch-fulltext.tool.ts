@@ -42,13 +42,28 @@
  * rather than thrown, so the declared `errors[]` covers the NCBI ID routing
  * alone.
  *
+ * The whole chain runs under one deadline, started as the handler starts. The
+ * ID routing, whose failure ends the call, runs under all of it; each tier after
+ * it that a later tier could still back up runs under half the time left as it
+ * starts, and the last under the rest. A tier the deadline left no time to start
+ * sends nothing and is recorded `not-attempted`; one whose upstream request it
+ * cut records its usual failure with the provider's `*_deadline_exceeded` reason,
+ * and an Unpaywall copy whose text extraction it stopped, or left no time to
+ * start, records `parse-failed`. (#310)
+ *
  * @module src/mcp-server/tools/definitions/fetch-fulltext.tool
  */
 
 import { type Context, tool, z } from '@cyanheads/mcp-ts-core';
-import { JsonRpcErrorCode, serializationError } from '@cyanheads/mcp-ts-core/errors';
+import { JsonRpcErrorCode, McpError, serializationError } from '@cyanheads/mcp-ts-core/errors';
 import { pdfParser } from '@cyanheads/mcp-ts-core/utils';
 import { getServerConfig } from '@/config/server-config.js';
+import {
+  type CallDeadline,
+  isSpent,
+  shareDeadline,
+  startCallDeadline,
+} from '@/services/call-deadline.js';
 import { NCBI_SERVICE_ERRORS } from '@/services/error-contracts.js';
 import {
   type EuropePmcService,
@@ -595,11 +610,17 @@ function buildUnmatchedTermsNotice(
  * a later tier may well have located an open-access copy and failed to download
  * it (`unpaywall:fetch-failed`), so the per-tier outcomes are the honest answer
  * and the notice defers to them. (#86)
+ *
+ * `pubmed_fetch_articles` takes PMIDs only, and an `unavailable` entry for a
+ * PMCID carries no PMID, so the notice names the conversion step for one.
  */
 function buildBodylessNotice(affectedIds: string[]): string {
   const subject =
     affectedIds.length === 1 ? `article ${affectedIds[0]}` : `articles ${affectedIds.join(', ')}`;
-  return `No body text could be retrieved for ${subject} — the full-text source returned front matter and abstract only, and no later tier recovered a copy. See \`triedTiers\` on the \`unavailable\` entry for what each tier reported, and use \`pubmed_fetch_articles\` for the abstract and metadata.`;
+  const viaConvert = affectedIds.some((id) => id.startsWith('PMC'))
+    ? ' (it takes PMIDs: convert a PMCID with `pubmed_convert_ids` first)'
+    : '';
+  return `No body text could be retrieved for ${subject} — the full-text source returned front matter and abstract only, and no later tier recovered a copy. See \`triedTiers\` on the \`unavailable\` entry for what each tier reported, and use \`pubmed_fetch_articles\` for the abstract and metadata${viaConvert}.`;
 }
 
 // ─── Schemas ─────────────────────────────────────────────────────────────────
@@ -991,7 +1012,7 @@ const UnavailableReasonSchema = z
     'service-error',
   ])
   .describe(
-    'Why no full text was returned — the most specific signal any tier that answered reported. not-found: upstream returned no record for this ID. no-pmc-fallback-disabled: every tier was skipped (`triedTiers` is all `not-attempted`) — typically because EPMC (`EUROPEPMC_ENABLED`) and Unpaywall (`UNPAYWALL_EMAIL`) are not configured. no-epmc-fulltext: EPMC indexed the record but publishes no fullTextXML. no-body: the record was retrieved but carries front matter and abstract only, with no body sections — use `pubmed_fetch_articles` for the metadata. no-doi: the DOI lookup ran and this record has none, so Unpaywall could not be queried. doi-lookup-failed: the DOI lookup itself errored, so whether a DOI exists is unknown and Unpaywall was never reached — retry the request; unlike no-doi this is a transient failure, not a settled answer. no-oa: Unpaywall has no OA copy. fetch-failed: download failed. parse-failed: the OA copy downloaded, but extraction returned no text, failed, or (HTML) ran past its 10 s deadline — the unpaywall tier `detail` says which. service-error: upstream server failure (threw, timed out, or returned malformed data). A reason never means the chain ran to completion — read `unqueriedTiers` for that.',
+    "Why no full text was returned — the most specific signal any tier that answered reported. not-found: upstream returned no record for this ID. no-pmc-fallback-disabled: every tier was skipped (`triedTiers` is all `not-attempted`) — typically because EPMC (`EUROPEPMC_ENABLED`) and Unpaywall (`UNPAYWALL_EMAIL`) are not configured, or because the tool call's deadline left them no time; each tier's `detail` says which. no-epmc-fulltext: EPMC indexed the record but publishes no fullTextXML. no-body: the record was retrieved but carries front matter and abstract only, with no body sections — use `pubmed_fetch_articles` for the metadata. no-doi: the DOI lookup ran and this record has none, so Unpaywall could not be queried. doi-lookup-failed: the DOI lookup itself errored, so whether a DOI exists is unknown and Unpaywall was never reached — retry the request; unlike no-doi this is a transient failure, not a settled answer. no-oa: Unpaywall has no OA copy. fetch-failed: the OA copy did not download, or was larger than the 50 MiB read limit — the unpaywall tier `detail` says which. parse-failed: the OA copy downloaded, but extraction returned no text, failed, (HTML) ran past its 10 s deadline, or was stopped or never started because the tool call's deadline ran out — the unpaywall tier `detail` says which. service-error: upstream server failure (threw, timed out, or returned malformed data). A reason never means the chain ran to completion — read `unqueriedTiers` for tiers this deployment has not configured, and `triedTiers` for a tier the tool call's deadline left no time to run.",
   );
 
 const UnqueriedTierSchema = z
@@ -1012,7 +1033,7 @@ const TierOutcomeSchema = z
     'service-error',
   ])
   .describe(
-    'Per-tier outcome. not-attempted: tier was skipped. miss: tier returned no record. no-fulltext: EPMC indexed the record but publishes no fullTextXML. no-body: the tier returned a record with front matter and abstract but no body sections, so the chain continued. no-doi: the DOI lookup ran and this record has none, so Unpaywall could not be queried. doi-lookup-failed: the DOI lookup itself errored, so whether a DOI exists is unknown and Unpaywall was never reached — retry the request. no-oa: Unpaywall reports no open-access copy. fetch-failed: OA copy download failed. parse-failed: the OA copy downloaded, but extraction returned no text, failed, or (HTML) ran past its 10 s deadline — `detail` says which. service-error: tier service threw.',
+    "Per-tier outcome. not-attempted: the tier did not run — it is not configured, it could not apply to this id, or the tool call's deadline left it no time; `detail` says which. miss: tier returned no record. no-fulltext: EPMC indexed the record but publishes no fullTextXML. no-body: the tier returned a record with front matter and abstract but no body sections, so the chain continued. no-doi: the DOI lookup ran and this record has none, so Unpaywall could not be queried. doi-lookup-failed: the DOI lookup itself errored, so whether a DOI exists is unknown and Unpaywall was never reached — retry the request. no-oa: Unpaywall reports no open-access copy. fetch-failed: the OA copy did not download, or was larger than the 50 MiB read limit — `detail` says which. parse-failed: the OA copy downloaded, but extraction returned no text, failed, (HTML) ran past its 10 s deadline, or was stopped or never started because the tool call's deadline ran out — `detail` says which. service-error: tier service threw. A tier whose upstream request the tool call's deadline cut reports its usual failure outcome, with the provider's `*_deadline_exceeded` reason leading `detail`.",
   );
 
 const TriedTierSchema = z
@@ -2197,6 +2218,8 @@ export const fetchFulltextTool = tool('pubmed_fetch_fulltext', {
   },
 
   async handler(input, ctx) {
+    // Every upstream call below runs under this one deadline, or a share of it. (#310)
+    const deadline = startCallDeadline();
     const idCount =
       (input.pmcids?.length ?? 0) + (input.pmids?.length ?? 0) + (input.dois?.length ?? 0);
     ctx.log.info('Executing pubmed_fetch_fulltext', {
@@ -2386,7 +2409,9 @@ export const fetchFulltextTool = tool('pubmed_fetch_fulltext', {
     for (const key of [...pmids, ...dois]) chainByInput.set(key, []);
 
     // The two lookups are independent; their answers are placed in field order.
-    const convertOptions = ctx.signal ? { signal: ctx.signal } : undefined;
+    // They run under the whole deadline: their failure ends the call, so no tier
+    // after them could use time they left.
+    const convertOptions = { signal: ctx.signal, deadline };
     const [pmidRecords, doiRecords] = await Promise.all([
       pmids.length > 0 ? getNcbiService().idConvert(pmids, 'pmid', convertOptions) : [],
       dois.length > 0 ? getNcbiService().idConvert(dois, 'doi', convertOptions) : [],
@@ -2465,12 +2490,36 @@ export const fetchFulltextTool = tool('pubmed_fetch_fulltext', {
       }
     };
 
+    // The fallback tiers this deployment runs, read up front: whether a later
+    // tier could still serve what a tier misses decides that tier's deadline.
+    const epmc = getEuropePmcService();
+    const unpaywall = getUnpaywallService();
+    /**
+     * The deadline a tier runs under, taken as it starts: half the time left
+     * while a later tier could still serve what this one misses, so a tier that
+     * hangs leaves the rest time to answer; the rest of the deadline otherwise.
+     */
+    const tierDeadline = (laterTier: boolean): CallDeadline =>
+      laterTier ? shareDeadline(deadline) : deadline;
+
     // ── Stage 1: PMC EFetch ─────────────────────────────────────────────────
     // Wrapped so transient NCBI failures fall through to EPMC/Unpaywall rather
     // than sinking the whole batch — the chain's contract is graceful fallback.
     let pmcArticles: z.infer<typeof PmcArticleSchema>[] = [];
 
-    if (pmcIds.length > 0) {
+    /** Record `entry` on every id sent to PMC EFetch and route them all on. */
+    const passOverPmc = (entry: z.infer<typeof TriedTierSchema>) => {
+      const allPrefixed = pmcIds.map(withPmcPrefix);
+      for (const prefixed of allPrefixed) {
+        const inputId = pmcidToInputId.get(prefixed) ?? prefixed;
+        chainByInput.get(inputId)?.push({ ...entry });
+      }
+      routePmcMissesToFallback(allPrefixed);
+    };
+
+    if (pmcIds.length > 0 && !hasTimeLeft(deadline, ctx.signal)) {
+      passOverPmc(outOfTime('pmc'));
+    } else if (pmcIds.length > 0) {
       try {
         const xmlData = await getNcbiService().eFetch<JatsNodeList>(
           { db: 'pmc', id: pmcIds.join(','), retmode: 'xml' },
@@ -2479,6 +2528,7 @@ export const fetchFulltextTool = tool('pubmed_fetch_fulltext', {
             useOrderedParser: true,
             usePost: pmcIds.length > 5,
             signal: ctx.signal,
+            deadline: tierDeadline(epmc !== undefined || unpaywall !== undefined),
           },
         );
 
@@ -2552,17 +2602,12 @@ export const fetchFulltextTool = tool('pubmed_fetch_fulltext', {
         routePmcMissesToFallback(missing);
       } catch (error: unknown) {
         if (ctx.signal.aborted) throw error;
-        const detail = error instanceof Error ? error.message : String(error);
+        const detail = tierFailureDetail(error);
         ctx.log.warning('PMC EFetch failed; chain continues with next layer', {
           pmcIdCount: pmcIds.length,
           error: detail,
         });
-        const allPrefixed = pmcIds.map(withPmcPrefix);
-        for (const prefixed of allPrefixed) {
-          const inputId = pmcidToInputId.get(prefixed) ?? prefixed;
-          chainByInput.get(inputId)?.push({ tier: 'pmc', outcome: 'service-error', detail });
-        }
-        routePmcMissesToFallback(allPrefixed);
+        passOverPmc({ tier: 'pmc', outcome: 'service-error', detail });
       }
     }
     // The records PMC EFetch served, by PMCID, under the id that owns each: the
@@ -2577,20 +2622,28 @@ export const fetchFulltextTool = tool('pubmed_fetch_fulltext', {
     // Each candidate's `id` is its own chain key from here on: a PMC miss is
     // routed under the id that owns the record.
     let candidates = [...pending.pmcid, ...pending.pmid, ...pending.doi];
-    const epmc = getEuropePmcService();
-    const epmcOutcomes: EpmcStageOutput = epmc
-      ? await runEpmcStage(epmc, { candidates, servedByPmc, input: filters, budget, ctx })
-      : {
-          articles: [],
-          articleInputIds: new Map(),
-          joins: [],
-          outcomes: new Map(),
-          remaining: candidates,
-          sectionFilterMisses: [],
-          truncatedArticles: [],
-          sectionCapArticles: [],
-          omittedSections: 0,
-        };
+    const epmcHasTime = hasTimeLeft(deadline, ctx.signal);
+    const epmcOutcomes: EpmcStageOutput =
+      epmc && epmcHasTime
+        ? await runEpmcStage(epmc, {
+            candidates,
+            servedByPmc,
+            input: filters,
+            budget,
+            ctx,
+            deadline: tierDeadline(unpaywall !== undefined),
+          })
+        : {
+            articles: [],
+            articleInputIds: new Map(),
+            joins: [],
+            outcomes: new Map(),
+            remaining: candidates,
+            sectionFilterMisses: [],
+            truncatedArticles: [],
+            sectionCapArticles: [],
+            omittedSections: 0,
+          };
 
     pmcArticles = pmcArticles.concat(epmcOutcomes.articles);
     truncatedArticles.push(...epmcOutcomes.truncatedArticles);
@@ -2613,6 +2666,8 @@ export const fetchFulltextTool = tool('pubmed_fetch_fulltext', {
         });
         markUnqueried(c.id, 'europepmc');
       }
+    } else if (!epmcHasTime) {
+      for (const c of candidates) chainByInput.get(c.id)?.push(outOfTime('europepmc'));
     } else {
       // A candidate whose search reached a record an earlier one already owns
       // joins that chain before the owner's outcome lands on it. (#192)
@@ -2631,7 +2686,6 @@ export const fetchFulltextTool = tool('pubmed_fetch_fulltext', {
     sectionFilterMisses.push(...epmcOutcomes.sectionFilterMisses);
 
     // ── Stage 3: Unpaywall fallback ─────────────────────────────────────────
-    const unpaywall = getUnpaywallService();
     const fallbackArticles: z.infer<typeof UnpaywallArticleSchema>[] = [];
 
     // Detail of a DOI-backfill lookup that threw, per field. A candidate still
@@ -2653,16 +2707,20 @@ export const fetchFulltextTool = tool('pubmed_fetch_fulltext', {
     // backfilled: a PMC ID through the PMC ID Converter, which returns DOIs for
     // PMC-indexed records, and only when Unpaywall is configured; a PMID from
     // PubMed metadata (db=pubmed), since the converter returns DOIs only for
-    // articles it has in PMC. The two lookups are independent.
-    const backfillPmcidDois = async (pmcids: string[]): Promise<Map<string, string>> => {
+    // articles it has in PMC. The two lookups are independent, and share one
+    // deadline: a share of the time left when Unpaywall runs after them, so a
+    // hung lookup still leaves the candidates that hold a DOI time to resolve.
+    const backfillPmcidDois = async (
+      pmcids: string[],
+      lookupDeadline: CallDeadline,
+    ): Promise<Map<string, string>> => {
       const found = new Map<string, string>();
       if (pmcids.length === 0) return found;
       try {
-        const records = await getNcbiService().idConvert(
-          pmcids,
-          'pmcid',
-          ctx.signal ? { signal: ctx.signal } : undefined,
-        );
+        const records = await getNcbiService().idConvert(pmcids, 'pmcid', {
+          signal: ctx.signal,
+          deadline: lookupDeadline,
+        });
         for (const r of records) {
           if (r.pmcid && r.doi) {
             found.set(withPmcPrefix(normalizePmcId(String(r.pmcid))), String(r.doi));
@@ -2670,7 +2728,7 @@ export const fetchFulltextTool = tool('pubmed_fetch_fulltext', {
         }
       } catch (error: unknown) {
         if (ctx.signal.aborted) throw error;
-        pmcidDoiLookupFailure = error instanceof Error ? error.message : String(error);
+        pmcidDoiLookupFailure = tierFailureDetail(error);
         ctx.log.warning('Failed to resolve PMCID → DOI for the Unpaywall fallback', {
           error: pmcidDoiLookupFailure,
           pmcidCount: pmcids.length,
@@ -2678,13 +2736,16 @@ export const fetchFulltextTool = tool('pubmed_fetch_fulltext', {
       }
       return found;
     };
-    const backfillPmidDois = async (pmidsNeedingDoi: string[]): Promise<Map<string, string>> => {
+    const backfillPmidDois = async (
+      pmidsNeedingDoi: string[],
+      lookupDeadline: CallDeadline,
+    ): Promise<Map<string, string>> => {
       if (pmidsNeedingDoi.length === 0) return new Map();
       try {
-        return await fetchPubmedDois(pmidsNeedingDoi, ctx.signal);
+        return await fetchPubmedDois(pmidsNeedingDoi, ctx.signal, lookupDeadline);
       } catch (error: unknown) {
         if (ctx.signal.aborted) throw error;
-        pmidDoiLookupFailure = error instanceof Error ? error.message : String(error);
+        pmidDoiLookupFailure = tierFailureDetail(error);
         ctx.log.warning('Failed to batch-fetch DOIs from PubMed for Unpaywall fallback', {
           error: pmidDoiLookupFailure,
           pmidCount: pmidsNeedingDoi.length,
@@ -2694,10 +2755,17 @@ export const fetchFulltextTool = tool('pubmed_fetch_fulltext', {
     };
     const needingDoi = (idType: IdType) =>
       candidates.filter((c) => c.idType === idType && !c.doi).map((c) => c.id);
-    const [pmcidDois, pmidDois] = await Promise.all([
-      unpaywall ? backfillPmcidDois(needingDoi('pmcid')) : new Map<string, string>(),
-      backfillPmidDois(needingDoi('pmid')),
-    ]);
+    // With the deadline spent, neither lookup runs: a candidate left without a
+    // DOI is then unlooked-up, never a settled `no-doi`.
+    const doiLookupsRan = hasTimeLeft(deadline, ctx.signal);
+    let [pmcidDois, pmidDois] = [new Map<string, string>(), new Map<string, string>()];
+    if (doiLookupsRan) {
+      const lookupDeadline = tierDeadline(unpaywall !== undefined);
+      [pmcidDois, pmidDois] = await Promise.all([
+        unpaywall ? backfillPmcidDois(needingDoi('pmcid'), lookupDeadline) : pmcidDois,
+        backfillPmidDois(needingDoi('pmid'), lookupDeadline),
+      ]);
+    }
     const backfilled = { pmcid: pmcidDois, pmid: pmidDois, doi: new Map<string, string>() };
     candidates = candidates.map((c) => {
       const doi = c.doi ?? backfilled[c.idType].get(c.id);
@@ -2710,8 +2778,9 @@ export const fetchFulltextTool = tool('pubmed_fetch_fulltext', {
         // have reached Unpaywall configured or not — that is `no-doi`, a real
         // answer, not an incomplete search, unless the lookup itself threw. A
         // PMC ID's DOI is looked up only for Unpaywall, so its absence means
-        // "never looked up", and the tier stays a genuine unknown and is marked.
-        if (!c.doi && c.idType === 'pmid') {
+        // "never looked up", and the tier stays a genuine unknown and is marked
+        // — as is a PMID's whose lookup the spent deadline skipped.
+        if (!c.doi && c.idType === 'pmid' && doiLookupsRan) {
           chainByInput.get(c.id)?.push(doilessTierEntry(pmidDoiLookupFailure));
           continue;
         }
@@ -2723,6 +2792,9 @@ export const fetchFulltextTool = tool('pubmed_fetch_fulltext', {
         markUnqueried(c.id, 'unpaywall');
       }
     } else {
+      // The last tier: every DOI resolves under the deadline itself, one object
+      // for all of them and for each one's download.
+      const unpaywallHasTime = hasTimeLeft(deadline, ctx.signal);
       // One resolve per DOI, case-insensitively: a later candidate carrying a
       // DOI an earlier one holds joins that chain, and the article is stamped
       // with the owner's identifier. (#192)
@@ -2730,7 +2802,13 @@ export const fetchFulltextTool = tool('pubmed_fetch_fulltext', {
       for (const c of candidates) {
         if (!c.doi) {
           const failure = c.idType === 'pmcid' ? pmcidDoiLookupFailure : pmidDoiLookupFailure;
-          chainByInput.get(c.id)?.push(doilessTierEntry(failure));
+          chainByInput
+            .get(c.id)
+            ?.push(doiLookupsRan ? doilessTierEntry(failure) : outOfTime('unpaywall'));
+          continue;
+        }
+        if (!unpaywallHasTime) {
+          chainByInput.get(c.id)?.push(outOfTime('unpaywall'));
           continue;
         }
         const owner = ownerByDoi.get(c.doi.toLowerCase());
@@ -2755,6 +2833,7 @@ export const fetchFulltextTool = tool('pubmed_fetch_fulltext', {
             },
             unpaywall,
             ctx,
+            deadline,
           ),
         })),
       );
@@ -3220,6 +3299,8 @@ interface EpmcStageInput {
   /** Every candidate that fell through PMC, in field order (`pmcid`, `pmid`, `doi`). */
   candidates: FallbackCandidate[];
   ctx: Context;
+  /** The tier's one deadline, for every search and full-text fetch it sends. (#310) */
+  deadline: CallDeadline;
   input: PmcFilterOptions;
   /** PMC IDs (`PMC<digits>`) PMC EFetch already served, each with the id that owns it. */
   servedByPmc: Map<string, string>;
@@ -3312,7 +3393,7 @@ async function runEpmcStage(
   const searched = await Promise.all(
     args.candidates.map(async (c) => ({
       c,
-      search: await searchEpmcSafe(epmc, queryFor(c), args.ctx),
+      search: await searchEpmcSafe(epmc, queryFor(c), args.ctx, args.deadline),
     })),
   );
 
@@ -3443,6 +3524,7 @@ async function searchEpmcSafe(
   epmc: EuropePmcService,
   query: string,
   ctx: Context,
+  deadline: CallDeadline,
 ): Promise<EpmcSearchResult> {
   try {
     const result = await epmc.search({
@@ -3450,11 +3532,12 @@ async function searchEpmcSafe(
       resultType: 'core',
       pageSize: 1,
       ...(ctx.signal && { signal: ctx.signal }),
+      deadline,
     });
     return result.hits[0] ? { kind: 'hit', hit: result.hits[0] } : { kind: 'miss' };
   } catch (error: unknown) {
     if (ctx.signal.aborted) throw error;
-    const detail = error instanceof Error ? error.message : String(error);
+    const detail = tierFailureDetail(error);
     ctx.log.warning('Europe PMC search failed; chain continues with next layer', {
       query,
       error: detail,
@@ -3502,7 +3585,12 @@ async function fetchEpmcArticle(
   }
 
   try {
-    const result = await epmc.fullTextXml(fullTextId, hit.source, args.ctx.signal ?? undefined);
+    const result = await epmc.fullTextXml(
+      fullTextId,
+      hit.source,
+      args.ctx.signal ?? undefined,
+      args.deadline,
+    );
     if (result.kind === 'not-available') {
       return { kind: 'no-fulltext', detail: 'EPMC fullTextXML not available for this record' };
     }
@@ -3568,7 +3656,7 @@ async function fetchEpmcArticle(
     };
   } catch (error: unknown) {
     if (args.ctx.signal.aborted) throw error;
-    const detail = error instanceof Error ? error.message : String(error);
+    const detail = tierFailureDetail(error);
     args.ctx.log.warning('Europe PMC fullTextXML failed; chain continues with next layer', {
       epmcId: hit.id,
       source: hit.source,
@@ -3587,14 +3675,15 @@ async function fetchEpmcArticle(
  */
 async function fetchPubmedDois(
   pmids: string[],
-  signal?: AbortSignal,
+  signal: AbortSignal,
+  deadline: CallDeadline,
 ): Promise<Map<string, string>> {
   const out = new Map<string, string>();
   if (pmids.length === 0) return out;
 
   const xmlData = await getNcbiService().eFetch<{ PubmedArticleSet?: XmlPubmedArticleSet }>(
     { db: 'pubmed', id: pmids.join(','), retmode: 'xml' },
-    { retmode: 'xml', usePost: pmids.length >= 100, ...(signal && { signal }) },
+    { retmode: 'xml', usePost: pmids.length >= 100, signal, deadline },
   );
 
   const articles = xmlData?.PubmedArticleSet?.PubmedArticle
@@ -3621,6 +3710,14 @@ async function fetchPubmedDois(
  * for HTML content only, the title the extractor detects on the page. None is
  * ever invented: with no source carrying one, the article has no title. The
  * journal name and year come from Unpaywall's record alone. (#144)
+ *
+ * The lookup and the download both run under `deadline`. A download that
+ * deadline leaves no time to start fails as `unpaywall_deadline_exceeded` like
+ * one it cuts mid-flight: either way the tier ran and the deadline cut it. The
+ * extraction after the download runs under it too: HTML extraction ends with it,
+ * and PDF extraction, which cannot be interrupted, does not start once it is
+ * spent. Either way the id ends `parse-failed`, the extraction's own message as
+ * the detail. (#310)
  */
 async function resolveUnpaywall(
   args: {
@@ -3632,6 +3729,7 @@ async function resolveUnpaywall(
   },
   service: UnpaywallService,
   ctx: Context,
+  deadline: CallDeadline,
 ): Promise<FallbackOutcome> {
   const { pmcId, pmid, doi, epmcTitle, budget } = args;
   const requestedIds = { ...(pmcId && { pmcId }), ...(pmid && { pmid }) };
@@ -3657,10 +3755,10 @@ async function resolveUnpaywall(
 
   let resolution: UnpaywallResolution;
   try {
-    resolution = await service.resolve(doi, ctx.signal);
+    resolution = await service.resolve(doi, ctx.signal, deadline);
   } catch (error: unknown) {
     if (ctx.signal.aborted) throw error;
-    const detail = error instanceof Error ? error.message : String(error);
+    const detail = tierFailureDetail(error);
     ctx.log.warning('Unpaywall DOI resolve failed', { doi, error: detail });
     return { unavailable: { reason: 'service-error', detail } };
   }
@@ -3671,10 +3769,10 @@ async function resolveUnpaywall(
 
   let content: UnpaywallContent;
   try {
-    content = await service.fetchContent(resolution.location, ctx.signal);
+    content = await service.fetchContent(resolution.location, ctx.signal, deadline);
   } catch (error: unknown) {
     if (ctx.signal.aborted) throw error;
-    const detail = error instanceof Error ? error.message : String(error);
+    const detail = tierFailureDetail(error);
     ctx.log.warning('Unpaywall content fetch failed', { doi, error: detail });
     return { unavailable: { reason: 'fetch-failed', detail } };
   }
@@ -3691,7 +3789,7 @@ async function resolveUnpaywall(
 
   try {
     if (content.kind === 'html') {
-      const extracted = await extractHtml(content.body, content.fetchedUrl, ctx.signal);
+      const extracted = await extractHtml(content.body, content.fetchedUrl, ctx.signal, deadline);
       const body = extracted.content.trim();
       if (!body) {
         return {
@@ -3714,6 +3812,15 @@ async function resolveUnpaywall(
       );
     }
 
+    if (!hasTimeLeft(deadline, ctx.signal)) {
+      return {
+        unavailable: {
+          reason: 'parse-failed',
+          detail: "PDF extraction was not started: the tool call's deadline left it no time",
+        },
+      };
+    }
+    // PDF extraction cannot be interrupted once started; it runs to completion.
     const extracted = await pdfParser.extractText(content.body, { mergePages: true });
     const text = typeof extracted.text === 'string' ? extracted.text.trim() : '';
     if (!text) {
@@ -3733,8 +3840,9 @@ async function resolveUnpaywall(
       text,
     );
   } catch (error: unknown) {
-    // A caller abort ends the call. An extractor failure, or HTML extraction
-    // stopped at its deadline, ends only this id, with the error as the detail.
+    // A caller abort ends the call. An extractor failure, or HTML extraction that
+    // its own bound or the tool call's deadline stopped or left no time to start,
+    // ends only this id, with the error as the detail.
     if (ctx.signal.aborted) throw error;
     const detail = error instanceof Error ? error.message : String(error);
     ctx.log.warning('Unpaywall content extraction failed', { pmid, doi, detail });
@@ -3778,6 +3886,41 @@ function buildUnpaywallArticle(args: {
     ...(location.host_type && { hostType: location.host_type }),
     ...(location.version && { version: location.version }),
   };
+}
+
+/** `detail` of a tier the tool call's deadline left no time to start. (#310) */
+const NO_TIME_LEFT = "The tool call's deadline left no time for this tier";
+
+/**
+ * The `triedTiers` entry of a tier the tool call's deadline left no time to
+ * start: it sent nothing, so it reports no outcome of the provider's. (#310)
+ */
+function outOfTime(tier: z.infer<typeof TriedTierSchema>['tier']): z.infer<typeof TriedTierSchema> {
+  return { tier, outcome: 'not-attempted', detail: NO_TIME_LEFT };
+}
+
+/**
+ * Whether the tool call's deadline leaves time to start the next step. Once it is
+ * spent, a caller who has cancelled ends the call with their own reason, never with
+ * a step skipped for time. (#310)
+ */
+function hasTimeLeft(deadline: CallDeadline, signal: AbortSignal): boolean {
+  if (!isSpent(deadline)) return true;
+  signal.throwIfAborted();
+  return false;
+}
+
+/**
+ * A tier failure's `detail`: the error's message, led by the provider's
+ * `*_deadline_exceeded` reason when a deadline cut the tier, so a cut reads
+ * apart from an upstream that failed on its own. (#310)
+ */
+function tierFailureDetail(error: unknown): string {
+  const message = error instanceof Error ? error.message : String(error);
+  const reason = error instanceof McpError ? error.data?.reason : undefined;
+  return typeof reason === 'string' && reason.endsWith('_deadline_exceeded')
+    ? `${reason}: ${message}`
+    : message;
 }
 
 /**

@@ -7,6 +7,11 @@
  * {@link espellBody}. `<CorrectedQuery>` is ESpell's lowercased, punctuation-
  * and digit-stripped rewrite; `<SpelledQuery>` interleaves the caller's text
  * (`<Original>`) with each replacement (`<Replaced>`) in document order.
+ *
+ * A second set, captured 2026-11-21 for the PubMed record-count check (#316),
+ * pairs `db=pubmed` and `db=mesh` answers with the ESearch counts
+ * (`esearch.fcgi?db=pubmed&rettype=count`) of the words they replace, so a stub
+ * can answer every request that check sends as NCBI did.
  * @module tests/services/ncbi/_espell-fixtures
  */
 
@@ -118,4 +123,71 @@ export function capturedEspell(term: string): string {
   const result = ESPELL_RESULTS[term];
   if (result === undefined) throw new Error(`no captured ESpell response for "${term}"`);
   return espellBody(result);
+}
+
+/**
+ * The `<eSpellResult>` element each dictionary returned on 2026-11-21 (#316).
+ * `db=mesh` is captured for the terms whose `db=pubmed` replacement the count
+ * check drops.
+ */
+const CHECKED_ESPELL_RESULTS: Readonly<
+  Record<'pubmed' | 'mesh', Readonly<Record<string, string>>>
+> = {
+  pubmed: {
+    tirzepatide:
+      '<eSpellResult>\n\t<Database>pubmed</Database>\n\t<Query>tirzepatide</Query>\n\t<CorrectedQuery>irzepatide</CorrectedQuery>\n\t<SpelledQuery><Original></Original><Replaced>irzepatide</Replaced></SpelledQuery>\n\t<ERROR/>\n</eSpellResult>\n',
+    tirzepatid:
+      '<eSpellResult>\n\t<Database>pubmed</Database>\n\t<Query>tirzepatid</Query>\n\t<CorrectedQuery>irzepatide</CorrectedQuery>\n\t<SpelledQuery><Original></Original><Replaced>irzepatide</Replaced></SpelledQuery>\n\t<ERROR/>\n</eSpellResult>\n',
+    'crispr screen':
+      '<eSpellResult>\n\t<Database>pubmed</Database>\n\t<Query>crispr screen</Query>\n\t<CorrectedQuery>crispri screen</CorrectedQuery>\n\t<SpelledQuery><Original></Original><Replaced>crispri</Replaced><Original> screen</Original></SpelledQuery>\n\t<ERROR/>\n</eSpellResult>\n',
+    '"heart failure"[tiab] AND tirzepatid':
+      '<eSpellResult>\n\t<Database>pubmed</Database>\n\t<Query>&quot;heart failure&quot;[tiab] AND tirzepatid</Query>\n\t<CorrectedQuery>heart failure tia and irzepatide</CorrectedQuery>\n\t<SpelledQuery><Original>&quot;heart failure&quot;[</Original><Replaced>tia</Replaced><Original>] AND </Original><Replaced>irzepatide</Replaced></SpelledQuery>\n\t<ERROR/>\n</eSpellResult>\n',
+    dexamethazone:
+      '<eSpellResult>\n\t<Database>pubmed</Database>\n\t<Query>dexamethazone</Query>\n\t<CorrectedQuery>dexamethasone</CorrectedQuery>\n\t<SpelledQuery><Original></Original><Replaced>dexamethasone</Replaced></SpelledQuery>\n\t<ERROR/>\n</eSpellResult>\n',
+    'metformn insulin resistence':
+      '<eSpellResult>\n\t<Database>pubmed</Database>\n\t<Query>metformn insulin resistence</Query>\n\t<CorrectedQuery>metformin insulin resistance</CorrectedQuery>\n\t<SpelledQuery><Original></Original><Replaced>metformin</Replaced><Original> insulin </Original><Replaced>resistance</Replaced></SpelledQuery>\n\t<ERROR/>\n</eSpellResult>\n',
+  },
+  mesh: {
+    tirzepatide:
+      '<eSpellResult>\n\t<Database>mesh</Database>\n\t<Query>tirzepatide</Query>\n\t<CorrectedQuery/>\n\t<SpelledQuery/>\n\t<ERROR/>\n</eSpellResult>\n',
+    tirzepatid:
+      '<eSpellResult>\n\t<Database>mesh</Database>\n\t<Query>tirzepatid</Query>\n\t<CorrectedQuery>tirzepatide</CorrectedQuery>\n\t<SpelledQuery><Original></Original><Replaced>tirzepatide</Replaced></SpelledQuery>\n\t<ERROR/>\n</eSpellResult>\n',
+    'crispr screen':
+      '<eSpellResult>\n\t<Database>mesh</Database>\n\t<Query>crispr screen</Query>\n\t<CorrectedQuery>crispa screen</CorrectedQuery>\n\t<SpelledQuery><Original></Original><Replaced>crispa</Replaced><Original> screen</Original></SpelledQuery>\n\t<ERROR/>\n</eSpellResult>\n',
+    '"heart failure"[tiab] AND tirzepatid':
+      '<eSpellResult>\n\t<Database>mesh</Database>\n\t<Query>&quot;heart failure&quot;[tiab] AND tirzepatid</Query>\n\t<CorrectedQuery>heart failure tiab and tirzepatide</CorrectedQuery>\n\t<SpelledQuery><Original>&quot;heart failure&quot;[tiab] AND </Original><Replaced>tirzepatide</Replaced></SpelledQuery>\n\t<ERROR/>\n</eSpellResult>\n',
+  },
+};
+
+/** Every `db=pubmed` term of the record-count captures, in capture order. */
+export const CHECKED_TERMS: readonly string[] = Object.keys(CHECKED_ESPELL_RESULTS.pubmed);
+
+/**
+ * The full response body `db` returned for `term` on 2026-11-21. Throws for a
+ * term never captured from that dictionary.
+ */
+export function capturedCheckedEspell(db: 'pubmed' | 'mesh', term: string): string {
+  const result = CHECKED_ESPELL_RESULTS[db][term];
+  if (result === undefined) throw new Error(`no captured db=${db} ESpell response for "${term}"`);
+  return espellBody(result);
+}
+
+/** PubMed record counts ESearch returned on 2026-11-21, keyed by the `term` sent. */
+export const CAPTURED_COUNTS: Readonly<Record<string, number>> = {
+  tirzepatide: 2837,
+  irzepatide: 1,
+  tirzepatid: 12,
+  crispr: 72950,
+  crispri: 1866,
+  crispa: 654,
+  dexamethazone: 90242,
+  dexamethasone: 90222,
+  metformn: 0,
+  resistence: 1762830,
+  resistance: 1762830,
+};
+
+/** The body `esearch.fcgi?rettype=count` returns: prolog, DOCTYPE, and the `<Count>` alone. */
+export function esearchCountBody(count: number): string {
+  return `<?xml version="1.0" encoding="UTF-8" ?>\n<!DOCTYPE eSearchResult PUBLIC "-//NLM//DTD esearch 20060628//EN" "https://eutils.ncbi.nlm.nih.gov/eutils/dtd/20060628/esearch.dtd">\n<eSearchResult>\n\t<Count>${count}</Count>\n</eSearchResult>\n`;
 }

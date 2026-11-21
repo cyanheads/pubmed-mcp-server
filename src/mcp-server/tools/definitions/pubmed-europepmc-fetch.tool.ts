@@ -15,6 +15,7 @@
 
 import { tool, z } from '@cyanheads/mcp-ts-core';
 import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
+import { startCallDeadline } from '@/services/call-deadline.js';
 import { EUROPEPMC_SERVICE_ERRORS } from '@/services/error-contracts.js';
 import { getEuropePmcService } from '@/services/europe-pmc/europe-pmc-service.js';
 import { EUROPEPMC_ALL_SOURCES, epmcFullTextId, epmcJournal } from '@/services/europe-pmc/types.js';
@@ -166,9 +167,12 @@ export const pubmedEuropepmcFetchTool = tool('pubmed_europepmc_fetch', {
 
   errors: [
     // Only the outage recoveries are this tool's own: they name the tool that
-    // reads a `MED` record while Europe PMC is down. (#288, #305)
+    // reads a `MED` record while Europe PMC is down. A rate limit keeps the
+    // shared hint, which says to wait out `retryAfter`. (#288, #305, #315)
     ...EUROPEPMC_SERVICE_ERRORS.map((entry) =>
-      entry.reason === 'europepmc_unreachable' || entry.reason === 'europepmc_deadline_exceeded'
+      entry.reason === 'europepmc_unreachable' ||
+      entry.reason === 'europepmc_deadline_exceeded' ||
+      entry.reason === 'europepmc_timed_out'
         ? {
             ...entry,
             recovery:
@@ -236,6 +240,8 @@ export const pubmedEuropepmcFetchTool = tool('pubmed_europepmc_fetch', {
   },
 
   async handler(input, ctx) {
+    // One deadline for the whole call, started before any upstream request. (#310)
+    const deadline = startCallDeadline();
     ctx.log.info('Executing pubmed_europepmc_fetch', { recordCount: input.records.length });
     const epmc = getEuropePmcService();
     if (!epmc) {
@@ -245,7 +251,7 @@ export const pubmedEuropepmcFetchTool = tool('pubmed_europepmc_fetch', {
       );
     }
 
-    const hits = await epmc.fetchRecords(input.records, ctx.signal);
+    const hits = await epmc.fetchRecords(input.records, ctx.signal, deadline);
 
     const resolvedRecords = hits.map((h) => {
       // EPMC returns these as raw JSON strings carrying JATS/HTML markup,

@@ -12,6 +12,7 @@ import {
   requestContextService,
 } from '@cyanheads/mcp-ts-core/utils';
 import { afterEach, beforeEach, describe, expect, it, type MockInstance, vi } from 'vitest';
+import type { CallDeadline } from '@/services/call-deadline.js';
 import type { NcbiApiClient } from '@/services/ncbi/api-client.js';
 import {
   NcbiService,
@@ -20,7 +21,17 @@ import {
 } from '@/services/ncbi/ncbi-service.js';
 import { createNcbiRequestQueue } from '@/services/ncbi/request-queue.js';
 import { NcbiResponseHandler } from '@/services/ncbi/response-handler.js';
-import { capturedEspell, ESPELL_TERMS, espellBody } from './_espell-fixtures.js';
+import type { NcbiRequestOptions, NcbiRequestParams } from '@/services/ncbi/types.js';
+import {
+  CAPTURED_COUNTS,
+  CHECKED_TERMS,
+  capturedCheckedEspell,
+  capturedEspell,
+  ESPELL_TERMS,
+  esearchCountBody,
+  espellBody,
+} from './_espell-fixtures.js';
+import { driveUntilSettled, track } from './_fake-clock.js';
 
 vi.mock('@cyanheads/mcp-ts-core/utils', async (importOriginal) => {
   const actual = await importOriginal<typeof import('@cyanheads/mcp-ts-core/utils')>();
@@ -198,13 +209,74 @@ describe('NcbiService', () => {
         QuotedPhraseNotFound: ['"Notarealmeshterm"[MeSH Terms]'],
       });
     });
+
+    it('rejects a well-formed document with no <eSearchResult> as ncbi_invalid_response, unretried', async () => {
+      const { service, mockApiClient, mockResponseHandler } = createMockService();
+      (mockApiClient.makeRequest as ReturnType<typeof vi.fn>).mockResolvedValue('<html/>');
+      (mockResponseHandler.parseAndHandleResponse as ReturnType<typeof vi.fn>).mockReturnValue({
+        html: { body: { p: 'The service is temporarily unavailable.' } },
+      });
+
+      await expect(service.eSearch({ db: 'pubmed', term: 'cancer' })).rejects.toMatchObject({
+        code: JsonRpcErrorCode.SerializationError,
+        data: { reason: 'ncbi_invalid_response', endpoint: 'esearch' },
+      });
+      expect(mockApiClient.makeRequest).toHaveBeenCalledTimes(1);
+    });
+
+    /** A service with two retries whose ESearch answers `body`, parsed by the real response handler. */
+    function esearchService(body: string) {
+      const makeRequest = vi.fn().mockResolvedValue(body);
+      const service = new NcbiService(
+        { makeRequest } as unknown as NcbiApiClient,
+        idleQueue(),
+        new NcbiResponseHandler(),
+        2,
+        TEST_DEADLINE_MS,
+      );
+      return { service, makeRequest };
+    }
+
+    it.each([
+      [
+        'no <Count>',
+        '<eSearchResult><RetMax>20</RetMax><RetStart>0</RetStart><IdList/><QueryTranslation>cancer[All Fields]</QueryTranslation></eSearchResult>',
+      ],
+      ['an empty <eSearchResult>', '<eSearchResult></eSearchResult>'],
+      ['an empty <Count>', '<eSearchResult><Count></Count></eSearchResult>'],
+      ['a non-numeric <Count>', '<eSearchResult><Count>many</Count></eSearchResult>'],
+    ])('rejects an answer with %s as ncbi_invalid_response, unretried', async (_label, result) => {
+      const { service, makeRequest } = esearchService(
+        `<?xml version="1.0" encoding="UTF-8" ?>\n${result}`,
+      );
+
+      await expect(service.eSearch({ db: 'pubmed', term: 'cancer' })).rejects.toMatchObject({
+        code: JsonRpcErrorCode.SerializationError,
+        data: { reason: 'ncbi_invalid_response', endpoint: 'esearch' },
+      });
+      expect(makeRequest).toHaveBeenCalledTimes(1);
+    });
+
+    it('reads <Count>0</Count> as zero records', async () => {
+      const { service } = esearchService(esearchCountBody(0));
+
+      const result = await service.eSearch({ db: 'pubmed', term: 'zzqxw', rettype: 'count' });
+
+      expect(result.count).toBe(0);
+    });
   });
 
   describe('eSpell', () => {
-    /** A service whose ESpell request answers `body`, parsed by the real response handler. */
+    /**
+     * A service whose ESpell request answers `body`, parsed by the real response
+     * handler. Every PubMed record count comes back as 1, so each replacement
+     * passes the count check (#316) and the rebuild alone decides the result.
+     */
     function espellService(body: string) {
       const mockApiClient = {
-        makeRequest: vi.fn().mockResolvedValue(body),
+        makeRequest: vi.fn((endpoint: string) =>
+          Promise.resolve(endpoint === 'esearch' ? esearchCountBody(1) : body),
+        ),
       } as unknown as NcbiApiClient;
       const service = new NcbiService(
         mockApiClient,
@@ -652,6 +724,917 @@ describe('NcbiService', () => {
       );
       await expect(spell(body, 'cancr')).rejects.toMatchObject({
         message: expect.stringContaining('Backend spell service unavailable'),
+      });
+    });
+
+    it.each([
+      [
+        'an XHTML page behind an XML prolog',
+        '<?xml version="1.0" encoding="UTF-8"?>\n<html xmlns="http://www.w3.org/1999/xhtml"><body><p>Service temporarily unavailable.</p></body></html>',
+      ],
+      ['another E-utility’s document', esearchCountBody(3)],
+    ])(
+      'rejects %s, which has no <eSpellResult>, as ncbi_invalid_response',
+      async (_label, body) => {
+        const { service, mockApiClient } = espellService(body);
+
+        await expect(service.eSpell({ db: 'pubmed', term: 'cancr' })).rejects.toMatchObject({
+          code: JsonRpcErrorCode.SerializationError,
+          data: { reason: 'ncbi_invalid_response', endpoint: 'espell' },
+        });
+        expect(mockApiClient.makeRequest).toHaveBeenCalledTimes(1);
+      },
+    );
+
+    describe('checks each replacement against PubMed record counts (#316)', () => {
+      const espellRequest = (db: 'pubmed' | 'mesh', term: string) => `espell?db=${db} ${term}`;
+      const countRequest = (term: string) => `esearch?db=pubmed&rettype=count ${term}`;
+
+      /** Answers one request, given in the form the two builders above write. */
+      type Answer = (request: string, signal: AbortSignal | undefined) => Promise<string>;
+
+      /**
+       * A service whose every request `answer` replies to, parsed by the real
+       * response handler, with no retries; `requests` records each one in the
+       * order it was sent.
+       */
+      function checkedService(answer: Answer) {
+        const requests: string[] = [];
+        const makeRequest = vi.fn(
+          (endpoint: string, params: NcbiRequestParams, options?: NcbiRequestOptions) => {
+            const rettype = params.rettype === undefined ? '' : `&rettype=${params.rettype}`;
+            const request = `${endpoint}?db=${params.db}${rettype} ${params.term}`;
+            requests.push(request);
+            return answer(request, options?.signal);
+          },
+        );
+        const service = new NcbiService(
+          { makeRequest } as unknown as NcbiApiClient,
+          idleQueue(),
+          new NcbiResponseHandler(),
+          0,
+          TEST_DEADLINE_MS,
+        );
+        return { service, requests };
+      }
+
+      /** Replies as NCBI did on 2026-11-21; a request the captures don't hold fails the call. */
+      const fromCaptures: Answer = async (request) => {
+        const [route, ...words] = request.split(' ');
+        const term = words.join(' ');
+        if (route === 'espell?db=pubmed') return capturedCheckedEspell('pubmed', term);
+        if (route === 'espell?db=mesh') return capturedCheckedEspell('mesh', term);
+        const count = CAPTURED_COUNTS[term];
+        if (route === 'esearch?db=pubmed&rettype=count' && count !== undefined) {
+          return esearchCountBody(count);
+        }
+        throw new Error(`no capture answers ${request}`);
+      };
+
+      const unavailable = () =>
+        Promise.reject(new McpError(JsonRpcErrorCode.ServiceUnavailable, 'NCBI did not answer'));
+
+      // Measured against live ESpell and ESearch (2026-11-21); each row replays the captures.
+      const CHECKED: [
+        term: string,
+        corrected: string,
+        hasSuggestion: boolean,
+        requests: string[],
+      ][] = [
+        // Correctly spelled, rewritten into a word PubMed holds once: dropped, and
+        // the MeSH dictionary leaves the word as written.
+        [
+          'tirzepatide',
+          'tirzepatide',
+          false,
+          [
+            espellRequest('pubmed', 'tirzepatide'),
+            countRequest('tirzepatide'),
+            countRequest('irzepatide'),
+            espellRequest('mesh', 'tirzepatide'),
+          ],
+        ],
+        // Dropped, then corrected by the MeSH dictionary's word, which outnumbers it.
+        [
+          'tirzepatid',
+          'tirzepatide',
+          true,
+          [
+            espellRequest('pubmed', 'tirzepatid'),
+            countRequest('tirzepatid'),
+            countRequest('irzepatide'),
+            espellRequest('mesh', 'tirzepatid'),
+            countRequest('tirzepatide'),
+          ],
+        ],
+        // Dropped; the MeSH dictionary's `crispa` is rarer than `crispr`, which stays.
+        [
+          'crispr screen',
+          'crispr screen',
+          false,
+          [
+            espellRequest('pubmed', 'crispr screen'),
+            countRequest('crispr'),
+            countRequest('crispri'),
+            espellRequest('mesh', 'crispr screen'),
+            countRequest('crispa'),
+          ],
+        ],
+        [
+          '"heart failure"[tiab] AND tirzepatid',
+          '"heart failure"[tiab] AND tirzepatide',
+          true,
+          [
+            espellRequest('pubmed', '"heart failure"[tiab] AND tirzepatid'),
+            countRequest('tirzepatid'),
+            countRequest('irzepatide'),
+            espellRequest('mesh', '"heart failure"[tiab] AND tirzepatid'),
+            countRequest('tirzepatide'),
+          ],
+        ],
+        // As common as the word it replaces: applied.
+        [
+          'dexamethazone',
+          'dexamethasone',
+          true,
+          [
+            espellRequest('pubmed', 'dexamethazone'),
+            countRequest('dexamethazone'),
+            countRequest('dexamethasone'),
+          ],
+        ],
+        // A word PubMed holds no record of cannot be outnumbered, so its
+        // replacement is never counted.
+        [
+          'metformn insulin resistence',
+          'metformin insulin resistance',
+          true,
+          [
+            espellRequest('pubmed', 'metformn insulin resistence'),
+            countRequest('metformn'),
+            countRequest('resistence'),
+            countRequest('resistance'),
+          ],
+        ],
+      ];
+
+      it.each(CHECKED)('%j → %j', async (term, corrected, hasSuggestion) => {
+        const { service } = checkedService(fromCaptures);
+        expect(await service.eSpell({ db: 'pubmed', term })).toEqual({
+          original: term,
+          corrected,
+          hasSuggestion,
+        });
+      });
+
+      it.each(CHECKED)('%j sends only the requests its checks need', async (term, ...rest) => {
+        const { service, requests } = checkedService(fromCaptures);
+        await service.eSpell({ db: 'pubmed', term });
+        expect(requests).toEqual(rest[2]);
+      });
+
+      it('covers every record-count capture', () => {
+        expect(CHECKED.map(([term]) => term).toSorted()).toEqual(CHECKED_TERMS.toSorted());
+      });
+
+      it.each(['IL6', 'HbA1c', 'breast cancer[mesh]', '1918 influenza pandemc'])(
+        'sends one request for %j, which ESpell leaves as written',
+        async (term) => {
+          const { service, mockApiClient } = espellService(capturedEspell(term));
+          expect(await service.eSpell({ db: 'pubmed', term })).toEqual({
+            original: term,
+            corrected: term,
+            hasSuggestion: false,
+          });
+          expect(mockApiClient.makeRequest).toHaveBeenCalledTimes(1);
+        },
+      );
+
+      /** `count` words, `cancra`, `cancrb`, …, which ESpell replaces with `cancera`, `cancerb`, …. */
+      const misspelled = (count: number) => {
+        const words = Array.from(
+          { length: count },
+          (_, i) => `cancr${String.fromCharCode(97 + i)}`,
+        );
+        const replacements = words.map((word) => word.replace('cancr', 'cancer'));
+        const query = words.join(' ');
+        const segments = replacements.map(
+          (replacement, i) =>
+            `<Original>${i === 0 ? '' : ' '}</Original><Replaced>${replacement}</Replaced>`,
+        );
+        return { words, replacements, query, body: spelled(query, segments.join('')) };
+      };
+
+      /**
+       * Answers `db=pubmed` with `body`, `db=mesh` with `mesh`, and each count
+       * from `counts`, 5 for a term it doesn't list.
+       */
+      const answering =
+        (body: string, counts: Record<string, number> = {}, mesh?: string): Answer =>
+        async (request) => {
+          const term = request.slice(request.indexOf(' ') + 1);
+          if (request.startsWith('espell?db=pubmed ')) return body;
+          if (request.startsWith('espell?db=mesh ') && mesh !== undefined) return mesh;
+          if (request.startsWith('esearch?')) return esearchCountBody(counts[term] ?? 5);
+          throw new Error(`unexpected request ${request}`);
+        };
+
+      it('stops at 12 requests and applies every later correction as ESpell wrote it', async () => {
+        const { words, replacements, query, body } = misspelled(10);
+        const { service, requests } = checkedService(answering(body));
+
+        const result = await service.eSpell({ db: 'pubmed', term: query });
+
+        expect(requests).toEqual([
+          espellRequest('pubmed', query),
+          ...words
+            .slice(0, 6)
+            .flatMap((word, i) => [countRequest(word), countRequest(replacements[i] ?? '')]),
+        ]);
+        expect(result).toEqual({
+          original: query,
+          corrected: replacements.join(' '),
+          hasSuggestion: true,
+          skippedChecks: words.slice(6).map((word, i) => ({
+            check: 'count',
+            word,
+            replacement: replacements[i + 6],
+            reason: 'request_cap',
+          })),
+        });
+      });
+
+      it('keeps a dropped word as written when the cap leaves no request for the MeSH dictionary', async () => {
+        const { words, replacements, query, body } = misspelled(6);
+        const { service, requests } = checkedService(answering(body, { cancera: 0 }));
+
+        const result = await service.eSpell({ db: 'pubmed', term: query });
+
+        expect(requests).toHaveLength(13);
+        expect(requests).not.toContain(espellRequest('mesh', query));
+        expect(result).toEqual({
+          original: query,
+          corrected: ['cancra', ...replacements.slice(1)].join(' '),
+          hasSuggestion: true,
+          skippedChecks: [
+            { check: 'mesh', word: words[0], replacement: 'cancera', reason: 'request_cap' },
+          ],
+        });
+      });
+
+      it('spends the 12th request on the first MeSH word and keeps the next dropped word as written', async () => {
+        const { words, replacements, query, body } = misspelled(5);
+        const mesh = spelled(
+          query,
+          '<Original></Original><Replaced>cancroa</Replaced><Original> </Original><Replaced>cancrob</Replaced><Original> cancrc cancrd cancre</Original>',
+        );
+        const counts = { cancera: 0, cancerb: 0, cancroa: 50, cancrob: 50 };
+        const { service, requests } = checkedService(answering(body, counts, mesh));
+
+        const result = await service.eSpell({ db: 'pubmed', term: query });
+
+        expect(requests).toEqual([
+          espellRequest('pubmed', query),
+          ...words.flatMap((word, i) => [countRequest(word), countRequest(replacements[i] ?? '')]),
+          espellRequest('mesh', query),
+          countRequest('cancroa'),
+        ]);
+        expect(result).toEqual({
+          original: query,
+          corrected: ['cancroa', 'cancrb', ...replacements.slice(2)].join(' '),
+          hasSuggestion: true,
+          skippedChecks: [
+            { check: 'mesh', word: 'cancrb', replacement: 'cancerb', reason: 'request_cap' },
+          ],
+        });
+      });
+
+      it('sends no 12th request for a correction whose two counts arrive with 11 sent', async () => {
+        // `cancra` has no PubMed record, so its check costs one request; five pairs follow.
+        const { query, body } = misspelled(7);
+        const { service, requests } = checkedService(answering(body, { cancra: 0 }));
+
+        const result = await service.eSpell({ db: 'pubmed', term: query });
+
+        expect(requests).toEqual([
+          espellRequest('pubmed', query),
+          countRequest('cancra'),
+          ...['b', 'c', 'd', 'e', 'f'].flatMap((x) => [
+            countRequest(`cancr${x}`),
+            countRequest(`cancer${x}`),
+          ]),
+        ]);
+        expect(result).toEqual({
+          original: query,
+          corrected: 'cancera cancerb cancerc cancerd cancere cancerf cancerg',
+          hasSuggestion: true,
+          skippedChecks: [
+            { check: 'count', word: 'cancrg', replacement: 'cancerg', reason: 'request_cap' },
+          ],
+        });
+      });
+
+      it('sends nothing once the cap stops a check, not even a MeSH lookup that would fit under it', async () => {
+        // `cancra` is dropped (2 requests), `cancrb` has no record (1), and four pairs
+        // follow (8): `cancrg`'s pair would make 13, the MeSH lookup alone 12.
+        const { query, body } = misspelled(7);
+        const mesh = spelled(query, `<Original>${query}</Original>`);
+        const { service, requests } = checkedService(
+          answering(body, { cancra: 5, cancera: 0, cancrb: 0 }, mesh),
+        );
+
+        const result = await service.eSpell({ db: 'pubmed', term: query });
+
+        expect(requests).toEqual([
+          espellRequest('pubmed', query),
+          countRequest('cancra'),
+          countRequest('cancera'),
+          countRequest('cancrb'),
+          ...['c', 'd', 'e', 'f'].flatMap((x) => [
+            countRequest(`cancr${x}`),
+            countRequest(`cancer${x}`),
+          ]),
+        ]);
+        expect(result).toEqual({
+          original: query,
+          corrected: 'cancra cancerb cancerc cancerd cancere cancerf cancerg',
+          hasSuggestion: true,
+          skippedChecks: [
+            { check: 'count', word: 'cancrg', replacement: 'cancerg', reason: 'request_cap' },
+            { check: 'mesh', word: 'cancra', replacement: 'cancera', reason: 'request_cap' },
+          ],
+        });
+      });
+
+      it('keeps a dropped word when the MeSH dictionary’s word holds only as many records', async () => {
+        const { query, body } = misspelled(1);
+        const mesh = spelled(query, '<Original></Original><Replaced>cancroa</Replaced>');
+        const { service, requests } = checkedService(
+          answering(body, { cancra: 5, cancera: 0, cancroa: 5 }, mesh),
+        );
+
+        expect(await service.eSpell({ db: 'pubmed', term: query })).toEqual({
+          original: query,
+          corrected: 'cancra',
+          hasSuggestion: false,
+        });
+        expect(requests).toEqual([
+          espellRequest('pubmed', query),
+          countRequest('cancra'),
+          countRequest('cancera'),
+          espellRequest('mesh', query),
+          countRequest('cancroa'),
+        ]);
+      });
+
+      it('keeps a dropped word when the MeSH dictionary replaces a span that runs past it', async () => {
+        const query = 'cancr a';
+        const body = spelled(
+          query,
+          '<Original></Original><Replaced>cancer</Replaced><Original> a</Original>',
+        );
+        // One replacement for both words, starting where the dropped `cancr` starts.
+        const mesh = spelled(query, '<Original></Original><Replaced>cancera</Replaced>');
+        const { service, requests } = checkedService(
+          answering(body, { cancr: 5, cancer: 0, cancera: 50 }, mesh),
+        );
+
+        expect(await service.eSpell({ db: 'pubmed', term: query })).toEqual({
+          original: query,
+          corrected: 'cancr a',
+          hasSuggestion: false,
+        });
+        expect(requests).toEqual([
+          espellRequest('pubmed', query),
+          countRequest('cancr'),
+          countRequest('cancer'),
+          espellRequest('mesh', query),
+        ]);
+      });
+
+      it('counts a word once however often the query repeats it', async () => {
+        const query = 'cancr AND cancr';
+        const body = spelled(
+          query,
+          '<Original></Original><Replaced>cancer</Replaced><Original> AND </Original><Replaced>cancer</Replaced>',
+        );
+        const { service, requests } = checkedService(answering(body));
+
+        expect(await service.eSpell({ db: 'pubmed', term: query })).toEqual({
+          original: query,
+          corrected: 'cancer AND cancer',
+          hasSuggestion: true,
+        });
+        expect(requests).toEqual([
+          espellRequest('pubmed', query),
+          countRequest('cancr'),
+          countRequest('cancer'),
+        ]);
+      });
+
+      it('applies a correction unchecked when a count fails, and still checks the next', async () => {
+        const { words, replacements, query, body } = misspelled(2);
+        const answer = answering(body);
+        const { service, requests } = checkedService((request, signal) =>
+          request === countRequest('cancera') ? unavailable() : answer(request, signal),
+        );
+
+        expect(await service.eSpell({ db: 'pubmed', term: query })).toEqual({
+          original: query,
+          corrected: replacements.join(' '),
+          hasSuggestion: true,
+          skippedChecks: [
+            { check: 'count', word: words[0], replacement: 'cancera', reason: 'request_failed' },
+          ],
+        });
+        expect(requests).toEqual([
+          espellRequest('pubmed', query),
+          countRequest('cancra'),
+          countRequest('cancera'),
+          countRequest('cancrb'),
+          countRequest('cancerb'),
+        ]);
+      });
+
+      it('applies a correction unchecked when a count answers a document with no <eSearchResult>', async () => {
+        const { words, replacements, query, body } = misspelled(1);
+        const answer = answering(body);
+        const { service } = checkedService((request, signal) =>
+          request === countRequest('cancera')
+            ? Promise.resolve('<?xml version="1.0"?>\n<eSummaryResult><DocSum/></eSummaryResult>')
+            : answer(request, signal),
+        );
+
+        expect(await service.eSpell({ db: 'pubmed', term: query })).toEqual({
+          original: query,
+          corrected: replacements.join(' '),
+          hasSuggestion: true,
+          skippedChecks: [
+            { check: 'count', word: words[0], replacement: 'cancera', reason: 'request_failed' },
+          ],
+        });
+      });
+
+      it('applies a correction unchecked when a count answers no <Count>', async () => {
+        const { words, replacements, query, body } = misspelled(1);
+        // A MeSH dictionary with nothing to offer, should the correction be dropped.
+        const answer = answering(body, {}, spelled(query, `<Original>${query}</Original>`));
+        const { service, requests } = checkedService((request, signal) =>
+          request === countRequest('cancera')
+            ? Promise.resolve('<?xml version="1.0"?>\n<eSearchResult></eSearchResult>')
+            : answer(request, signal),
+        );
+
+        expect(await service.eSpell({ db: 'pubmed', term: query })).toEqual({
+          original: query,
+          corrected: replacements.join(' '),
+          hasSuggestion: true,
+          skippedChecks: [
+            { check: 'count', word: words[0], replacement: 'cancera', reason: 'request_failed' },
+          ],
+        });
+        expect(requests).toEqual([
+          espellRequest('pubmed', query),
+          countRequest('cancra'),
+          countRequest('cancera'),
+        ]);
+      });
+
+      it('keeps a dropped word as written, naming its MeSH lookup, when the MeSH dictionary answers a document with no <eSpellResult>', async () => {
+        const { service, requests } = checkedService((request, signal) =>
+          request === espellRequest('mesh', 'tirzepatid')
+            ? Promise.resolve(
+                '<?xml version="1.0" encoding="UTF-8"?>\n<html xmlns="http://www.w3.org/1999/xhtml"><body><p>Service temporarily unavailable.</p></body></html>',
+              )
+            : fromCaptures(request, signal),
+        );
+
+        expect(await service.eSpell({ db: 'pubmed', term: 'tirzepatid' })).toEqual({
+          original: 'tirzepatid',
+          corrected: 'tirzepatid',
+          hasSuggestion: false,
+          skippedChecks: [
+            {
+              check: 'mesh',
+              word: 'tirzepatid',
+              replacement: 'irzepatide',
+              reason: 'request_failed',
+            },
+          ],
+        });
+        expect(requests).toEqual([
+          espellRequest('pubmed', 'tirzepatid'),
+          countRequest('tirzepatid'),
+          countRequest('irzepatide'),
+          espellRequest('mesh', 'tirzepatid'),
+        ]);
+      });
+
+      it.each([
+        ['the MeSH dictionary’s answer', espellRequest('mesh', 'tirzepatid')],
+        ['the count of the MeSH dictionary’s word', countRequest('tirzepatide')],
+      ])('keeps a dropped word as written when %s fails', async (_label, failing) => {
+        const { service } = checkedService((request, signal) =>
+          request === failing ? unavailable() : fromCaptures(request, signal),
+        );
+
+        expect(await service.eSpell({ db: 'pubmed', term: 'tirzepatid' })).toEqual({
+          original: 'tirzepatid',
+          corrected: 'tirzepatid',
+          hasSuggestion: false,
+          skippedChecks: [
+            {
+              check: 'mesh',
+              word: 'tirzepatid',
+              replacement: 'irzepatide',
+              reason: 'request_failed',
+            },
+          ],
+        });
+      });
+
+      it('rejects with an unclassified error a check throws instead of degrading on it', async () => {
+        const defect = new TypeError('not an NCBI failure');
+        const { service } = checkedService((request, signal) =>
+          request === countRequest('irzepatide')
+            ? Promise.reject(defect)
+            : fromCaptures(request, signal),
+        );
+
+        await expect(service.eSpell({ db: 'pubmed', term: 'tirzepatide' })).rejects.toBe(defect);
+      });
+
+      it('rejects with the caller’s reason when the caller cancels during a check', async () => {
+        const controller = new AbortController();
+        // A classified reason, as the framework's own cancellation is: one the checks
+        // would otherwise degrade on as a failed NCBI request.
+        const reason = new McpError(
+          JsonRpcErrorCode.RequestCancelled,
+          'caller cancelled mid-check',
+        );
+        const { service, requests } = checkedService((request, signal) => {
+          if (request !== countRequest('irzepatide')) return fromCaptures(request, signal);
+          controller.abort(reason);
+          // The request then fails with an error of its own.
+          return unavailable();
+        });
+
+        await expect(
+          service.eSpell({ db: 'pubmed', term: 'tirzepatide' }, { signal: controller.signal }),
+        ).rejects.toBe(reason);
+        // No MeSH lookup follows the cancellation.
+        expect(requests).toEqual([
+          espellRequest('pubmed', 'tirzepatide'),
+          countRequest('tirzepatide'),
+          countRequest('irzepatide'),
+        ]);
+      });
+
+      describe('the 10 s bound across every check', () => {
+        /** Fake-clock origin. Nonzero so no scheduler reads a zero timestamp as "never started". */
+        const T0 = 1_000_000;
+
+        beforeEach(() => {
+          vi.useFakeTimers({ now: T0 });
+        });
+
+        afterEach(() => {
+          vi.useRealTimers();
+        });
+
+        /** A request that ends only when its signal aborts, as one NCBI never answers does. */
+        const hang = (signal: AbortSignal | undefined) =>
+          new Promise<string>((_, reject) => {
+            signal?.addEventListener('abort', () => reject(signal.reason), { once: true });
+          });
+
+        it('applies a correction unchecked when its count hangs past the bound, and checks nothing after', async () => {
+          const { words, replacements, query, body } = misspelled(2);
+          const answer = answering(body);
+          const { service, requests } = checkedService((request, signal) =>
+            request === countRequest('cancera') ? hang(signal) : answer(request, signal),
+          );
+
+          const call = service.eSpell({ db: 'pubmed', term: query });
+          expect(await driveUntilSettled(track(call))).toEqual({ ok: true });
+
+          expect(Date.now() - T0).toBe(10_000);
+          expect(await call).toEqual({
+            original: query,
+            corrected: replacements.join(' '),
+            hasSuggestion: true,
+            skippedChecks: words.map((word, i) => ({
+              check: 'count',
+              word,
+              replacement: replacements[i],
+              reason: 'time_limit',
+            })),
+          });
+          expect(requests).toEqual([
+            espellRequest('pubmed', query),
+            countRequest('cancra'),
+            countRequest('cancera'),
+          ]);
+          expect(vi.getTimerCount()).toBe(0);
+        });
+
+        it('keeps a dropped word as written when the MeSH dictionary hangs past the bound', async () => {
+          const { service } = checkedService((request, signal) =>
+            request === espellRequest('mesh', 'tirzepatid')
+              ? hang(signal)
+              : fromCaptures(request, signal),
+          );
+
+          const call = service.eSpell({ db: 'pubmed', term: 'tirzepatid' });
+          expect(await driveUntilSettled(track(call))).toEqual({ ok: true });
+
+          expect(Date.now() - T0).toBe(10_000);
+          expect(await call).toEqual({
+            original: 'tirzepatid',
+            corrected: 'tirzepatid',
+            hasSuggestion: false,
+            skippedChecks: [
+              {
+                check: 'mesh',
+                word: 'tirzepatid',
+                replacement: 'irzepatide',
+                reason: 'time_limit',
+              },
+            ],
+          });
+          expect(vi.getTimerCount()).toBe(0);
+        });
+
+        it('clears its timer when every check finishes inside the bound', async () => {
+          const { service } = checkedService(fromCaptures);
+
+          await service.eSpell({ db: 'pubmed', term: 'tirzepatid' });
+
+          expect(Date.now() - T0).toBe(0);
+          expect(vi.getTimerCount()).toBe(0);
+        });
+
+        it('clears its timer when a check rejects', async () => {
+          const defect = new TypeError('not an NCBI failure');
+          const { service } = checkedService((request, signal) =>
+            request === countRequest('irzepatide')
+              ? Promise.reject(defect)
+              : fromCaptures(request, signal),
+          );
+
+          await expect(service.eSpell({ db: 'pubmed', term: 'tirzepatide' })).rejects.toBe(defect);
+          expect(vi.getTimerCount()).toBe(0);
+        });
+
+        it('checks nothing once the bound runs out, not even a repeated word whose counts are known', async () => {
+          const query = 'cancr AND cancr';
+          const body = spelled(
+            query,
+            '<Original></Original><Replaced>cancer</Replaced><Original> AND </Original><Replaced>cancer</Replaced>',
+          );
+          const answer = answering(body);
+          // The count of `cancer` answers 1 ms after the bound fires, as a request that
+          // ignores its signal does.
+          const { service, requests } = checkedService((request, signal) =>
+            request === countRequest('cancer')
+              ? new Promise<string>((resolve) =>
+                  setTimeout(() => resolve(esearchCountBody(5)), 10_001),
+                )
+              : answer(request, signal),
+          );
+
+          const call = service.eSpell({ db: 'pubmed', term: query });
+          expect(await driveUntilSettled(track(call))).toEqual({ ok: true });
+
+          expect(Date.now() - T0).toBe(10_001);
+          expect(await call).toEqual({
+            original: query,
+            corrected: 'cancer AND cancer',
+            hasSuggestion: true,
+            skippedChecks: [
+              { check: 'count', word: 'cancr', replacement: 'cancer', reason: 'time_limit' },
+            ],
+          });
+          expect(requests).toEqual([
+            espellRequest('pubmed', query),
+            countRequest('cancr'),
+            countRequest('cancer'),
+          ]);
+          expect(vi.getTimerCount()).toBe(0);
+        });
+      });
+
+      /**
+       * The checks run under the smaller of their own 10 s and the time the tool call
+       * has left, and the ESpell request under the tool call's deadline (#310). Checks
+       * the deadline cuts short degrade as the 10 s bound's do; the call never fails on them.
+       */
+      describe('under the tool call’s deadline (#310)', () => {
+        /** Fake-clock origin. Nonzero so no scheduler reads a zero timestamp as "never started". */
+        const T0 = 1_000_000;
+
+        beforeEach(() => {
+          vi.useFakeTimers({ now: T0 });
+        });
+
+        afterEach(() => {
+          vi.useRealTimers();
+        });
+
+        /** A tool call deadline 50 s long with `leftMs` left on it now. */
+        const deadlineWith = (leftMs: number): CallDeadline => ({
+          expiresAt: Date.now() + leftMs,
+          totalMs: 50_000,
+        });
+
+        /** A request that ends only when its signal aborts, as one NCBI never answers does. */
+        const hang = (signal: AbortSignal | undefined) =>
+          new Promise<string>((_, reject) => {
+            signal?.addEventListener('abort', () => reject(signal.reason), { once: true });
+          });
+
+        it('stops the checks at the deadline when it has under 10 s left, applying the correction unchecked', async () => {
+          const { words, replacements, query, body } = misspelled(2);
+          const answer = answering(body);
+          const { service, requests } = checkedService((request, signal) =>
+            request === countRequest('cancera') ? hang(signal) : answer(request, signal),
+          );
+
+          const call = service.eSpell(
+            { db: 'pubmed', term: query },
+            { deadline: deadlineWith(4_000) },
+          );
+          expect(await driveUntilSettled(track(call))).toEqual({ ok: true });
+
+          expect(Date.now() - T0).toBe(4_000);
+          expect(await call).toEqual({
+            original: query,
+            corrected: replacements.join(' '),
+            hasSuggestion: true,
+            skippedChecks: words.map((word, i) => ({
+              check: 'count',
+              word,
+              replacement: replacements[i],
+              reason: 'time_limit',
+            })),
+          });
+          expect(requests).toEqual([
+            espellRequest('pubmed', query),
+            countRequest('cancra'),
+            countRequest('cancera'),
+          ]);
+          expect(vi.getTimerCount()).toBe(0);
+        });
+
+        it('keeps a dropped word as written when the deadline runs out during its MeSH lookup', async () => {
+          const { service } = checkedService((request, signal) =>
+            request === espellRequest('mesh', 'tirzepatid')
+              ? hang(signal)
+              : fromCaptures(request, signal),
+          );
+
+          const call = service.eSpell(
+            { db: 'pubmed', term: 'tirzepatid' },
+            { deadline: deadlineWith(4_000) },
+          );
+          expect(await driveUntilSettled(track(call))).toEqual({ ok: true });
+
+          expect(Date.now() - T0).toBe(4_000);
+          expect(await call).toEqual({
+            original: 'tirzepatid',
+            corrected: 'tirzepatid',
+            hasSuggestion: false,
+            skippedChecks: [
+              {
+                check: 'mesh',
+                word: 'tirzepatid',
+                replacement: 'irzepatide',
+                reason: 'time_limit',
+              },
+            ],
+          });
+          expect(vi.getTimerCount()).toBe(0);
+        });
+
+        it('still stops the checks at 10 s when the deadline has more left', async () => {
+          const { query, body } = misspelled(1);
+          const answer = answering(body);
+          const { service } = checkedService((request, signal) =>
+            request === countRequest('cancera') ? hang(signal) : answer(request, signal),
+          );
+
+          const call = service.eSpell(
+            { db: 'pubmed', term: query },
+            { deadline: deadlineWith(30_000) },
+          );
+          expect(await driveUntilSettled(track(call))).toEqual({ ok: true });
+
+          expect(Date.now() - T0).toBe(10_000);
+          expect((await call).skippedChecks).toEqual([
+            { check: 'count', word: 'cancra', replacement: 'cancera', reason: 'time_limit' },
+          ]);
+        });
+
+        it('sends no check once ESpell answers on a spent deadline, applying every correction unchecked', async () => {
+          // ESpell answers 1 ms before the deadline, leaving the checks none.
+          const { words, replacements, query, body } = misspelled(2);
+          const answer = answering(body);
+          const { service, requests } = checkedService((request, signal) =>
+            request.startsWith('espell?')
+              ? new Promise<string>((resolve) => setTimeout(() => resolve(body), 999))
+              : answer(request, signal),
+          );
+
+          const call = service.eSpell(
+            { db: 'pubmed', term: query },
+            { deadline: deadlineWith(1_000) },
+          );
+          expect(await driveUntilSettled(track(call))).toEqual({ ok: true });
+
+          expect(Date.now() - T0).toBe(999);
+          expect(await call).toEqual({
+            original: query,
+            corrected: replacements.join(' '),
+            hasSuggestion: true,
+            skippedChecks: words.map((word, i) => ({
+              check: 'count',
+              word,
+              replacement: replacements[i],
+              reason: 'time_limit',
+            })),
+          });
+          expect(requests).toEqual([espellRequest('pubmed', query)]);
+          expect(vi.getTimerCount()).toBe(0);
+        });
+
+        it('rejects with the caller’s reason when the caller cancels as ESpell answers on a spent deadline', async () => {
+          const controller = new AbortController();
+          const reason = new Error('caller cancelled as ESpell answered');
+          const { query, body } = misspelled(1);
+          const { service, requests } = checkedService(
+            () =>
+              new Promise<string>((resolve) =>
+                setTimeout(() => {
+                  controller.abort(reason);
+                  resolve(body);
+                }, 999),
+              ),
+          );
+
+          const outcome = await driveUntilSettled(
+            track(
+              service.eSpell(
+                { db: 'pubmed', term: query },
+                { deadline: deadlineWith(1_000), signal: controller.signal },
+              ),
+            ),
+          );
+
+          expect(outcome).toEqual({ ok: false, error: reason });
+          expect(requests).toEqual([espellRequest('pubmed', query)]);
+        });
+
+        it('fails the call when the ESpell request itself outlasts the deadline', async () => {
+          const { service } = checkedService((_request, signal) => hang(signal));
+
+          const outcome = await driveUntilSettled(
+            track(
+              service.eSpell({ db: 'pubmed', term: 'cancra' }, { deadline: deadlineWith(4_000) }),
+            ),
+          );
+
+          expect(outcome).toMatchObject({
+            ok: false,
+            error: {
+              code: JsonRpcErrorCode.Timeout,
+              data: { reason: 'ncbi_deadline_exceeded', deadlineMs: 50_000 },
+            },
+          });
+          expect(Date.now() - T0).toBe(4_000);
+        });
+
+        it('rejects with the caller’s reason when the caller cancels a check under the deadline', async () => {
+          const controller = new AbortController();
+          const reason = new Error('caller cancelled mid-check');
+          const { query, body } = misspelled(1);
+          const answer = answering(body);
+          const { service } = checkedService((request, signal) =>
+            request === countRequest('cancera') ? hang(signal) : answer(request, signal),
+          );
+
+          const call = track(
+            service.eSpell(
+              { db: 'pubmed', term: query },
+              { deadline: deadlineWith(4_000), signal: controller.signal },
+            ),
+          );
+          await vi.advanceTimersByTimeAsync(2_000);
+          controller.abort(reason);
+          await vi.advanceTimersByTimeAsync(0);
+
+          expect(call.outcome).toEqual({ ok: false, error: reason });
+          expect(vi.getTimerCount()).toBe(0);
+        });
       });
     });
   });
@@ -1762,7 +2745,7 @@ describe('NcbiService retry behavior', () => {
     expect(error.data).not.toHaveProperty('retryAfter');
   });
 
-  it('exhausted retries on Timeout keep the code with no reason', async () => {
+  it('exhausted retries on Timeout stamp ncbi_timed_out', async () => {
     const { service, mockApiClient } = createRetryService(1);
     const makeRequest = mockApiClient.makeRequest as ReturnType<typeof vi.fn>;
     makeRequest.mockRejectedValue(new McpError(JsonRpcErrorCode.Timeout, 'slow'));
@@ -1773,9 +2756,9 @@ describe('NcbiService retry behavior', () => {
 
     expect(error).toMatchObject({
       code: JsonRpcErrorCode.Timeout,
-      data: { endpoint: 'esearch', attempts: 2 },
+      message: 'slow (failed after 2 attempts)',
+      data: { reason: 'ncbi_timed_out', endpoint: 'esearch', attempts: 2 },
     });
-    expect(error.data).not.toHaveProperty('reason');
   });
 
   it('keeps the error text of a JSON response as ncbiErrors when retries run out', async () => {
@@ -2451,6 +3434,294 @@ describe('NcbiService deadline timer cleanup', () => {
 });
 
 /**
+ * A call under a tool call's deadline (#310) runs under the smaller of NCBI's own
+ * deadline and the time the tool call has left, reports the length of whichever bound
+ * fired, and sends nothing once the tool call's deadline is spent.
+ */
+describe('NcbiService under a tool call’s deadline (#310)', () => {
+  /** Fake-clock origin. Nonzero so no scheduler reads a zero timestamp as "never started". */
+  const T0 = 1_000_000;
+  /** The tool call deadline's length. Each test hands it over partway through, so its length and the time left differ. */
+  const CALL_MS = 50_000;
+
+  beforeEach(() => {
+    vi.useFakeTimers({ now: T0 });
+  });
+
+  afterEach(() => {
+    vi.restoreAllMocks();
+    vi.useRealTimers();
+  });
+
+  /** A tool call deadline {@link CALL_MS} long with `leftMs` left on it now. */
+  const deadlineWith = (leftMs: number): CallDeadline => ({
+    expiresAt: Date.now() + leftMs,
+    totalMs: CALL_MS,
+  });
+
+  /** A request that ends only when its signal aborts, as one NCBI never answers does. */
+  const hangUntilAborted = (signal: AbortSignal | undefined) =>
+    new Promise<string>((_, reject) => {
+      signal?.addEventListener('abort', () => reject(signal.reason), { once: true });
+    });
+
+  const hangingRequest = (_endpoint: string, _params: unknown, options?: NcbiRequestOptions) =>
+    hangUntilAborted(options?.signal);
+
+  const deadlineExceeded = (deadlineMs: number) => ({
+    ok: false,
+    error: {
+      code: JsonRpcErrorCode.Timeout,
+      data: { reason: 'ncbi_deadline_exceeded', deadlineMs },
+    },
+  });
+
+  /** A service whose every ESearch body parses as an empty result; requests answer at once unless given. */
+  function deadlineService(
+    options: {
+      makeExternalRequest?: (url: string, params: unknown, signal?: AbortSignal) => Promise<string>;
+      makeRequest?: (
+        endpoint: string,
+        params: unknown,
+        options?: NcbiRequestOptions,
+      ) => Promise<string>;
+      maxRetries?: number;
+      ncbiDeadlineMs?: number;
+      queue?: Pacer;
+    } = {},
+  ) {
+    const apiClient = {
+      makeRequest: vi.fn(options.makeRequest ?? (() => Promise.resolve('<xml/>'))),
+      makeExternalRequest: vi.fn(
+        options.makeExternalRequest ?? (() => Promise.resolve('{"records":[]}')),
+      ),
+    };
+    const responseHandler = {
+      parseAndHandleResponse: vi.fn(() => ({
+        eSearchResult: { Count: '0', RetMax: '0', RetStart: '0', QueryTranslation: '' },
+      })),
+    };
+    const service = new NcbiService(
+      apiClient as unknown as NcbiApiClient,
+      options.queue ?? idleQueue(),
+      responseHandler as unknown as NcbiResponseHandler,
+      options.maxRetries ?? 0,
+      options.ncbiDeadlineMs ?? TEST_DEADLINE_MS,
+    );
+    return { service, apiClient };
+  }
+
+  const search = (
+    service: NcbiService,
+    options: { deadline: CallDeadline; signal?: AbortSignal },
+  ) => service.eSearch({ db: 'pubmed', term: 'asthma' }, options);
+
+  describe('eSearch', () => {
+    it.each<
+      [
+        label: string,
+        leftMs: number,
+        requests: number,
+        build: () => ReturnType<typeof deadlineService>,
+      ]
+    >([
+      ['mid-request', 20_000, 1, () => deadlineService({ makeRequest: hangingRequest })],
+      [
+        'waiting on a queue that never frees a slot',
+        20_000,
+        0,
+        () => deadlineService({ queue: saturatedQueue() }),
+      ],
+      [
+        // Jitter pinned, so the first backoff is exactly the 1000 ms left; the deadline's
+        // timer was armed first and fires first, mid-sleep.
+        'mid-backoff',
+        1_000,
+        1,
+        () => {
+          vi.spyOn(Math, 'random').mockReturnValue(0.5);
+          return deadlineService({
+            maxRetries: 3,
+            makeRequest: () =>
+              Promise.reject(new McpError(JsonRpcErrorCode.ServiceUnavailable, 'down')),
+          });
+        },
+      ],
+    ])(
+      'ends at the tool call deadline’s instant, %s, reporting its length',
+      async (_label, leftMs, requests, build) => {
+        const { service, apiClient } = build();
+
+        const outcome = await driveUntilSettled(
+          track(search(service, { deadline: deadlineWith(leftMs) })),
+        );
+
+        expect(outcome).toMatchObject(deadlineExceeded(CALL_MS));
+        expect(Date.now() - T0).toBe(leftMs);
+        expect(apiClient.makeRequest).toHaveBeenCalledTimes(requests);
+        expect(vi.getTimerCount()).toBe(0);
+      },
+    );
+
+    it('ends at the tool call deadline’s instant, never shed as queue_full, when the real queue’s next start is 1 ms past its time left', async () => {
+      /**
+       * The real queue, with one start already in its history: the next may start
+       * 20 001 ms from now, so a call with 20 000 ms left projects a wait 1 ms longer
+       * than its time. The wait budget the queue is offered carries a 1 ms margin past
+       * the deadline, so the call waits and the deadline ends it, rather than the queue
+       * shedding it at once.
+       */
+      const queue = createNcbiRequestQueue({ minStartGapMs: 20_001, maxConcurrent: 1 });
+      const { service, apiClient } = deadlineService({ queue });
+      await service.eSearch({ db: 'pubmed', term: 'asthma' });
+
+      const outcome = await driveUntilSettled(
+        track(search(service, { deadline: deadlineWith(20_000) })),
+      );
+
+      expect(outcome).toMatchObject(deadlineExceeded(CALL_MS));
+      expect(Date.now() - T0).toBe(20_000);
+      expect(apiClient.makeRequest).toHaveBeenCalledTimes(1);
+      expect(vi.getTimerCount()).toBe(0);
+    });
+
+    it('ends at NCBI’s own deadline when that comes first, reporting its length', async () => {
+      const { service } = deadlineService({ ncbiDeadlineMs: 1_000, makeRequest: hangingRequest });
+
+      const outcome = await driveUntilSettled(
+        track(search(service, { deadline: deadlineWith(20_000) })),
+      );
+
+      expect(outcome).toMatchObject(deadlineExceeded(1_000));
+      expect(Date.now() - T0).toBe(1_000);
+    });
+
+    it.each([0, 1])(
+      'sends nothing and arms no timer on a deadline with %i ms left',
+      async (leftMs) => {
+        const { service, apiClient } = deadlineService();
+
+        const error = await search(service, { deadline: deadlineWith(leftMs) }).catch(
+          (e: unknown) => e,
+        );
+
+        expect({ ok: false, error }).toMatchObject(deadlineExceeded(CALL_MS));
+        expect(apiClient.makeRequest).not.toHaveBeenCalled();
+        expect(vi.getTimerCount()).toBe(0);
+      },
+    );
+
+    it('fails a spent deadline with the error a deadline that fires mid-request ends with', async () => {
+      const fired = await driveUntilSettled(
+        track(
+          search(deadlineService({ makeRequest: hangingRequest }).service, {
+            deadline: deadlineWith(20_000),
+          }),
+        ),
+      );
+      const spent = (await search(deadlineService().service, { deadline: deadlineWith(0) }).catch(
+        (e: unknown) => e,
+      )) as McpError;
+
+      expect(fired.ok).toBe(false);
+      const expired = (fired as { error: McpError }).error;
+      expect(spent).toBeInstanceOf(McpError);
+      expect(spent.code).toBe(expired.code);
+      expect(spent.message).toBe(expired.message);
+      expect(spent.data).toEqual(expired.data);
+    });
+
+    it('rethrows the caller’s reason on a spent deadline once the caller has aborted', async () => {
+      const controller = new AbortController();
+      const reason = new Error('caller cancelled');
+      controller.abort(reason);
+      const { service, apiClient } = deadlineService();
+
+      await expect(
+        search(service, { deadline: deadlineWith(0), signal: controller.signal }),
+      ).rejects.toBe(reason);
+      expect(apiClient.makeRequest).not.toHaveBeenCalled();
+      expect(vi.getTimerCount()).toBe(0);
+    });
+
+    it('rethrows the caller’s reason when the caller aborts under a deadline', async () => {
+      const controller = new AbortController();
+      // A reason the service's mapping would relabel (a transient McpError reads as
+      // ncbi_unreachable), so only the caller-abort rethrow returns it as it came.
+      const reason = new McpError(JsonRpcErrorCode.ServiceUnavailable, 'Server shutting down');
+      const { service } = deadlineService({ makeRequest: hangingRequest });
+
+      const call = track(
+        search(service, { deadline: deadlineWith(20_000), signal: controller.signal }),
+      );
+      await vi.advanceTimersByTimeAsync(5_000);
+      controller.abort(reason);
+      await vi.advanceTimersByTimeAsync(0);
+
+      expect(call.outcome).toEqual({ ok: false, error: reason });
+      expect(Date.now() - T0).toBe(5_000);
+      expect(vi.getTimerCount()).toBe(0);
+    });
+
+    it('cuts the second of two calls sharing one deadline at the shared instant', async () => {
+      // The first call answers after 15 s; the second never does.
+      const makeRequest = vi.fn(
+        (endpoint: string, params: unknown, options?: NcbiRequestOptions): Promise<string> =>
+          makeRequest.mock.calls.length === 1
+            ? new Promise((resolve) => setTimeout(() => resolve('<xml/>'), 15_000))
+            : hangingRequest(endpoint, params, options),
+      );
+      const { service } = deadlineService({ makeRequest });
+      const deadline = deadlineWith(20_000);
+
+      const outcome = await driveUntilSettled(
+        track(
+          (async () => {
+            await search(service, { deadline });
+            await search(service, { deadline });
+          })(),
+        ),
+      );
+
+      expect(outcome).toMatchObject(deadlineExceeded(CALL_MS));
+      expect(Date.now() - T0).toBe(20_000);
+      expect(makeRequest).toHaveBeenCalledTimes(2);
+    });
+  });
+
+  describe('idConvert', () => {
+    it('ends at the tool call deadline’s instant, reporting its length', async () => {
+      const { service, apiClient } = deadlineService({
+        makeExternalRequest: (_url, _params, signal) => hangUntilAborted(signal),
+      });
+
+      const outcome = await driveUntilSettled(
+        track(service.idConvert(['123'], 'pmid', { deadline: deadlineWith(20_000) })),
+      );
+
+      expect(outcome).toMatchObject(deadlineExceeded(CALL_MS));
+      expect(Date.now() - T0).toBe(20_000);
+      expect(apiClient.makeExternalRequest).toHaveBeenCalledTimes(1);
+    });
+
+    it.each([0, 1])(
+      'sends nothing and arms no timer on a deadline with %i ms left',
+      async (leftMs) => {
+        const { service, apiClient } = deadlineService();
+
+        const error = await service
+          .idConvert(['123'], 'pmid', { deadline: deadlineWith(leftMs) })
+          .catch((e: unknown) => e);
+
+        expect({ ok: false, error }).toMatchObject(deadlineExceeded(CALL_MS));
+        expect(apiClient.makeExternalRequest).not.toHaveBeenCalled();
+        expect(vi.getTimerCount()).toBe(0);
+      },
+    );
+  });
+});
+
+/**
  * Integration suite: the real NCBI request queue paired with a mock `NcbiApiClient`.
  * Exercises the full deadline → retry → queue → execute chain to lock in the fixes
  * from #50 (queue wait counts toward the deadline; concurrent calls don't serialize
@@ -2725,6 +3996,284 @@ describe('NcbiService integration with real queue', () => {
     expect(s).toBeDefined();
     expect(mockApiClient.makeRequest).toHaveBeenCalledTimes(2);
   }, 2000);
+});
+
+/**
+ * The reason a call reaches its caller under when the retry loop stops on a transient
+ * failure, through the real retry loop, pacer, and the service's reclassification of
+ * each request's failure. A request fails the way the NCBI client fails it for that HTTP
+ * answer — the framework's `httpErrorFromResponse` over the response — so only the
+ * client's fetch is stood in for. On a fake clock with jitter pinned, a retry waits 1 s,
+ * then 2 s.
+ */
+describe('NcbiService reasons for a call stopped on a transient failure', () => {
+  const T0 = 1_000_000;
+
+  type HttpReply = { status: number; statusText: string; retryAfter?: string };
+
+  const GATEWAY_TIMEOUT: HttpReply = { status: 504, statusText: 'Gateway Timeout' };
+
+  let httpErrorFromResponse: typeof import('@cyanheads/mcp-ts-core/utils').httpErrorFromResponse;
+  let random: MockInstance<typeof Math.random>;
+
+  beforeEach(async () => {
+    ({ httpErrorFromResponse } = await vi.importActual<
+      typeof import('@cyanheads/mcp-ts-core/utils')
+    >('@cyanheads/mcp-ts-core/utils'));
+    vi.useFakeTimers({ now: T0 });
+    random = vi.spyOn(Math, 'random').mockReturnValue(0.5);
+  });
+
+  afterEach(() => {
+    random.mockRestore();
+    vi.useRealTimers();
+  });
+
+  /**
+   * A service whose every request fails as NCBI's answer would — one reply per request,
+   * the last repeating — recording the instant (ms since T0) each request started.
+   */
+  function serviceAnswering(replies: HttpReply[], maxRetries: number, deadlineMs: number) {
+    const starts: number[] = [];
+    const makeRequest = vi.fn(async (endpoint: string) => {
+      const { status, statusText, retryAfter } = replies[
+        Math.min(starts.length, replies.length - 1)
+      ] as HttpReply;
+      starts.push(Date.now() - T0);
+      throw await httpErrorFromResponse(
+        new Response('', {
+          status,
+          statusText,
+          ...(retryAfter && { headers: { 'retry-after': retryAfter } }),
+        }),
+        { service: 'NCBI', data: { endpoint } },
+      );
+    });
+    const service = new NcbiService(
+      { makeRequest } as unknown as NcbiApiClient,
+      idleQueue(),
+      new NcbiResponseHandler(),
+      maxRetries,
+      deadlineMs,
+    );
+    return { service, starts };
+  }
+
+  /** Drives one ESearch call to its failure: the error and the instant (ms since T0) it settled. */
+  async function failure(service: NcbiService) {
+    const outcome = await driveUntilSettled(
+      track(service.eSearch({ db: 'pubmed', term: 'asthma' })),
+      60_000,
+    );
+    if (outcome.ok) throw new Error('Expected the call to fail.');
+    return { error: outcome.error, settledAt: Date.now() - T0 };
+  }
+
+  it.each([
+    { reply: GATEWAY_TIMEOUT, code: JsonRpcErrorCode.Timeout, reason: 'ncbi_timed_out' },
+    {
+      reply: { status: 408, statusText: 'Request Timeout' },
+      code: JsonRpcErrorCode.Timeout,
+      reason: 'ncbi_timed_out',
+    },
+    {
+      reply: { status: 503, statusText: 'Service Unavailable' },
+      code: JsonRpcErrorCode.ServiceUnavailable,
+      reason: 'ncbi_unreachable',
+    },
+    {
+      reply: { status: 429, statusText: 'Too Many Requests' },
+      code: JsonRpcErrorCode.RateLimited,
+      reason: 'ncbi_rate_limited',
+    },
+  ])(
+    'ends HTTP $reply.status on every attempt as $reason once retries run out',
+    async ({ reply, code, reason }) => {
+      const { service, starts } = serviceAnswering([reply], 2, 60_000);
+
+      const { error, settledAt } = await failure(service);
+
+      expect(error).toMatchObject({
+        code,
+        message: `NCBI returned HTTP ${reply.status} ${reply.statusText}. (failed after 3 attempts)`,
+      });
+      expect(error.data).toEqual({ reason, endpoint: 'esearch', attempts: 3 });
+      expect(starts).toEqual([0, 1000, 3000]);
+      expect(settledAt).toBe(3000);
+    },
+  );
+
+  /** An honored Retry-After replaces the backoff, so each retry starts 1 s after the last. */
+  it.each([
+    {
+      reply: { status: 503, statusText: 'Service Unavailable', retryAfter: '1' },
+      code: JsonRpcErrorCode.ServiceUnavailable,
+      reason: 'ncbi_unreachable',
+    },
+    {
+      reply: { ...GATEWAY_TIMEOUT, retryAfter: '1' },
+      code: JsonRpcErrorCode.Timeout,
+      reason: 'ncbi_timed_out',
+    },
+  ])(
+    'keeps the Retry-After of a $reply.status on every attempt once retries run out',
+    async ({ reply, code, reason }) => {
+      const { service, starts } = serviceAnswering([reply], 2, 60_000);
+
+      const { error, settledAt } = await failure(service);
+
+      expect(error).toMatchObject({
+        code,
+        message: `NCBI returned HTTP ${reply.status} ${reply.statusText}. (failed after 3 attempts)`,
+      });
+      expect(error.data).toEqual({ reason, endpoint: 'esearch', attempts: 3, retryAfter: '1' });
+      expect(starts).toEqual([0, 1000, 2000]);
+      expect(settledAt).toBe(2000);
+    },
+  );
+
+  it('ends a 504 whose next backoff cannot fit as ncbi_timed_out, before the deadline fires', async () => {
+    // Attempt 2 fails at 1000ms; its 2000ms backoff cannot fit the 1500ms left of a
+    // 2500ms deadline, so the loop stops there.
+    const { service, starts } = serviceAnswering([GATEWAY_TIMEOUT], 3, 2500);
+
+    const { error, settledAt } = await failure(service);
+
+    expect(error).toMatchObject({
+      code: JsonRpcErrorCode.Timeout,
+      message: 'NCBI returned HTTP 504 Gateway Timeout. (failed after 2 attempts)',
+    });
+    expect(error.data).toEqual({ reason: 'ncbi_timed_out', endpoint: 'esearch', attempts: 2 });
+    expect(starts).toEqual([0, 1000]);
+    expect(settledAt).toBe(1000);
+  });
+
+  it('still ends a 504 ladder the deadline cuts short as ncbi_deadline_exceeded', async () => {
+    // The 1000ms backoff after attempt 1 ends exactly at the 1000ms deadline, so it is
+    // slept, and the deadline's timer — armed first — interrupts it.
+    const { service, starts } = serviceAnswering([GATEWAY_TIMEOUT], 3, 1000);
+
+    const { error, settledAt } = await failure(service);
+
+    expect(error).toMatchObject({
+      code: JsonRpcErrorCode.Timeout,
+      message: 'NCBI request deadline (1000ms) exceeded',
+      data: { reason: 'ncbi_deadline_exceeded', deadlineMs: 1000 },
+    });
+    expect(error.data).not.toHaveProperty('attempts');
+    expect(starts).toEqual([0]);
+    expect(settledAt).toBe(1000);
+  });
+
+  /**
+   * The loop never retries a failure whose Retry-After outlasts the 30 s backoff cap or
+   * the time left: that attempt's own error, Retry-After intact, ends the call.
+   */
+  it.each([
+    {
+      label: 'a 503 whose Retry-After outlasts the backoff cap',
+      reply: { status: 503, statusText: 'Service Unavailable', retryAfter: '40' },
+      deadlineMs: 60_000,
+      code: JsonRpcErrorCode.ServiceUnavailable,
+      reason: 'ncbi_unreachable',
+      requestStarts: [0],
+    },
+    {
+      label: 'a 504 whose Retry-After outlasts the time left',
+      reply: { ...GATEWAY_TIMEOUT, retryAfter: '3' },
+      deadlineMs: 5000,
+      code: JsonRpcErrorCode.Timeout,
+      reason: 'ncbi_timed_out',
+      requestStarts: [0, 3000],
+    },
+  ])(
+    'reports $label as $reason with its Retry-After',
+    async ({ reply, deadlineMs, code, reason, requestStarts }) => {
+      const { service, starts } = serviceAnswering([reply], 3, deadlineMs);
+
+      const { error, settledAt } = await failure(service);
+
+      expect(error).toMatchObject({
+        code,
+        message: `NCBI returned HTTP ${reply.status} ${reply.statusText}.`,
+        data: { reason, endpoint: 'esearch', status: reply.status, retryAfter: reply.retryAfter },
+      });
+      expect(error.data).not.toHaveProperty('attempts');
+      expect(starts).toEqual(requestStarts);
+      expect(settledAt).toBe(requestStarts.at(-1));
+    },
+  );
+
+  it('leaves a 501, which is never retried, without a reason', async () => {
+    const { service, starts } = serviceAnswering(
+      [{ status: 501, statusText: 'Not Implemented' }],
+      3,
+      60_000,
+    );
+
+    const { error } = await failure(service);
+
+    expect(error).toMatchObject({
+      code: JsonRpcErrorCode.ServiceUnavailable,
+      message: 'NCBI returned HTTP 501 Not Implemented.',
+      data: { status: 501, retryable: false },
+    });
+    expect(error.data).not.toHaveProperty('reason');
+    expect(starts).toEqual([0]);
+  });
+
+  /**
+   * The client reports a request its own timeout ended as `ncbi_unreachable` before the
+   * loop sees it, so a call whose every attempt timed out that way ends there, not as
+   * `ncbi_timed_out`. Runs the real client; its timeout timer is put on the fake clock.
+   */
+  it('ends a per-request timeout on every attempt as ncbi_unreachable', async () => {
+    const { NcbiApiClient } = await import('@/services/ncbi/api-client.js');
+    const timeoutSpy = vi.spyOn(AbortSignal, 'timeout').mockImplementation((ms: number) => {
+      const controller = new AbortController();
+      setTimeout(
+        () =>
+          controller.abort(
+            new DOMException('The operation was aborted due to timeout', 'TimeoutError'),
+          ),
+        ms,
+      );
+      return controller.signal;
+    });
+    const starts: number[] = [];
+    const fetchSpy = vi.spyOn(globalThis, 'fetch').mockImplementation((_url, init) => {
+      starts.push(Date.now() - T0);
+      return new Promise<Response>((_, reject) => {
+        const signal = init?.signal as AbortSignal;
+        signal.addEventListener('abort', () => reject(signal.reason), { once: true });
+      });
+    });
+    try {
+      const service = new NcbiService(
+        new NcbiApiClient({ toolIdentifier: 'test', timeoutMs: 5000 }),
+        idleQueue(),
+        new NcbiResponseHandler(),
+        1,
+        60_000,
+      );
+
+      const { error, settledAt } = await failure(service);
+
+      expect(error).toMatchObject({
+        code: JsonRpcErrorCode.ServiceUnavailable,
+        message: expect.stringMatching(
+          /^NCBI request failed: .*aborted due to timeout \(failed after 2 attempts\)$/,
+        ),
+      });
+      expect(error.data).toEqual({ reason: 'ncbi_unreachable', endpoint: 'esearch', attempts: 2 });
+      // Each attempt ran out its 5 s timeout, with the 1 s backoff between them.
+      expect(starts).toEqual([0, 6000]);
+      expect(settledAt).toBe(11_000);
+    } finally {
+      timeoutSpy.mockRestore();
+      fetchSpy.mockRestore();
+    }
+  });
 });
 
 describe('initNcbiService / getNcbiService', () => {

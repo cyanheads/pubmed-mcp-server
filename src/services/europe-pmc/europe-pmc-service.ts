@@ -10,9 +10,12 @@
  * Every call runs as a retry loop around the shared request queue: each attempt
  * re-enters the queue and waits out its start gap, and a backoff sleep holds no
  * concurrency slot, so callers backing off never stall the calls behind them. One
- * deadline (`EUROPEPMC_TOTAL_DEADLINE_MS`) bounds the whole loop — queue waits,
- * requests, backoff sleeps, and the first-page probes below — and its expiry
- * aborts the request in flight and ends the call as `europepmc_deadline_exceeded`.
+ * deadline bounds the whole loop — queue waits, requests, backoff sleeps, and the
+ * first-page probes below: `EUROPEPMC_TOTAL_DEADLINE_MS`, or the time left on the
+ * tool call's deadline when the caller hands one in and it ends sooner. Its expiry
+ * aborts the request in flight and ends the call as `europepmc_deadline_exceeded`,
+ * and a call handed a deadline with no time left ends that way before sending
+ * anything.
  *
  * A search's retry boundary covers fetch and response classification, so
  * Europe PMC's intermittent empty `{ version }` envelope is retried like an
@@ -54,6 +57,7 @@ import {
 import { XMLParser, XMLValidator } from 'fast-xml-parser';
 
 import { getServerConfig } from '@/config/server-config.js';
+import { type CallDeadline, upstreamBound } from '@/services/call-deadline.js';
 import { ORDERED_XML_PARSER_OPTIONS } from '@/services/ncbi/parsing/ordered-xml-parser-options.js';
 import type { JatsNode, JatsNodeList } from '@/services/ncbi/parsing/pmc-xml-helpers.js';
 import { stripInvisibleFormatChars } from '@/services/ncbi/parsing/text-helpers.js';
@@ -89,8 +93,35 @@ const isTransient = (error: unknown): boolean =>
 interface LoopOutcome {
   /** Whether the deadline fired — the loop's own signal, never inferred from the error. */
   deadlineFired: boolean;
-  /** The loop's total deadline. */
+  /**
+   * Length of the deadline the loop ran under, in ms: Europe PMC's own, or the tool
+   * call's when that one bound it (see `upstreamBound`).
+   */
   deadlineMs: number;
+}
+
+/**
+ * The reason each code a retry loop can end on is reported under: once retries are
+ * spent, or when a transient failure names a `Retry-After` the loop will not wait
+ * out. Each is declared for that code alone, so a 504 stays a Timeout and never
+ * reads as `europepmc_unreachable`. (#152, #315)
+ */
+const REASON_BY_CODE = new Map<JsonRpcErrorCode, string>([
+  [JsonRpcErrorCode.ServiceUnavailable, 'europepmc_unreachable'],
+  [JsonRpcErrorCode.Timeout, 'europepmc_timed_out'],
+  [JsonRpcErrorCode.RateLimited, 'europepmc_rate_limited'],
+]);
+
+/**
+ * The expiry of the deadline a call ran under, `deadlineMs` long: thrown when it
+ * fires inside the retry loop, and before the loop when it has no time left.
+ */
+function deadlineExceeded(label: string, deadlineMs: number, cause?: unknown): McpError {
+  return timeout(
+    `Europe PMC request deadline (${deadlineMs}ms) exceeded`,
+    { reason: 'europepmc_deadline_exceeded', label, deadlineMs },
+    cause === undefined ? undefined : { cause },
+  );
 }
 
 /**
@@ -98,37 +129,47 @@ interface LoopOutcome {
  *
  * - The deadline fired — mid-request, in the queue, mid-backoff, or during a
  *   first-page probe → `europepmc_deadline_exceeded` (Timeout), with `label` and
- *   `deadlineMs`.
+ *   `deadlineMs`, the length of whichever deadline bound the loop.
  * - The loop stopped because the next backoff would not fit the time left → as
  *   when retries run out, below. It arrives as the same `retry_deadline_exceeded`
  *   an expiry does, and its timing cannot tell the two apart (timers can fire
  *   early), so the loop's own signal does. (#174)
  * - Retries ran out → the last attempt's code and message with the attempt count
  *   appended, `label`, `attempts`, and the upstream `retryAfter`, so a 429 still
- *   tells the caller how long to wait. Only a `ServiceUnavailable` gains
- *   `europepmc_unreachable`; a `Timeout` or `RateLimited` keeps its code with no
- *   reason, as the OpenAlex service reports them.
- * - Anything never retried — a non-transient failure, or a `Retry-After` longer
- *   than the backoff cap or the time left — passes through unchanged.
+ *   tells the caller how long to wait, under the reason {@link REASON_BY_CODE}
+ *   names for that code: a ServiceUnavailable is `europepmc_unreachable`, a
+ *   Timeout — `EUROPEPMC_TIMEOUT_MS` elapsed or an HTTP 504, 408, or 425 — is
+ *   `europepmc_timed_out`, a RateLimited is `europepmc_rate_limited`. (#315)
+ * - A transient failure never retried because its `Retry-After` outlasts the
+ *   backoff cap or the time left → the attempt's own error and message, stamped
+ *   with the reason {@link REASON_BY_CODE} names for its code and `label`, its
+ *   `retryAfter` kept: a 429, and a 5xx alike. (#315, #310)
+ * - Anything else never retried — a non-transient failure — passes through
+ *   unchanged.
  */
 function toServiceError(error: unknown, label: string, loop: LoopOutcome): unknown {
-  if (!(error instanceof McpError) || typeof error.data?.retryAttempts !== 'number') return error;
-  if (error.data.reason === 'retry_deadline_exceeded' && loop.deadlineFired) {
-    return timeout(
-      `Europe PMC request deadline (${loop.deadlineMs}ms) exceeded`,
-      { reason: 'europepmc_deadline_exceeded', label, deadlineMs: loop.deadlineMs },
+  if (!(error instanceof McpError)) return error;
+  if (typeof error.data?.retryAttempts !== 'number') {
+    const reason = isTransient(error) ? REASON_BY_CODE.get(error.code) : undefined;
+    if (!reason) return error;
+    return new McpError(
+      error.code,
+      error.message,
+      { ...error.data, reason, label },
       { cause: error },
     );
   }
+  if (error.data.reason === 'retry_deadline_exceeded' && loop.deadlineFired) {
+    return deadlineExceeded(label, loop.deadlineMs, error);
+  }
   const last = error.cause instanceof McpError ? error.cause : error;
   const attempts = error.data.retryAttempts;
+  const reason = REASON_BY_CODE.get(last.code);
   return new McpError(
     last.code,
     `${last.message} (failed after ${attempts} attempt${attempts === 1 ? '' : 's'})`,
     {
-      ...(last.code === JsonRpcErrorCode.ServiceUnavailable && {
-        reason: 'europepmc_unreachable',
-      }),
+      ...(reason && { reason }),
       label,
       attempts,
       ...(last.data?.retryAfter !== undefined && { retryAfter: last.data.retryAfter }),
@@ -298,9 +339,12 @@ export class EuropePmcService {
    * never probed, since nothing could use the answer. A documented sort is
    * never probed for: Europe PMC refuses one only intermittently, so its 503s
    * take the ordinary retry path, as an unsorted search's do (#289).
+   *
+   * `params.deadline`, the tool call's deadline, bounds every attempt and probe
+   * together, as `runPaced` describes.
    */
   async search(params: EuropePmcSearchParams): Promise<EuropePmcSearchResult> {
-    const { sort: requestedSort, ...rest } = params;
+    const { sort: requestedSort, deadline, ...rest } = params;
     const sort = effectiveSort(requestedSort);
     const request: EuropePmcSearchParams = { ...rest, ...(sort && { sort }) };
     const cursorMark = callerCursor(request);
@@ -308,6 +352,7 @@ export class EuropePmcService {
     return await this.runPaced(
       'search',
       request.signal,
+      deadline,
       (attempt, signal) => this.searchOnce({ ...request, signal }, attempt === this.maxRetries + 1),
       cursorMark === undefined && (sort === undefined || !sortIsSuspect(sort))
         ? undefined
@@ -535,12 +580,14 @@ export class EuropePmcService {
   async fetchRecords(
     refs: readonly EuropePmcRecordRef[],
     signal?: AbortSignal,
+    deadline?: CallDeadline,
   ): Promise<EuropePmcSearchHit[]> {
     const result = await this.search({
       query: refs.map(recordLookupQuery).join(' OR '),
       resultType: 'core',
       pageSize: refs.length,
       ...(signal && { signal }),
+      ...(deadline && { deadline }),
     });
     return result.hits;
   }
@@ -560,9 +607,13 @@ export class EuropePmcService {
     epmcId: string,
     source: EuropePmcSource,
     signal?: AbortSignal,
+    deadline?: CallDeadline,
   ): Promise<EuropePmcFullTextResult> {
-    const outcome = await this.runPaced(`fullTextXml(${epmcId})`, signal, (_attempt, loopSignal) =>
-      this.client.fullTextXml(epmcId, loopSignal),
+    const outcome = await this.runPaced(
+      `fullTextXml(${epmcId})`,
+      signal,
+      deadline,
+      (_attempt, loopSignal) => this.client.fullTextXml(epmcId, loopSignal),
     );
 
     if (outcome.kind === 'not-available') {
@@ -581,12 +632,14 @@ export class EuropePmcService {
    * @param pageSize  Number of records to request per page (max 1000 per EPMC)
    * @param page  1-based page number
    * @param signal  Optional AbortSignal
+   * @param deadline  The tool call's deadline, when it may end before Europe PMC's own
    */
   citations(
     pmid: string,
     pageSize: number,
     page: number,
     signal?: AbortSignal,
+    deadline?: CallDeadline,
   ): Promise<EuropePmcRelatedResult> {
     return this.fetchRelatedLinks(
       (loopSignal) => this.client.citations(pmid, pageSize, page, loopSignal),
@@ -594,6 +647,7 @@ export class EuropePmcService {
       pmid,
       (parsed) => ensureArray<EuropePmcRelatedRecord>(parsed.citationList?.citation),
       signal,
+      deadline,
     );
   }
 
@@ -607,12 +661,14 @@ export class EuropePmcService {
    * @param pageSize  Number of records to request per page (max 1000 per EPMC)
    * @param page  1-based page number
    * @param signal  Optional AbortSignal
+   * @param deadline  The tool call's deadline, when it may end before Europe PMC's own
    */
   references(
     pmid: string,
     pageSize: number,
     page: number,
     signal?: AbortSignal,
+    deadline?: CallDeadline,
   ): Promise<EuropePmcRelatedResult> {
     return this.fetchRelatedLinks(
       (loopSignal) => this.client.references(pmid, pageSize, page, loopSignal),
@@ -620,6 +676,7 @@ export class EuropePmcService {
       pmid,
       (parsed) => ensureArray<EuropePmcRelatedRecord>(parsed.referenceList?.reference),
       signal,
+      deadline,
     );
   }
 
@@ -635,8 +692,9 @@ export class EuropePmcService {
     pmid: string,
     extractRecords: (parsed: EuropePmcLinksResponse) => EuropePmcRelatedRecord[],
     signal?: AbortSignal,
+    deadline?: CallDeadline,
   ): Promise<EuropePmcRelatedResult> {
-    const text = await this.runPaced(`${kind}(${pmid})`, signal, (_attempt, loopSignal) =>
+    const text = await this.runPaced(`${kind}(${pmid})`, signal, deadline, (_attempt, loopSignal) =>
       fetch(loopSignal),
     );
 
@@ -741,11 +799,14 @@ export class EuropePmcService {
   /**
    * Runs one Europe PMC call: a retry loop around the shared request queue, so
    * every attempt re-queues and is re-paced, and a backoff sleep holds no queue
-   * slot. One deadline covers queue waits, attempts, and backoff. Its signal —
-   * joined with the caller's — reaches the queue wait, the backoff sleep, and
-   * `execute`, which passes it to the HTTP request, so the request in flight when
-   * the deadline fires is aborted then rather than at its own timeout. `execute`
-   * receives the one-based attempt number and that signal.
+   * slot. One deadline covers queue waits, attempts, and backoff: Europe PMC's
+   * own (`totalDeadlineMs`), or the time `deadline` — the tool call's — has left
+   * when that is less. Its signal — joined with the caller's — reaches the queue
+   * wait, the backoff sleep, and `execute`, which passes it to the HTTP request,
+   * so the request in flight when the deadline fires is aborted then rather than
+   * at its own timeout. `execute` receives the one-based attempt number and that
+   * signal. Per-request timeouts are left as configured: only the loop's own
+   * signal ends a request early, so an expiry is always read as one.
    *
    * `reclassify`, when given, sees each failed attempt after its queue slot is
    * released and before the retry decision, with the same signal and the
@@ -753,16 +814,21 @@ export class EuropePmcService {
    * too. The error it returns is the one the loop judges, so it can end the
    * retries by returning a non-transient error.
    *
-   * A caller abort rethrows the caller's own reason; every other failure is
+   * A `deadline` with no time left ends the call as `europepmc_deadline_exceeded`
+   * before anything is queued, sent, or timed. A caller abort rethrows the
+   * caller's own reason, and takes precedence over that; every other failure is
    * mapped by {@link toServiceError}, after the loop. Once the caller is ruled
    * out, the loop's signal has aborted only if the deadline fired.
    */
   private async runPaced<T>(
     label: string,
     callerSignal: AbortSignal | undefined,
+    deadline: CallDeadline | undefined,
     execute: (attempt: number, signal: AbortSignal) => Promise<T>,
     reclassify?: (error: unknown, signal: AbortSignal, attempt: number) => Promise<unknown>,
   ): Promise<T> {
+    const bound = upstreamBound(this.totalDeadlineMs, deadline);
+    if (bound.spent && !callerSignal?.aborted) throw deadlineExceeded(label, bound.deadlineMs);
     let attempt = 0;
     let loopSignal: AbortSignal | undefined;
     try {
@@ -793,7 +859,7 @@ export class EuropePmcService {
         {
           maxRetries: this.maxRetries,
           maxDelayMs: MAX_BACKOFF_MS,
-          deadlineMs: this.totalDeadlineMs,
+          deadlineMs: bound.remainingMs,
           isTransient,
           operation: `Europe PMC ${label}`,
           ...(callerSignal && { signal: callerSignal }),
@@ -803,7 +869,7 @@ export class EuropePmcService {
       if (callerSignal?.aborted) throw callerSignal.reason;
       throw toServiceError(error, label, {
         deadlineFired: loopSignal?.aborted === true,
-        deadlineMs: this.totalDeadlineMs,
+        deadlineMs: bound.deadlineMs,
       });
     }
   }

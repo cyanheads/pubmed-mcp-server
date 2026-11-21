@@ -6,6 +6,8 @@
 import { JsonRpcErrorCode, McpError } from '@cyanheads/mcp-ts-core/errors';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
+import type { CallDeadline } from '@/services/call-deadline.js';
+
 const mockFetchWithTimeout = vi.fn();
 
 vi.mock('@cyanheads/mcp-ts-core/utils', async () => {
@@ -484,6 +486,7 @@ describe('EuropePmcService.search — upstream failures and empty envelopes (#15
   });
 
   const service = () => makeService({ maxRetries: MAX_RETRIES });
+  type Svc = ReturnType<typeof service>;
 
   describe('HTTP failures on /search (#152)', () => {
     it('retries a 404 and ends as europepmc_unreachable, never a bare NotFound', async () => {
@@ -534,54 +537,74 @@ describe('EuropePmcService.search — upstream failures and empty envelopes (#15
     });
 
     /**
-     * `europepmc_unreachable` is declared for `ServiceUnavailable` only. A failure
-     * that keeps another transient code says what it is through that code and its
-     * message, the way the NCBI service reports an exhausted Timeout or RateLimited.
+     * Each code a spent retry loop can end on carries the reason declared for it:
+     * `europepmc_unreachable` for ServiceUnavailable only, `europepmc_timed_out` for
+     * a Timeout, `europepmc_rate_limited` for a RateLimited. The last attempt's
+     * message, the attempt count, and the call's `label` are kept, and no hint is
+     * stamped here: the declaring tool fills it in. (#315)
      */
-    const expectNoUnreachableReason = (err: McpError) => {
-      expect(err.data?.reason).toBeUndefined();
+    const expectSpent = (err: McpError, code: JsonRpcErrorCode, reason: string, label: string) => {
+      expect(err.code).toBe(code);
+      expect(err.data?.reason).toBe(reason);
       expect(err.data?.recovery).toBeUndefined();
+      expect(err.data?.label).toBe(label);
       expect(err.data?.attempts).toBe(EXHAUSTED);
       expect(err.message).toMatch(new RegExp(`\\(failed after ${EXHAUSTED} attempts\\)$`));
     };
 
-    it('retries a 504 and keeps Timeout, without the unreachable reason', async () => {
+    it('retries a 504 and ends as europepmc_timed_out, never the unreachable reason (#315)', async () => {
       mockFetchWithTimeout.mockRejectedValue(
         httpErrorRejection(504, JsonRpcErrorCode.Timeout, 'gateway timeout'),
       );
       const err = (await service()
         .search({ query: 'cancer' })
         .catch((e: unknown) => e)) as McpError;
-      expect(err.code).toBe(JsonRpcErrorCode.Timeout);
-      expect(err.message).toContain('Status: 504');
-      expectNoUnreachableReason(err);
+      expect(err.message).toBe(
+        'Europe PMC search request failed: Fetch failed for <upstream>. Status: 504 (failed after 4 attempts)',
+      );
+      expectSpent(err, JsonRpcErrorCode.Timeout, 'europepmc_timed_out', 'search');
       expect(mockFetchWithTimeout).toHaveBeenCalledTimes(EXHAUSTED);
     });
 
-    it('keeps a 429 RateLimited with its retryAfter and without the unreachable reason', async () => {
+    it('ends an exhausted 429 as europepmc_rate_limited, keeping its retryAfter', async () => {
       mockFetchWithTimeout.mockRejectedValue(
         httpErrorRejection(429, JsonRpcErrorCode.RateLimited, '', '7'),
       );
       const err = (await service()
         .search({ query: 'cancer' })
         .catch((e: unknown) => e)) as McpError;
-      expect(err.code).toBe(JsonRpcErrorCode.RateLimited);
       expect(err.data?.retryAfter).toBe('7');
-      expectNoUnreachableReason(err);
+      expectSpent(err, JsonRpcErrorCode.RateLimited, 'europepmc_rate_limited', 'search');
       expect(mockFetchWithTimeout).toHaveBeenCalledTimes(EXHAUSTED);
     });
 
-    it('keeps an exhausted request timeout on another endpoint as Timeout, without the reason', async () => {
+    it.each([
+      ['citations', 'citations(31295471)', (s: Svc) => s.citations('31295471', 25, 1)],
+      ['references', 'references(31295471)', (s: Svc) => s.references('31295471', 25, 1)],
+      ['fullTextXml', 'fullTextXml(PMC8371605)', (s: Svc) => s.fullTextXml('PMC8371605', 'PMC')],
+    ] as const)(
+      'ends an exhausted request timeout on %s as europepmc_timed_out (#315)',
+      async (_endpoint, label, call) => {
+        mockFetchWithTimeout.mockRejectedValue(
+          new McpError(JsonRpcErrorCode.Timeout, 'Request timed out after 20000ms.', {
+            errorSource: 'FetchTimeout',
+          }),
+        );
+        const err = (await call(service()).catch((e: unknown) => e)) as McpError;
+        expect(err.message).toBe('Request timed out after 20000ms. (failed after 4 attempts)');
+        expectSpent(err, JsonRpcErrorCode.Timeout, 'europepmc_timed_out', label);
+        expect(mockFetchWithTimeout).toHaveBeenCalledTimes(EXHAUSTED);
+      },
+    );
+
+    it('ends an exhausted fullTextXML 504 as europepmc_timed_out (#315)', async () => {
       mockFetchWithTimeout.mockRejectedValue(
-        new McpError(JsonRpcErrorCode.Timeout, 'Request timed out after 20000ms.', {
-          errorSource: 'FetchTimeout',
-        }),
+        httpErrorRejection(504, JsonRpcErrorCode.Timeout, 'gateway timeout'),
       );
       const err = (await service()
-        .citations('31295471', 25, 1)
+        .fullTextXml('PMC8371605', 'PMC')
         .catch((e: unknown) => e)) as McpError;
-      expect(err.code).toBe(JsonRpcErrorCode.Timeout);
-      expectNoUnreachableReason(err);
+      expectSpent(err, JsonRpcErrorCode.Timeout, 'europepmc_timed_out', 'fullTextXml(PMC8371605)');
       expect(mockFetchWithTimeout).toHaveBeenCalledTimes(EXHAUSTED);
     });
 
@@ -1789,21 +1812,94 @@ describe('EuropePmcService request pacing', () => {
     expect(settledAt).toBeLessThan(60_000);
   });
 
-  it('fails fast with the 429 and its retryAfter when Retry-After exceeds the 30 s backoff cap', async () => {
-    recordStarts(() =>
-      Promise.reject(httpErrorRejection(429, JsonRpcErrorCode.RateLimited, '', '120')),
-    );
-    const service = makeService({ maxRetries: 3 });
+  /**
+   * A Retry-After the loop will not wait out — past the 30 s backoff cap, or past
+   * the time left of the deadline — ends the call on that 429, unretried, as
+   * `europepmc_rate_limited` with the attempt's own message and `retryAfter`. (#315)
+   */
+  it.each([
+    ['exceeds the 30 s backoff cap', '120', DEADLINE_MS],
+    ['outlasts the time left of a 5 s deadline', '10', 5_000],
+  ])(
+    'fails fast as europepmc_rate_limited when the 429 Retry-After %s',
+    async (_case, retryAfter, totalDeadlineMs) => {
+      recordStarts(() =>
+        Promise.reject(httpErrorRejection(429, JsonRpcErrorCode.RateLimited, '', retryAfter)),
+      );
+      const service = makeService({ maxRetries: 3, totalDeadlineMs });
 
-    const outcome = expect(service.search({ query: 'a' })).rejects.toMatchObject({
-      code: JsonRpcErrorCode.RateLimited,
-      message: 'Fetch failed for <upstream>. Status: 429',
-      data: { retryAfter: '120' },
-    });
-    await vi.advanceTimersByTimeAsync(0);
-    await outcome;
-    expect(starts).toEqual([0]);
-  });
+      const outcome = expect(service.search({ query: 'a' })).rejects.toMatchObject({
+        code: JsonRpcErrorCode.RateLimited,
+        message: 'Fetch failed for <upstream>. Status: 429',
+        data: { reason: 'europepmc_rate_limited', label: 'search', status: 429, retryAfter },
+      });
+      await vi.advanceTimersByTimeAsync(0);
+      await outcome;
+      expect(starts).toEqual([0]);
+    },
+  );
+
+  /**
+   * A 5xx the loop declines to retry on the same grounds ends unretried too, under
+   * the reason declared for its code, with its own message, `retryAfter`, and
+   * `label` — from the search endpoint, which wraps its failures, and from the
+   * full-text and link endpoints, which pass them through as `fetchWithTimeout`
+   * threw them. (#310)
+   */
+  it.each([
+    [
+      'a search 503 whose Retry-After exceeds the 30 s backoff cap',
+      503,
+      'europepmc_unreachable',
+      '120',
+      DEADLINE_MS,
+      'search',
+      (s: InstanceType<typeof EuropePmcService>) => s.search({ query: 'a' }),
+    ],
+    [
+      'a search 504 whose Retry-After outlasts the time left of a 5 s deadline',
+      504,
+      'europepmc_timed_out',
+      '10',
+      5_000,
+      'search',
+      (s: InstanceType<typeof EuropePmcService>) => s.search({ query: 'a' }),
+    ],
+    [
+      'a fullTextXml 503 whose Retry-After exceeds the 30 s backoff cap',
+      503,
+      'europepmc_unreachable',
+      '120',
+      DEADLINE_MS,
+      'fullTextXml(PMC1)',
+      (s: InstanceType<typeof EuropePmcService>) => s.fullTextXml('PMC1', 'PMC'),
+    ],
+    [
+      'a references 504 whose Retry-After exceeds the 30 s backoff cap',
+      504,
+      'europepmc_timed_out',
+      '120',
+      DEADLINE_MS,
+      'references(1)',
+      (s: InstanceType<typeof EuropePmcService>) => s.references('1', 10, 1),
+    ],
+  ])(
+    'fails fast with its declared reason on %s',
+    async (_case, status, reason, retryAfter, totalDeadlineMs, label, call) => {
+      const code = status === 504 ? JsonRpcErrorCode.Timeout : JsonRpcErrorCode.ServiceUnavailable;
+      recordStarts(() => Promise.reject(httpErrorRejection(status, code, '', retryAfter)));
+      const service = makeService({ maxRetries: 3, totalDeadlineMs });
+
+      const outcome = expect(call(service)).rejects.toMatchObject({
+        code,
+        message: expect.stringMatching(new RegExp(`Status: ${status}$`)),
+        data: { reason, label, status, retryAfter },
+      });
+      await vi.advanceTimersByTimeAsync(0);
+      await outcome;
+      expect(starts).toEqual([0]);
+    },
+  );
 
   /**
    * A retry's backoff sleep runs outside the pacer: the failed attempt gives its
@@ -2005,12 +2101,34 @@ describe('EuropePmcService total deadline (#305)', () => {
     expect(vi.getTimerCount()).toBe(0);
   });
 
+  /**
+   * The give-up exit reports the last attempt under the reason declared for its
+   * code, never the deadline's. A 429 with no Retry-After backs off like any other
+   * failure, so it reaches this exit too; the search passes it through unwrapped.
+   * (#174, #315)
+   */
   it.each([
-    [503, JsonRpcErrorCode.ServiceUnavailable, 'europepmc_unreachable'],
-    [504, JsonRpcErrorCode.Timeout, undefined],
+    [
+      503,
+      JsonRpcErrorCode.ServiceUnavailable,
+      'europepmc_unreachable',
+      'Europe PMC search request failed: Fetch failed for <upstream>. Status: 503',
+    ],
+    [
+      504,
+      JsonRpcErrorCode.Timeout,
+      'europepmc_timed_out',
+      'Europe PMC search request failed: Fetch failed for <upstream>. Status: 504',
+    ],
+    [
+      429,
+      JsonRpcErrorCode.RateLimited,
+      'europepmc_rate_limited',
+      'Fetch failed for <upstream>. Status: 429',
+    ],
   ])(
     'reports the last attempt when the next backoff would not fit the time left: a %i (#174)',
-    async (status, code, reason) => {
+    async (status, code, reason, lastMessage) => {
       // After failures at 0, 1 and 3 s, the 4 s backoff cannot fit the 2 s left of a
       // 5 s deadline: the loop stops at 3 s, before the deadline fires.
       const starts: number[] = [];
@@ -2028,11 +2146,67 @@ describe('EuropePmcService total deadline (#305)', () => {
       expect(settledAt).toBe(3_000);
       expect(error).toMatchObject({
         code,
-        message: `Europe PMC search request failed: Fetch failed for <upstream>. Status: ${status} (failed after 3 attempts)`,
-        data: { label: 'search', attempts: 3 },
+        message: `${lastMessage} (failed after 3 attempts)`,
+        data: { reason, label: 'search', attempts: 3 },
       });
-      expect((error as McpError).data?.reason).toBe(reason);
+      expect((error as McpError).data).not.toHaveProperty('deadlineMs');
       expect(starts).toEqual([0, 1_000, 3_000]);
+    },
+  );
+
+  /**
+   * The service as `initEuropePmcService()` builds it, through the real
+   * `fetchWithTimeout`: three retries, so four attempts with the 1 s, 2 s, and 4 s
+   * backoffs between them, ending well inside the 45 s deadline as
+   * `europepmc_timed_out`. A 504 answers at once and settles at 7 s; a request
+   * that hangs past `EUROPEPMC_TIMEOUT_MS=1000` is cut by its own timeout each
+   * time and settles at 11 s. (#315)
+   */
+  it.each([
+    [
+      'answers every attempt with HTTP 504, at default config',
+      {},
+      () => Promise.resolve(new Response('Gateway Timeout', { status: 504 })),
+      [0, 1_000, 3_000, 7_000],
+      7_000,
+      /Status: 504 \(failed after 4 attempts\)$/,
+    ],
+    [
+      'hangs on every request past EUROPEPMC_TIMEOUT_MS=1000',
+      { EUROPEPMC_TIMEOUT_MS: '1000' },
+      (init: RequestInit | undefined) => hangUntilAborted(init),
+      [0, 2_000, 5_000, 10_000],
+      11_000,
+      /timed out\. \(failed after 4 attempts\)$/,
+    ],
+  ] as const)(
+    'ends a search against a Europe PMC that %s as europepmc_timed_out',
+    async (_case, env, reply, expectedStarts, expectedSettledAt, message) => {
+      vi.stubEnv('EUROPEPMC_ENABLED', 'true');
+      for (const [name, value] of Object.entries(env)) vi.stubEnv(name, value);
+      vi.resetModules();
+      const mod = await import('@/services/europe-pmc/europe-pmc-service.js');
+      mod.initEuropePmcService();
+      mockFetchWithTimeout.mockImplementation(realFetchWithTimeout);
+      const starts: number[] = [];
+      vi.spyOn(globalThis, 'fetch').mockImplementation((_url, init) => {
+        starts.push(elapsed());
+        return reply(init);
+      });
+
+      const settled = settle((mod.getEuropePmcService() as Service).search({ query: 'CRISPR' }));
+      await vi.advanceTimersByTimeAsync(DEADLINE_MS);
+
+      const { settledAt, error } = await settled;
+      expect(settledAt).toBe(expectedSettledAt);
+      expect(error).toMatchObject({
+        code: JsonRpcErrorCode.Timeout,
+        message: expect.stringMatching(message),
+        data: { reason: 'europepmc_timed_out', label: 'search', attempts: 4 },
+      });
+      expect((error as McpError).data).not.toHaveProperty('deadlineMs');
+      expect(starts).toEqual(expectedStarts);
+      expect(vi.getTimerCount()).toBe(0);
     },
   );
 
@@ -2096,6 +2270,211 @@ describe('EuropePmcService total deadline (#305)', () => {
       settledAt: 5_000,
       error: deadlineExceeded('search', 5_000),
     });
+  });
+
+  /**
+   * A tool call hands every Europe PMC call it makes the deadline it started, and
+   * each call runs under whichever bound ends first: the time that deadline has
+   * left, or Europe PMC's own. An expiry of the tool call's deadline reports that
+   * deadline's full length as `deadlineMs`. Each deadline here belongs to a 50 s
+   * tool call that has already run part of its time. (#310)
+   */
+  describe('under the tool call’s deadline (#310)', () => {
+    const CALL_TOTAL_MS = 50_000;
+
+    /** A 50 s tool call's deadline with `leftMs` still to run. */
+    const callDeadline = (leftMs: number): CallDeadline => ({
+      expiresAt: Date.now() + leftMs,
+      totalMs: CALL_TOTAL_MS,
+    });
+
+    it.each([
+      [
+        'search',
+        'search',
+        (s: Service, deadline: CallDeadline) =>
+          s.search({ query: 'malaria', pageSize: 1, deadline }),
+      ],
+      [
+        'fetchRecords',
+        'search',
+        (s: Service, deadline: CallDeadline) =>
+          s.fetchRecords([{ source: 'MED', epmcId: '9500320' }], undefined, deadline),
+      ],
+      [
+        'fullTextXml',
+        'fullTextXml(PMC8371605)',
+        (s: Service, deadline: CallDeadline) =>
+          s.fullTextXml('PMC8371605', 'PMC', undefined, deadline),
+      ],
+      [
+        'citations',
+        'citations(9500320)',
+        (s: Service, deadline: CallDeadline) => s.citations('9500320', 25, 1, undefined, deadline),
+      ],
+      [
+        'references',
+        'references(9500320)',
+        (s: Service, deadline: CallDeadline) => s.references('9500320', 25, 1, undefined, deadline),
+      ],
+    ] as const)(
+      'ends a %s at the tool call’s deadline when it has less time left than Europe PMC’s, aborting the request in flight then',
+      async (_call, label, call) => {
+        // The real `fetchWithTimeout`, so every request also runs its own 20 s timeout.
+        mockFetchWithTimeout.mockImplementation(realFetchWithTimeout);
+        const starts: number[] = [];
+        const aborts: number[] = [];
+        vi.spyOn(globalThis, 'fetch').mockImplementation((_url, init) => {
+          starts.push(elapsed());
+          return hangUntilAborted(init, () => aborts.push(elapsed()));
+        });
+
+        const settled = settle(call(makeService({ maxRetries: 3 }), callDeadline(30_000)));
+        await vi.advanceTimersByTimeAsync(DEADLINE_MS);
+
+        expect(await settled).toMatchObject({
+          settledAt: 30_000,
+          error: deadlineExceeded(label, CALL_TOTAL_MS),
+        });
+        // The first request runs out its own 20 s timeout and backs off 1 s; the
+        // second is aborted at 30 s, when the tool call has no time left, well
+        // before Europe PMC's own 45 s deadline.
+        expect(starts).toEqual([0, 21_000]);
+        expect(aborts).toEqual([20_000, 30_000]);
+        expect(vi.getTimerCount()).toBe(0);
+      },
+    );
+
+    it('ends a call in a backoff sleep that the tool call’s deadline cuts short', async () => {
+      // After 503s at 0, 1 and 3 s, the 4 s wait ends on the instant the tool call
+      // runs out, 7 s in; the deadline's timer was armed first and fires first.
+      const starts: number[] = [];
+      mockFetchWithTimeout.mockImplementation(() => {
+        starts.push(elapsed());
+        return Promise.reject(httpErrorRejection(503, JsonRpcErrorCode.ServiceUnavailable, 'down'));
+      });
+
+      const settled = settle(
+        makeService({ maxRetries: 3 }).search({ query: 'a', deadline: callDeadline(7_000) }),
+      );
+      await vi.advanceTimersByTimeAsync(20_000);
+
+      expect(await settled).toMatchObject({
+        settledAt: 7_000,
+        error: deadlineExceeded('search', CALL_TOTAL_MS),
+      });
+      expect(starts).toEqual([0, 1_000, 3_000]);
+      expect(vi.getTimerCount()).toBe(0);
+    });
+
+    it('ends a call at Europe PMC’s own deadline when that is shorter than the time left, reporting its own length', async () => {
+      hangEveryRequest();
+
+      const settled = settle(
+        makeService({ maxRetries: 3, totalDeadlineMs: 5_000 }).search({
+          query: 'a',
+          deadline: callDeadline(30_000),
+        }),
+      );
+      await vi.advanceTimersByTimeAsync(30_000);
+
+      expect(await settled).toMatchObject({
+        settledAt: 5_000,
+        error: deadlineExceeded('search', 5_000),
+      });
+    });
+
+    it.each([0, 1])(
+      'sends nothing and arms no timer when the tool call has %i ms left',
+      async (leftMs) => {
+        hangEveryRequest();
+
+        const settled = settle(
+          makeService({ maxRetries: 3 }).search({ query: 'a', deadline: callDeadline(leftMs) }),
+        );
+        await vi.advanceTimersByTimeAsync(0);
+
+        expect(mockFetchWithTimeout).not.toHaveBeenCalled();
+        expect(vi.getTimerCount()).toBe(0);
+        expect(await settled).toMatchObject({
+          settledAt: 0,
+          error: deadlineExceeded('search', CALL_TOTAL_MS),
+        });
+      },
+    );
+
+    it('rethrows the caller’s own reason when its signal aborted before a call on a spent deadline', async () => {
+      hangEveryRequest();
+      const controller = new AbortController();
+      const reason = new Error('caller went away');
+      controller.abort(reason);
+
+      const call = makeService({ maxRetries: 3 }).search({
+        query: 'a',
+        signal: controller.signal,
+        deadline: callDeadline(0),
+      });
+
+      await expect(call).rejects.toBe(reason);
+      expect(mockFetchWithTimeout).not.toHaveBeenCalled();
+      expect(vi.getTimerCount()).toBe(0);
+    });
+
+    it('rejects with the caller’s own reason when it aborts a request in flight under the tool call’s deadline', async () => {
+      hangEveryRequest();
+      const controller = new AbortController();
+      const reason = new Error('caller went away');
+
+      const call = makeService({ maxRetries: 3 }).search({
+        query: 'a',
+        signal: controller.signal,
+        deadline: callDeadline(30_000),
+      });
+      const outcome = expect(call).rejects.toBe(reason);
+      await vi.advanceTimersByTimeAsync(5_000);
+      controller.abort(reason);
+      await outcome;
+
+      expect(mockFetchWithTimeout).toHaveBeenCalledTimes(1);
+      expect(vi.getTimerCount()).toBe(0);
+    });
+
+    it.each([
+      ['a caller cursor (#180)', { cursorMark: 'abc' }],
+      ['an undocumented sort (#239)', { sort: 'BOGUS desc' }],
+    ])(
+      'cuts the first-page probe for %s at the instant the tool call runs out',
+      async (_suspect, input) => {
+        // The search draws HTTP 503, which sends a probe of the first page (`pageSize`
+        // 1) under the same deadline; the probe never answers.
+        const aborts: number[] = [];
+        mockFetchWithTimeout.mockImplementation(
+          (url: string, _timeoutMs: number, _ctx: unknown, init?: RequestInit) =>
+            new URL(url).searchParams.get('pageSize') === '1'
+              ? hangUntilAborted(init, () => aborts.push(elapsed()))
+              : Promise.reject(
+                  httpErrorRejection(503, JsonRpcErrorCode.ServiceUnavailable, 'down'),
+                ),
+        );
+
+        const settled = settle(
+          makeService({ maxRetries: 3 }).search({
+            query: 'malaria',
+            pageSize: 10,
+            ...input,
+            deadline: callDeadline(30_000),
+          }),
+        );
+        await vi.advanceTimersByTimeAsync(DEADLINE_MS);
+
+        expect(await settled).toMatchObject({
+          settledAt: 30_000,
+          error: deadlineExceeded('search', CALL_TOTAL_MS),
+        });
+        expect(mockFetchWithTimeout).toHaveBeenCalledTimes(2);
+        expect(aborts).toEqual([30_000]);
+      },
+    );
   });
 });
 

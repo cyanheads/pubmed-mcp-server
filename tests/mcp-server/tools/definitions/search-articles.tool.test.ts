@@ -24,6 +24,10 @@ import {
   FIELD_AND_PHRASE_ESEARCH_XML,
   QUOTED_PHRASE_AMP_ESEARCH_XML,
 } from '../../../services/ncbi/parsing/_entity-fixtures.js';
+import {
+  LANGUAGES_BY_PMID,
+  LANGUAGES_ESUMMARY_XML,
+} from '../../../services/ncbi/parsing/_language-fixtures.js';
 
 const mockESearch = vi.fn();
 const mockESummary = vi.fn();
@@ -2346,6 +2350,29 @@ describe('searchArticlesTool format() escaping of the other summary fields (issu
     expect(text).toContain('**DOI:** 10.1000/\\[abc\\](def)');
   });
 
+  it('escapes the language codes (issue #309)', () => {
+    const text =
+      textBlocks(
+        searchArticlesTool.format!({
+          query: 'cancer',
+          offset: 0,
+          pmids: ['42'],
+          summaries: [
+            {
+              pmid: '42',
+              title: 'Plain title',
+              languages: ['*eng*', '[spa](x)'],
+              pubmedUrl: 'https://pubmed.ncbi.nlm.nih.gov/42/',
+            },
+          ],
+          searchUrl: 'https://pubmed.ncbi.nlm.nih.gov/?term=cancer',
+          totalCount: 1,
+        }),
+      )[0]?.text ?? '';
+
+    expect(text).toContain('\n**Language:** \\*eng\\*, \\[spa\\](x)\n');
+  });
+
   it('keeps every lone delimiter visible across the lines of one summary (issue #261)', () => {
     const text =
       textBlocks(
@@ -3448,21 +3475,18 @@ const SEARCH_OUTAGE_RECOVERY =
 describe('searchArticlesTool NCBI outage recovery (issue #288)', () => {
   const errors = searchArticlesTool.errors ?? [];
   const declared = (reason: string) => errors.find((entry) => entry.reason === reason);
+  /** The NCBI reasons that mean the search could not be answered, whatever its query. */
+  const OUTAGE_REASONS = ['ncbi_unreachable', 'ncbi_timed_out', 'ncbi_deadline_exceeded'];
 
-  it.each(['ncbi_unreachable', 'ncbi_deadline_exceeded'])(
-    'replaces only the recovery of the shared %s entry',
-    (reason) => {
-      const shared = NCBI_SERVICE_ERRORS.find((entry) => entry.reason === reason);
-      expect(shared).toBeDefined();
-      expect(declared(reason)).toEqual({ ...shared, recovery: SEARCH_OUTAGE_RECOVERY });
-    },
-  );
+  it.each(OUTAGE_REASONS)('replaces only the recovery of the shared %s entry', (reason) => {
+    const shared = NCBI_SERVICE_ERRORS.find((entry) => entry.reason === reason);
+    expect(shared).toBeDefined();
+    expect(declared(reason)).toEqual({ ...shared, recovery: SEARCH_OUTAGE_RECOVERY });
+  });
 
   it('keeps every other NCBI entry shared and declares each reason once', () => {
     for (const shared of NCBI_SERVICE_ERRORS) {
-      if (shared.reason === 'ncbi_unreachable' || shared.reason === 'ncbi_deadline_exceeded') {
-        continue;
-      }
+      if (OUTAGE_REASONS.includes(shared.reason)) continue;
       expect(declared(shared.reason), shared.reason).toEqual(shared);
     }
     const reasons = errors.map((entry) => entry.reason);
@@ -3798,6 +3822,41 @@ describe('searchArticlesTool against a failing NCBI backend (issue #174)', () =>
       expect(fetchSpy).toHaveBeenCalledTimes(fetches);
     },
   );
+
+  it('reports an HTTP 504 on every attempt as ncbi_timed_out, naming the other search on both surfaces', async () => {
+    vi.spyOn(Math, 'random').mockReturnValue(0.5);
+    const fetchSpy = vi
+      .spyOn(globalThis, 'fetch')
+      .mockImplementation(() =>
+        Promise.resolve(new Response('', { status: 504, statusText: 'Gateway Timeout' })),
+      );
+    const tool = await loadTool({ NCBI_MAX_RETRIES: '1' });
+
+    const pending = runToolContract(tool, { query: 'asthma', maxResults: 1 });
+    await vi.advanceTimersByTimeAsync(5000);
+    const result = await pending;
+
+    const message = 'NCBI returned HTTP 504 Gateway Timeout. (failed after 2 attempts)';
+    expect(result.isError).toBe(true);
+    expect(result.structuredContent).toMatchObject({
+      error: {
+        code: JsonRpcErrorCode.Timeout,
+        message,
+        data: {
+          reason: 'ncbi_timed_out',
+          endpoint: 'esearch',
+          attempts: 2,
+          recovery: { hint: SEARCH_OUTAGE_RECOVERY },
+        },
+      },
+    });
+    expect(readCommonMark(contractText(result))).toBe(
+      [`Error: ${message}`, `Recovery: ${SEARCH_OUTAGE_RECOVERY}`, '(reason ncbi_timed_out)'].join(
+        '\n\n',
+      ),
+    );
+    expect(fetchSpy).toHaveBeenCalledTimes(2);
+  });
 });
 
 describe('withoutFormattingTags — which tags are removed (issue #260)', () => {
@@ -3955,5 +4014,107 @@ describe('searchArticlesTool summary links (issue #307)', () => {
         `⟨strong⟩PMC:⟨/strong⟩ ${pmcUrl}`,
       ].join('\n'),
     );
+  });
+});
+
+describe('searchArticlesTool summary languages (issue #309)', () => {
+  /** The PMIDs of the fixture, in NCBI's order: the unknown 99999999 among them. */
+  const PMIDS = ['20301295', '34463784', '43020712', '99999999', '25881375', '42233801'];
+
+  beforeEach(() => {
+    mockESearch.mockReset();
+    mockESummary.mockReset();
+    mockExtractBriefSummaries.mockReset();
+    mockExtractBriefSummaries.mockImplementation(realExtractBriefSummaries);
+    mockESearch.mockResolvedValue({
+      count: PMIDS.length,
+      idList: PMIDS,
+      retmax: 20,
+      retstart: 0,
+      queryTranslation: 'x',
+    });
+    mockESummary.mockResolvedValue(parseESummaryXml(LANGUAGES_ESUMMARY_XML));
+  });
+
+  const search = async () => {
+    const result = await runToolContract(searchArticlesTool, {
+      query: 'x',
+      summaryCount: PMIDS.length,
+    });
+    const { summaries } = result.structuredContent as {
+      summaries: { pmid: string; languages?: string[] }[];
+    };
+    const blocks = contractText(result).split('\n#### ').slice(1);
+    const blockOf = (pmid: string) => blocks.find((b) => b.includes(`**PMID:** ${pmid}\n`)) ?? '';
+    return { summaries, blocks, blockOf };
+  };
+
+  it("carries every code of each summary on both surfaces, in NCBI's order", async () => {
+    const { summaries, blocks, blockOf } = await search();
+
+    expect(summaries.map((s) => s.pmid)).toEqual(PMIDS);
+    expect(blocks).toHaveLength(PMIDS.length);
+    for (const [pmid, languages] of LANGUAGES_BY_PMID) {
+      expect(summaries.find((s) => s.pmid === pmid)?.languages, pmid).toEqual(languages);
+      expect(blockOf(pmid), pmid).toContain(`\n**Language:** ${languages.join(', ')}\n`);
+    }
+    expect(blockOf('25881375')).toContain('**Language:** ara, eng, fre, ger, por, spa\n');
+    // Beside the record's venue and type, ahead of its dates.
+    expect(blockOf('42233801')).toContain(
+      '**Source:** Cien Saude Colet\n**Language:** por, eng, spa\n**Published:** 2026-04\n',
+    );
+  });
+
+  it('gives a summary ESummary did not describe no languages on either surface', async () => {
+    const { summaries, blockOf } = await search();
+
+    expect(summaries.find((s) => s.pmid === '99999999')).not.toHaveProperty('languages');
+    expect(blockOf('99999999')).not.toBe('');
+    expect(blockOf('99999999')).not.toContain('**Language:**');
+  });
+});
+
+describe('searchArticlesTool call deadline (issue #310)', () => {
+  const STARTED_AT = Date.UTC(2026, 0, 1);
+
+  beforeEach(() => {
+    mockESearch.mockReset();
+    mockESummary.mockReset();
+    mockExtractBriefSummaries.mockReset();
+    mockExtractBriefSummaries.mockResolvedValue([]);
+    vi.useFakeTimers({ toFake: ['Date'] });
+    vi.setSystemTime(STARTED_AT);
+  });
+
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  it('passes ESearch and the ESummary after it one deadline, started with the call, beside ctx.signal', async () => {
+    mockESearch.mockResolvedValue({
+      count: 1,
+      idList: ['111'],
+      retmax: 20,
+      retstart: 0,
+      queryTranslation: 'asthma',
+      webEnv: 'NCBI_ENV',
+      queryKey: '1',
+    });
+    mockESummary.mockResolvedValue({});
+    const ctx = createMockContext({ errors: searchArticlesTool.errors });
+    const input = searchArticlesTool.input.parse({ query: 'asthma', summaryCount: 1 });
+    await searchArticlesTool.handler(input, ctx);
+
+    expect(mockESearch).toHaveBeenCalledTimes(1);
+    expect(mockESummary).toHaveBeenCalledTimes(1);
+    const searchOptions = mockESearch.mock.lastCall?.[1];
+    const summaryOptions = mockESummary.mock.lastCall?.[1];
+    expect(searchOptions).toEqual({
+      signal: ctx.signal,
+      deadline: { expiresAt: STARTED_AT + 50_000, totalMs: 50_000 },
+    });
+    expect(searchOptions.signal).toBe(ctx.signal);
+    expect(summaryOptions.signal).toBe(ctx.signal);
+    expect(summaryOptions.deadline).toBe(searchOptions.deadline);
   });
 });

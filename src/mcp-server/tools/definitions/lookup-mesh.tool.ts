@@ -9,6 +9,7 @@
  */
 
 import { tool, z } from '@cyanheads/mcp-ts-core';
+import { startCallDeadline } from '@/services/call-deadline.js';
 import { NCBI_SERVICE_ERRORS, QUERY_INPUT_ERRORS } from '@/services/error-contracts.js';
 import { getNcbiService } from '@/services/ncbi/ncbi-service.js';
 import { ensureArray, getOptionalText, getText } from '@/services/ncbi/parsing/xml-helpers.js';
@@ -336,6 +337,7 @@ export const lookupMeshTool = tool('pubmed_lookup_mesh', {
   },
 
   async handler(input, ctx) {
+    const deadline = startCallDeadline();
     const { query, offset, includeDetails } = input;
     // A `maxResults` past the cap is served at the cap rather than rejected, and
     // the ranked ESearch window is sized from this applied value. (#232)
@@ -352,7 +354,7 @@ export const lookupMeshTool = tool('pubmed_lookup_mesh', {
     }
 
     const hasFieldTag = /\[.+\]/.test(query);
-    const callOpts = { signal: ctx.signal };
+    const callOpts = { signal: ctx.signal, deadline };
     const broadSearch = ncbi.eSearch(
       { db: 'mesh', term: query, retmax: maxResults, retstart: offset },
       callOpts,

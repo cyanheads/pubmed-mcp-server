@@ -1,15 +1,25 @@
 /**
  * @fileoverview Unpaywall service. Resolves a DOI to an open-access location —
  * together with the title, journal name, and year the DOI object carries — and
- * fetches the raw content (HTML or PDF) for downstream extraction. Enabled only
- * when `UNPAYWALL_EMAIL` is set — absence leaves the fallback disabled.
+ * fetches the raw content (HTML or PDF, each read held to a 50 MiB limit) for
+ * downstream extraction. Enabled only when `UNPAYWALL_EMAIL` is set — absence
+ * leaves the fallback disabled.
  *
  * Philosophy: best-effort. Upstream 404s and non-OA DOIs return a `no-oa`
  * resolution; only genuine service failures (5xx, network, timeout) throw.
+ *
+ * Each request runs under `UNPAYWALL_TIMEOUT_MS`, or under the time the tool
+ * call's deadline has left when that is shorter; a request the deadline cuts, or
+ * one it leaves no time to start, ends as `unpaywall_deadline_exceeded`.
  * @module src/services/unpaywall/unpaywall-service
  */
 
-import { JsonRpcErrorCode, McpError, serviceUnavailable } from '@cyanheads/mcp-ts-core/errors';
+import {
+  JsonRpcErrorCode,
+  McpError,
+  serviceUnavailable,
+  timeout,
+} from '@cyanheads/mcp-ts-core/errors';
 import {
   fetchWithTimeout,
   httpErrorFromResponse,
@@ -18,6 +28,7 @@ import {
 } from '@cyanheads/mcp-ts-core/utils';
 
 import { getServerConfig } from '@/config/server-config.js';
+import { type CallDeadline, upstreamBound } from '@/services/call-deadline.js';
 import { normalizeDoi } from '@/services/doi.js';
 import { readBody } from '@/services/fetch-redaction.js';
 import {
@@ -43,12 +54,19 @@ export class UnpaywallService {
   /**
    * Look up a DOI in Unpaywall. Returns a structured outcome — never throws
    * for a DOI that simply has no OA copy or that Unpaywall doesn't know.
-   * Throws `McpError(ServiceUnavailable)` only for network/server failures.
+   * Throws `McpError(ServiceUnavailable)` only for network/server failures, and
+   * a Timeout with reason `unpaywall_deadline_exceeded` when `deadline` cuts the
+   * lookup or leaves no time to send it.
    */
-  async resolve(doi: string, signal?: AbortSignal): Promise<UnpaywallResolution> {
+  async resolve(
+    doi: string,
+    signal?: AbortSignal,
+    deadline?: CallDeadline,
+  ): Promise<UnpaywallResolution> {
     const normalized = normalizeDoi(doi.trim());
     if (!normalized.startsWith('10.')) return { kind: 'no-oa', reason: 'Invalid DOI' };
 
+    const request = this.requestTimeout(deadline, signal, { doi: normalized });
     const url = `${UNPAYWALL_API_BASE}/${encodeURIComponent(normalized)}?email=${encodeURIComponent(this.email)}`;
     const ctx = requestContextService.createRequestContext({
       operation: 'UnpaywallResolve',
@@ -62,7 +80,7 @@ export class UnpaywallService {
     // before falling back to the service-unavailable wrap.
     let response: Response;
     try {
-      response = await fetchWithTimeout(url, this.timeoutMs, ctx, {
+      response = await fetchWithTimeout(url, request.timeoutMs, ctx, {
         headers: { Accept: 'application/json', 'User-Agent': USER_AGENT },
         expectedStatuses: [404, 422],
         ...(signal && { signal }),
@@ -77,17 +95,22 @@ export class UnpaywallService {
         }
       }
       const msg = error instanceof Error ? error.message : String(error);
-      throw serviceUnavailable(
-        `Unpaywall request failed: ${msg}`,
-        {
-          reason: 'unpaywall_unreachable',
-          doi: normalized,
-        },
-        { cause: error },
+      throw (
+        request.cut(error) ??
+        serviceUnavailable(
+          `Unpaywall request failed: ${msg}`,
+          {
+            reason: 'unpaywall_unreachable',
+            doi: normalized,
+          },
+          { cause: error },
+        )
       );
     }
 
-    const data = (await readBody(response.json())) as UnpaywallResponse;
+    const data = (await readBody(response.json()).catch((error: unknown) => {
+      throw request.cut(error) ?? error;
+    })) as UnpaywallResponse;
     if (!data.is_oa) return { kind: 'no-oa', reason: 'No open-access copy indexed' };
 
     const location = data.best_oa_location ?? data.oa_locations?.[0];
@@ -128,8 +151,20 @@ export class UnpaywallService {
    * landing page, which is likelier to hold real content. The HTML already
    * received is kept and returned when a second fetch cannot improve on it —
    * the two addresses are the same, or the fallback fetch itself fails. (#104)
+   *
+   * A body past the {@link MAX_CONTENT_BYTES} read limit at `url_for_pdf` falls
+   * through the same way, unless `url` is the same address: that refusal is
+   * thrown, since a second read would only repeat it. (#311)
+   *
+   * Each read runs under `deadline` as {@link resolve} does. The landing-page read
+   * starts only while `deadline` has time left; once spent, the HTML already
+   * received is returned, or the call fails as `unpaywall_deadline_exceeded`.
    */
-  async fetchContent(location: UnpaywallLocation, signal?: AbortSignal): Promise<UnpaywallContent> {
+  async fetchContent(
+    location: UnpaywallLocation,
+    signal?: AbortSignal,
+    deadline?: CallDeadline,
+  ): Promise<UnpaywallContent> {
     const pdfUrl = location.url_for_pdf ?? undefined;
     const htmlUrl = location.url;
 
@@ -137,7 +172,7 @@ export class UnpaywallService {
       /** HTML served where a PDF was advertised — a fallback candidate, not a result. */
       let servedHtml: UnpaywallContent | undefined;
       try {
-        const content = await this.fetchAs(pdfUrl, 'pdf', signal);
+        const content = await this.fetchAs(pdfUrl, 'pdf', signal, deadline);
         if (content.kind === 'pdf') return content;
         servedHtml = content;
         logger.debug(
@@ -148,6 +183,7 @@ export class UnpaywallService {
           }),
         );
       } catch (pdfErr: unknown) {
+        if (pdfUrl === htmlUrl && isOverReadLimit(pdfErr)) throw pdfErr;
         logger.debug(
           'Unpaywall PDF fetch failed; falling back to HTML URL',
           requestContextService.createRequestContext({
@@ -166,14 +202,42 @@ export class UnpaywallService {
       }
 
       try {
-        return await this.fetchAs(htmlUrl, 'auto', signal);
+        return await this.fetchAs(htmlUrl, 'auto', signal, deadline);
       } catch (htmlErr: unknown) {
         if (servedHtml) return servedHtml;
         throw htmlErr;
       }
     }
 
-    return this.fetchAs(htmlUrl, 'auto', signal);
+    return this.fetchAs(htmlUrl, 'auto', signal, deadline);
+  }
+
+  /**
+   * The timeout one request runs under: `UNPAYWALL_TIMEOUT_MS`, or the time
+   * `deadline` has left when that is shorter. A `deadline` already spent sends
+   * nothing and throws `unpaywall_deadline_exceeded` with `where` in its data,
+   * unless the caller has aborted, whose cancellation then takes its own course.
+   */
+  private requestTimeout(
+    deadline: CallDeadline | undefined,
+    signal: AbortSignal | undefined,
+    where: Record<string, unknown>,
+  ): RequestTimeout {
+    const bound = upstreamBound(this.timeoutMs, deadline);
+    if (bound.spent && !signal?.aborted) throw deadlineExceeded(bound.deadlineMs, where);
+    /**
+     * One timer bounds the request, and which one is fixed here, as it is armed: a
+     * timeout the deadline shortened is the deadline's own, so the request's timeout
+     * firing on it is the deadline expiring. No elapsed time is compared afterwards.
+     */
+    const shortened = bound.remainingMs < this.timeoutMs;
+    return {
+      timeoutMs: bound.remainingMs,
+      cut: (error) =>
+        shortened && isRequestTimeout(error)
+          ? deadlineExceeded(bound.deadlineMs, where, error)
+          : undefined,
+    };
   }
 
   /**
@@ -188,13 +252,17 @@ export class UnpaywallService {
    *
    * Records and error data name the URL's host, never the URL: a publisher's
    * PDF link can carry an access token in its path or query.
+   *
+   * The body is read under {@link MAX_CONTENT_BYTES}; see {@link readWithinLimit}.
    */
   private async fetchAs(
     url: string,
     expected: 'pdf' | 'auto',
     signal?: AbortSignal,
+    deadline?: CallDeadline,
   ): Promise<UnpaywallContent> {
     const host = hostOf(url);
+    const request = this.requestTimeout(deadline, signal, { host });
     const ctx = requestContextService.createRequestContext({
       operation: 'UnpaywallFetch',
       additionalContext: { expected, host },
@@ -207,17 +275,20 @@ export class UnpaywallService {
 
     let response: Response;
     try {
-      response = await fetchWithTimeout(url, this.timeoutMs, ctx, {
+      response = await fetchWithTimeout(url, request.timeoutMs, ctx, {
         headers: { Accept: accept, 'User-Agent': USER_AGENT },
         redirect: 'follow',
         ...(signal && { signal }),
       });
     } catch (error: unknown) {
       const msg = error instanceof Error ? error.message : String(error);
-      throw serviceUnavailable(
-        `Unpaywall content fetch failed: ${msg}`,
-        { reason: 'unpaywall_unreachable', host },
-        { cause: error },
+      throw (
+        request.cut(error) ??
+        serviceUnavailable(
+          `Unpaywall content fetch failed: ${msg}`,
+          { reason: 'unpaywall_unreachable', host },
+          { cause: error },
+        )
       );
     }
 
@@ -231,12 +302,120 @@ export class UnpaywallService {
     const fetchedUrl = response.url || url;
     // Read the body once — a Response body can only be consumed once, and the
     // bytes are what the classification reads.
-    const bytes = new Uint8Array(await readBody(response.arrayBuffer()));
+    const bytes = await readBody(readWithinLimit(response, host)).catch((error: unknown) => {
+      throw request.cut(error) ?? error;
+    });
 
     if (hasPdfMagic(bytes)) return { kind: 'pdf', fetchedUrl, body: bytes };
 
     return { kind: 'html', fetchedUrl, body: new TextDecoder().decode(bytes) };
   }
+}
+
+/** The timeout one Unpaywall request runs under, from `UnpaywallService.requestTimeout`. */
+interface RequestTimeout {
+  /**
+   * The deadline's expiry when `error` is the request's own timeout firing on a
+   * timeout the deadline shortened; `undefined` for every other failure.
+   */
+  readonly cut: (error: unknown) => McpError | undefined;
+  /** The request's timeout, in ms. */
+  readonly timeoutMs: number;
+}
+
+/**
+ * `data.reason` of the Timeout a request ends on when the tool call's deadline cuts
+ * it or leaves no time to send it. No contract declares it, like
+ * {@link OVER_READ_LIMIT}: `pubmed_fetch_fulltext` catches every Unpaywall failure
+ * per article and reports it as a tier outcome.
+ */
+const DEADLINE_EXCEEDED = 'unpaywall_deadline_exceeded';
+
+/** The expiry of a deadline `deadlineMs` long, naming the lookup or host in `where`. */
+function deadlineExceeded(
+  deadlineMs: number,
+  where: Record<string, unknown>,
+  cause?: unknown,
+): McpError {
+  return timeout(
+    `Unpaywall request deadline (${deadlineMs}ms) exceeded`,
+    { reason: DEADLINE_EXCEEDED, deadlineMs, ...where },
+    cause === undefined ? undefined : { cause },
+  );
+}
+
+/** Whether `error` is `fetchWithTimeout`'s own timeout firing, before the headers or mid-body. */
+function isRequestTimeout(error: unknown): boolean {
+  return error instanceof McpError && error.data?.errorSource === 'FetchTimeout';
+}
+
+/** Decoded bytes one content read may hold: 50 MiB, for a PDF and a landing page alike. */
+const MAX_CONTENT_BYTES = 50 * 1024 * 1024;
+
+/** `data.reason` of the refusal {@link readWithinLimit} throws. */
+const OVER_READ_LIMIT = 'unpaywall_content_too_large';
+
+/**
+ * Read a response body whole, refusing one past {@link MAX_CONTENT_BYTES}.
+ *
+ * An uncompressed body whose `Content-Length` is already past the limit is
+ * refused unread. Every other body is counted as it streams: a compressed body's
+ * `Content-Length` is its encoded size while the runtime yields decoded bytes,
+ * and a chunked body has none. A refusal cancels the body, which releases the
+ * connection and the request deadline that `fetchWithTimeout` hands it.
+ *
+ * @throws {McpError} `ServiceUnavailable` with `data.reason` {@link OVER_READ_LIMIT}
+ *   on a refusal. A failure while the body streams rejects with the stream's own
+ *   error, as classified by `fetchWithTimeout`.
+ */
+async function readWithinLimit(response: Response, host: string | undefined): Promise<Uint8Array> {
+  const { body } = response;
+  if (!body) return new Uint8Array(0);
+
+  const refusal = () =>
+    serviceUnavailable(
+      `Unpaywall content is larger than the ${MAX_CONTENT_BYTES / (1024 * 1024)} MiB read limit`,
+      { reason: OVER_READ_LIMIT, host },
+    );
+
+  if (declaresOverLimit(response.headers)) {
+    await body.cancel();
+    throw refusal();
+  }
+
+  const reader = body.getReader();
+  const chunks: Uint8Array[] = [];
+  let size = 0;
+  for (;;) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    size += value.byteLength;
+    if (size > MAX_CONTENT_BYTES) {
+      await reader.cancel();
+      throw refusal();
+    }
+    chunks.push(value);
+  }
+
+  const bytes = new Uint8Array(size);
+  let offset = 0;
+  for (const chunk of chunks) {
+    bytes.set(chunk, offset);
+    offset += chunk.byteLength;
+  }
+  return bytes;
+}
+
+/** Whether an uncompressed response's `Content-Length` names a body past {@link MAX_CONTENT_BYTES}. */
+function declaresOverLimit(headers: Headers): boolean {
+  const encoding = headers.get('content-encoding')?.trim().toLowerCase();
+  if (encoding && encoding !== 'identity') return false;
+  return Number(headers.get('content-length')) > MAX_CONTENT_BYTES;
+}
+
+/** Whether `error` is {@link readWithinLimit}'s refusal of a body past the limit. */
+function isOverReadLimit(error: unknown): boolean {
+  return error instanceof McpError && error.data?.reason === OVER_READ_LIMIT;
 }
 
 /** The host a URL names, for log and error labels — `undefined` when it does not parse. */

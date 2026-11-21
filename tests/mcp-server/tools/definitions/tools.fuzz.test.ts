@@ -215,7 +215,11 @@ describe('Tool fuzz coverage', () => {
     ]);
     // `0000` is `0` again, so it takes no entry of its own.
     expect(result.unavailablePmids).toEqual(['0', '1000000001', '9'.repeat(40)]);
-    expect(mockFetchRecords).toHaveBeenLastCalledWith(['23456789'], ctx);
+    expect(mockFetchRecords).toHaveBeenLastCalledWith(
+      ['23456789'],
+      ctx,
+      expect.objectContaining({ totalMs: 50_000 }),
+    );
   });
 
   it('pubmed_find_related survives fuzz', async () => {

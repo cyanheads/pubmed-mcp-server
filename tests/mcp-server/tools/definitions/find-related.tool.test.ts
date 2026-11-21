@@ -1,18 +1,21 @@
 /**
  * @fileoverview Tests for the find-related tool — offset pagination (#36),
  * multi-source provider fallback (#63), the total match count in the header on
- * every return path (#147), Doc Type rendering (#146), and the label an
- * exhausted OpenAlex or Europe PMC Timeout or RateLimited reports — named by its
- * code — in the coverage summary and the all-providers-failed attempts (#160),
- * and a `maxResults` past the cap served at the cap on every return path (#232).
+ * every return path (#147), Doc Type rendering (#146), the label an exhausted
+ * OpenAlex Timeout or RateLimited reports — named by its code — and the reason
+ * Europe PMC declares for one, in the coverage summary and the all-providers-failed
+ * attempts (#160, #315), a `maxResults` past the cap served at the cap on every
+ * return path (#232), and the one call deadline every step shares, with a step that
+ * had no time left reported not reached (#310).
  * @module tests/mcp-server/tools/definitions/find-related.tool.test
  */
 
 import { type ContentBlock, z } from '@cyanheads/mcp-ts-core';
 import { JsonRpcErrorCode, McpError } from '@cyanheads/mcp-ts-core/errors';
 import { createMockContext, getEnrichment, runToolContract } from '@cyanheads/mcp-ts-core/testing';
-import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
+import type { CallDeadline } from '@/services/call-deadline.js';
 import type { ESummaryResult, ParsedBriefSummary } from '@/services/ncbi/types.js';
 
 import { readCommonMark, textBlocks } from '../../../_helpers.js';
@@ -21,8 +24,14 @@ import {
   BOOK_ESUMMARY_XML,
   CHAPTER_DATES_ESUMMARY_XML,
   parseESummaryXml,
+  VERSION_PAIR_ESUMMARY_V1_XML,
+  VERSION_PAIR_ESUMMARY_V2_XML,
 } from '../../../services/ncbi/parsing/_book-fixtures.js';
 import { APOS_TITLE_ESUMMARY_XML } from '../../../services/ncbi/parsing/_entity-fixtures.js';
+import {
+  LANGUAGES_BY_PMID,
+  LANGUAGES_ESUMMARY_XML,
+} from '../../../services/ncbi/parsing/_language-fixtures.js';
 
 const mockELink = vi.fn();
 const mockESummary = vi.fn();
@@ -88,6 +97,15 @@ function eLinkResponse(pmids: string[], linkName = 'pubmed_pubmed') {
 
 type FindRelatedInput = Parameters<typeof findRelatedTool.handler>[0];
 type FindRelatedCtx = Parameters<typeof findRelatedTool.handler>[1];
+
+/**
+ * The deadline every upstream call is handed beside its signal. The call-deadline
+ * tests at the end of this file pin its values; elsewhere any deadline will do.
+ */
+const aDeadline = expect.objectContaining({
+  expiresAt: expect.any(Number),
+  totalMs: expect.any(Number),
+});
 
 /** Structured payload the `all_providers_failed` contract entry carries. */
 interface AllProvidersFailedData {
@@ -795,7 +813,13 @@ describe('findRelatedTool', () => {
       });
       const result = await findRelatedTool.handler(input, ctx);
 
-      expect(mockEpmcCitations).toHaveBeenCalledWith('12345', 130, 1, expect.any(AbortSignal));
+      expect(mockEpmcCitations).toHaveBeenCalledWith(
+        '12345',
+        130,
+        1,
+        expect.any(AbortSignal),
+        aDeadline,
+      );
       expect(result.articles.map((a) => a.pmid)).toEqual(
         Array.from({ length: 10 }, (_, i) => String(1120 + i)),
       );
@@ -827,6 +851,7 @@ describe('findRelatedTool', () => {
         1000,
         1,
         expect.any(AbortSignal),
+        aDeadline,
       );
       expect(mockEpmcReferences).toHaveBeenNthCalledWith(
         2,
@@ -834,6 +859,7 @@ describe('findRelatedTool', () => {
         1000,
         2,
         expect.any(AbortSignal),
+        aDeadline,
       );
       // Offsets index PMID-addressable rows across pages, never raw upstream rows.
       expect(result.articles.map((a) => a.pmid)).toEqual(['9001', '9002']);
@@ -864,8 +890,22 @@ describe('findRelatedTool', () => {
       });
       const result = await findRelatedTool.handler(input, ctx);
 
-      expect(mockEpmcCitations).toHaveBeenNthCalledWith(1, '12345', 85, 1, expect.any(AbortSignal));
-      expect(mockEpmcCitations).toHaveBeenNthCalledWith(2, '12345', 85, 2, expect.any(AbortSignal));
+      expect(mockEpmcCitations).toHaveBeenNthCalledWith(
+        1,
+        '12345',
+        85,
+        1,
+        expect.any(AbortSignal),
+        aDeadline,
+      );
+      expect(mockEpmcCitations).toHaveBeenNthCalledWith(
+        2,
+        '12345',
+        85,
+        2,
+        expect.any(AbortSignal),
+        aDeadline,
+      );
       expect(result.articles.map((a) => a.pmid)).toEqual(['2000', '2001', '2002', '2003', '2004']);
       expect(result.totalCount).toBe(2055);
       const notice = String(getEnrichment(ctx).notice);
@@ -1166,7 +1206,12 @@ describe('findRelatedTool', () => {
       });
       const result = await findRelatedTool.handler(input, ctx);
 
-      expect(mockOaReferences).toHaveBeenCalledWith('37952131', 145, expect.any(AbortSignal));
+      expect(mockOaReferences).toHaveBeenCalledWith(
+        '37952131',
+        145,
+        expect.any(AbortSignal),
+        aDeadline,
+      );
       expect(result.articles.map((a) => a.pmid)).toEqual(['4140', '4141', '4142', '4143', '4144']);
       expect(result.totalCount).toBe(150);
       expect(String(getEnrichment(ctx).notice)).toContain('12 with no PubMed PMID');
@@ -1349,7 +1394,7 @@ describe('findRelatedTool', () => {
         >('@/services/openalex/openalex-service.js');
         const { OpenAlexApiClient } = await import('@/services/openalex/api-client.js');
         mockGetOaService.mockReturnValue(
-          new OpenAlexService(new OpenAlexApiClient({ timeoutMs: 20_000 }), 0),
+          new OpenAlexService(new OpenAlexApiClient({ timeoutMs: 20_000 }), 0, 45_000),
         );
         mockEpmcReferences.mockResolvedValue({
           pmids: [],
@@ -1386,20 +1431,8 @@ describe('findRelatedTool', () => {
       },
     );
 
-    /**
-     * The same labels through the real Europe PMC service and its pacer. A 429
-     * whose Retry-After outlasts the backoff cap fails on its first attempt with
-     * no reason at all, so it too is named by its code.
-     */
-    it.each([
-      ['exhausted 504', 'timed_out', { status: 504 }],
-      ['exhausted 429', 'rate_limited', { status: 429, headers: { 'retry-after': '5' } }],
-      [
-        '429 with a Retry-After past the backoff cap',
-        'rate_limited',
-        { status: 429, headers: { 'retry-after': '120' } },
-      ],
-    ])('labels a Europe PMC %s as %s, still retryable', async (_label, reason, init) => {
+    /** The real Europe PMC service and its pacer, with no retries, behind the stubbed fetch. */
+    async function useRealEuropePmcService() {
       const { EuropePmcService } = await vi.importActual<
         typeof import('@/services/europe-pmc/europe-pmc-service.js')
       >('@/services/europe-pmc/europe-pmc-service.js');
@@ -1415,32 +1448,94 @@ describe('findRelatedTool', () => {
           45_000,
         ),
       );
-      mockOaReferences.mockResolvedValue({
-        pmids: [],
-        totalCount: 0,
-        droppedNoPmid: 0,
-        reachCapped: false,
-      });
-      const fetchSpy = vi
-        .spyOn(globalThis, 'fetch')
-        .mockImplementation(() => Promise.resolve(new Response('', init)));
+    }
 
-      try {
-        const result = await runToolContract(findRelatedTool, referencesInput);
+    /**
+     * Europe PMC's own declared reasons, through its real service and pacer: an
+     * exhausted Timeout is `europepmc_timed_out`, and a 429 — retries spent, or
+     * never retried because its Retry-After outlasts the backoff cap — is
+     * `europepmc_rate_limited`. Both are declared retryable. (#315)
+     */
+    const EPMC_FAILURES = [
+      ['exhausted 504', 'europepmc_timed_out', { status: 504 }],
+      ['exhausted 429', 'europepmc_rate_limited', { status: 429, headers: { 'retry-after': '5' } }],
+      [
+        '429 with a Retry-After past the backoff cap',
+        'europepmc_rate_limited',
+        { status: 429, headers: { 'retry-after': '120' } },
+      ],
+    ] as const;
 
-        const structured = result.structuredContent as {
-          coverageFailures?: Array<{ provider: string; reason: string; retryable: boolean }>;
-          notice?: string;
-        };
-        expect(structured.coverageFailures).toEqual([
-          { provider: 'europepmc', reason, retryable: true },
-        ]);
-        expect(structured.notice).toContain(`Europe PMC (${reason}) did not answer`);
-        expect(fetchSpy).toHaveBeenCalledTimes(1);
-      } finally {
-        fetchSpy.mockRestore();
-      }
-    });
+    it.each(EPMC_FAILURES)(
+      'labels a Europe PMC %s as %s, still retryable',
+      async (_label, reason, init) => {
+        await useRealEuropePmcService();
+        mockOaReferences.mockResolvedValue({
+          pmids: [],
+          totalCount: 0,
+          droppedNoPmid: 0,
+          reachCapped: false,
+        });
+        const fetchSpy = vi
+          .spyOn(globalThis, 'fetch')
+          .mockImplementation(() => Promise.resolve(new Response('', init)));
+
+        try {
+          const result = await runToolContract(findRelatedTool, referencesInput);
+
+          const structured = result.structuredContent as {
+            coverageFailures?: Array<{ provider: string; reason: string; retryable: boolean }>;
+            notice?: string;
+          };
+          expect(structured.coverageFailures).toEqual([
+            { provider: 'europepmc', reason, retryable: true },
+          ]);
+          expect(structured.notice).toContain(`Europe PMC (${reason}) did not answer`);
+          expect(structured.notice).toContain('Retry after a brief delay');
+          const text = textBlocks(result.content as ContentBlock[])
+            .map((b) => b.text)
+            .join('\n');
+          expect(text).toContain(`Europe PMC (${reason}) did not answer`);
+          expect(fetchSpy).toHaveBeenCalledTimes(1);
+        } finally {
+          fetchSpy.mockRestore();
+        }
+      },
+    );
+
+    it.each(EPMC_FAILURES)(
+      'names a Europe PMC %s as %s in attempted[] when every provider fails',
+      async (_label, reason, init) => {
+        await useRealEuropePmcService();
+        // What an exhausted NCBI HTTP 504 reaches the chain as.
+        mockELink.mockRejectedValue(
+          new McpError(JsonRpcErrorCode.Timeout, 'NCBI timed out', { reason: 'ncbi_timed_out' }),
+        );
+        mockOaCitedBy.mockRejectedValue(new McpError(JsonRpcErrorCode.Timeout, 'OA timed out'));
+        const fetchSpy = vi
+          .spyOn(globalThis, 'fetch')
+          .mockImplementation(() => Promise.resolve(new Response('', init)));
+
+        try {
+          const ctx = createMockContext({ errors: findRelatedTool.errors });
+          const input = findRelatedTool.input.parse({ pmid: '12345', relationship: 'cited_by' });
+          const error = await rejection(input, ctx);
+
+          expect(failureData(error).attempted).toEqual([
+            { provider: 'ncbi', reason: 'ncbi_timed_out', message: 'NCBI timed out' },
+            { provider: 'europepmc', reason, message: expect.stringContaining('Status: ') },
+            // A reason-less Timeout is named by its code.
+            { provider: 'openalex', reason: 'timed_out', message: 'OA timed out' },
+          ]);
+          expect(failureData(error).recovery?.hint).toContain(
+            `NCBI (ncbi_timed_out), Europe PMC (${reason}), OpenAlex (timed_out)`,
+          );
+          expect(fetchSpy).toHaveBeenCalledTimes(1);
+        } finally {
+          fetchSpy.mockRestore();
+        }
+      },
+    );
 
     it('reports a fallback failure the upstream marked not retryable as not retryable', async () => {
       mockEpmcReferences.mockResolvedValue({
@@ -1840,6 +1935,57 @@ describe('findRelatedTool', () => {
       expect(mockESummary).toHaveBeenCalledTimes(1);
     });
 
+    /**
+     * ESummary as the endpoint answers: the requested PMIDs only, in the wire
+     * format `version` selects, from the verbatim four-record capture pair.
+     */
+    function versionPairEsummary(params: {
+      id?: string;
+      version?: string;
+    }): Promise<ESummaryResult> {
+      const ids = new Set(String(params.id).split(','));
+      const result = parseESummaryXml(
+        params.version === '2.0' ? VERSION_PAIR_ESUMMARY_V2_XML : VERSION_PAIR_ESUMMARY_V1_XML,
+      );
+      const set = result.DocumentSummarySet;
+      if (set) {
+        set.DocumentSummary = [set.DocumentSummary].flat().filter((d) => ids.has(d['@_uid']));
+      }
+      if (result.DocSum) {
+        result.DocSum = [result.DocSum].flat().filter((d) => ids.has(String(d.Id)));
+      }
+      return Promise.resolve(result);
+    }
+
+    it('treats a whole Bookshelf book, which ESummary gives no Title, as found', async () => {
+      // PMID 40825089 has no similar records. ESummary 2.0 names it in BookTitle
+      // beside an empty Title; the version 1 DocSum has an empty Title and no
+      // BookTitle at all, so the record reads as unknown there.
+      mockELink.mockResolvedValue({ eLinkResult: [{ LinkSet: {} }] });
+      mockESummary.mockImplementation(versionPairEsummary);
+      mockExtractBriefSummaries.mockImplementation(realExtractBriefSummaries);
+
+      const ctx = createMockContext({ errors: findRelatedTool.errors });
+      const input = findRelatedTool.input.parse({ pmid: '40825089', relationship: 'similar' });
+      const result = await findRelatedTool.handler(input, ctx);
+
+      expect(result.totalCount).toBe(0);
+      expect(getEnrichment(ctx).notice).toBeUndefined();
+    });
+
+    it('still reports a source ESummary answers with an error entry as missing', async () => {
+      // An unknown PMID's `<DocumentSummary>` carries only its uid and an error.
+      mockELink.mockResolvedValue({ eLinkResult: [{ LinkSet: {} }] });
+      mockESummary.mockResolvedValue({ eSummaryResult: {} });
+      mockExtractBriefSummaries.mockResolvedValue([{ pmid: '99999999999', authorNames: [] }]);
+
+      const ctx = createMockContext({ errors: findRelatedTool.errors });
+      const input = findRelatedTool.input.parse({ pmid: '99999999999', relationship: 'similar' });
+      await findRelatedTool.handler(input, ctx);
+
+      expect(getEnrichment(ctx).notice).toContain('not found in PubMed');
+    });
+
     it('falls back gracefully when the ESummary lookup fails (transport error)', async () => {
       mockELink.mockResolvedValue({ eLinkResult: [{ LinkSet: {} }] });
       mockESummary.mockRejectedValue(new Error('NCBI down'));
@@ -2107,6 +2253,18 @@ describe('findRelatedTool Bookshelf chapter dates (issue #199)', () => {
   });
 });
 
+/** Every content[] line of a row's item — its heading and indented lines — keyed by the row's PMID. */
+const itemLines = (result: Awaited<ReturnType<typeof runToolContract>>, pmid: string) => {
+  const lines = textBlocks(result.content as ContentBlock[])
+    .map((b) => b.text)
+    .join('\n')
+    .split('\n');
+  const start = lines.findIndex((line) => line.startsWith(`- **[PMID ${pmid}]`));
+  const rest = lines.slice(start + 1);
+  const end = rest.findIndex((line) => !line.startsWith('  '));
+  return [lines[start], ...(end === -1 ? rest : rest.slice(0, end))];
+};
+
 describe('findRelatedTool row identifiers and dates (issues #293, #297)', () => {
   beforeEach(() => {
     mockELink.mockReset();
@@ -2117,18 +2275,6 @@ describe('findRelatedTool row identifiers and dates (issues #293, #297)', () => 
     mockGetEpmcService.mockReturnValue(epmcService);
     mockGetOaService.mockReturnValue(oaService);
   });
-
-  /** Every content[] line of a row's item — its heading and indented lines — keyed by the row's PMID. */
-  const itemLines = (result: Awaited<ReturnType<typeof runToolContract>>, pmid: string) => {
-    const lines = textBlocks(result.content as ContentBlock[])
-      .map((b) => b.text)
-      .join('\n')
-      .split('\n');
-    const start = lines.findIndex((line) => line.startsWith(`- **[PMID ${pmid}]`));
-    const rest = lines.slice(start + 1);
-    const end = rest.findIndex((line) => !line.startsWith('  '));
-    return [lines[start], ...(end === -1 ? rest : rest.slice(0, end))];
-  };
 
   /** The identifier fields of each structured row. */
   const identifiersOf = (result: Awaited<ReturnType<typeof runToolContract>>) =>
@@ -2311,6 +2457,61 @@ describe('findRelatedTool row identifiers and dates (issues #293, #297)', () => 
       '  Diabetes Obes Metab, 2026-12, epub 2026-09-27',
     );
     expect(itemLines(result, '17212296').at(-1)).toBe('  Nurs Times, 2006-12-12/2007-01-01');
+  });
+});
+
+describe('findRelatedTool row languages (issue #309)', () => {
+  /** The PMIDs of the fixture, in NCBI's order: the unknown 99999999 among them. */
+  const PMIDS = ['20301295', '34463784', '43020712', '99999999', '25881375', '42233801'];
+
+  beforeEach(() => {
+    mockELink.mockReset();
+    mockESummary.mockReset();
+    mockExtractBriefSummaries.mockReset();
+    mockGetEpmcService.mockReturnValue(epmcService);
+    mockGetOaService.mockReturnValue(oaService);
+    mockELink.mockResolvedValue(eLinkResponse(PMIDS));
+    mockESummary.mockResolvedValue(parseESummaryXml(LANGUAGES_ESUMMARY_XML));
+    mockExtractBriefSummaries.mockImplementation(realExtractBriefSummaries);
+  });
+
+  const run = async () => {
+    const result = await runToolContract(findRelatedTool, { pmid: '12345' });
+    const { articles } = result.structuredContent as {
+      articles: { pmid: string; languages?: string[] }[];
+    };
+    return { result, articles };
+  };
+
+  it("carries every code of each row on both surfaces, in NCBI's order, above the meta line", async () => {
+    const { result, articles } = await run();
+
+    expect(articles.map((a) => a.pmid)).toEqual(PMIDS);
+    for (const [pmid, languages] of LANGUAGES_BY_PMID) {
+      expect(articles.find((a) => a.pmid === pmid)?.languages, pmid).toEqual(languages);
+      // The meta line stays the item's last line (#297); the language sits on its own just above it.
+      expect(itemLines(result, pmid).at(-2), pmid).toBe(`  Language: ${languages.join(', ')}`);
+    }
+    expect(itemLines(result, '25881375').slice(-2)).toEqual([
+      '  Language: ara, eng, fre, ger, por, spa',
+      '  Int J Orthod Milwaukee, 2015',
+    ]);
+    expect(itemLines(result, '42233801')).toEqual([
+      '- **[PMID 42233801](<https://pubmed.ncbi.nlm.nih.gov/42233801/>)** · DOI 10.1590/1413-81232026314.15792024',
+      '  Phenomenological approaches to qualitative research in the field of Nutrition in Brazil: a literature review.',
+      '  *Vasconcelos FAG*',
+      '  Language: por, eng, spa',
+      '  Cien Saude Colet, 2026-04, epub 2024-12-30',
+    ]);
+  });
+
+  it('gives a row ESummary did not describe no languages on either surface', async () => {
+    const { result, articles } = await run();
+
+    expect(articles.find((a) => a.pmid === '99999999')).not.toHaveProperty('languages');
+    expect(itemLines(result, '99999999')).toEqual([
+      '- **[PMID 99999999](<https://pubmed.ncbi.nlm.nih.gov/99999999/>)**',
+    ]);
   });
 });
 
@@ -2542,6 +2743,24 @@ describe('findRelatedTool content[] escaping of the row lines (issue #255)', () 
     expect(text).toContain('\n  \\> Lancet, Book \\[1\\](x) — Pub \\_A\\_, \\`chapter\\`, 1993');
   });
 
+  it('escapes the Language line, structuredContent unchanged (#309)', async () => {
+    mockExtractBriefSummaries.mockResolvedValue([
+      {
+        pmid: '111',
+        title: 'Row with languages',
+        source: 'J Res',
+        docType: 'citation',
+        pubDate: '2021',
+        languages: ['*eng*', '_fre_'],
+      },
+    ]);
+    const result = await runToolContract(findRelatedTool, { pmid: '34265844' });
+
+    const { articles } = result.structuredContent as { articles: { languages?: string[] }[] };
+    expect(articles[0]?.languages).toEqual(['*eng*', '_fre_']);
+    expect(contractText(result)).toContain('\n  Language: \\*eng\\*, \\_fre\\_\n');
+  });
+
   it('keeps a lone delimiter in each value visible across the row, authors italics included (#261)', async () => {
     mockExtractBriefSummaries.mockResolvedValue([
       {
@@ -2706,7 +2925,13 @@ describe('findRelatedTool page-size clamp (#232)', () => {
     });
 
     expect(mockEpmcCitations).toHaveBeenCalledTimes(1);
-    expect(mockEpmcCitations).toHaveBeenCalledWith('12345', 50, 1, expect.any(AbortSignal));
+    expect(mockEpmcCitations).toHaveBeenCalledWith(
+      '12345',
+      50,
+      1,
+      expect.any(AbortSignal),
+      aDeadline,
+    );
     expect(noticeOf(result)).toBe(
       `${CLAMPED} Pass \`offset: 50\` for the next page. NCBI eLink unavailable — related articles served by Europe PMC (citations index).`,
     );
@@ -2722,7 +2947,7 @@ describe('findRelatedTool page-size clamp (#232)', () => {
       offset: 10,
     });
 
-    expect(mockOaSimilar).toHaveBeenCalledWith('12345', 60, expect.any(AbortSignal));
+    expect(mockOaSimilar).toHaveBeenCalledWith('12345', 60, expect.any(AbortSignal), aDeadline);
     expect(pmidsOf(result)).toEqual(ranked(50, 1011));
     expect(noticeOf(result)).toBe(
       `${CLAMPED} Pass \`offset: 60\` for the next page. NCBI eLink unavailable — related articles served by OpenAlex (related_works — OpenAlex similarity, not PubMed’s neighbor algorithm).`,
@@ -2741,8 +2966,14 @@ describe('findRelatedTool page-size clamp (#232)', () => {
       maxResults: 60,
     });
 
-    expect(mockEpmcReferences).toHaveBeenCalledWith('12345', 50, 1, expect.any(AbortSignal));
-    expect(mockOaReferences).toHaveBeenCalledWith('12345', 50, expect.any(AbortSignal));
+    expect(mockEpmcReferences).toHaveBeenCalledWith(
+      '12345',
+      50,
+      1,
+      expect.any(AbortSignal),
+      aDeadline,
+    );
+    expect(mockOaReferences).toHaveBeenCalledWith('12345', 50, expect.any(AbortSignal), aDeadline);
     expect(noticeOf(result)).toBe(
       `${CLAMPED} No reference list available for PMID 12345 via NCBI, Europe PMC, or OpenAlex. Use pubmed_fetch_articles to inspect the article record, or try relationship: "similar" / "cited_by".`,
     );
@@ -2928,5 +3159,694 @@ describe('findRelatedTool caller cancellation', () => {
     mockESummary.mockImplementation(cancel);
 
     await expect(run(signal, {})).rejects.toBe(reason);
+  });
+});
+
+/**
+ * One deadline for the whole call (#310). The handler starts it before any upstream
+ * call; a step that another step can still follow takes half the time left as it
+ * starts, and the last takes what remains. A step with no time left is never asked and
+ * is reported not reached, apart from every failure label. Faked `Date` pins the
+ * deadlines handed down; faked timers stand in for upstreams that never answer, each
+ * rejecting with its provider's deadline reason as its deadline expires, as the
+ * services do.
+ */
+describe('findRelatedTool call deadline (issue #310)', () => {
+  const STARTED_AT = Date.UTC(2026, 0, 1);
+  /** The call's own deadline at the default config. */
+  const CALL = { expiresAt: STARTED_AT + 50_000, totalMs: 50_000 };
+  const NOT_REACHED_ONE = "this call's deadline ran out before it was asked.";
+  const NOT_REACHED_BOTH = "this call's deadline ran out before they were asked.";
+
+  beforeEach(() => {
+    mockELink.mockReset();
+    mockESummary.mockReset();
+    mockESummary.mockResolvedValue({ eSummaryResult: {} });
+    mockExtractBriefSummaries.mockReset();
+    mockExtractBriefSummaries.mockResolvedValue([]);
+    mockEpmcCitations.mockReset();
+    mockEpmcReferences.mockReset();
+    mockOaSimilar.mockReset();
+    mockOaCitedBy.mockReset();
+    mockOaReferences.mockReset();
+    mockGetEpmcService.mockReturnValue(epmcService);
+    mockGetOaService.mockReturnValue(oaService);
+  });
+
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  /** Moves the faked clock on, as an upstream call that took `ms` would. */
+  const elapse = (ms: number) => vi.setSystemTime(Date.now() + ms);
+  /** Runs the call's deadline out, as a step that overran its share would. */
+  const spendCallDeadline = () => vi.setSystemTime(CALL.expiresAt);
+  const failure = (code: JsonRpcErrorCode, message: string, reason: string) =>
+    new McpError(code, message, { reason });
+  const ncbiDown = () =>
+    failure(JsonRpcErrorCode.ServiceUnavailable, 'NCBI down', 'ncbi_unreachable');
+
+  /** An upstream that never answers: it rejects with `reason` as `deadline` expires. */
+  const hangUntil = (deadline: CallDeadline, reason: string) =>
+    new Promise<never>((_, reject) => {
+      setTimeout(
+        () =>
+          reject(
+            new McpError(JsonRpcErrorCode.Timeout, `deadline (${deadline.totalMs}ms) exceeded`, {
+              reason,
+              deadlineMs: deadline.totalMs,
+            }),
+          ),
+        deadline.expiresAt - Date.now(),
+      );
+    });
+  const ncbiHangs = (_params: unknown, options: { deadline: CallDeadline }) =>
+    hangUntil(options.deadline, 'ncbi_deadline_exceeded');
+  const epmcHangs = (...args: [string, number, number, AbortSignal, CallDeadline]) =>
+    hangUntil(args[4], 'europepmc_deadline_exceeded');
+  const openAlexHangs = (...args: [string, number, AbortSignal, CallDeadline]) =>
+    hangUntil(args[3], 'openalex_deadline_exceeded');
+
+  describe('the deadline each step is handed', () => {
+    beforeEach(() => {
+      vi.useFakeTimers({ toFake: ['Date'] });
+      vi.setSystemTime(STARTED_AT);
+    });
+
+    it('hands ELink and each fallback half the time left as it starts, and the row ESummary the rest, beside ctx.signal', async () => {
+      mockELink.mockImplementation(async () => {
+        elapse(10_000);
+        throw ncbiDown();
+      });
+      mockEpmcCitations.mockImplementation(async () => {
+        elapse(4_000);
+        throw failure(JsonRpcErrorCode.ServiceUnavailable, 'EPMC down', 'europepmc_unreachable');
+      });
+      mockOaCitedBy.mockImplementation(async () => {
+        elapse(1_000);
+        return { pmids: ['777'], totalCount: 1 };
+      });
+
+      const ctx = createMockContext({ errors: findRelatedTool.errors });
+      await findRelatedTool.handler(
+        findRelatedTool.input.parse({ pmid: '12345', relationship: 'cited_by' }),
+        ctx,
+      );
+
+      // ELink starts with 50 s left and a later step: half.
+      expect(mockELink.mock.calls[0]?.[1]).toEqual({
+        signal: ctx.signal,
+        deadline: { expiresAt: STARTED_AT + 25_000, totalMs: 25_000 },
+      });
+      // Europe PMC starts at 10 s with 40 s left, OpenAlex at 14 s with 36 s left:
+      // the row ESummary can still follow either.
+      expect(mockEpmcCitations.mock.calls[0]?.slice(3)).toEqual([
+        ctx.signal,
+        { expiresAt: STARTED_AT + 30_000, totalMs: 20_000 },
+      ]);
+      expect(mockOaCitedBy.mock.calls[0]?.slice(2)).toEqual([
+        ctx.signal,
+        { expiresAt: STARTED_AT + 32_000, totalMs: 18_000 },
+      ]);
+      // The row ESummary is the last step: the call's own deadline.
+      expect(mockESummary.mock.calls[0]?.[1]).toEqual({ signal: ctx.signal, deadline: CALL });
+      for (const signal of [
+        mockELink.mock.calls[0]?.[1].signal,
+        mockEpmcCitations.mock.calls[0]?.[3],
+        mockOaCitedBy.mock.calls[0]?.[2],
+        mockESummary.mock.calls[0]?.[1].signal,
+      ]) {
+        expect(signal).toBe(ctx.signal);
+      }
+    });
+
+    it('shares the deadline down the references coverage path', async () => {
+      mockELink.mockImplementation(async () => {
+        elapse(2_000);
+        return eLinkResponse([], 'pubmed_pubmed_refs');
+      });
+      mockESummary.mockImplementation(async () => {
+        elapse(2_000);
+        return { eSummaryResult: {} };
+      });
+      mockExtractBriefSummaries
+        .mockResolvedValueOnce([{ pmid: '12345', title: 'Source' }])
+        .mockResolvedValue([]);
+      mockEpmcReferences.mockImplementation(async () => {
+        elapse(2_000);
+        return { pmids: [], hitCount: 0, droppedNoPmid: 0 };
+      });
+      mockOaReferences.mockImplementation(async () => {
+        elapse(2_000);
+        return { pmids: ['888'], totalCount: 1 };
+      });
+
+      const ctx = createMockContext({ errors: findRelatedTool.errors });
+      const result = await findRelatedTool.handler(
+        findRelatedTool.input.parse({ pmid: '12345', relationship: 'references' }),
+        ctx,
+      );
+
+      expect(result.articles.map((a) => a.pmid)).toEqual(['888']);
+      expect(mockELink.mock.calls[0]?.[1].deadline).toEqual({
+        expiresAt: STARTED_AT + 25_000,
+        totalMs: 25_000,
+      });
+      // The source ESummary at 2 s, with a coverage check after it.
+      expect(mockESummary.mock.calls[0]?.[1].deadline).toEqual({
+        expiresAt: STARTED_AT + 26_000,
+        totalMs: 24_000,
+      });
+      expect(mockEpmcReferences.mock.calls[0]?.[4]).toEqual({
+        expiresAt: STARTED_AT + 27_000,
+        totalMs: 23_000,
+      });
+      expect(mockOaReferences.mock.calls[0]?.[3]).toEqual({
+        expiresAt: STARTED_AT + 28_000,
+        totalMs: 22_000,
+      });
+      expect(mockESummary.mock.calls[1]?.[1].deadline).toEqual(CALL);
+    });
+
+    it.each(['similar', 'cited_by'] as const)(
+      'hands the source ESummary of an empty %s set the call deadline itself: no coverage check follows that relationship, though both coverage providers are configured',
+      async (relationship) => {
+        mockELink.mockImplementation(async () => {
+          elapse(2_000);
+          return eLinkResponse([]);
+        });
+        mockExtractBriefSummaries.mockResolvedValue([{ pmid: '12345', title: 'Source' }]);
+
+        const ctx = createMockContext({ errors: findRelatedTool.errors });
+        await findRelatedTool.handler(
+          findRelatedTool.input.parse({ pmid: '12345', relationship }),
+          ctx,
+        );
+
+        expect(mockESummary).toHaveBeenCalledTimes(1);
+        expect(mockESummary.mock.calls[0]?.[1]).toEqual({ signal: ctx.signal, deadline: CALL });
+      },
+    );
+
+    /** The source ESummary's deadline 2 s in with a coverage check after it: half the 48 s left. */
+    const SOURCE_SHARE = { expiresAt: STARTED_AT + 26_000, totalMs: 24_000 };
+
+    it.each([
+      ['the call deadline itself', 'neither coverage provider is configured', false, false, CALL],
+      ['half the time left', 'only Europe PMC is configured', true, false, SOURCE_SHARE],
+      ['half the time left', 'only OpenAlex is configured', false, true, SOURCE_SHARE],
+    ] as const)(
+      'hands the source ESummary of an empty references set %s when %s',
+      async (_handed, _configured, epmcConfigured, openAlexConfigured, expected) => {
+        if (!epmcConfigured) mockGetEpmcService.mockReturnValue(undefined);
+        if (!openAlexConfigured) mockGetOaService.mockReturnValue(undefined);
+        mockELink.mockImplementation(async () => {
+          elapse(2_000);
+          return eLinkResponse([], 'pubmed_pubmed_refs');
+        });
+        mockExtractBriefSummaries.mockResolvedValue([{ pmid: '12345', title: 'Source' }]);
+        mockEpmcReferences.mockResolvedValue({ pmids: [], hitCount: 0, droppedNoPmid: 0 });
+        mockOaReferences.mockResolvedValue({
+          pmids: [],
+          totalCount: 0,
+          droppedNoPmid: 0,
+          reachCapped: false,
+        });
+
+        const ctx = createMockContext({ errors: findRelatedTool.errors });
+        await findRelatedTool.handler(
+          findRelatedTool.input.parse({ pmid: '12345', relationship: 'references' }),
+          ctx,
+        );
+
+        expect(mockESummary).toHaveBeenCalledTimes(1);
+        expect(mockESummary.mock.calls[0]?.[1]).toEqual({ signal: ctx.signal, deadline: expected });
+      },
+    );
+
+    it.each([
+      ['cited_by', mockEpmcCitations],
+      ['references', mockEpmcReferences],
+    ] as const)(
+      'hands every page of one Europe PMC %s step the one deadline it started with',
+      async (relationship, pages) => {
+        mockELink.mockRejectedValue(ncbiDown());
+        pages
+          .mockImplementationOnce(async () => {
+            elapse(1_000);
+            return {
+              pmids: Array.from({ length: 80 }, (_, i) => String(1000 + i)),
+              hitCount: 2055,
+              droppedNoPmid: 5,
+            };
+          })
+          .mockResolvedValueOnce({
+            pmids: Array.from({ length: 84 }, (_, i) => String(2000 + i)),
+            hitCount: 2055,
+            droppedNoPmid: 1,
+          });
+
+        await findRelatedTool.handler(
+          findRelatedTool.input.parse({ pmid: '12345', relationship, maxResults: 5, offset: 80 }),
+          createMockContext({ errors: findRelatedTool.errors }),
+        );
+
+        expect(pages).toHaveBeenCalledTimes(2);
+        expect(pages.mock.calls[0]?.[4]).toEqual({
+          expiresAt: STARTED_AT + 25_000,
+          totalMs: 25_000,
+        });
+        expect(pages.mock.calls[1]?.[4]).toBe(pages.mock.calls[0]?.[4]);
+      },
+    );
+  });
+
+  describe('every upstream hung', () => {
+    beforeEach(() => {
+      vi.useFakeTimers({ now: STARTED_AT });
+    });
+
+    /** Runs the handler to settlement on the faked clock, and when it settled. */
+    async function settle(args: Record<string, unknown>) {
+      const ctx = createMockContext({ errors: findRelatedTool.errors });
+      let settledAt = Number.NaN;
+      let result: Awaited<ReturnType<typeof findRelatedTool.handler>> | undefined;
+      let error: unknown;
+      const settled = Promise.resolve(
+        findRelatedTool.handler(findRelatedTool.input.parse({ pmid: '12345', ...args }), ctx),
+      )
+        .then(
+          (value) => {
+            result = value;
+          },
+          (thrown: unknown) => {
+            error = thrown;
+          },
+        )
+        .finally(() => {
+          settledAt = Date.now() - STARTED_AT;
+        });
+      await vi.runAllTimersAsync();
+      await settled;
+      return { ctx, error, result, settledAt };
+    }
+
+    const hangEverything = () => {
+      mockELink.mockImplementation(ncbiHangs);
+      mockESummary.mockImplementation(ncbiHangs);
+      mockEpmcCitations.mockImplementation(epmcHangs);
+      mockEpmcReferences.mockImplementation(epmcHangs);
+      mockOaSimilar.mockImplementation(openAlexHangs);
+      mockOaCitedBy.mockImplementation(openAlexHangs);
+      mockOaReferences.mockImplementation(openAlexHangs);
+    };
+
+    const cuts = {
+      similar: [
+        ['ncbi', 'ncbi_deadline_exceeded', 25_000],
+        ['openalex', 'openalex_deadline_exceeded', 12_500],
+      ],
+      chain: [
+        ['ncbi', 'ncbi_deadline_exceeded', 25_000],
+        ['europepmc', 'europepmc_deadline_exceeded', 12_500],
+        ['openalex', 'openalex_deadline_exceeded', 6_250],
+      ],
+    } as const;
+
+    it.each([
+      ['similar', 37_500, cuts.similar],
+      ['cited_by', 43_750, cuts.chain],
+      ['references', 43_750, cuts.chain],
+    ] as const)(
+      'settles an all-hung %s call at %d ms with all_providers_failed, each provider cut by its share',
+      async (relationship, at, expected) => {
+        hangEverything();
+
+        const { error, settledAt } = await settle({ relationship });
+
+        expect(settledAt).toBe(at);
+        expect(error).toBeInstanceOf(McpError);
+        const data = failureData(error as McpError);
+        expect(data.reason).toBe('all_providers_failed');
+        expect(data.attempted).toEqual(
+          expected.map(([provider, reason, ms]) => ({
+            provider,
+            reason,
+            message: `deadline (${ms}ms) exceeded`,
+          })),
+        );
+        expect(mockESummary).not.toHaveBeenCalled();
+      },
+    );
+
+    it('serves Europe PMC’s rows when NCBI hangs, and degrades the hung row ESummary at the call deadline', async () => {
+      hangEverything();
+      mockEpmcCitations.mockResolvedValue({ pmids: ['333', '444'], hitCount: 2, droppedNoPmid: 0 });
+
+      const { ctx, result, settledAt } = await settle({ relationship: 'cited_by' });
+
+      expect(settledAt).toBe(50_000);
+      expect(getEnrichment(ctx).source).toBe('europepmc');
+      expect(result?.articles).toEqual([
+        { pmid: '333', pubmedUrl: 'https://pubmed.ncbi.nlm.nih.gov/333/' },
+        { pmid: '444', pubmedUrl: 'https://pubmed.ncbi.nlm.nih.gov/444/' },
+      ]);
+      expect(String(getEnrichment(ctx).notice)).toContain('NCBI eSummary did not respond');
+      expect(mockOaCitedBy).not.toHaveBeenCalled();
+    });
+
+    it('reports both reference-coverage providers cut by their shares, still retryable', async () => {
+      hangEverything();
+      mockELink.mockResolvedValue(eLinkResponse([], 'pubmed_pubmed_refs'));
+      mockESummary.mockResolvedValue({ eSummaryResult: {} });
+      mockExtractBriefSummaries.mockResolvedValue([{ pmid: '12345', title: 'Source' }]);
+
+      const { ctx, result, settledAt } = await settle({ relationship: 'references' });
+
+      expect(settledAt).toBe(37_500);
+      expect(result?.articles).toEqual([]);
+      expect(getEnrichment(ctx).coverageFailures).toEqual([
+        { provider: 'europepmc', reason: 'europepmc_deadline_exceeded', retryable: true },
+        { provider: 'openalex', reason: 'openalex_deadline_exceeded', retryable: true },
+      ]);
+    });
+  });
+
+  describe('a step with no time left', () => {
+    beforeEach(() => {
+      vi.useFakeTimers({ toFake: ['Date'] });
+      vi.setSystemTime(STARTED_AT);
+    });
+
+    it('reports the fallbacks the deadline never reached as not_reached on both surfaces, and never asks them', async () => {
+      mockELink.mockImplementation(async () => {
+        spendCallDeadline();
+        throw failure(
+          JsonRpcErrorCode.Timeout,
+          'NCBI request deadline (25000ms) exceeded',
+          'ncbi_deadline_exceeded',
+        );
+      });
+
+      const result = await runToolContract(findRelatedTool, {
+        pmid: '12345',
+        relationship: 'cited_by',
+      });
+
+      expect(result.isError).toBe(true);
+      const data = (result.structuredContent as { error: { data: AllProvidersFailedData } }).error
+        .data;
+      expect(data.attempted).toEqual([
+        {
+          provider: 'ncbi',
+          reason: 'ncbi_deadline_exceeded',
+          message: 'NCBI request deadline (25000ms) exceeded',
+        },
+        {
+          provider: 'europepmc',
+          reason: 'not_reached',
+          message: `Europe PMC was not reached: ${NOT_REACHED_ONE}`,
+        },
+        {
+          provider: 'openalex',
+          reason: 'not_reached',
+          message: `OpenAlex was not reached: ${NOT_REACHED_ONE}`,
+        },
+      ]);
+      const hint = `Providers attempted: NCBI (ncbi_deadline_exceeded). Retry the transient failures after a brief delay. Europe PMC and OpenAlex were not reached: ${NOT_REACHED_BOTH}`;
+      expect(data.recovery?.hint).toBe(hint);
+      const text = contractText(result);
+      expect(text).toContain(`Recovery: ${hint}`);
+      expect(text).not.toContain('(not_reached)');
+      expect(mockEpmcCitations).not.toHaveBeenCalled();
+      expect(mockOaCitedBy).not.toHaveBeenCalled();
+    });
+
+    it('names a provider its share cut beside the one the deadline never reached', async () => {
+      mockELink.mockRejectedValue(ncbiDown());
+      mockEpmcCitations.mockImplementation(async () => {
+        spendCallDeadline();
+        throw failure(
+          JsonRpcErrorCode.Timeout,
+          'Europe PMC request deadline (25000ms) exceeded',
+          'europepmc_deadline_exceeded',
+        );
+      });
+
+      const error = await rejection(
+        findRelatedTool.input.parse({ pmid: '12345', relationship: 'cited_by' }),
+        createMockContext({ errors: findRelatedTool.errors }),
+      );
+
+      expect(failureData(error).attempted.map((a) => a.reason)).toEqual([
+        'ncbi_unreachable',
+        'europepmc_deadline_exceeded',
+        'not_reached',
+      ]);
+      expect(failureData(error).recovery?.hint).toBe(
+        `Providers attempted: NCBI (ncbi_unreachable), Europe PMC (europepmc_deadline_exceeded). Retry the transient failures after a brief delay. OpenAlex was not reached: ${NOT_REACHED_ONE}`,
+      );
+      expect(mockOaCitedBy).not.toHaveBeenCalled();
+    });
+
+    it('reports reference-coverage providers the deadline never reached as not_reached on both surfaces, and never asks them', async () => {
+      mockELink.mockResolvedValue(eLinkResponse([], 'pubmed_pubmed_refs'));
+      mockESummary.mockImplementation(async () => {
+        spendCallDeadline();
+        return { eSummaryResult: {} };
+      });
+      mockExtractBriefSummaries.mockResolvedValue([{ pmid: '12345', title: 'Source' }]);
+
+      const result = await runToolContract(findRelatedTool, {
+        pmid: '12345',
+        relationship: 'references',
+      });
+
+      const structured = result.structuredContent as {
+        articles: unknown[];
+        coverageFailures?: unknown[];
+        notice?: string;
+      };
+      expect(structured.articles).toEqual([]);
+      expect(structured.coverageFailures).toEqual([
+        { provider: 'europepmc', reason: 'not_reached', retryable: true },
+        { provider: 'openalex', reason: 'not_reached', retryable: true },
+      ]);
+      const notice = `No reference list available for PMID 12345 via NCBI. Use pubmed_fetch_articles to inspect the article record, or try relationship: "similar" / "cited_by". Reference coverage could not be fully checked — Europe PMC and OpenAlex were not reached: ${NOT_REACHED_BOTH}`;
+      expect(structured.notice).toBe(notice);
+      const text = contractText(result);
+      expect(text).toContain(`> ${notice}`);
+      expect(text).toContain(
+        '**Coverage not checked:** Europe PMC (not_reached), OpenAlex (not_reached)',
+      );
+      expect(mockEpmcReferences).not.toHaveBeenCalled();
+      expect(mockOaReferences).not.toHaveBeenCalled();
+    });
+
+    it('separates a coverage provider its share cut from one the deadline never reached', async () => {
+      mockELink.mockResolvedValue(eLinkResponse([], 'pubmed_pubmed_refs'));
+      mockExtractBriefSummaries.mockResolvedValue([{ pmid: '12345', title: 'Source' }]);
+      mockEpmcReferences.mockImplementation(async () => {
+        spendCallDeadline();
+        throw failure(
+          JsonRpcErrorCode.Timeout,
+          'Europe PMC request deadline (25000ms) exceeded',
+          'europepmc_deadline_exceeded',
+        );
+      });
+
+      const ctx = createMockContext({ errors: findRelatedTool.errors });
+      await findRelatedTool.handler(
+        findRelatedTool.input.parse({ pmid: '12345', relationship: 'references' }),
+        ctx,
+      );
+
+      expect(getEnrichment(ctx).coverageFailures).toEqual([
+        { provider: 'europepmc', reason: 'europepmc_deadline_exceeded', retryable: true },
+        { provider: 'openalex', reason: 'not_reached', retryable: true },
+      ]);
+      expect(String(getEnrichment(ctx).notice)).toContain(
+        `Reference coverage could not be fully checked — Europe PMC (europepmc_deadline_exceeded) did not answer. Retry after a brief delay to complete the coverage check. OpenAlex was not reached: ${NOT_REACHED_ONE}`,
+      );
+      expect(mockOaReferences).not.toHaveBeenCalled();
+    });
+
+    /** Turns one fallback off by configuration: Europe PMC disabled, or OpenAlex unset. */
+    const turnOff = {
+      'Europe PMC': () => mockGetEpmcService.mockReturnValue(undefined),
+      OpenAlex: () => mockGetOaService.mockReturnValue(undefined),
+    } as const;
+
+    it.each([
+      [
+        'Europe PMC',
+        [
+          {
+            provider: 'europepmc',
+            reason: 'provider_disabled',
+            message: 'Europe PMC is turned off by server configuration.',
+          },
+          {
+            provider: 'openalex',
+            reason: 'not_reached',
+            message: `OpenAlex was not reached: ${NOT_REACHED_ONE}`,
+          },
+        ],
+        `Providers attempted: NCBI (ncbi_deadline_exceeded), Europe PMC (provider_disabled). Retry the transient failures after a brief delay. Europe PMC is turned off by server configuration and will not recover on retry. OpenAlex was not reached: ${NOT_REACHED_ONE}`,
+      ],
+      [
+        'OpenAlex',
+        [
+          {
+            provider: 'europepmc',
+            reason: 'not_reached',
+            message: `Europe PMC was not reached: ${NOT_REACHED_ONE}`,
+          },
+          {
+            provider: 'openalex',
+            reason: 'provider_disabled',
+            message: 'OpenAlex is not configured on this server.',
+          },
+        ],
+        `Providers attempted: NCBI (ncbi_deadline_exceeded), OpenAlex (provider_disabled). Retry the transient failures after a brief delay. OpenAlex is turned off by server configuration and will not recover on retry. Europe PMC was not reached: ${NOT_REACHED_ONE}`,
+      ],
+    ] as const)(
+      'reports a fallback %s that configuration turned off as provider_disabled on both surfaces, never not_reached, when the deadline ran out before it',
+      async (disabled, fallbacks, hint) => {
+        turnOff[disabled]();
+        mockELink.mockImplementation(async () => {
+          spendCallDeadline();
+          throw failure(
+            JsonRpcErrorCode.Timeout,
+            'NCBI request deadline (25000ms) exceeded',
+            'ncbi_deadline_exceeded',
+          );
+        });
+
+        const result = await runToolContract(findRelatedTool, {
+          pmid: '12345',
+          relationship: 'cited_by',
+        });
+
+        expect(result.isError).toBe(true);
+        const data = (result.structuredContent as { error: { data: AllProvidersFailedData } }).error
+          .data;
+        expect(data.attempted).toEqual([
+          {
+            provider: 'ncbi',
+            reason: 'ncbi_deadline_exceeded',
+            message: 'NCBI request deadline (25000ms) exceeded',
+          },
+          ...fallbacks,
+        ]);
+        expect(data.recovery?.hint).toBe(hint);
+        expect(contractText(result)).toContain(`Recovery: ${hint}`);
+        expect(mockEpmcCitations).not.toHaveBeenCalled();
+        expect(mockOaCitedBy).not.toHaveBeenCalled();
+      },
+    );
+
+    it.each([
+      [
+        'Europe PMC',
+        [
+          { provider: 'europepmc', reason: 'provider_disabled', retryable: false },
+          { provider: 'openalex', reason: 'not_reached', retryable: true },
+        ],
+        `Europe PMC (provider_disabled) did not answer. Europe PMC is turned off by server configuration and will not recover on retry. OpenAlex was not reached: ${NOT_REACHED_ONE}`,
+        '**Coverage not checked:** Europe PMC (provider_disabled), OpenAlex (not_reached)',
+      ],
+      [
+        'OpenAlex',
+        [
+          { provider: 'europepmc', reason: 'not_reached', retryable: true },
+          { provider: 'openalex', reason: 'provider_disabled', retryable: false },
+        ],
+        `OpenAlex (provider_disabled) did not answer. OpenAlex is turned off by server configuration and will not recover on retry. Europe PMC was not reached: ${NOT_REACHED_ONE}`,
+        '**Coverage not checked:** Europe PMC (not_reached), OpenAlex (provider_disabled)',
+      ],
+    ] as const)(
+      'reports a reference-coverage %s that configuration turned off as provider_disabled and not retryable on both surfaces, never not_reached, when the deadline ran out before it',
+      async (disabled, coverageFailures, outcomes, trailer) => {
+        turnOff[disabled]();
+        mockELink.mockResolvedValue(eLinkResponse([], 'pubmed_pubmed_refs'));
+        mockESummary.mockImplementation(async () => {
+          spendCallDeadline();
+          return { eSummaryResult: {} };
+        });
+        mockExtractBriefSummaries.mockResolvedValue([{ pmid: '12345', title: 'Source' }]);
+
+        const result = await runToolContract(findRelatedTool, {
+          pmid: '12345',
+          relationship: 'references',
+        });
+
+        const structured = result.structuredContent as {
+          coverageFailures?: unknown[];
+          notice?: string;
+        };
+        expect(structured.coverageFailures).toEqual(coverageFailures);
+        const notice = `No reference list available for PMID 12345 via NCBI. Use pubmed_fetch_articles to inspect the article record, or try relationship: "similar" / "cited_by". Reference coverage could not be fully checked — ${outcomes}`;
+        expect(structured.notice).toBe(notice);
+        const text = contractText(result);
+        expect(text).toContain(`> ${notice}`);
+        expect(text).toContain(trailer);
+        expect(mockEpmcReferences).not.toHaveBeenCalled();
+        expect(mockOaReferences).not.toHaveBeenCalled();
+      },
+    );
+
+    it('returns bare rows with a notice of their own when no time is left for the row ESummary, and never asks it', async () => {
+      mockELink.mockImplementation(async () => {
+        spendCallDeadline();
+        return eLinkResponse(['101', '102']);
+      });
+
+      const result = await runToolContract(findRelatedTool, { pmid: '12345' });
+
+      const structured = result.structuredContent as { articles: unknown[]; notice?: string };
+      expect(structured.articles).toEqual([
+        { pmid: '101', pubmedUrl: 'https://pubmed.ncbi.nlm.nih.gov/101/' },
+        { pmid: '102', pubmedUrl: 'https://pubmed.ncbi.nlm.nih.gov/102/' },
+      ]);
+      const notice =
+        "Article metadata was not fetched — this call's deadline ran out before NCBI eSummary was asked; returning related PMIDs only. Use pubmed_fetch_articles for full metadata.";
+      expect(structured.notice).toBe(notice);
+      expect(contractText(result)).toContain(`> ${notice}`);
+      expect(mockESummary).not.toHaveBeenCalled();
+    });
+
+    /** A caller abort that lands as the deadline runs out, in the step before `next`. */
+    it.each([
+      [
+        'the OpenAlex fallback',
+        () => {
+          mockELink.mockRejectedValue(ncbiDown());
+          return mockEpmcCitations;
+        },
+        { pmids: [], hitCount: 0, droppedNoPmid: 0 },
+      ],
+      ['the row ESummary', () => mockELink, eLinkResponse(['101'])],
+    ] as const)(
+      'rethrows a caller abort, never a not-reached outcome, when no time is left for %s',
+      async (_next, stepBefore, answer) => {
+        const controller = new AbortController();
+        const reason = new DOMException('The caller cancelled the request.', 'AbortError');
+        stepBefore().mockImplementation(async () => {
+          spendCallDeadline();
+          controller.abort(reason);
+          return answer;
+        });
+
+        await expect(
+          findRelatedTool.handler(
+            findRelatedTool.input.parse({ pmid: '12345', relationship: 'cited_by' }),
+            createMockContext({ errors: findRelatedTool.errors, signal: controller.signal }),
+          ),
+        ).rejects.toBe(reason);
+        expect(mockOaCitedBy).not.toHaveBeenCalled();
+        expect(mockESummary).not.toHaveBeenCalled();
+      },
+    );
   });
 });

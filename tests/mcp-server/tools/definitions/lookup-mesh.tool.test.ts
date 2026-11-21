@@ -6,7 +6,7 @@
 import { type ContentBlock, z } from '@cyanheads/mcp-ts-core';
 import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
 import { createMockContext, getEnrichment, runToolContract } from '@cyanheads/mcp-ts-core/testing';
-import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { NcbiResponseHandler } from '@/services/ncbi/response-handler.js';
 import type { ESummaryResponseContainer, ESummaryResult } from '@/services/ncbi/types.js';
@@ -2125,5 +2125,47 @@ describe('lookupMeshTool caller cancellation', () => {
     mockESummary.mockImplementation(cancel);
 
     await expect(run(signal)).rejects.toBe(reason);
+  });
+});
+
+describe('lookupMeshTool call deadline (issue #310)', () => {
+  const STARTED_AT = Date.UTC(2026, 0, 1);
+
+  beforeEach(() => {
+    mockESearch.mockReset();
+    mockESummary.mockReset();
+    vi.useFakeTimers({ toFake: ['Date'] });
+    vi.setSystemTime(STARTED_AT);
+  });
+
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  it('passes both ESearches and the ESummary after them one deadline, started with the call, beside ctx.signal', async () => {
+    mockESearch.mockImplementation(async (params: { term: string }) =>
+      params.term.endsWith('[MH]')
+        ? { idList: ['68009369'], count: 1 }
+        : { idList: ['68009369', '68001234'], count: 2 },
+    );
+    mockESummary.mockImplementation(async (params: { id: string }) =>
+      summaryFor(params.id.split(',')),
+    );
+    const ctx = createMockContext({ errors: lookupMeshTool.errors });
+    await lookupMeshTool.handler(lookupMeshTool.input.parse({ query: 'Neoplasms' }), ctx);
+
+    expect(mockESearch).toHaveBeenCalledTimes(2);
+    expect(mockESummary).toHaveBeenCalledTimes(1);
+    const [first, ...rest] = [...mockESearch.mock.calls, ...mockESummary.mock.calls].map(
+      (call) => call[1],
+    );
+    expect(first).toEqual({
+      signal: ctx.signal,
+      deadline: { expiresAt: STARTED_AT + 50_000, totalMs: 50_000 },
+    });
+    for (const options of [first, ...rest]) {
+      expect(options.signal).toBe(ctx.signal);
+      expect(options.deadline).toBe(first.deadline);
+    }
   });
 });

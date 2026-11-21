@@ -5,7 +5,7 @@
 
 import type { ContentBlock } from '@cyanheads/mcp-ts-core';
 import { createMockContext, getEnrichment, runToolContract } from '@cyanheads/mcp-ts-core/testing';
-import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { toJSONSchema } from 'zod/v4/core';
 
 import {
@@ -1165,5 +1165,38 @@ describe('formatCitationsTool record text holding a line break (issue #233)', ()
     expect(text).toBe(
       '# PubMed Citations\n**Formatted:** 1/1\n\n## PMID 1\n**\\[Effect of \\*drug\\* on risk\\].**\n\n### APA\nA.',
     );
+  });
+});
+
+describe('formatCitationsTool call deadline (issue #310)', () => {
+  const STARTED_AT = Date.UTC(2026, 0, 1);
+
+  beforeEach(() => {
+    mockEFetch.mockReset();
+    vi.useFakeTimers({ toFake: ['Date'] });
+    vi.setSystemTime(STARTED_AT);
+  });
+
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  it('passes EFetch the deadline the call starts, beside ctx.signal', async () => {
+    mockEFetch.mockResolvedValue({
+      PubmedArticleSet: parseArticleSetXml(articleSetXml(JOURNAL_ARTICLE_XML)),
+    });
+    const ctx = createMockContext({ errors: formatCitationsTool.errors });
+    const input = formatCitationsTool.input.parse({ pmids: ['12345'] });
+    await formatCitationsTool.handler(input, ctx);
+
+    expect(mockEFetch).toHaveBeenCalledTimes(1);
+    const options = mockEFetch.mock.lastCall?.[1];
+    expect(options).toEqual({
+      retmode: 'xml',
+      usePost: false,
+      signal: ctx.signal,
+      deadline: { expiresAt: STARTED_AT + 50_000, totalMs: 50_000 },
+    });
+    expect(options.signal).toBe(ctx.signal);
   });
 });

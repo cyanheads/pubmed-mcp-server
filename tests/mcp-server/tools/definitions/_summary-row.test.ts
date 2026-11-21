@@ -14,6 +14,10 @@ import { extractBriefSummaries } from '@/services/ncbi/parsing/esummary-parser.j
 import type { ParsedBriefSummary } from '@/services/ncbi/types.js';
 
 import { parseESummaryXml } from '../../../services/ncbi/parsing/_book-fixtures.js';
+import {
+  LANGUAGES_BY_PMID,
+  LANGUAGES_ESUMMARY_XML,
+} from '../../../services/ncbi/parsing/_language-fixtures.js';
 
 /**
  * ESummary version 2.0 for three rows of PMID 31535829's `cited_by` set, fetched
@@ -35,6 +39,7 @@ describe('summaryRow', () => {
         authorNames: ['Salim H', 'Qureshi S', 'Gulsin GS', 'Khan HR'],
         source: 'Diabetes Obes Metab',
         docType: 'citation',
+        languages: ['por', 'eng', 'spa'],
         pubDate: '2026-12',
         epubDate: '2026-09-27',
         doi: '10.1111/dom.71375',
@@ -46,6 +51,7 @@ describe('summaryRow', () => {
         authors: 'Salim H, Qureshi S, Gulsin GS, et al.',
         source: 'Diabetes Obes Metab',
         docType: 'citation',
+        languages: ['por', 'eng', 'spa'],
         pubDate: '2026-12',
         epubDate: '2026-09-27',
         doi: '10.1111/dom.71375',
@@ -193,5 +199,25 @@ describe('summaryRow over a real ESummary response', () => {
         pubmedUrl: 'https://pubmed.ncbi.nlm.nih.gov/42802242/',
       },
     ]);
+  });
+
+  it("carries every record's language codes in NCBI's order, and none on an unknown PMID's row (#309)", async () => {
+    const rows = (await extractBriefSummaries(parseESummaryXml(LANGUAGES_ESUMMARY_XML))).map(
+      summaryRow,
+    );
+
+    expect(rows.map((row) => row.pmid)).toEqual([
+      '20301295',
+      '34463784',
+      '43020712',
+      '99999999',
+      '25881375',
+      '42233801',
+    ]);
+    for (const [pmid, languages] of LANGUAGES_BY_PMID) {
+      expect(rows.find((row) => row.pmid === pmid)?.languages, pmid).toEqual(languages);
+    }
+    expect(rows.find((row) => row.pmid === '99999999')).not.toHaveProperty('languages');
+    for (const row of rows) expect(summaryRowSchema.parse(row)).toStrictEqual(row);
   });
 });

@@ -5,10 +5,11 @@
 
 import { readFileSync } from 'node:fs';
 import { type ContentBlock, z } from '@cyanheads/mcp-ts-core';
-import { JsonRpcErrorCode, timeout } from '@cyanheads/mcp-ts-core/errors';
+import { JsonRpcErrorCode, serviceUnavailable, timeout } from '@cyanheads/mcp-ts-core/errors';
 import { createMockContext, getEnrichment, runToolContract } from '@cyanheads/mcp-ts-core/testing';
 import { XMLParser } from 'fast-xml-parser';
-import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import type { CallDeadline } from '@/services/call-deadline.js';
 import { ORDERED_XML_PARSER_OPTIONS } from '@/services/ncbi/parsing/ordered-xml-parser-options.js';
 
 import {
@@ -102,6 +103,12 @@ function openAccess(fullTextId: string) {
   return { isOpenAccess: 'Y', fullTextIdList: { fullTextId: [fullTextId] } };
 }
 const OA_PMC42 = openAccess('PMC42');
+
+/** The deadline the chain hands each Europe PMC and Unpaywall request beside the signal. (#310) */
+const ANY_DEADLINE = expect.objectContaining({
+  expiresAt: expect.any(Number),
+  totalMs: expect.any(Number),
+});
 
 /**
  * Configure `mockEFetch` to dispatch by `db` — mirrors production:
@@ -420,6 +427,7 @@ describe('fetchFulltextTool', () => {
         'ncbi_unreachable',
         'ncbi_rate_limited',
         'ncbi_deadline_exceeded',
+        'ncbi_timed_out',
         'ncbi_invalid_response',
         'ncbi_resource_not_found',
         'blank_filter',
@@ -739,7 +747,12 @@ describe('fetchFulltextTool', () => {
       const input = fetchFulltextTool.input.parse({ pmids: ['42'] });
       const result = await fetchFulltextTool.handler(input, ctx);
 
-      expect(mockEpmcFullTextXml).toHaveBeenCalledWith('PMC42', 'MED', expect.any(AbortSignal));
+      expect(mockEpmcFullTextXml).toHaveBeenCalledWith(
+        'PMC42',
+        'MED',
+        expect.any(AbortSignal),
+        ANY_DEADLINE,
+      );
       expect(result.totalReturned).toBe(1);
       const article = result.articles[0];
       expect(article?.source).toBe('pmc');
@@ -851,6 +864,7 @@ describe('fetchFulltextTool', () => {
         'PPR1325930',
         'PPR',
         expect.any(AbortSignal),
+        ANY_DEADLINE,
       );
       const parsed = fetchFulltextTool.output.parse(result.structuredContent);
       expect(parsed.totalReturned).toBe(1);
@@ -1130,7 +1144,11 @@ describe('fetchFulltextTool', () => {
 
       // The DOI hint from idConvert should mean no PubMed metadata round-trip.
       expect(mockEFetch).toHaveBeenCalledTimes(1);
-      expect(mockUnpaywallResolve).toHaveBeenCalledWith('10.1/x', expect.any(AbortSignal));
+      expect(mockUnpaywallResolve).toHaveBeenCalledWith(
+        '10.1/x',
+        expect.any(AbortSignal),
+        ANY_DEADLINE,
+      );
       expect(result.totalReturned).toBe(1);
       const article = result.articles[0];
       expect(article?.source).toBe('unpaywall');
@@ -1482,7 +1500,11 @@ describe('fetchFulltextTool', () => {
       const input = fetchFulltextTool.input.parse({ pmids: ['42'] });
       const result = await fetchFulltextTool.handler(input, ctx);
 
-      expect(mockUnpaywallResolve).toHaveBeenCalledWith('10.1000/example', expect.any(AbortSignal));
+      expect(mockUnpaywallResolve).toHaveBeenCalledWith(
+        '10.1000/example',
+        expect.any(AbortSignal),
+        ANY_DEADLINE,
+      );
       expect(result.totalReturned).toBe(1);
       const article = result.articles[0];
       expect(article?.source).toBe('unpaywall');
@@ -1808,6 +1830,7 @@ describe('fetchFulltextTool', () => {
           BODY,
           'https://repo.example.org/paper?view=full',
           ctx.signal,
+          ANY_DEADLINE,
         );
       });
 
@@ -1871,6 +1894,91 @@ describe('fetchFulltextTool', () => {
 
         await expect(call).rejects.toBe(reason);
       });
+    });
+
+    it('ends only the id whose copy is past the 50 MiB read limit, as fetch-failed with the limit in its detail (issue #311)', async () => {
+      const LIMIT_BYTES = 50 * 1024 * 1024;
+      const CHUNK_BYTES = 256 * 1024;
+      // The real service reads the content; only the DOI lookup and global fetch are stubbed.
+      const { UnpaywallService } = await vi.importActual<
+        typeof import('@/services/unpaywall/unpaywall-service.js')
+      >('@/services/unpaywall/unpaywall-service.js');
+      const service = new UnpaywallService('oa@example.com', 20_000);
+      mockGetUnpaywallService.mockReturnValue({
+        resolve: mockUnpaywallResolve,
+        fetchContent: service.fetchContent.bind(service),
+      });
+      mockIdConvert.mockResolvedValue([
+        { 'requested-id': '42', pmid: '42' },
+        { 'requested-id': '43', pmid: '43' },
+      ]);
+      mockEFetchBy({ pubmedDois: { '42': '10.1000/large', '43': '10.1000/small' } });
+      mockUnpaywallResolve.mockImplementation(async (doi: string) => ({
+        kind: 'found',
+        location: { url: `https://repo.example.org/${doi.split('/')[1]}` },
+      }));
+      mockHtmlExtract.mockResolvedValue({ title: 'Small paper', content: 'Small body' });
+
+      // `/large` streams a PDF four chunks past the limit, from one reused chunk, with no Content-Length.
+      const chunk = new Uint8Array(CHUNK_BYTES);
+      chunk.set([0x25, 0x50, 0x44, 0x46, 0x2d]);
+      vi.stubGlobal('fetch', async (input: string | URL | Request) => {
+        if (String(input).endsWith('/small')) {
+          return new Response('<html><body><article>Small body</article></body></html>', {
+            status: 200,
+            headers: { 'content-type': 'text/html' },
+          });
+        }
+        let sentBytes = 0;
+        const body = new ReadableStream<Uint8Array>(
+          {
+            pull(controller) {
+              if (sentBytes >= LIMIT_BYTES + 4 * CHUNK_BYTES) {
+                controller.close();
+                return;
+              }
+              sentBytes += CHUNK_BYTES;
+              controller.enqueue(chunk);
+            },
+          },
+          { highWaterMark: 0 },
+        );
+        return new Response(body, { status: 200, headers: { 'content-type': 'application/pdf' } });
+      });
+
+      try {
+        const ctx = createMockContext({ errors: fetchFulltextTool.errors });
+        const input = fetchFulltextTool.input.parse({ pmids: ['42', '43'] });
+        const result = await fetchFulltextTool.handler(input, ctx);
+
+        expect(result.articles).toEqual([
+          expect.objectContaining({ source: 'unpaywall', pmid: '43', content: 'Small body' }),
+        ]);
+        expect(result.unavailable).toEqual([
+          {
+            id: '42',
+            idType: 'pmid',
+            reason: 'fetch-failed',
+            triedTiers: [
+              { tier: 'pmc', outcome: 'not-attempted', detail: 'PMID has no PMC counterpart' },
+              { tier: 'europepmc', outcome: 'not-attempted', detail: 'EUROPEPMC_ENABLED=false' },
+              {
+                tier: 'unpaywall',
+                outcome: 'fetch-failed',
+                detail: expect.stringContaining('50 MiB read limit'),
+              },
+            ],
+            unqueriedTiers: ['europepmc'],
+          },
+        ]);
+        const text = textBlocks(fetchFulltextTool.format!(result))
+          .map((block) => block.text)
+          .join('\n');
+        expect(text).toMatch(/unpaywall:fetch-failed \([^)]*50 MiB read limit/);
+        expect(text).toContain('Small body');
+      } finally {
+        vi.unstubAllGlobals();
+      }
     });
 
     it('combines PMC hits with Unpaywall fallback in a single response', async () => {
@@ -1948,7 +2056,7 @@ describe('fetchFulltextTool', () => {
       const { result } = await run();
 
       expect(mockUnpaywallResolve).toHaveBeenCalledTimes(1);
-      expect(mockUnpaywallResolve).toHaveBeenCalledWith(DOI, expect.any(AbortSignal));
+      expect(mockUnpaywallResolve).toHaveBeenCalledWith(DOI, expect.any(AbortSignal), ANY_DEADLINE);
       expect(result.articles).toHaveLength(1);
       expect(result.articles[0]).toMatchObject({ source: 'unpaywall', pmid: '42', doi: DOI });
       expect(result.unavailable).toBeUndefined();
@@ -2107,6 +2215,7 @@ describe('fetchFulltextTool', () => {
       expect(mockUnpaywallResolve).toHaveBeenCalledWith(
         '10.1056/nejmoa2406673',
         expect.any(AbortSignal),
+        ANY_DEADLINE,
       );
       expect(pubmedDoiLookupRan()).toBe(false);
       expect(result.unavailable?.[0]?.reason).toBe('no-oa');
@@ -2202,7 +2311,11 @@ describe('fetchFulltextTool', () => {
 
       const byId = new Map(result.unavailable?.map((u) => [u.id, u]));
       expect(mockUnpaywallResolve).toHaveBeenCalledTimes(1);
-      expect(mockUnpaywallResolve).toHaveBeenCalledWith('10.1/one', expect.any(AbortSignal));
+      expect(mockUnpaywallResolve).toHaveBeenCalledWith(
+        '10.1/one',
+        expect.any(AbortSignal),
+        ANY_DEADLINE,
+      );
       expect(byId.get('1')?.reason).toBe('no-oa');
       expect(byId.get('2')?.reason).toBe('doi-lookup-failed');
     });
@@ -2457,7 +2570,12 @@ describe('fetchFulltextTool', () => {
       expect(mockEpmcSearch).toHaveBeenCalledWith(
         expect.objectContaining({ query: 'DOI:"10.1/x"' }),
       );
-      expect(mockEpmcFullTextXml).toHaveBeenCalledWith('PMC42', 'MED', expect.any(AbortSignal));
+      expect(mockEpmcFullTextXml).toHaveBeenCalledWith(
+        'PMC42',
+        'MED',
+        expect.any(AbortSignal),
+        ANY_DEADLINE,
+      );
       expect(result.totalReturned).toBe(1);
       const article = result.articles[0];
       expect(article?.source).toBe('pmc');
@@ -2683,7 +2801,11 @@ describe('fetchFulltextTool', () => {
       const result = await fetchFulltextTool.handler(input, ctx);
 
       // Unpaywall is queried with the original DOI.
-      expect(mockUnpaywallResolve).toHaveBeenCalledWith('10.1/x', expect.any(AbortSignal));
+      expect(mockUnpaywallResolve).toHaveBeenCalledWith(
+        '10.1/x',
+        expect.any(AbortSignal),
+        ANY_DEADLINE,
+      );
       expect(result.totalReturned).toBe(1);
       const article = result.articles[0];
       expect(article?.source).toBe('unpaywall');
@@ -3380,7 +3502,10 @@ describe('fetchFulltextTool', () => {
 
       const notice = getEnrichment(ctx).notice;
       expect(notice).toContain('PMC2600426');
-      expect(notice).toContain('pubmed_fetch_articles');
+      // `pubmed_fetch_articles` rejects a PMCID, so the notice names the conversion first.
+      expect(notice).toContain(
+        'use `pubmed_fetch_articles` for the abstract and metadata (it takes PMIDs: convert a PMCID with `pubmed_convert_ids` first).',
+      );
     });
 
     it('demotes a bodyless EPMC fullTextXML to no-body and continues the chain', async () => {
@@ -3433,9 +3558,10 @@ describe('fetchFulltextTool', () => {
         },
         { tier: 'unpaywall', outcome: 'no-oa', detail: 'No open-access copy indexed' },
       ]);
-      expect(getEnrichment(ctx).notice).toContain(
-        'No body text could be retrieved for article 42 —',
-      );
+      const notice = getEnrichment(ctx).notice;
+      expect(notice).toContain('No body text could be retrieved for article 42 —');
+      // A PMID goes to `pubmed_fetch_articles` as it is: no conversion step is named.
+      expect(notice).toContain('use `pubmed_fetch_articles` for the abstract and metadata.');
     });
   });
 
@@ -3488,6 +3614,7 @@ describe('fetchFulltextTool', () => {
       expect(mockUnpaywallResolve).toHaveBeenCalledWith(
         '10.1523/jneurosci.3043-08.2008',
         expect.any(AbortSignal),
+        ANY_DEADLINE,
       );
       // The EPMC hit already carried the DOI — no ID Converter round-trip.
       expect(mockIdConvert).not.toHaveBeenCalled();
@@ -3531,6 +3658,7 @@ describe('fetchFulltextTool', () => {
       expect(mockUnpaywallResolve).toHaveBeenCalledWith(
         '10.1523/JNEUROSCI.3043-08.2008',
         expect.any(AbortSignal),
+        ANY_DEADLINE,
       );
       expect(result.totalReturned).toBe(1);
       expect(result.articles[0]?.source).toBe('unpaywall');
@@ -10789,5 +10917,698 @@ describe('fetchFulltextTool article links (issue #307)', () => {
     );
     // Only the authored Unpaywall link remains a link.
     expect(read.match(/⟨a href=/g)).toEqual(['⟨a href=']);
+  });
+});
+
+// ─── #310: one deadline across the tier chain ────────────────────────────────
+
+describe('fetchFulltextTool call deadline (issue #310)', () => {
+  const STARTED_AT = Date.UTC(2026, 0, 1);
+  /** The deadline the handler starts at `STARTED_AT`: the default 50 s call deadline. */
+  const CALL_DEADLINE = { expiresAt: STARTED_AT + 50_000, totalMs: 50_000 };
+  /** The `detail` of a tier the call's deadline left no time to start. */
+  const NO_TIME = "The tool call's deadline left no time for this tier";
+  /** A PMC EFetch answer holding no article. */
+  const EMPTY_PMC_SET = [{ 'pmc-articleset': [] }];
+
+  /** Moves the frozen clock on by `ms`, as an upstream that took that long to answer. */
+  const elapse = (ms: number) => vi.setSystemTime(Date.now() + ms);
+
+  const withEpmc = () =>
+    mockGetEpmcService.mockReturnValue({
+      search: mockEpmcSearch,
+      fullTextXml: mockEpmcFullTextXml,
+      parseFullTextXml: mockEpmcParseFullTextXml,
+    });
+  const withUnpaywall = () =>
+    mockGetUnpaywallService.mockReturnValue({
+      resolve: mockUnpaywallResolve,
+      fetchContent: mockUnpaywallFetchContent,
+    });
+
+  beforeEach(() => {
+    for (const mock of [
+      mockEFetch,
+      mockIdConvert,
+      mockParsePmcArticle,
+      mockUnpaywallResolve,
+      mockUnpaywallFetchContent,
+      mockGetUnpaywallService,
+      mockEpmcSearch,
+      mockEpmcFullTextXml,
+      mockEpmcParseFullTextXml,
+      mockGetEpmcService,
+      mockHtmlExtract,
+      mockPdfExtractText,
+    ]) {
+      mock.mockReset();
+    }
+    mockGetUnpaywallService.mockReturnValue(undefined);
+    mockGetEpmcService.mockReturnValue(undefined);
+    vi.useFakeTimers({ toFake: ['Date'] });
+    vi.setSystemTime(STARTED_AT);
+  });
+
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  async function run(
+    input: Record<string, unknown>,
+    ctx = createMockContext({ errors: fetchFulltextTool.errors }),
+  ) {
+    const result = await fetchFulltextTool.handler(fetchFulltextTool.input.parse(input), ctx);
+    const text = textBlocks(fetchFulltextTool.format!(result))
+      .map((block) => block.text)
+      .join('\n');
+    return { ctx, result, text };
+  }
+
+  it('hands both ID Converter routing lookups the deadline it starts, beside ctx.signal', async () => {
+    mockIdConvert.mockResolvedValue([]);
+    const { ctx } = await run({ pmids: ['42'], dois: ['10.1/x'] });
+
+    const routing = mockIdConvert.mock.calls.filter(([, idType]) => idType !== 'pmcid');
+    expect(routing.map(([ids, idType]) => [ids, idType])).toEqual([
+      [['42'], 'pmid'],
+      [['10.1/x'], 'doi'],
+    ]);
+    const [pmidOptions, doiOptions] = routing.map(([, , options]) => options);
+    expect(pmidOptions).toEqual({ signal: ctx.signal, deadline: CALL_DEADLINE });
+    expect(pmidOptions.signal).toBe(ctx.signal);
+    expect(doiOptions.signal).toBe(ctx.signal);
+    expect(doiOptions.deadline).toBe(pmidOptions.deadline);
+  });
+
+  it('gives each tier with a later one half the time left as it starts, and the last tier the call deadline itself', async () => {
+    withEpmc();
+    withUnpaywall();
+    // PMC EFetch answers 10 s in, holding neither record.
+    mockEFetch.mockImplementation(async () => {
+      elapse(10_000);
+      return EMPTY_PMC_SET;
+    });
+    // Europe PMC finds PMC1, with a DOI, and misses PMC2; PMC1's full text
+    // takes 4 s and is not available.
+    mockEpmcSearch.mockImplementation(async ({ query }: { query: string }) =>
+      query === 'PMCID:PMC1'
+        ? {
+            hits: [
+              { id: 'PMC1', source: 'PMC', pmcid: 'PMC1', doi: '10.1/one', ...openAccess('PMC1') },
+            ],
+            hitCount: 1,
+          }
+        : { hits: [], hitCount: 0 },
+    );
+    mockEpmcFullTextXml.mockImplementation(async () => {
+      elapse(4_000);
+      return { kind: 'not-available' };
+    });
+    // The ID Converter backfills PMC2's DOI; Unpaywall locates PMC1's copy,
+    // whose download fails.
+    mockIdConvert.mockResolvedValue([{ 'requested-id': 'PMC2', pmcid: 'PMC2', doi: '10.1/two' }]);
+    mockUnpaywallResolve.mockImplementation(async (doi: string) =>
+      doi === '10.1/one'
+        ? { kind: 'found', location: { url: 'https://repo.example.org/one' } }
+        : { kind: 'no-oa', reason: 'No open-access copy indexed' },
+    );
+    mockUnpaywallFetchContent.mockRejectedValue(new Error('Unpaywall content fetch failed'));
+
+    const { ctx } = await run({ pmcids: ['PMC1', 'PMC2'] });
+
+    // PMC EFetch starts with 50 s left: 25 s.
+    expect(mockEFetch).toHaveBeenCalledTimes(1);
+    const [, pmcOptions] = mockEFetch.mock.calls[0] ?? [];
+    expect(pmcOptions.signal).toBe(ctx.signal);
+    expect(pmcOptions.deadline).toEqual({ expiresAt: STARTED_AT + 25_000, totalMs: 25_000 });
+
+    // Europe PMC starts 10 s in with 40 s left: 20 s, one deadline for both
+    // searches and the full-text fetch.
+    const searches = mockEpmcSearch.mock.calls.map(([params]) => params);
+    expect(searches.map((params) => params.query)).toEqual(['PMCID:PMC1', 'PMCID:PMC2']);
+    const epmcDeadline = searches[0]?.deadline;
+    expect(epmcDeadline).toEqual({ expiresAt: STARTED_AT + 30_000, totalMs: 20_000 });
+    expect(searches[1]?.deadline).toBe(epmcDeadline);
+    for (const params of searches) expect(params.signal).toBe(ctx.signal);
+    expect(mockEpmcFullTextXml).toHaveBeenCalledTimes(1);
+    const [fullTextId, source, fullTextSignal, fullTextDeadline] =
+      mockEpmcFullTextXml.mock.calls[0] ?? [];
+    expect([fullTextId, source]).toEqual(['PMC1', 'PMC']);
+    expect(fullTextSignal).toBe(ctx.signal);
+    expect(fullTextDeadline).toBe(epmcDeadline);
+
+    // The DOI backfill starts 14 s in with 36 s left: 18 s.
+    expect(mockIdConvert).toHaveBeenCalledTimes(1);
+    const [backfillIds, backfillType, backfillOptions] = mockIdConvert.mock.calls[0] ?? [];
+    expect([backfillIds, backfillType]).toEqual([['PMC2'], 'pmcid']);
+    expect(backfillOptions.signal).toBe(ctx.signal);
+    expect(backfillOptions.deadline).toEqual({ expiresAt: STARTED_AT + 32_000, totalMs: 18_000 });
+
+    // Unpaywall, the last tier, runs under the call deadline itself: one object
+    // for every DOI and for both of its requests.
+    expect(mockUnpaywallResolve.mock.calls.map(([doi]) => doi)).toEqual(['10.1/one', '10.1/two']);
+    const unpaywallDeadline = mockUnpaywallResolve.mock.calls[0]?.[2];
+    expect(unpaywallDeadline).toEqual(CALL_DEADLINE);
+    for (const [, signal, deadline] of mockUnpaywallResolve.mock.calls) {
+      expect(signal).toBe(ctx.signal);
+      expect(deadline).toBe(unpaywallDeadline);
+    }
+    expect(mockUnpaywallFetchContent).toHaveBeenCalledTimes(1);
+    const [location, contentSignal, contentDeadline] =
+      mockUnpaywallFetchContent.mock.calls[0] ?? [];
+    expect(location).toEqual({ url: 'https://repo.example.org/one' });
+    expect(contentSignal).toBe(ctx.signal);
+    expect(contentDeadline).toBe(unpaywallDeadline);
+  });
+
+  it('hands the PubMed DOI lookup and the ID Converter DOI backfill one share of the time left', async () => {
+    withUnpaywall();
+    mockIdConvert.mockImplementation(async (_ids: string[], idType: string) =>
+      idType === 'pmid' ? [{ 'requested-id': '42', pmid: '42' }] : [],
+    );
+    mockEFetch.mockImplementation(async (params: { db: string }) => {
+      if (params.db === 'pmc') {
+        elapse(10_000);
+        return EMPTY_PMC_SET;
+      }
+      return { PubmedArticleSet: { PubmedArticle: [] } };
+    });
+
+    const { ctx } = await run({ pmcids: ['PMC2'], pmids: ['42'] });
+
+    const pmcCall = mockEFetch.mock.calls.find(([params]) => params.db === 'pmc');
+    const pubmedCall = mockEFetch.mock.calls.find(([params]) => params.db === 'pubmed');
+    const backfillCall = mockIdConvert.mock.calls.find(([, idType]) => idType === 'pmcid');
+    expect(pmcCall?.[1].deadline).toEqual({ expiresAt: STARTED_AT + 25_000, totalMs: 25_000 });
+    // Both lookups start 10 s in with 40 s left: one 20 s share.
+    const lookupDeadline = pubmedCall?.[1].deadline;
+    expect(lookupDeadline).toEqual({ expiresAt: STARTED_AT + 30_000, totalMs: 20_000 });
+    expect(pubmedCall?.[1].signal).toBe(ctx.signal);
+    expect(backfillCall?.[0]).toEqual(['PMC2']);
+    expect(backfillCall?.[2].signal).toBe(ctx.signal);
+    expect(backfillCall?.[2].deadline).toBe(lookupDeadline);
+    expect(mockUnpaywallResolve).not.toHaveBeenCalled();
+  });
+
+  it('runs PMC EFetch under the call deadline itself when no fallback tier is configured', async () => {
+    mockEFetch.mockResolvedValue(EMPTY_PMC_SET);
+    await run({ pmcids: ['PMC1'] });
+
+    expect(mockEFetch.mock.calls[0]?.[1].deadline).toEqual(CALL_DEADLINE);
+  });
+
+  it('runs Europe PMC under the call deadline itself when Unpaywall is not configured', async () => {
+    withEpmc();
+    mockEFetch.mockImplementation(async () => {
+      elapse(10_000);
+      return EMPTY_PMC_SET;
+    });
+    mockEpmcSearch.mockResolvedValue({ hits: [], hitCount: 0 });
+    await run({ pmcids: ['PMC1'] });
+
+    expect(mockEFetch.mock.calls[0]?.[1].deadline).toEqual({
+      expiresAt: STARTED_AT + 25_000,
+      totalMs: 25_000,
+    });
+    expect(mockEpmcSearch.mock.calls[0]?.[0].deadline).toEqual(CALL_DEADLINE);
+  });
+
+  it('runs the PubMed DOI lookup under the call deadline itself when Unpaywall is not configured', async () => {
+    // The routing lookup answers 10 s in: the PMID has no PMC copy and no DOI yet.
+    mockIdConvert.mockImplementation(async () => {
+      elapse(10_000);
+      return [{ 'requested-id': '42', pmid: '42' }];
+    });
+    mockEFetchBy({ pubmedDois: {} });
+
+    const { ctx, result } = await run({ pmids: ['42'] });
+
+    const pubmedCall = mockEFetch.mock.calls.find(([params]) => params.db === 'pubmed');
+    expect(pubmedCall?.[1].signal).toBe(ctx.signal);
+    expect(pubmedCall?.[1].deadline).toEqual(CALL_DEADLINE);
+    expect(pubmedCall?.[1].deadline).toBe(mockIdConvert.mock.calls[0]?.[2].deadline);
+    expect(result.unavailable?.[0]?.triedTiers.at(-1)).toEqual({
+      tier: 'unpaywall',
+      outcome: 'no-doi',
+    });
+  });
+
+  it('reports the tiers a spent deadline left no time for as not-attempted on both surfaces, never calling them', async () => {
+    withEpmc();
+    withUnpaywall();
+    // PMC EFetch misses the record as the call deadline runs out.
+    mockEFetch.mockImplementation(async () => {
+      elapse(50_000);
+      return EMPTY_PMC_SET;
+    });
+
+    const { result, text } = await run({ pmcids: ['PMC1'] });
+
+    expect(mockEFetch).toHaveBeenCalledTimes(1);
+    expect(mockEpmcSearch).toHaveBeenCalledTimes(0);
+    expect(mockEpmcFullTextXml).toHaveBeenCalledTimes(0);
+    expect(mockIdConvert).toHaveBeenCalledTimes(0);
+    expect(mockUnpaywallResolve).toHaveBeenCalledTimes(0);
+    expect(mockUnpaywallFetchContent).toHaveBeenCalledTimes(0);
+    expect(result.unavailable).toEqual([
+      {
+        id: 'PMC1',
+        idType: 'pmcid',
+        reason: 'not-found',
+        triedTiers: [
+          { tier: 'pmc', outcome: 'miss' },
+          { tier: 'europepmc', outcome: 'not-attempted', detail: NO_TIME },
+          { tier: 'unpaywall', outcome: 'not-attempted', detail: NO_TIME },
+        ],
+      },
+    ]);
+    expect(text).toContain('- [pmcid] PMC1 — not-found');
+    expect(text).toContain(
+      `chain: pmc:miss → europepmc:not-attempted (${NO_TIME}) → unpaywall:not-attempted (${NO_TIME})`,
+    );
+    expect(text).not.toContain('Not queried');
+  });
+
+  it('skips PMC EFetch, and every tier after it, when the routing lookup answers as the deadline runs out', async () => {
+    withEpmc();
+    withUnpaywall();
+    mockIdConvert.mockImplementation(async () => {
+      elapse(50_000);
+      return [{ 'requested-id': '42', pmid: '42', pmcid: 'PMC42', doi: '10.1/x' }];
+    });
+
+    const { result, text } = await run({ pmids: ['42'] });
+
+    expect(mockIdConvert).toHaveBeenCalledTimes(1);
+    expect(mockEFetch).toHaveBeenCalledTimes(0);
+    expect(mockEpmcSearch).toHaveBeenCalledTimes(0);
+    expect(mockUnpaywallResolve).toHaveBeenCalledTimes(0);
+    expect(result.unavailable).toEqual([
+      {
+        id: '42',
+        idType: 'pmid',
+        reason: 'no-pmc-fallback-disabled',
+        triedTiers: [
+          { tier: 'pmc', outcome: 'not-attempted', detail: NO_TIME },
+          { tier: 'europepmc', outcome: 'not-attempted', detail: NO_TIME },
+          { tier: 'unpaywall', outcome: 'not-attempted', detail: NO_TIME },
+        ],
+      },
+    ]);
+    expect(text).toContain(`chain: pmc:not-attempted (${NO_TIME}) → europepmc:not-attempted`);
+  });
+
+  it('marks an unconfigured Unpaywall unqueried for a PMID whose DOI lookup the spent deadline skipped, never no-doi', async () => {
+    withEpmc();
+    mockIdConvert.mockResolvedValue([{ 'requested-id': '42', pmid: '42' }]);
+    // Europe PMC misses the record as the call deadline runs out.
+    mockEpmcSearch.mockImplementation(async () => {
+      elapse(50_000);
+      return { hits: [], hitCount: 0 };
+    });
+
+    const { result } = await run({ pmids: ['42'] });
+
+    expect(mockEFetch).toHaveBeenCalledTimes(0);
+    expect(result.unavailable).toEqual([
+      {
+        id: '42',
+        idType: 'pmid',
+        reason: 'not-found',
+        triedTiers: [
+          { tier: 'pmc', outcome: 'not-attempted', detail: 'PMID has no PMC counterpart' },
+          { tier: 'europepmc', outcome: 'miss' },
+          { tier: 'unpaywall', outcome: 'not-attempted', detail: 'UNPAYWALL_EMAIL is not set' },
+        ],
+        unqueriedTiers: ['unpaywall'],
+      },
+    ]);
+  });
+
+  it('reports a tier its deadline cut as that tier’s failure, naming the provider’s deadline reason, and moves on', async () => {
+    withEpmc();
+    withUnpaywall();
+    mockEFetch.mockRejectedValue(
+      timeout('NCBI request deadline (25000ms) exceeded', {
+        reason: 'ncbi_deadline_exceeded',
+        deadlineMs: 25_000,
+      }),
+    );
+    mockEpmcSearch.mockRejectedValue(
+      timeout('Europe PMC request deadline (12500ms) exceeded', {
+        reason: 'europepmc_deadline_exceeded',
+        label: 'search',
+        deadlineMs: 12_500,
+      }),
+    );
+    mockIdConvert.mockResolvedValue([{ 'requested-id': 'PMC1', pmcid: 'PMC1', doi: '10.1/one' }]);
+    mockUnpaywallResolve.mockResolvedValue({
+      kind: 'found',
+      location: { url: 'https://repo.example.org/one' },
+    });
+    mockUnpaywallFetchContent.mockRejectedValue(
+      timeout('Unpaywall request deadline (50000ms) exceeded', {
+        reason: 'unpaywall_deadline_exceeded',
+        deadlineMs: 50_000,
+        host: 'repo.example.org',
+      }),
+    );
+
+    const { result, text } = await run({ pmcids: ['PMC1'] });
+
+    expect(result.unavailable).toEqual([
+      {
+        id: 'PMC1',
+        idType: 'pmcid',
+        reason: 'fetch-failed',
+        triedTiers: [
+          {
+            tier: 'pmc',
+            outcome: 'service-error',
+            detail: 'ncbi_deadline_exceeded: NCBI request deadline (25000ms) exceeded',
+          },
+          {
+            tier: 'europepmc',
+            outcome: 'service-error',
+            detail: 'europepmc_deadline_exceeded: Europe PMC request deadline (12500ms) exceeded',
+          },
+          {
+            tier: 'unpaywall',
+            outcome: 'fetch-failed',
+            detail: 'unpaywall_deadline_exceeded: Unpaywall request deadline (50000ms) exceeded',
+          },
+        ],
+      },
+    ]);
+    expect(text).toContain(
+      'chain: pmc:service-error (ncbi_deadline_exceeded: NCBI request deadline (25000ms) exceeded) → europepmc:service-error (europepmc_deadline_exceeded: Europe PMC request deadline (12500ms) exceeded) → unpaywall:fetch-failed (unpaywall_deadline_exceeded: Unpaywall request deadline (50000ms) exceeded)',
+    );
+  });
+
+  it('reports a tier that failed on a declared reason of its own with the bare message, never the deadline-cut prefix', async () => {
+    withEpmc();
+    mockEFetch.mockRejectedValue(
+      timeout('NCBI request timed out after 3 attempts', { reason: 'ncbi_timed_out' }),
+    );
+    mockEpmcSearch.mockRejectedValue(
+      serviceUnavailable('Europe PMC is unreachable', { reason: 'europepmc_unreachable' }),
+    );
+
+    const { result, text } = await run({ pmcids: ['PMC1'] });
+
+    expect(result.unavailable?.[0]?.triedTiers.slice(0, 2)).toEqual([
+      { tier: 'pmc', outcome: 'service-error', detail: 'NCBI request timed out after 3 attempts' },
+      { tier: 'europepmc', outcome: 'service-error', detail: 'Europe PMC is unreachable' },
+    ]);
+    expect(text).toContain(
+      'chain: pmc:service-error (NCBI request timed out after 3 attempts) → europepmc:service-error (Europe PMC is unreachable)',
+    );
+  });
+
+  it('settles a PMID whose DOI lookup ran and found none as no-doi when the deadline runs out after the lookup, never not-attempted', async () => {
+    withUnpaywall();
+    mockIdConvert.mockResolvedValue([{ 'requested-id': '42', pmid: '42' }]);
+    // PubMed's record carries no DOI, and answers as the call deadline runs out.
+    mockEFetch.mockImplementation(async () => {
+      elapse(50_000);
+      return { PubmedArticleSet: { PubmedArticle: [] } };
+    });
+
+    const { result, text } = await run({ pmids: ['42'] });
+
+    expect(mockUnpaywallResolve).not.toHaveBeenCalled();
+    expect(result.unavailable).toEqual([
+      {
+        id: '42',
+        idType: 'pmid',
+        reason: 'no-doi',
+        triedTiers: [
+          { tier: 'pmc', outcome: 'not-attempted', detail: 'PMID has no PMC counterpart' },
+          { tier: 'europepmc', outcome: 'not-attempted', detail: 'EUROPEPMC_ENABLED=false' },
+          { tier: 'unpaywall', outcome: 'no-doi' },
+        ],
+        unqueriedTiers: ['europepmc'],
+      },
+    ]);
+    expect(text).toContain('- [pmid] 42 — no-doi');
+    expect(text).toContain('→ unpaywall:no-doi');
+    expect(text).not.toContain(NO_TIME);
+  });
+
+  it.each(['PMC EFetch', 'Europe PMC', 'DOI backfill', 'Unpaywall'] as const)(
+    'rethrows the caller’s cancellation when it aborts during the %s tier',
+    async (tier) => {
+      withEpmc();
+      withUnpaywall();
+      const started = Promise.withResolvers<void>();
+      /** A request that answers only by rejecting with the caller's reason once it aborts. */
+      const hang = (signal: AbortSignal) =>
+        new Promise((_resolve, reject) => {
+          signal.addEventListener('abort', () => reject(signal.reason), { once: true });
+          started.resolve();
+        });
+      mockEFetch.mockImplementation(async (_params: unknown, options: { signal: AbortSignal }) =>
+        tier === 'PMC EFetch' ? hang(options.signal) : EMPTY_PMC_SET,
+      );
+      mockEpmcSearch.mockImplementation(async (params: { signal: AbortSignal }) =>
+        tier === 'Europe PMC' ? hang(params.signal) : { hits: [], hitCount: 0 },
+      );
+      mockIdConvert.mockImplementation(
+        async (_ids: string[], _idType: string, options: { signal: AbortSignal }) =>
+          tier === 'DOI backfill'
+            ? hang(options.signal)
+            : [{ 'requested-id': 'PMC1', pmcid: 'PMC1', doi: '10.1/one' }],
+      );
+      mockUnpaywallResolve.mockImplementation(async (_doi: string, signal: AbortSignal) =>
+        hang(signal),
+      );
+      const controller = new AbortController();
+      const reason = new DOMException('The client went away', 'AbortError');
+      const ctx = createMockContext({
+        errors: fetchFulltextTool.errors,
+        signal: controller.signal,
+      });
+
+      const call = fetchFulltextTool.handler(
+        fetchFulltextTool.input.parse({ pmcids: ['PMC1'] }),
+        ctx,
+      );
+      await started.promise;
+      controller.abort(reason);
+
+      await expect(call).rejects.toBe(reason);
+    },
+  );
+
+  /**
+   * A caller abort that lands as the deadline runs out, in the step before a path
+   * that skips work for time: `arrange` answers the chain up to that path and names
+   * the step whose answer lands with the abort, and the work the path skips.
+   */
+  it.each([
+    [
+      'the PMC EFetch skip',
+      { pmids: ['42'] },
+      () => {
+        withEpmc();
+        withUnpaywall();
+        mockIdConvert.mockResolvedValue([
+          { 'requested-id': '42', pmid: '42', pmcid: 'PMC42', doi: '10.1/x' },
+        ]);
+        return { stepBefore: mockIdConvert, skipped: mockEFetch };
+      },
+    ],
+    [
+      'the Europe PMC skip',
+      { pmcids: ['PMC1'] },
+      () => {
+        withEpmc();
+        withUnpaywall();
+        mockEFetch.mockResolvedValue(EMPTY_PMC_SET);
+        return { stepBefore: mockEFetch, skipped: mockEpmcSearch };
+      },
+    ],
+    [
+      'the DOI lookup skip',
+      { pmids: ['42'] },
+      () => {
+        withEpmc();
+        mockIdConvert.mockResolvedValue([{ 'requested-id': '42', pmid: '42' }]);
+        mockEpmcSearch.mockResolvedValue({ hits: [], hitCount: 0 });
+        return { stepBefore: mockEpmcSearch, skipped: mockEFetch };
+      },
+    ],
+    [
+      'the Unpaywall skip',
+      { pmids: ['42'] },
+      () => {
+        withUnpaywall();
+        mockIdConvert.mockResolvedValue([{ 'requested-id': '42', pmid: '42' }]);
+        mockEFetchBy({ pubmedDois: { '42': '10.1/x' } });
+        return { stepBefore: mockEFetch, skipped: mockUnpaywallResolve };
+      },
+    ],
+    [
+      'the PDF branch',
+      { pmids: ['42'] },
+      () => {
+        withUnpaywall();
+        mockIdConvert.mockResolvedValue([{ 'requested-id': '42', pmid: '42' }]);
+        mockEFetchBy({ pubmedDois: { '42': '10.1/x' } });
+        mockUnpaywallResolve.mockResolvedValue({
+          kind: 'found',
+          location: { url: 'https://repo.example.org/paper.pdf' },
+        });
+        mockUnpaywallFetchContent.mockResolvedValue({
+          kind: 'pdf',
+          fetchedUrl: 'https://repo.example.org/paper.pdf',
+          body: new Uint8Array([0x25, 0x50, 0x44, 0x46]),
+        });
+        return { stepBefore: mockUnpaywallFetchContent, skipped: mockPdfExtractText };
+      },
+    ],
+  ] as const)(
+    'rethrows a caller abort, never a payload, when %s finds the deadline spent',
+    async (_path, input, arrange) => {
+      const { stepBefore, skipped } = arrange();
+      const controller = new AbortController();
+      const reason = new DOMException('The client went away', 'AbortError');
+      const answer = stepBefore.getMockImplementation();
+      stepBefore.mockImplementation(async (...args: unknown[]) => {
+        elapse(50_000);
+        controller.abort(reason);
+        return answer?.(...args);
+      });
+      const ctx = createMockContext({
+        errors: fetchFulltextTool.errors,
+        signal: controller.signal,
+      });
+
+      await expect(
+        fetchFulltextTool.handler(fetchFulltextTool.input.parse(input), ctx),
+      ).rejects.toBe(reason);
+      expect(skipped).not.toHaveBeenCalled();
+    },
+  );
+
+  describe('content extraction after the Unpaywall download', () => {
+    /** The chain of a PMID with no PMC copy and no Europe PMC configured, ending at Unpaywall. */
+    const unpaywallChain = (unpaywall: { outcome: string; detail: string }) => [
+      { tier: 'pmc', outcome: 'not-attempted', detail: 'PMID has no PMC counterpart' },
+      { tier: 'europepmc', outcome: 'not-attempted', detail: 'EUROPEPMC_ENABLED=false' },
+      { tier: 'unpaywall', ...unpaywall },
+    ];
+
+    beforeEach(() => {
+      withUnpaywall();
+    });
+
+    it('hands the HTML extractor the deadline the Unpaywall lookup and download ran under', async () => {
+      mockIdConvert.mockResolvedValue([{ 'requested-id': '42', pmid: '42' }]);
+      mockEFetchBy({ pubmedDois: { '42': '10.1000/example' } });
+      mockUnpaywallResolve.mockResolvedValue({
+        kind: 'found',
+        location: { url: 'https://repo.example.org/paper' },
+      });
+      mockUnpaywallFetchContent.mockResolvedValue({
+        kind: 'html',
+        fetchedUrl: 'https://repo.example.org/paper',
+        body: '<html><body><article>Main body</article></body></html>',
+      });
+      mockHtmlExtract.mockResolvedValue({ content: 'Main body' });
+
+      const { ctx } = await run({ pmids: ['42'] });
+
+      expect(mockHtmlExtract).toHaveBeenCalledTimes(1);
+      const [, , signal, extractionDeadline] = mockHtmlExtract.mock.calls[0] ?? [];
+      expect(signal).toBe(ctx.signal);
+      expect(extractionDeadline).toEqual(CALL_DEADLINE);
+      expect(extractionDeadline).toBe(mockUnpaywallResolve.mock.calls[0]?.[2]);
+      expect(extractionDeadline).toBe(mockUnpaywallFetchContent.mock.calls[0]?.[2]);
+    });
+
+    it('never starts PDF extraction once the download returns with the deadline spent, ending the id parse-failed on both surfaces', async () => {
+      const detail = "PDF extraction was not started: the tool call's deadline left it no time";
+      mockIdConvert.mockResolvedValue([{ 'requested-id': '42', pmid: '42' }]);
+      mockEFetchBy({ pubmedDois: { '42': '10.1000/example' } });
+      mockUnpaywallResolve.mockResolvedValue({
+        kind: 'found',
+        location: { url: 'https://repo.example.org/paper.pdf' },
+      });
+      // The PDF arrives as the call deadline runs out.
+      mockUnpaywallFetchContent.mockImplementation(async () => {
+        elapse(50_000);
+        return {
+          kind: 'pdf',
+          fetchedUrl: 'https://repo.example.org/paper.pdf',
+          body: new Uint8Array([0x25, 0x50, 0x44, 0x46]),
+        };
+      });
+      mockPdfExtractText.mockResolvedValue({ totalPages: 1, text: 'Paper text' });
+
+      const { result, text } = await run({ pmids: ['42'] });
+
+      expect(mockPdfExtractText).not.toHaveBeenCalled();
+      expect(result.articles).toEqual([]);
+      expect(result.unavailable).toEqual([
+        {
+          id: '42',
+          idType: 'pmid',
+          reason: 'parse-failed',
+          triedTiers: unpaywallChain({ outcome: 'parse-failed', detail }),
+          unqueriedTiers: ['europepmc'],
+        },
+      ]);
+      expect(text).toContain('- [pmid] 42 — parse-failed');
+      expect(text).toContain(`unpaywall:parse-failed (${detail})`);
+    });
+
+    it('ends only the id whose HTML extraction the call deadline stopped, as parse-failed with the extractor’s message', async () => {
+      const stopped = "HTML extraction was stopped: the tool call's deadline ran out";
+      mockIdConvert.mockResolvedValue([
+        { 'requested-id': '42', pmid: '42' },
+        { 'requested-id': '43', pmid: '43' },
+      ]);
+      mockEFetchBy({ pubmedDois: { '42': '10.1000/slow', '43': '10.1000/fast' } });
+      mockUnpaywallResolve.mockImplementation(async (doi: string) => ({
+        kind: 'found',
+        location: { url: `https://repo.example.org/${doi.split('/')[1]}` },
+      }));
+      mockUnpaywallFetchContent.mockImplementation(async (location: { url: string }) => ({
+        kind: 'html',
+        fetchedUrl: location.url,
+        body: '<html><body><article>Body</article></body></html>',
+      }));
+      /** The slow page needs longer to extract than the call deadline leaves. */
+      const SLOW_EXTRACTION_MS = 60_000;
+      // Stops where the deadline it is handed runs out, as the off-thread extractor
+      // does; handed none, it runs the slow page to the end.
+      mockHtmlExtract.mockImplementation(
+        async (_html: string, url: string, _signal: AbortSignal, deadline?: CallDeadline) => {
+          if (!url.endsWith('/slow')) return { title: 'Fast paper', content: 'Fast body' };
+          if (deadline && deadline.expiresAt - Date.now() < SLOW_EXTRACTION_MS) {
+            throw timeout(stopped, { reason: 'html_extraction_deadline' });
+          }
+          return { title: 'Slow paper', content: 'Slow body' };
+        },
+      );
+
+      const { result, text } = await run({ pmids: ['42', '43'] });
+
+      expect(result.articles).toEqual([
+        expect.objectContaining({ source: 'unpaywall', pmid: '43', content: 'Fast body' }),
+      ]);
+      expect(result.unavailable).toEqual([
+        {
+          id: '42',
+          idType: 'pmid',
+          reason: 'parse-failed',
+          triedTiers: unpaywallChain({ outcome: 'parse-failed', detail: stopped }),
+          unqueriedTiers: ['europepmc'],
+        },
+      ]);
+      expect(text).toContain(`unpaywall:parse-failed (${stopped})`);
+      expect(text).toContain('Fast body');
+    });
   });
 });

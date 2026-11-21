@@ -9,6 +9,7 @@
 
 import { tool, z } from '@cyanheads/mcp-ts-core';
 import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
+import { startCallDeadline } from '@/services/call-deadline.js';
 import { NCBI_SERVICE_ERRORS } from '@/services/error-contracts.js';
 import { getNcbiService } from '@/services/ncbi/ncbi-service.js';
 import { parseArticleSet } from '@/services/ncbi/parsing/article-parser.js';
@@ -589,6 +590,7 @@ export const fetchArticlesTool = tool('pubmed_fetch_articles', {
   },
 
   async handler(input, ctx) {
+    const deadline = startCallDeadline();
     ctx.log.info('Executing pubmed_fetch', { pmidCount: input.pmids.length });
 
     // NCBI reads `00000001` as PMID 1 and answers with `<PMID>1</PMID>`, so the
@@ -598,7 +600,7 @@ export const fetchArticlesTool = tool('pubmed_fetch_articles', {
 
     const xmlData = await getNcbiService().eFetch(
       { db: 'pubmed', id: requested.join(','), retmode: 'xml' },
-      { retmode: 'xml', usePost: requested.length >= 100, signal: ctx.signal },
+      { retmode: 'xml', usePost: requested.length >= 100, signal: ctx.signal, deadline },
     );
 
     if (!xmlData || !('PubmedArticleSet' in xmlData)) {

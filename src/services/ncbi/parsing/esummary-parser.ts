@@ -357,17 +357,21 @@ function parseSingleDocumentSummary(docSummary: ESummaryDocumentSummary): Parsed
     docType === 'chapter' ? chapterDateFromDocDate(getText(docSummary.DocDate)) : undefined;
   const pubDate = chapterDate ?? parseNcbiDate(getText(docSummary.PubDate));
   const epubDate = parseNcbiDate(getText(docSummary.EPubDate));
+  // A lone code arrives as a scalar, several as a list, both in one batch. (#309)
+  const languages = ensureArray(docSummary.Lang?.string).filter(Boolean);
 
   return {
     pmid: String(pmid),
     ...(title && { title }),
-    authors: formatESummaryAuthors(authorsArray),
+    // A record that credits no one carries no display string, never an empty one.
+    ...(authorsArray.length > 0 && { authors: formatESummaryAuthors(authorsArray) }),
     authorNames: authorsArray.map((a) => a.name),
     ...(editors.length > 0 && { editors: editors.map((e) => e.name) }),
     ...(source && { source }),
     ...(bookTitle && { bookTitle }),
     ...(publisherName && { publisherName }),
     ...(docType && { docType }),
+    ...(languages.length > 0 && { languages }),
     ...(doiValue && { doi: doiValue }),
     ...(pmcIdValue && { pmcId: pmcIdValue }),
     ...(pubDate && { pubDate }),
@@ -442,7 +446,7 @@ function parseSingleDocSumOldXml(docSum: ESummaryDocSumOldXml): ParsedBriefSumma
   return {
     pmid: String(pmid),
     ...(title !== undefined && { title }),
-    authors: formatESummaryAuthors(authorsArray),
+    ...(authorsArray.length > 0 && { authors: formatESummaryAuthors(authorsArray) }),
     authorNames: authorsArray.map((a) => a.name),
     ...(source !== undefined && { source }),
     ...(doiFromItems !== undefined && { doi: doiFromItems }),

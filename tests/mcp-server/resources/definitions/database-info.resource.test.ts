@@ -4,7 +4,7 @@
  */
 
 import { createMockContext } from '@cyanheads/mcp-ts-core/testing';
-import { describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { NCBI_SERVICE_ERRORS } from '@/services/error-contracts.js';
 
@@ -84,5 +84,33 @@ describe('databaseInfoResource', () => {
     expect(databaseInfoResource.errors?.map((e) => e.reason)).toEqual(
       NCBI_SERVICE_ERRORS.map((e) => e.reason),
     );
+  });
+});
+
+describe('databaseInfoResource call deadline (issue #310)', () => {
+  const STARTED_AT = Date.UTC(2026, 0, 1);
+
+  beforeEach(() => {
+    mockEInfo.mockReset();
+    vi.useFakeTimers({ toFake: ['Date'] });
+    vi.setSystemTime(STARTED_AT);
+  });
+
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  it('passes EInfo the deadline the read starts, beside ctx.signal', async () => {
+    mockEInfo.mockResolvedValue({ eInfoResult: { DbInfo: { DbName: 'pubmed' } } });
+    const ctx = createMockContext({ errors: databaseInfoResource.errors });
+    await databaseInfoResource.handler(databaseInfoResource.params!.parse({}), ctx);
+
+    expect(mockEInfo).toHaveBeenCalledTimes(1);
+    const options = mockEInfo.mock.lastCall?.[1];
+    expect(options).toEqual({
+      signal: ctx.signal,
+      deadline: { expiresAt: STARTED_AT + 50_000, totalMs: 50_000 },
+    });
+    expect(options.signal).toBe(ctx.signal);
   });
 });

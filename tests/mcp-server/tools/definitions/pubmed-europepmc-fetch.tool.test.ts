@@ -30,6 +30,13 @@ vi.mock('@/services/europe-pmc/europe-pmc-service.js', () => ({
   getEuropePmcService: () => mockGetEpmc(),
 }));
 
+// The real deadline, recorded, so a test can tell which object the handler started.
+vi.mock('@/services/call-deadline.js', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('@/services/call-deadline.js')>();
+  return { ...actual, startCallDeadline: vi.fn(actual.startCallDeadline) };
+});
+
+const { startCallDeadline } = await import('@/services/call-deadline.js');
 const { pubmedEuropepmcFetchTool } = await import(
   '@/mcp-server/tools/definitions/pubmed-europepmc-fetch.tool.js'
 );
@@ -112,17 +119,30 @@ describe('pubmedEuropepmcFetchTool', () => {
     await expect(promise).rejects.toMatchObject({ data: { reason: 'europepmc_disabled' } });
   });
 
-  it('passes the requested refs straight through to the service', async () => {
+  /**
+   * The refs go through as given, beside `ctx.signal`, which goes down unchanged,
+   * and the one deadline the handler started before any upstream request — 50 s
+   * at default config. (#310)
+   */
+  it('passes the requested refs, ctx.signal, and the deadline it started to the service', async () => {
+    vi.mocked(startCallDeadline).mockClear();
     mockFetchRecords.mockResolvedValue([patHit]);
     const ctx = createMockContext({ errors: pubmedEuropepmcFetchTool.errors });
     const input = pubmedEuropepmcFetchTool.input.parse({
       records: [{ source: 'PAT', epmcId: 'KR20120031038' }],
     });
     await pubmedEuropepmcFetchTool.handler(input, ctx);
+
+    expect(startCallDeadline).toHaveBeenCalledTimes(1);
+    const deadline = vi.mocked(startCallDeadline).mock.results[0]?.value;
+    expect(deadline).toMatchObject({ totalMs: 50_000 });
+    expect(mockFetchRecords).toHaveBeenCalledTimes(1);
     expect(mockFetchRecords).toHaveBeenCalledWith(
       [{ source: 'PAT', epmcId: 'KR20120031038' }],
       ctx.signal,
+      deadline,
     );
+    expect(mockFetchRecords.mock.calls[0]?.[2]).toBe(deadline);
   });
 
   it('flattens EPMC `Y`/`N` flags and emits an epmcUrl', async () => {
@@ -1051,7 +1071,11 @@ describe('pubmedEuropepmcFetchTool whole-response budget (#188)', () => {
       deferredPairs.some((p) => p.epmcId === h.id && p.source === h.source),
     );
     const second = await call(remaining, deferredPairs);
-    expect(mockFetchRecords).toHaveBeenLastCalledWith(deferredPairs, expect.anything());
+    expect(mockFetchRecords).toHaveBeenLastCalledWith(
+      deferredPairs,
+      expect.anything(),
+      expect.anything(),
+    );
     expect(second.structured.deferred).toBeUndefined();
     expect(second.structured.notFound).toBeUndefined();
 
@@ -1265,6 +1289,7 @@ describe('pubmedEuropepmcFetchTool source case and the records shape (issue #244
       expect(result.isError).toBeFalsy();
       expect(mockFetchRecords).toHaveBeenCalledWith(
         [{ source: source.toUpperCase(), epmcId }],
+        expect.anything(),
         expect.anything(),
       );
       const structured = result.structuredContent as { records: unknown[]; notFound?: unknown };

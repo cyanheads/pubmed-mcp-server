@@ -4,11 +4,14 @@
  * deadline, its records normalized and checked against the PMIDs sent — a
  * record for a PMID not sent fails as `icite_unrequested_record`, unretried.
  *
- * Once retries run out, the last attempt's `data.reason` is kept
- * (`icite_invalid_response` for a body that is not the JSON envelope), and a
+ * The total deadline is iCite's own, or the time the tool call has left when
+ * that is less. Its expiry ends the call as `icite_deadline_exceeded`. Once the
+ * attempts stop without it — retries ran out, or the next backoff would not fit
+ * the time left — the last attempt's `data.reason` is kept
+ * (`icite_invalid_response` for a body that is not the JSON envelope), a
  * `ServiceUnavailable` with no reason — a network failure or an HTTP 5xx — is
- * reported as `icite_unreachable`. A `Timeout` or `RateLimited` keeps its own
- * code and any upstream `retryAfter`.
+ * reported as `icite_unreachable`, and a `Timeout` as `icite_timed_out`. A
+ * `RateLimited` keeps its own code and any upstream `retryAfter`.
  *
  * Reuses the Europe PMC per-request timeout and retry count (the same settings
  * the OpenAlex service runs on); iCite takes no key or contact email.
@@ -17,10 +20,16 @@
  */
 
 import type { Context } from '@cyanheads/mcp-ts-core';
-import { JsonRpcErrorCode, McpError, serviceUnavailable } from '@cyanheads/mcp-ts-core/errors';
+import {
+  JsonRpcErrorCode,
+  McpError,
+  serviceUnavailable,
+  timeout,
+} from '@cyanheads/mcp-ts-core/errors';
 import { logger, requestContextService, withRetry } from '@cyanheads/mcp-ts-core/utils';
 
 import { getServerConfig } from '@/config/server-config.js';
+import { type CallDeadline, upstreamBound } from '@/services/call-deadline.js';
 import { IciteApiClient } from './api-client.js';
 import { ICITE_DEADLINE_MS, type IciteRawRecord, type IciteRecord } from './types.js';
 
@@ -104,25 +113,73 @@ function normalizeRecord(raw: IciteRawRecord): IciteRecord | undefined {
   };
 }
 
+const OPERATION = 'NIH iCite /pubs';
+
+/** The reason a failure the attempts stopped on is reported under, by its code, when it carries none. */
+const REASON_BY_CODE = new Map<JsonRpcErrorCode, string>([
+  [JsonRpcErrorCode.ServiceUnavailable, 'icite_unreachable'],
+  [JsonRpcErrorCode.Timeout, 'icite_timed_out'],
+]);
+
+/** The expiry of the deadline a call ran under, `deadlineMs` long. */
+function deadlineExceeded(deadlineMs: number, cause?: unknown): McpError {
+  return timeout(
+    `NIH iCite request deadline (${deadlineMs}ms) exceeded`,
+    { reason: 'icite_deadline_exceeded', deadlineMs },
+    cause === undefined ? undefined : { cause },
+  );
+}
+
 /**
- * An exhausted failure as the caller sees it: a `ServiceUnavailable` that
- * carries no reason — a network failure or an HTTP 5xx — becomes
- * `icite_unreachable`. Every other error, a caller's abort included, passes
- * through unchanged.
+ * Maps what the retry loop throws onto this service's failure reasons. A caller's
+ * abort never reaches here.
+ *
+ * - The deadline fired — mid-request or mid-backoff → `icite_deadline_exceeded`,
+ *   with `deadlineMs`.
+ * - The loop stopped because the next backoff would not fit the time left → the
+ *   last attempt's error as when retries run out, below. It arrives as the same
+ *   `retry_deadline_exceeded` an expiry does, and its timing cannot tell the two
+ *   apart (timers can fire early), so the loop's own signal does.
+ * - Every other failure keeps its `data.reason`; one with none is stamped the
+ *   reason {@link REASON_BY_CODE} names for its code, and any other code passes
+ *   through unchanged.
  */
-function withUnreachableReason(error: unknown): unknown {
-  if (
-    !(error instanceof McpError) ||
-    error.code !== JsonRpcErrorCode.ServiceUnavailable ||
-    error.data?.reason !== undefined
-  ) {
-    return error;
+function toServiceError(error: unknown, deadlineFired: boolean, deadlineMs: number): unknown {
+  if (!(error instanceof McpError)) return error;
+  let failure = error;
+  if (error.data?.reason === 'retry_deadline_exceeded') {
+    if (deadlineFired) return deadlineExceeded(deadlineMs, error);
+    failure = asExhausted(error.cause, Number(error.data.retryAttempts));
   }
+  const reason = failure.data?.reason === undefined ? REASON_BY_CODE.get(failure.code) : undefined;
+  if (reason === undefined) return failure;
   return new McpError(
-    error.code,
-    error.message,
-    { ...error.data, reason: 'icite_unreachable' },
-    { cause: error },
+    failure.code,
+    failure.message,
+    { ...failure.data, reason },
+    { cause: failure },
+  );
+}
+
+/**
+ * The last attempt's error in the shape `withRetry` gives one whose retries ran out:
+ * the attempt count in the message and as `retryAttempts`. A failure that is not an
+ * `McpError` — a body that failed mid-stream — reads as unreachable.
+ */
+function asExhausted(last: unknown, attempts: number): McpError {
+  const lastError =
+    last instanceof McpError
+      ? last
+      : serviceUnavailable(
+          `NIH iCite request failed: ${last instanceof Error ? last.message : String(last)}`,
+          undefined,
+          { cause: last },
+        );
+  return new McpError(
+    lastError.code,
+    `${lastError.message} (failed after ${attempts} attempt${attempts === 1 ? '' : 's'})`,
+    { ...lastError.data, retryAttempts: attempts, operation: OPERATION },
+    { cause: lastError },
   );
 }
 
@@ -145,23 +202,44 @@ export class IciteService {
    * `retryable: false` — repeating the request repeats the answer. The mark is
    * set here because the framework fills in only the contract's recovery hint
    * on a service throw, not its `retryable`.
+   *
+   * The call runs under {@link ICITE_DEADLINE_MS}, or under the time `deadline` has
+   * left when that is less; a `deadline` already spent sends nothing and fails as
+   * `icite_deadline_exceeded`. A caller's abort passes through unchanged.
    */
-  async fetchRecords(pmids: readonly string[], ctx: Context): Promise<IciteRecord[]> {
+  async fetchRecords(
+    pmids: readonly string[],
+    ctx: Context,
+    deadline?: CallDeadline,
+  ): Promise<IciteRecord[]> {
+    const bound = upstreamBound(ICITE_DEADLINE_MS, deadline);
+    if (bound.spent && !ctx.signal.aborted) throw deadlineExceeded(bound.deadlineMs);
+
+    let loopSignal: AbortSignal | undefined;
     let raw: IciteRawRecord[];
     try {
       raw = await withRetry(
-        ({ signal, remainingMs }) =>
-          this.client.fetchPubs(pmids, Math.min(this.timeoutMs, remainingMs), ctx, signal),
+        ({ signal }) => {
+          loopSignal = signal;
+          /**
+           * The deadline's expiry reaches the request through `signal`. The per-request
+           * timeout stays uncapped: a timer shortened to the time left would fire at the
+           * deadline's own instant and could be read as an ordinary timeout.
+           */
+          return this.client.fetchPubs(pmids, this.timeoutMs, ctx, signal);
+        },
         {
           maxRetries: this.maxRetries,
-          deadlineMs: ICITE_DEADLINE_MS,
-          operation: 'NIH iCite /pubs',
+          deadlineMs: bound.remainingMs,
+          operation: OPERATION,
           context: ctx,
           signal: ctx.signal,
         },
       );
     } catch (error: unknown) {
-      throw withUnreachableReason(error);
+      if (ctx.signal.aborted) throw error;
+      // The caller is ruled out, so the loop's signal has aborted only if the deadline fired.
+      throw toServiceError(error, loopSignal?.aborted === true, bound.deadlineMs);
     }
 
     const requested = new Set(pmids);

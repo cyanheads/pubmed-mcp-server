@@ -6,6 +6,7 @@
 import { JsonRpcErrorCode, McpError } from '@cyanheads/mcp-ts-core/errors';
 import type { RequestContext } from '@cyanheads/mcp-ts-core/utils';
 import { afterEach, beforeEach, describe, expect, it, type MockInstance, vi } from 'vitest';
+import type { UnpaywallContent } from '@/services/unpaywall/types.js';
 
 const mockFetchWithTimeout = vi.fn();
 
@@ -21,6 +22,10 @@ const { UnpaywallService, initUnpaywallService, getUnpaywallService } = await im
   '@/services/unpaywall/unpaywall-service.js'
 );
 const { logger } = await import('@cyanheads/mcp-ts-core/utils');
+/** The framework helper the module mock replaces, for cases that run its deadline wrapper. */
+const { fetchWithTimeout: realFetchWithTimeout } = await vi.importActual<
+  typeof import('@cyanheads/mcp-ts-core/utils')
+>('@cyanheads/mcp-ts-core/utils');
 
 function jsonResponse(body: unknown, init: ResponseInit = {}) {
   return new Response(JSON.stringify(body), {
@@ -455,6 +460,557 @@ describe('UnpaywallService.fetchContent', () => {
 
       expect(content.kind).toBe('html');
       expect(content.body).toContain('landing');
+    });
+  });
+});
+
+/**
+ * One content read holds at most 50 MiB of decoded body. Each stub body streams
+ * lazily from one reused chunk and counts what was pulled from it, so no case
+ * holds more than one body of the limit's size. (#311)
+ */
+describe('UnpaywallService.fetchContent read limit (issue #311)', () => {
+  const LIMIT_BYTES = 50 * 1024 * 1024;
+  const CHUNK_BYTES = 256 * 1024;
+  /** A body four chunks past the limit, so a reader that stops at the limit leaves some unread. */
+  const PAST_LIMIT_BYTES = LIMIT_BYTES + 4 * CHUNK_BYTES;
+  const TOO_LARGE = { reason: 'unpaywall_content_too_large' };
+  /** `%PDF-` — the five magic bytes every PDF starts with. */
+  const PDF_MAGIC = [0x25, 0x50, 0x44, 0x46, 0x2d];
+  const LANDING_HTML = '<html><body>landing</body></html>';
+  const PAPER_URL = 'https://example.org/paper';
+  const PDF_URL = 'https://example.org/paper.pdf';
+
+  /**
+   * `totalBytes` of body, one reused chunk opening with `%PDF-` per pull and
+   * nothing pulled ahead of the reader. `pulledBytes` counts what the reader took;
+   * `cancelled` records a reader that let the rest go.
+   */
+  function countedBody(totalBytes: number) {
+    const chunk = new Uint8Array(CHUNK_BYTES);
+    chunk.set(PDF_MAGIC);
+    const stats = { pulledBytes: 0, cancelled: false };
+    const stream = new ReadableStream<Uint8Array>(
+      {
+        pull(controller) {
+          const size = Math.min(CHUNK_BYTES, totalBytes - stats.pulledBytes);
+          if (size === 0) {
+            controller.close();
+            return;
+          }
+          stats.pulledBytes += size;
+          controller.enqueue(size === CHUNK_BYTES ? chunk : chunk.subarray(0, size));
+        },
+        cancel() {
+          stats.cancelled = true;
+        },
+      },
+      { highWaterMark: 0 },
+    );
+    return { stream, stats };
+  }
+
+  const streamed = (stream: ReadableStream<Uint8Array>, headers: Record<string, string> = {}) =>
+    new Response(stream, {
+      status: 200,
+      headers: { 'content-type': 'application/pdf', ...headers },
+    });
+
+  const landingPage = () =>
+    new Response(LANDING_HTML, { status: 200, headers: { 'content-type': 'text/html' } });
+
+  const requestedUrls = () => mockFetchWithTimeout.mock.calls.map((call) => call[0] as string);
+
+  const service = () => new UnpaywallService('oa@example.com', 20000);
+
+  /**
+   * The error `pending` rejects with. A resolution fails the case naming only the
+   * content's kind and size, so a body read whole never reaches an assertion diff.
+   */
+  const refusalOf = (pending: Promise<UnpaywallContent>): Promise<unknown> =>
+    pending.then(
+      (content) => {
+        throw new Error(
+          `expected a rejection, got ${content.kind} content of ${content.body.length} bytes`,
+        );
+      },
+      (error: unknown) => error,
+    );
+
+  beforeEach(() => {
+    mockFetchWithTimeout.mockReset();
+  });
+
+  it.each([
+    ['one byte past the limit', LIMIT_BYTES + 1],
+    ['several chunks past the limit', PAST_LIMIT_BYTES],
+  ])(
+    'stops reading a body %s that has no Content-Length at the limit',
+    async (_label, totalBytes) => {
+      const { stream, stats } = countedBody(totalBytes);
+      mockFetchWithTimeout.mockResolvedValueOnce(streamed(stream));
+
+      const error = await refusalOf(service().fetchContent({ url: PAPER_URL }));
+
+      expect(error).toBeInstanceOf(McpError);
+      expect(error).toMatchObject({
+        code: JsonRpcErrorCode.ServiceUnavailable,
+        data: { ...TOO_LARGE, host: 'example.org' },
+      });
+      expect((error as Error).message).toContain('50 MiB read limit');
+      expect(stats.pulledBytes).toBeLessThanOrEqual(LIMIT_BYTES + CHUNK_BYTES);
+      expect(stats.cancelled).toBe(true);
+    },
+  );
+
+  it('refuses an uncompressed body whose Content-Length is past the limit before reading any of it', async () => {
+    const { stream, stats } = countedBody(LIMIT_BYTES + 1);
+    mockFetchWithTimeout.mockResolvedValueOnce(
+      streamed(stream, { 'content-length': String(LIMIT_BYTES + 1) }),
+    );
+
+    const error = await refusalOf(service().fetchContent({ url: PAPER_URL }));
+
+    expect(error).toMatchObject({ data: TOO_LARGE });
+    expect((error as Error).message).toContain('50 MiB read limit');
+    expect(stats.pulledBytes).toBe(0);
+    expect(stats.cancelled).toBe(true);
+  });
+
+  it.each(['gzip', 'br'])(
+    'counts the decoded bytes of a %s body whose Content-Length is its encoded size',
+    async (encoding) => {
+      // What fetch hands back for a compressed body on both runtimes: the decoded
+      // bytes, with Content-Encoding and the encoded Content-Length left in place.
+      const { stream, stats } = countedBody(PAST_LIMIT_BYTES);
+      mockFetchWithTimeout.mockResolvedValueOnce(
+        streamed(stream, { 'content-encoding': encoding, 'content-length': String(64 * 1024) }),
+      );
+
+      const error = await refusalOf(service().fetchContent({ url: PAPER_URL }));
+
+      expect(error).toMatchObject({ data: TOO_LARGE });
+      expect(stats.pulledBytes).toBeLessThanOrEqual(LIMIT_BYTES + CHUNK_BYTES);
+      expect(stats.cancelled).toBe(true);
+    },
+  );
+
+  it.each(['gzip', 'br'])(
+    'reads a %s body whole when its encoded Content-Length is past the limit and its decoded bytes are not',
+    async (encoding) => {
+      const { stream, stats } = countedBody(CHUNK_BYTES);
+      mockFetchWithTimeout.mockResolvedValueOnce(
+        streamed(stream, {
+          'content-encoding': encoding,
+          'content-length': String(LIMIT_BYTES + 1),
+        }),
+      );
+
+      const content = await service().fetchContent({ url: PAPER_URL });
+
+      expect(content.kind).toBe('pdf');
+      expect((content.body as Uint8Array).byteLength).toBe(CHUNK_BYTES);
+      expect(stats.pulledBytes).toBe(CHUNK_BYTES);
+    },
+  );
+
+  it('reads a response that carries no body as an empty page', async () => {
+    mockFetchWithTimeout.mockResolvedValueOnce(
+      new Response(null, { status: 200, headers: { 'content-type': 'text/html' } }),
+    );
+
+    expect(await service().fetchContent({ url: PAPER_URL })).toEqual({
+      kind: 'html',
+      fetchedUrl: PAPER_URL,
+      body: '',
+    });
+  });
+
+  it('resolves a body of exactly the limit, Content-Length included, as a PDF', async () => {
+    const { stream, stats } = countedBody(LIMIT_BYTES);
+    mockFetchWithTimeout.mockResolvedValueOnce(
+      streamed(stream, { 'content-length': String(LIMIT_BYTES) }),
+    );
+
+    const content = await service().fetchContent({ url: PAPER_URL });
+
+    expect(content.kind).toBe('pdf');
+    const body = content.body as Uint8Array;
+    expect(body).toBeInstanceOf(Uint8Array);
+    expect(body.byteLength).toBe(LIMIT_BYTES);
+    expect(Array.from(body.subarray(0, 5))).toEqual(PDF_MAGIC);
+    expect(Array.from(body.subarray(CHUNK_BYTES, CHUNK_BYTES + 5))).toEqual(PDF_MAGIC);
+    expect(stats.pulledBytes).toBe(LIMIT_BYTES);
+  });
+
+  it('falls through to the landing page when the url_for_pdf body is past the limit', async () => {
+    const { stream } = countedBody(PAST_LIMIT_BYTES);
+    mockFetchWithTimeout
+      .mockResolvedValueOnce(streamed(stream))
+      .mockResolvedValueOnce(landingPage());
+
+    const content = await service().fetchContent({ url: PAPER_URL, url_for_pdf: PDF_URL });
+
+    // Kind first: a PDF read whole would otherwise land in the toEqual diff.
+    expect(content.kind).toBe('html');
+    expect(content).toEqual({ kind: 'html', fetchedUrl: PAPER_URL, body: LANDING_HTML });
+    expect(requestedUrls()).toEqual([PDF_URL, PAPER_URL]);
+  });
+
+  it('does not read the same address again when url_for_pdf equals url and its body is past the limit', async () => {
+    const { stream } = countedBody(PAST_LIMIT_BYTES);
+    mockFetchWithTimeout
+      .mockResolvedValueOnce(streamed(stream))
+      .mockResolvedValueOnce(landingPage());
+
+    const error = await refusalOf(
+      service().fetchContent({ url: PAPER_URL, url_for_pdf: PAPER_URL }),
+    );
+
+    expect(error).toMatchObject({ data: TOO_LARGE });
+    expect(requestedUrls()).toEqual([PAPER_URL]);
+  });
+
+  it('still reads the same address again when url_for_pdf equals url and the first read failed on the network', async () => {
+    mockFetchWithTimeout
+      .mockRejectedValueOnce(new Error('connect ECONNRESET'))
+      .mockResolvedValueOnce(landingPage());
+
+    const content = await service().fetchContent({ url: PAPER_URL, url_for_pdf: PAPER_URL });
+
+    expect(content).toMatchObject({ kind: 'html', body: LANDING_HTML });
+    expect(requestedUrls()).toEqual([PAPER_URL, PAPER_URL]);
+  });
+
+  /**
+   * The real `fetchWithTimeout` over a stubbed global `fetch`: the deadline it
+   * hands to the body, and the caller's signal, reach the read.
+   */
+  describe('through the fetchWithTimeout body wrapper', () => {
+    const fetchStub = vi.fn<typeof fetch>();
+
+    /**
+     * Answers the next fetch with a body that sends one chunk, then stays open
+     * until that request's signal aborts, which errors it the way a real fetch
+     * body errors. Resolves once the first chunk is sent.
+     */
+    function answerWithStalledBody(): Promise<void> {
+      const firstChunkSent = Promise.withResolvers<void>();
+      fetchStub.mockImplementationOnce(async (_input, init) => {
+        const signal = init?.signal as AbortSignal;
+        let sent = false;
+        const stream = new ReadableStream<Uint8Array>(
+          {
+            start(controller) {
+              signal.addEventListener('abort', () => controller.error(signal.reason), {
+                once: true,
+              });
+            },
+            pull(controller) {
+              if (sent) return;
+              sent = true;
+              controller.enqueue(Uint8Array.of(...PDF_MAGIC));
+              firstChunkSent.resolve();
+            },
+          },
+          { highWaterMark: 0 },
+        );
+        return streamed(stream);
+      });
+      return firstChunkSent.promise;
+    }
+
+    beforeEach(() => {
+      fetchStub.mockReset();
+      mockFetchWithTimeout.mockImplementation(realFetchWithTimeout);
+      vi.stubGlobal('fetch', fetchStub);
+    });
+
+    afterEach(() => {
+      vi.useRealTimers();
+      vi.unstubAllGlobals();
+    });
+
+    it('cancels the upstream body and disarms the request deadline when it refuses a body', async () => {
+      vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
+      const { stream, stats } = countedBody(PAST_LIMIT_BYTES);
+      fetchStub.mockResolvedValueOnce(streamed(stream));
+
+      const error = await refusalOf(service().fetchContent({ url: PAPER_URL }));
+
+      expect(error).toMatchObject({ data: TOO_LARGE });
+      expect(stats.cancelled).toBe(true);
+      // The wrapper's own queue holds one chunk ahead of the reader.
+      expect(stats.pulledBytes).toBeLessThanOrEqual(LIMIT_BYTES + 2 * CHUNK_BYTES);
+      expect(vi.getTimerCount()).toBe(0);
+    });
+
+    it('rejects with RequestCancelled when the caller aborts mid-body', async () => {
+      const bodyStarted = answerWithStalledBody();
+      const controller = new AbortController();
+
+      const call = service().fetchContent({ url: PAPER_URL }, controller.signal);
+      await bodyStarted;
+      controller.abort(new DOMException('The client went away', 'AbortError'));
+
+      await expect(call).rejects.toMatchObject({ code: JsonRpcErrorCode.RequestCancelled });
+    });
+
+    it('rejects with Timeout when UNPAYWALL_TIMEOUT_MS runs out mid-body, and not before', async () => {
+      vi.useFakeTimers();
+      const bodyStarted = answerWithStalledBody();
+      let settled = false;
+
+      const call = service().fetchContent({ url: PAPER_URL });
+      call.then(
+        () => {
+          settled = true;
+        },
+        () => {
+          settled = true;
+        },
+      );
+      await bodyStarted;
+      await vi.advanceTimersByTimeAsync(19_999);
+      expect(settled).toBe(false);
+      await vi.advanceTimersByTimeAsync(1);
+
+      await expect(call).rejects.toMatchObject({ code: JsonRpcErrorCode.Timeout });
+    });
+  });
+});
+
+/**
+ * The tool call's deadline, passed beside the signal: each request's timeout is
+ * `UNPAYWALL_TIMEOUT_MS` or the time the deadline has left, whichever is shorter, and
+ * a request the shortened timeout cuts ends as `unpaywall_deadline_exceeded`, never as
+ * an ordinary timeout. The real `fetchWithTimeout` runs over a stubbed `fetch` under
+ * the fake clock. (#310)
+ */
+describe('UnpaywallService under a tool call deadline (#310)', () => {
+  const TIMEOUT_MS = 20_000;
+  const DOI = '10.1000/x';
+  const PAPER_URL = 'https://example.org/paper';
+  const PDF_URL = 'https://example.org/paper.pdf';
+  const LANDING_HTML = '<html><body>landing</body></html>';
+  const fetchStub = vi.fn<typeof fetch>();
+
+  const service = () => new UnpaywallService('oa@example.com', TIMEOUT_MS);
+  const deadlineWith = (leftMs: number, totalMs: number) => ({
+    expiresAt: Date.now() + leftMs,
+    totalMs,
+  });
+
+  /** A response whose headers arrive at once and whose body never ends until its signal aborts. */
+  function stalledBody(init: RequestInit | undefined, contentType: string): Response {
+    const signal = init?.signal as AbortSignal;
+    const stream = new ReadableStream<Uint8Array>({
+      start(controller) {
+        signal.addEventListener('abort', () => controller.error(signal.reason), { once: true });
+      },
+    });
+    return new Response(stream, { status: 200, headers: { 'content-type': contentType } });
+  }
+
+  /** A request that never answers until its signal aborts; one already aborted rejects at once. */
+  const hang = (_input: unknown, init: RequestInit | undefined) =>
+    new Promise<Response>((_resolve, reject) => {
+      const signal = init?.signal as AbortSignal;
+      if (signal.aborted) reject(signal.reason);
+      signal.addEventListener('abort', () => reject(signal.reason), { once: true });
+    });
+
+  /** Run a call under the fake clock; return what it threw and the instant it settled. */
+  async function settleTimed(call: Promise<unknown>) {
+    const start = Date.now();
+    let settledAfterMs: number | undefined;
+    const outcome = call.then(
+      () => {
+        throw new Error('expected the call to fail');
+      },
+      (error: unknown) => {
+        settledAfterMs = Date.now() - start;
+        return error;
+      },
+    );
+    await vi.runAllTimersAsync();
+    return { error: await outcome, settledAfterMs };
+  }
+
+  const requestedUrls = () =>
+    fetchStub.mock.calls.map(([input]) => (input instanceof Request ? input.url : String(input)));
+
+  beforeEach(() => {
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout', 'Date'] });
+    fetchStub.mockReset();
+    mockFetchWithTimeout.mockReset();
+    mockFetchWithTimeout.mockImplementation(realFetchWithTimeout);
+    vi.stubGlobal('fetch', fetchStub);
+  });
+
+  afterEach(() => {
+    vi.useRealTimers();
+    vi.unstubAllGlobals();
+  });
+
+  describe('resolve', () => {
+    it('settles at the deadline’s instant as unpaywall_deadline_exceeded when it leaves less than UNPAYWALL_TIMEOUT_MS', async () => {
+      fetchStub.mockImplementation(hang);
+      const { error, settledAfterMs } = await settleTimed(
+        service().resolve(DOI, undefined, deadlineWith(5_000, 50_000)),
+      );
+
+      expect(error).toBeInstanceOf(McpError);
+      expect(error).toMatchObject({
+        code: JsonRpcErrorCode.Timeout,
+        message: 'Unpaywall request deadline (50000ms) exceeded',
+        data: { reason: 'unpaywall_deadline_exceeded', deadlineMs: 50_000, doi: DOI },
+      });
+      expect(settledAfterMs).toBe(5_000);
+    });
+
+    it('ends a lookup body the deadline cuts mid-read as unpaywall_deadline_exceeded', async () => {
+      fetchStub.mockImplementation(async (_input, init) => stalledBody(init, 'application/json'));
+      const { error, settledAfterMs } = await settleTimed(
+        service().resolve(DOI, undefined, deadlineWith(5_000, 50_000)),
+      );
+
+      expect(error).toMatchObject({
+        code: JsonRpcErrorCode.Timeout,
+        data: { reason: 'unpaywall_deadline_exceeded', deadlineMs: 50_000 },
+      });
+      expect(settledAfterMs).toBe(5_000);
+    });
+
+    it('keeps an ordinary UNPAYWALL_TIMEOUT_MS timeout as unpaywall_unreachable when the deadline leaves more time', async () => {
+      fetchStub.mockImplementation(hang);
+      const { error, settledAfterMs } = await settleTimed(
+        service().resolve(DOI, undefined, deadlineWith(30_000, 50_000)),
+      );
+
+      expect(error).toMatchObject({
+        code: JsonRpcErrorCode.ServiceUnavailable,
+        data: { reason: 'unpaywall_unreachable', doi: DOI },
+      });
+      expect((error as McpError).cause).toMatchObject({ code: JsonRpcErrorCode.Timeout });
+      expect(settledAfterMs).toBe(TIMEOUT_MS);
+    });
+
+    it.each([0, 1])(
+      'sends nothing and arms no timer on a deadline with %i ms left',
+      async (leftMs) => {
+        fetchStub.mockImplementation(async () => jsonResponse({ is_oa: false }));
+        const error = await service()
+          .resolve(DOI, undefined, deadlineWith(leftMs, 50_000))
+          .catch((e: unknown) => e);
+
+        expect(error).toMatchObject({
+          code: JsonRpcErrorCode.Timeout,
+          data: { reason: 'unpaywall_deadline_exceeded', deadlineMs: 50_000, doi: DOI },
+        });
+        expect(fetchStub).not.toHaveBeenCalled();
+        expect(vi.getTimerCount()).toBe(0);
+      },
+    );
+
+    it('never reports a caller’s cancellation on a spent deadline as the deadline', async () => {
+      fetchStub.mockImplementation(hang);
+      const controller = new AbortController();
+      controller.abort(new DOMException('The client went away', 'AbortError'));
+      const { error } = await settleTimed(
+        service().resolve(DOI, controller.signal, deadlineWith(0, 50_000)),
+      );
+
+      expect((error as McpError).data?.reason).not.toBe('unpaywall_deadline_exceeded');
+      expect((error as McpError).cause).toMatchObject({ code: JsonRpcErrorCode.RequestCancelled });
+    });
+  });
+
+  describe('fetchContent', () => {
+    it('settles at the deadline’s instant as unpaywall_deadline_exceeded when it leaves less than UNPAYWALL_TIMEOUT_MS', async () => {
+      fetchStub.mockImplementation(hang);
+      const { error, settledAfterMs } = await settleTimed(
+        service().fetchContent({ url: PAPER_URL }, undefined, deadlineWith(5_000, 50_000)),
+      );
+
+      expect(error).toMatchObject({
+        code: JsonRpcErrorCode.Timeout,
+        message: 'Unpaywall request deadline (50000ms) exceeded',
+        data: { reason: 'unpaywall_deadline_exceeded', deadlineMs: 50_000, host: 'example.org' },
+      });
+      expect(settledAfterMs).toBe(5_000);
+    });
+
+    it('ends a content body the deadline cuts mid-read as unpaywall_deadline_exceeded', async () => {
+      fetchStub.mockImplementation(async (_input, init) => stalledBody(init, 'application/pdf'));
+      const { error, settledAfterMs } = await settleTimed(
+        service().fetchContent({ url: PAPER_URL }, undefined, deadlineWith(5_000, 50_000)),
+      );
+
+      expect(error).toMatchObject({
+        code: JsonRpcErrorCode.Timeout,
+        data: { reason: 'unpaywall_deadline_exceeded', deadlineMs: 50_000 },
+      });
+      expect(settledAfterMs).toBe(5_000);
+    });
+
+    it.each([0, 1])(
+      'sends nothing and arms no timer on a deadline with %i ms left',
+      async (leftMs) => {
+        fetchStub.mockImplementation(
+          async () =>
+            new Response(LANDING_HTML, { status: 200, headers: { 'content-type': 'text/html' } }),
+        );
+        const error = await service()
+          .fetchContent(
+            { url: PAPER_URL, url_for_pdf: PDF_URL },
+            undefined,
+            deadlineWith(leftMs, 50_000),
+          )
+          .catch((e: unknown) => e);
+
+        expect(error).toMatchObject({
+          code: JsonRpcErrorCode.Timeout,
+          data: { reason: 'unpaywall_deadline_exceeded', deadlineMs: 50_000 },
+        });
+        expect(fetchStub).not.toHaveBeenCalled();
+        expect(vi.getTimerCount()).toBe(0);
+      },
+    );
+
+    it('skips the landing-page read once the deadline that cut the PDF read is spent', async () => {
+      fetchStub.mockImplementation(hang);
+      const { error, settledAfterMs } = await settleTimed(
+        service().fetchContent(
+          { url: PAPER_URL, url_for_pdf: PDF_URL },
+          undefined,
+          deadlineWith(5_000, 50_000),
+        ),
+      );
+
+      expect(error).toMatchObject({
+        code: JsonRpcErrorCode.Timeout,
+        data: { reason: 'unpaywall_deadline_exceeded', deadlineMs: 50_000 },
+      });
+      expect(settledAfterMs).toBe(5_000);
+      expect(requestedUrls()).toEqual([PDF_URL]);
+    });
+
+    it('still reads the landing page after a failed PDF read while the deadline has time left', async () => {
+      fetchStub
+        .mockRejectedValueOnce(new TypeError('fetch failed'))
+        .mockResolvedValueOnce(
+          new Response(LANDING_HTML, { status: 200, headers: { 'content-type': 'text/html' } }),
+        );
+
+      const content = await service().fetchContent(
+        { url: PAPER_URL, url_for_pdf: PDF_URL },
+        undefined,
+        deadlineWith(5_000, 50_000),
+      );
+
+      expect(content).toEqual({ kind: 'html', fetchedUrl: PAPER_URL, body: LANDING_HTML });
+      expect(requestedUrls()).toEqual([PDF_URL, PAPER_URL]);
     });
   });
 });

@@ -11,6 +11,8 @@
  * @module src/services/europe-pmc/types
  */
 
+import type { CallDeadline } from '@/services/call-deadline.js';
+
 /** Base URL for Europe PMC's RESTful web service. */
 export const EUROPEPMC_API_BASE = 'https://www.ebi.ac.uk/europepmc/webservices/rest';
 
@@ -156,6 +158,11 @@ export const EUROPEPMC_DEFAULT_PAGE_SIZE = 25;
 export interface EuropePmcSearchParams {
   /** EPMC's cursor pagination token; start with `*` for the first page. */
   cursorMark?: string;
+  /**
+   * The tool call's deadline. The search ends when it runs out, if that comes
+   * before `EUROPEPMC_TOTAL_DEADLINE_MS` does; omitted, that deadline alone applies.
+   */
+  deadline?: CallDeadline;
   /**
    * Europe PMC serves 1–1,000; `pubmed_europepmc_search` caps it at 100 per
    * call. Default {@link EUROPEPMC_DEFAULT_PAGE_SIZE}.

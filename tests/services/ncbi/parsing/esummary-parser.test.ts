@@ -21,6 +21,7 @@ import {
   parseESummaryXml,
 } from './_book-fixtures.js';
 import { APOS_TITLE_ESUMMARY_XML } from './_entity-fixtures.js';
+import { LANGUAGES_BY_PMID, LANGUAGES_ESUMMARY_XML } from './_language-fixtures.js';
 
 describe('formatESummaryAuthors', () => {
   it('returns empty string for no authors', () => {
@@ -1006,5 +1007,99 @@ describe('ESummary text NCBI double-encodes, decoded one layer (#262)', () => {
     expect(summary?.title).toContain('in Parkinson&lt;s&gt; AT&T Disease Patients');
     expect(summary?.authorNames?.[0]).toBe('R&amp;D Group');
     expect(summary?.source).toBe('Otolaryngol &amp; Pol');
+  });
+});
+
+/* -------------------------------------------------------------------------- */
+/*  Languages (#309)                                                          */
+/* -------------------------------------------------------------------------- */
+
+describe('ESummary languages (#309)', () => {
+  const summariesOf = async (xml: string) =>
+    new Map((await extractBriefSummaries(parseESummaryXml(xml))).map((s) => [s.pmid, s]));
+
+  it('receives a lone Lang code as a scalar and several as an array, in one batch', () => {
+    const docs = ensureArray(
+      parseESummaryXml(LANGUAGES_ESUMMARY_XML).DocumentSummarySet?.DocumentSummary,
+    );
+    const langOf = (pmid: string) => docs.find((d) => d['@_uid'] === pmid)?.Lang;
+
+    expect(langOf('34463784')).toEqual({ string: 'ger' });
+    expect(langOf('43020712')).toEqual({ string: ['eng', 'spa'] });
+    expect(langOf('99999999')).toBeUndefined();
+  });
+
+  it("reads every code of every described record as a list, in NCBI's order", async () => {
+    const summaries = await summariesOf(LANGUAGES_ESUMMARY_XML);
+
+    for (const [pmid, languages] of LANGUAGES_BY_PMID) {
+      expect(summaries.get(pmid)?.languages, pmid).toEqual(languages);
+    }
+  });
+
+  it('gives the error entry of an unknown PMID no languages', async () => {
+    const summaries = await summariesOf(LANGUAGES_ESUMMARY_XML);
+
+    expect(summaries.get('99999999')?.pmid).toBe('99999999');
+    expect(summaries.get('99999999')).not.toHaveProperty('languages');
+  });
+
+  it('never emits an empty list: a record with no Lang, or an empty one, has none', async () => {
+    const lone = '<Lang><string>ger</string></Lang>';
+    for (const replacement of ['', '<Lang/>', '<Lang><string></string></Lang>']) {
+      const summary = (await summariesOf(LANGUAGES_ESUMMARY_XML.replace(lone, replacement))).get(
+        '34463784',
+      );
+      expect(summary?.title, replacement).toBe(
+        '[Update on diagnostics and treatment of heart failure].',
+      );
+      expect(summary, replacement).not.toHaveProperty('languages');
+    }
+  });
+
+  it('reads none from a version 1 DocSum, which names languages rather than coding them', async () => {
+    // `<Item Name="Lang" Type="String">English</Item>`, not the NLM code the
+    // version 2.0 `Lang` and EFetch's `Language` carry.
+    const [summary] = await extractBriefSummaries(parseESummaryXml(BOOK_ESUMMARY_V1_XML));
+
+    expect(summary?.pmid).toBe('20301425');
+    expect(summary).not.toHaveProperty('languages');
+  });
+});
+
+/* -------------------------------------------------------------------------- */
+/*  A record with no contributors                                             */
+/* -------------------------------------------------------------------------- */
+
+describe('ESummary record with no contributors', () => {
+  const summariesOf = async (xml: string) =>
+    new Map((await extractBriefSummaries(parseESummaryXml(xml))).map((s) => [s.pmid, s]));
+
+  it('carries no authors string: a book that credits no one, and an unknown PMID', async () => {
+    // 40825089 is a NICE guidance book whose `<Authors/>` is empty.
+    const book = (await summariesOf(CHAPTER_DATES_ESUMMARY_XML)).get('40825089');
+    const unknown = (await summariesOf(LANGUAGES_ESUMMARY_XML)).get('99999999');
+
+    expect(book?.bookTitle).toBe('Dapagliflozin for treating chronic kidney disease');
+    expect(book).not.toHaveProperty('authors');
+    expect(unknown?.pmid).toBe('99999999');
+    expect(unknown).not.toHaveProperty('authors');
+  });
+
+  it('carries none from a version 1 DocSum whose AuthorList is empty', async () => {
+    const [summary] = await extractBriefSummaries(
+      parseESummaryXml(
+        '<eSummaryResult><DocSum><Id>40825089</Id><Item Name="PubDate" Type="Date">2025 Jul 2</Item><Item Name="AuthorList" Type="List"></Item><Item Name="Title" Type="String">Dapagliflozin for treating chronic kidney disease</Item></DocSum></eSummaryResult>',
+      ),
+    );
+
+    expect(summary?.title).toBe('Dapagliflozin for treating chronic kidney disease');
+    expect(summary).not.toHaveProperty('authors');
+  });
+
+  it('keeps the display string of a record that has authors', async () => {
+    const summary = (await summariesOf(LANGUAGES_ESUMMARY_XML)).get('34463784');
+
+    expect(summary?.authors).toBe('Wintrich J, Berger AK, Bewarder Y, et al.');
   });
 });

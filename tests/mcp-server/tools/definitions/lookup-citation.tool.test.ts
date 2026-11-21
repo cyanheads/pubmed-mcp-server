@@ -6,7 +6,7 @@
 import type { ContentBlock } from '@cyanheads/mcp-ts-core';
 import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
 import { createMockContext, runToolContract } from '@cyanheads/mcp-ts-core/testing';
-import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { toJSONSchema } from 'zod/v4/core';
 
 import {
@@ -2041,5 +2041,46 @@ describe('integer fields in every citation position (#198)', () => {
         pattern: expect.any(String),
       });
     }
+  });
+});
+
+describe('lookupCitationTool call deadline (issue #310)', () => {
+  const STARTED_AT = Date.UTC(2026, 0, 1);
+
+  beforeEach(() => {
+    mockECitMatch.mockReset();
+    mockESummary.mockReset();
+    mockExtractBriefSummaries.mockReset();
+    mockExtractBriefSummaries.mockResolvedValue([]);
+    vi.useFakeTimers({ toFake: ['Date'] });
+    vi.setSystemTime(STARTED_AT);
+  });
+
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  it('passes ECitMatch and the ESummary after it one deadline, started with the call, beside ctx.signal', async () => {
+    mockECitMatch.mockResolvedValue([
+      { key: '1', matched: true, pmid: '8400044', status: 'matched' },
+    ]);
+    mockESummary.mockResolvedValue({});
+    const ctx = createMockContext({ errors: lookupCitationTool.errors });
+    const input = lookupCitationTool.input.parse({
+      citations: [{ journal: 'proc natl acad sci u s a', year: '1993' }],
+    });
+    await lookupCitationTool.handler(input, ctx);
+
+    expect(mockECitMatch).toHaveBeenCalledTimes(1);
+    expect(mockESummary).toHaveBeenCalledTimes(1);
+    const citMatchOptions = mockECitMatch.mock.lastCall?.[1];
+    const summaryOptions = mockESummary.mock.lastCall?.[1];
+    expect(citMatchOptions).toEqual({
+      signal: ctx.signal,
+      deadline: { expiresAt: STARTED_AT + 50_000, totalMs: 50_000 },
+    });
+    expect(citMatchOptions.signal).toBe(ctx.signal);
+    expect(summaryOptions.signal).toBe(ctx.signal);
+    expect(summaryOptions.deadline).toBe(citMatchOptions.deadline);
   });
 });

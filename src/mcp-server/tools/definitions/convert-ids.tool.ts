@@ -8,6 +8,7 @@
  */
 
 import { tool, z } from '@cyanheads/mcp-ts-core';
+import { startCallDeadline } from '@/services/call-deadline.js';
 import { normalizeDoi } from '@/services/doi.js';
 import { NCBI_ID_INPUT_ERRORS, NCBI_SERVICE_ERRORS } from '@/services/error-contracts.js';
 import { getNcbiService } from '@/services/ncbi/ncbi-service.js';
@@ -134,6 +135,7 @@ export const convertIdsTool = tool('pubmed_convert_ids', {
   }),
 
   async handler(input, ctx) {
+    const deadline = startCallDeadline();
     ctx.log.info('Executing pubmed_convert_ids', {
       count: input.ids.length,
       idType: input.idType,
@@ -157,7 +159,10 @@ export const convertIdsTool = tool('pubmed_convert_ids', {
       input.idType === 'pmcid'
         ? input.ids
         : [...new Set(input.ids.map((id) => sentForm(id, input.idType)))];
-    const raw = await getNcbiService().idConvert(ids, input.idType, { signal: ctx.signal });
+    const raw = await getNcbiService().idConvert(ids, input.idType, {
+      signal: ctx.signal,
+      deadline,
+    });
 
     // NCBI returns pmid as a number in JSON — coerce all ID fields to strings
     const conversions = new Map<

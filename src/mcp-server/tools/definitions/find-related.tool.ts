@@ -13,12 +13,30 @@
  * in `output`, which `format()` states in the header. A zero-padded source PMID
  * runs as the PMID it spells, so the source never appears among its own related
  * articles.
+ *
+ * The whole chain runs under one deadline, started as the handler starts (#310). A
+ * step that another step can still follow — a fallback provider, a reference-coverage
+ * check, the rows' ESummary — takes half the time left as it starts; the last step
+ * takes what remains. A provider whose step has no time left is never asked and is
+ * reported `not_reached`, apart from every failure label; the rows' ESummary in that
+ * case is skipped like a failed one, with a notice of its own.
  * @module src/mcp-server/tools/definitions/find-related.tool
  */
 
 import { tool, z } from '@cyanheads/mcp-ts-core';
-import { configurationError, JsonRpcErrorCode, McpError } from '@cyanheads/mcp-ts-core/errors';
+import {
+  configurationError,
+  JsonRpcErrorCode,
+  McpError,
+  timeout,
+} from '@cyanheads/mcp-ts-core/errors';
 import { markdownLink } from '@cyanheads/mcp-ts-core/utils';
+import {
+  type CallDeadline,
+  isSpent,
+  shareDeadline,
+  startCallDeadline,
+} from '@/services/call-deadline.js';
 import { EUROPEPMC_SERVICE_ERRORS, OPENALEX_SERVICE_ERRORS } from '@/services/error-contracts.js';
 import { getEuropePmcService } from '@/services/europe-pmc/europe-pmc-service.js';
 import { getNcbiService } from '@/services/ncbi/ncbi-service.js';
@@ -74,17 +92,22 @@ const PROVIDER_LABELS: Record<ProviderName, string> = {
 
 /** A provider the server never reached because configuration turned it off. */
 const PROVIDER_DISABLED = 'provider_disabled';
+/** A provider the chain never asked because its step had no time left on the call's deadline. */
+const NOT_REACHED = 'not_reached';
 /** A provider failure that carried no declared reason and whose code names none below. */
 const UNCLASSIFIED_ERROR = 'unclassified_error';
 
 /**
  * Label for a provider failure that carries no declared reason, named by its code.
- * NCBI stamps `ncbi_unreachable` on a `ServiceUnavailable` and `ncbi_rate_limited` on
- * a `RateLimited`, and that reason wins; Europe PMC and OpenAlex declare their
- * `*_unreachable` reason for `ServiceUnavailable` only, and Europe PMC stamps
- * `europepmc_deadline_exceeded` on a call that outruns its total deadline. So an
- * exhausted per-request timeout from any provider, or an exhausted Europe PMC or
- * OpenAlex rate limit, reaches the chain with its code and no reason.
+ * A declared reason wins: NCBI stamps `ncbi_unreachable`, `ncbi_timed_out`, and
+ * `ncbi_rate_limited` on a `ServiceUnavailable`, `Timeout`, and `RateLimited`; Europe
+ * PMC stamps `europepmc_unreachable`, `europepmc_timed_out`, and
+ * `europepmc_rate_limited` on those three codes; OpenAlex stamps `openalex_unreachable`
+ * on a `ServiceUnavailable` and `openalex_invalid_response` on a body it cannot parse.
+ * Each stamps its `*_deadline_exceeded` on a call its deadline cut: the provider's own
+ * total deadline, or the share of this call's deadline its step ran under. So an
+ * exhausted OpenAlex timeout or rate limit reaches the chain with its code and no
+ * reason.
  */
 const REASON_BY_CODE = new Map<JsonRpcErrorCode, string>([
   [JsonRpcErrorCode.RateLimited, 'rate_limited'],
@@ -106,7 +129,7 @@ interface ProviderResult {
   totalCount: number;
 }
 
-/** One provider's outcome in the chain, reported when every attempt failed. */
+/** One provider's outcome in the chain, reported when no provider answered. */
 interface ProviderAttempt {
   message: string;
   provider: ProviderName;
@@ -114,10 +137,10 @@ interface ProviderAttempt {
 }
 
 /**
- * A reference-coverage fallback that threw instead of answering. Carries the
- * declared reason and whether a retry can reach it — never the upstream
- * message, which can hold URLs and request detail this success payload has no
- * business publishing.
+ * A reference-coverage fallback that failed or was not reached instead of
+ * answering. Carries the declared reason and whether a retry can reach it —
+ * never the upstream message, which can hold URLs and request detail this
+ * success payload has no business publishing.
  */
 interface CoverageFailure {
   provider: 'europepmc' | 'openalex';
@@ -125,7 +148,11 @@ interface CoverageFailure {
   retryable: boolean;
 }
 
-/** Declared retryability per reason the two coverage fallbacks can throw. */
+/**
+ * Declared retryability per reason the two coverage fallbacks can throw, from their
+ * service contracts — `europepmc_deadline_exceeded` and `openalex_deadline_exceeded`
+ * among them, both retryable.
+ */
 const RETRYABLE_BY_REASON = new Map<string, boolean>(
   [...EUROPEPMC_SERVICE_ERRORS, ...OPENALEX_SERVICE_ERRORS].map((entry) => [
     entry.reason,
@@ -133,12 +160,37 @@ const RETRYABLE_BY_REASON = new Map<string, boolean>(
   ]),
 );
 
+/**
+ * Throws when a fallback's step has no time left on the call's deadline, before its
+ * service is asked: the caller's own reason when the caller has cancelled, otherwise
+ * a `not_reached` outcome, which the chain records beside the failures but never
+ * words as one.
+ */
+function ensureTimeLeft(
+  provider: 'europepmc' | 'openalex',
+  deadline: CallDeadline,
+  signal: AbortSignal,
+): void {
+  if (!isSpent(deadline)) return;
+  signal.throwIfAborted();
+  throw timeout(`${PROVIDER_LABELS[provider]} was not reached: ${notReachedReason(1)}`, {
+    reason: NOT_REACHED,
+    provider,
+  });
+}
+
+/** Why a provider was not reached, for `count` of them. */
+function notReachedReason(count: number): string {
+  return `this call's deadline ran out before ${count === 1 ? 'it was' : 'they were'} asked.`;
+}
+
 // ─── NCBI provider ────────────────────────────────────────────────────────────
 
 async function ncbiProvider(
   pmid: string,
   relationship: 'similar' | 'cited_by' | 'references',
   signal: AbortSignal,
+  deadline: CallDeadline,
 ): Promise<ProviderResult> {
   const ncbi = getNcbiService();
   const linkName =
@@ -157,7 +209,7 @@ async function ncbiProvider(
       linkname: linkName,
       retmode: 'xml',
     },
-    { signal },
+    { signal, deadline },
   )) as ELinkResponse;
 
   const eLinkResultsArray = ensureArray(eLinkResult?.eLinkResult);
@@ -200,7 +252,8 @@ const EPMC_MAX_PAGES = 10;
  * non-MED rows carry no PubMed PMID and are dropped, so a single page sized on
  * the raw window can under-fill it. Pages share one size (the endpoint pages by
  * number, so the size must stay constant) and are pulled until the filtered
- * array reaches the window, upstream runs out, or `EPMC_MAX_PAGES` is hit.
+ * array reaches the window, upstream runs out, or `EPMC_MAX_PAGES` is hit. Every
+ * page runs under the one `deadline` this step started with.
  */
 async function epmcProvider(
   pmid: string,
@@ -208,6 +261,7 @@ async function epmcProvider(
   offset: number,
   maxResults: number,
   signal: AbortSignal,
+  deadline: CallDeadline,
 ): Promise<ProviderResult> {
   const epmc = getEuropePmcService();
   if (!epmc) {
@@ -216,6 +270,7 @@ async function epmcProvider(
       provider: 'europepmc',
     });
   }
+  ensureTimeLeft('europepmc', deadline, signal);
 
   const needed = offset + maxResults;
   const pageSize = Math.min(needed, EPMC_MAX_PAGE_SIZE);
@@ -226,8 +281,8 @@ async function epmcProvider(
   for (let page = 1; page <= EPMC_MAX_PAGES && allPmids.length < needed; page++) {
     const result =
       relationship === 'cited_by'
-        ? await epmc.citations(pmid, pageSize, page, signal)
-        : await epmc.references(pmid, pageSize, page, signal);
+        ? await epmc.citations(pmid, pageSize, page, signal, deadline)
+        : await epmc.references(pmid, pageSize, page, signal, deadline);
     allPmids.push(...result.pmids);
     droppedNoPmid += result.droppedNoPmid;
     hitCount = result.hitCount;
@@ -256,6 +311,7 @@ async function openAlexProvider(
   relationship: 'similar' | 'cited_by' | 'references',
   maxNeeded: number,
   signal: AbortSignal,
+  deadline: CallDeadline,
 ): Promise<ProviderResult> {
   const oa = getOpenAlexServiceOptional();
   if (!oa) {
@@ -264,17 +320,18 @@ async function openAlexProvider(
       provider: 'openalex',
     });
   }
+  ensureTimeLeft('openalex', deadline, signal);
 
   let result: OpenAlexRelatedResult;
   switch (relationship) {
     case 'similar':
-      result = await oa.similar(pmid, maxNeeded, signal);
+      result = await oa.similar(pmid, maxNeeded, signal, deadline);
       break;
     case 'cited_by':
-      result = await oa.citedBy(pmid, maxNeeded, signal);
+      result = await oa.citedBy(pmid, maxNeeded, signal, deadline);
       break;
     case 'references':
-      result = await oa.references(pmid, maxNeeded, signal);
+      result = await oa.references(pmid, maxNeeded, signal, deadline);
       break;
   }
 
@@ -289,13 +346,15 @@ async function openAlexProvider(
 
 /**
  * Record a coverage-fallback failure with its declared reason. A provider off by
- * configuration never recovers on retry; a failure with no declared reason is
- * treated as transient, matching how the fully-failed chain reports one, unless
- * the error itself says a retry cannot succeed (`data.retryable: false`).
+ * configuration never recovers on retry; one the deadline never reached is reached
+ * by a new call, which starts a deadline of its own; a failure with no declared
+ * reason is treated as transient, matching how the fully-failed chain reports one,
+ * unless the error itself says a retry cannot succeed (`data.retryable: false`).
  */
 function coverageFailureFrom(provider: 'europepmc' | 'openalex', err: unknown): CoverageFailure {
   const { reason } = attemptFrom(provider, err);
   if (reason === PROVIDER_DISABLED) return { provider, reason, retryable: false };
+  if (reason === NOT_REACHED) return { provider, reason, retryable: true };
   const retryable =
     RETRYABLE_BY_REASON.get(reason) ?? !(err instanceof McpError && err.data?.retryable === false);
   return { provider, reason, retryable };
@@ -325,17 +384,41 @@ function disabledClause(entries: readonly { provider: ProviderName; reason: stri
   return ` ${disabled.join(' and ')} ${disabled.length > 1 ? 'are' : 'is'} turned off by server configuration and will not recover on retry.`;
 }
 
+/** Whether an outcome is a provider the deadline never reached, as opposed to one that ran. */
+function wasNotReached(entry: { reason: string }): boolean {
+  return entry.reason === NOT_REACHED;
+}
+
+/**
+ * Sentence naming the providers the call's deadline never reached, which were never
+ * asked and so never failed. Empty when every entry ran.
+ */
+function notReachedSentence(
+  entries: readonly { provider: ProviderName; reason: string }[],
+): string {
+  const skipped = entries.filter(wasNotReached).map((e) => PROVIDER_LABELS[e.provider]);
+  if (skipped.length === 0) return '';
+  return `${skipped.join(' and ')} ${skipped.length > 1 ? 'were' : 'was'} not reached: ${notReachedReason(skipped.length)}`;
+}
+
 /**
  * Disclosure for a `references` answer whose coverage check came back short.
  * Names each provider that failed and its reason, separates a
  * configuration-disabled provider from the transient failures worth retrying,
- * and never describes a failed provider as having answered.
+ * names a provider the deadline never reached apart from both, and never
+ * describes a failed provider as having answered.
  */
 function coverageIncompleteNotice(failures: readonly CoverageFailure[]): string {
-  const retryClause = failures.some((f) => f.retryable)
+  const failed = failures.filter((f) => !wasNotReached(f));
+  const retryClause = failed.some((f) => f.retryable)
     ? ' Retry after a brief delay to complete the coverage check.'
     : '';
-  return `Reference coverage could not be fully checked — ${summarizeOutcomes(failures)} did not answer.${retryClause}${disabledClause(failures)}`;
+  const answered =
+    failed.length > 0
+      ? `${summarizeOutcomes(failed)} did not answer.${retryClause}${disabledClause(failed)}`
+      : '';
+  const outcomes = [answered, notReachedSentence(failures)].filter(Boolean).join(' ');
+  return `Reference coverage could not be fully checked — ${outcomes}`;
 }
 
 /** Compact, log-safe description of an unknown thrown value. */
@@ -361,12 +444,16 @@ function attemptFrom(provider: ProviderName, err: unknown): ProviderAttempt {
 
 /**
  * Recovery hint for a fully failed chain. Names only the providers actually
- * attempted and their observed outcomes — never another origin's health — and
+ * attempted and their observed outcomes — never another origin's health —
  * separates a configuration-disabled provider, which no retry brings back, from
- * the transient failures worth retrying.
+ * the transient failures worth retrying, and names a provider the deadline never
+ * reached in a sentence of its own rather than among the failures. NCBI always
+ * runs, so the attempted list is never empty.
  */
 function allProvidersFailedHint(attempts: readonly ProviderAttempt[]): string {
-  return `Providers attempted: ${summarizeOutcomes(attempts)}. Retry the transient failures after a brief delay.${disabledClause(attempts)}`;
+  const ran = attempts.filter((a) => !wasNotReached(a));
+  const skipped = notReachedSentence(attempts);
+  return `Providers attempted: ${summarizeOutcomes(ran)}. Retry the transient failures after a brief delay.${disabledClause(ran)}${skipped && ` ${skipped}`}`;
 }
 
 // ─── Tool Definition ─────────────────────────────────────────────────────────
@@ -389,9 +476,9 @@ export const findRelatedTool = tool('pubmed_find_related', {
     {
       reason: 'all_providers_failed',
       code: JsonRpcErrorCode.ServiceUnavailable,
-      when: 'Every provider eligible for the requested relationship failed; none answered.',
+      when: "Every provider eligible for the requested relationship failed, or was not asked because the call's deadline ran out first; none answered.",
       recovery:
-        'Read data.attempted for each provider outcome, then retry the transient failures after a brief delay; an entry marked provider_disabled is turned off by server configuration and will not recover.',
+        "Read data.attempted for each provider outcome, then retry the transient failures after a brief delay; an entry marked provider_disabled is turned off by server configuration and will not recover, and one marked not_reached was never asked because the call's deadline ran out before it.",
       retryable: true,
     },
   ] as const,
@@ -435,7 +522,7 @@ export const findRelatedTool = tool('pubmed_find_related', {
     articles: z
       .array(summaryRowSchema.describe('Related article with enriched summary'))
       .describe(
-        'Related articles, each summarized as `pubmed_search_articles` summarizes a search result. When NCBI eSummary does not answer, each is its `pmid` and `pubmedUrl` alone, with a notice.',
+        "Related articles, each summarized as `pubmed_search_articles` summarizes a search result. When NCBI eSummary does not answer, or the call's deadline runs out before it is asked, each is its `pmid` and `pubmedUrl` alone, with a notice.",
       ),
     // A domain field, not enrichment: format() sees only this payload, and the
     // header states the total beside the returned count. (#147)
@@ -457,7 +544,7 @@ export const findRelatedTool = tool('pubmed_find_related', {
       .string()
       .optional()
       .describe(
-        `Guidance when results are empty, a fallback provider answered, offset overshot, a fallback provider could not be reached, upstream rows were excluded for carrying no PubMed PMID, or a \`maxResults\` past the per-call cap of ${MAX_RESULTS_CAP} was served at ${MAX_RESULTS_CAP}. Absent on an NCBI result page that needs none of these.`,
+        `Guidance when results are empty, a fallback provider answered, offset overshot, a fallback provider could not be reached or was not asked before the call's deadline ran out, upstream rows were excluded for carrying no PubMed PMID, article metadata could not be fetched, or a \`maxResults\` past the per-call cap of ${MAX_RESULTS_CAP} was served at ${MAX_RESULTS_CAP}. Absent on an NCBI result page that needs none of these.`,
       ),
     coverageFailures: z
       .array(
@@ -465,17 +552,19 @@ export const findRelatedTool = tool('pubmed_find_related', {
           .object({
             provider: z
               .enum(['europepmc', 'openalex'])
-              .describe('Reference-coverage provider that failed'),
+              .describe('Reference-coverage provider that did not answer'),
             reason: z
               .string()
-              .describe('Declared failure reason, e.g. europepmc_unreachable or provider_disabled'),
+              .describe(
+                "Declared failure reason, e.g. europepmc_unreachable; provider_disabled when configuration turned the provider off, not_reached when the call's deadline ran out before it was asked",
+              ),
             retryable: z.boolean().describe('Whether a retry can reach this provider'),
           })
           .describe('One coverage provider that could not be checked'),
       )
       .optional()
       .describe(
-        'Reference-coverage fallbacks that failed instead of answering, so the reference set is unverified rather than confirmed absent. Absent when every provider consulted answered.',
+        "Reference-coverage fallbacks that failed, or were not asked before the call's deadline ran out, instead of answering, so the reference set is unverified rather than confirmed absent. Absent when every provider consulted answered.",
       ),
   },
 
@@ -487,6 +576,11 @@ export const findRelatedTool = tool('pubmed_find_related', {
   },
 
   async handler(input, ctx) {
+    // Every upstream call below runs under this one deadline. A step that a later
+    // step can still follow — a fallback, a coverage check, the rows' ESummary —
+    // takes `shareDeadline(deadline)` as it starts, half the time left; the last step
+    // takes `deadline` itself. (#310)
+    const deadline = startCallDeadline();
     const ncbi = getNcbiService();
     ctx.log.debug('Finding related articles', {
       pmid: input.pmid,
@@ -537,7 +631,8 @@ export const findRelatedTool = tool('pubmed_find_related', {
     // Every provider the chain tried, with its outcome. A structurally ineligible
     // provider (Europe PMC for `similar`) is never tried and never appears here;
     // an unconfigured one is tried, fails as `provider_disabled` without reaching
-    // its upstream, and is recorded like any other failure.
+    // its upstream, and is recorded like any other failure; one whose step had no
+    // time left is recorded as `not_reached`, never asked.
     const attempts: ProviderAttempt[] = [];
     // Records WHY a non-primary provider answered, so the provenance notice can
     // distinguish an NCBI outage from references coverage for a non-PMC source.
@@ -547,9 +642,15 @@ export const findRelatedTool = tool('pubmed_find_related', {
     // failure here is carried to the caller instead of logged and dropped.
     const coverageFailures: CoverageFailure[] = [];
 
-    // 1. NCBI (primary)
+    // 1. NCBI (primary). An ESummary always follows an answer, and a fallback a
+    //    failure, so ELink takes a share.
     try {
-      providerResult = await ncbiProvider(canonicalPmid, input.relationship, ctx.signal);
+      providerResult = await ncbiProvider(
+        canonicalPmid,
+        input.relationship,
+        ctx.signal,
+        shareDeadline(deadline),
+      );
     } catch (err) {
       if (ctx.signal.aborted) throw err;
       ctx.log.warning('NCBI eLink failed, trying fallback providers', {
@@ -561,6 +662,7 @@ export const findRelatedTool = tool('pubmed_find_related', {
 
     // 2. Europe PMC (fallback for cited_by / references only). An empty EPMC
     //    result is not "served" — fall through to OpenAlex rather than return 0.
+    //    OpenAlex or the rows' ESummary follows, so it takes a share.
     if (providerResult === null && epmcSupports(input.relationship)) {
       try {
         const epmcResult = await epmcProvider(
@@ -569,6 +671,7 @@ export const findRelatedTool = tool('pubmed_find_related', {
           input.offset,
           maxResults,
           ctx.signal,
+          shareDeadline(deadline),
         );
         if (epmcResult.allPmids.length > 0) {
           providerResult = epmcResult;
@@ -578,7 +681,7 @@ export const findRelatedTool = tool('pubmed_find_related', {
         }
       } catch (err) {
         if (ctx.signal.aborted) throw err;
-        ctx.log.warning('Europe PMC fallback failed, trying OpenAlex', {
+        ctx.log.warning('Europe PMC fallback did not answer, trying OpenAlex', {
           pmid: input.pmid,
           err: describeError(err),
         });
@@ -586,7 +689,8 @@ export const findRelatedTool = tool('pubmed_find_related', {
       }
     }
 
-    // 3. OpenAlex (last resort for all relationships)
+    // 3. OpenAlex (last resort for all relationships). The rows' ESummary follows
+    //    an answer, so it takes a share too.
     if (providerResult === null) {
       try {
         providerResult = await openAlexProvider(
@@ -594,11 +698,12 @@ export const findRelatedTool = tool('pubmed_find_related', {
           input.relationship,
           input.offset + maxResults,
           ctx.signal,
+          shareDeadline(deadline),
         );
         fallbackKind = 'outage';
       } catch (err) {
         if (ctx.signal.aborted) throw err;
-        ctx.log.warning('OpenAlex fallback failed', {
+        ctx.log.warning('OpenAlex fallback did not answer', {
           pmid: input.pmid,
           err: describeError(err),
         });
@@ -636,14 +741,25 @@ export const findRelatedTool = tool('pubmed_find_related', {
     if (providerResult.source === 'ncbi' && providerResult.allPmids.length === 0) {
       let sourceSummary: ParsedBriefSummary | undefined;
       let sourceConfirmedMissing = false;
+      // The last step, unless a references coverage check can run after it: one
+      // turned off by configuration asks no upstream, so it needs no time. A source
+      // ESummary with no time left sends nothing and fails, which leaves the source
+      // unconfirmed exactly as any other failure of it does.
+      const coverageCanFollow =
+        input.relationship === 'references' &&
+        (getEuropePmcService() !== undefined || getOpenAlexServiceOptional() !== undefined);
       try {
+        // Version 2.0, as for the rows: the version 1 DocSum has no BookTitle, so a
+        // whole Bookshelf book, whose Title is empty, would read as unknown there.
         const summaryResult = await ncbi.eSummary(
-          { db: 'pubmed', id: canonicalPmid },
-          { signal: ctx.signal },
+          { db: 'pubmed', version: '2.0', retmode: 'xml', id: canonicalPmid },
+          { signal: ctx.signal, deadline: coverageCanFollow ? shareDeadline(deadline) : deadline },
         );
-        const summaries = await extractBriefSummaries(summaryResult);
-        sourceSummary = summaries[0];
-        if (!sourceSummary?.title) sourceConfirmedMissing = true;
+        const [summary] = await extractBriefSummaries(summaryResult);
+        // An unknown PMID comes back as an error entry holding its uid alone. A
+        // Bookshelf book has no Title and is named by its BookTitle (40825089).
+        if (summary?.title || summary?.bookTitle) sourceSummary = summary;
+        else sourceConfirmedMissing = true;
       } catch (err) {
         if (ctx.signal.aborted) throw err;
         ctx.log.debug('Source PMID ESummary failed', { err });
@@ -673,29 +789,44 @@ export const findRelatedTool = tool('pubmed_find_related', {
       // source returns empty; Europe PMC then OpenAlex serve them. An unconfirmed
       // source (ESummary itself failed) stays silent — the empty set is most
       // likely a transient NCBI issue, not a real "no references".
-      if (input.relationship === 'references' && sourceSummary?.title) {
+      if (input.relationship === 'references' && sourceSummary) {
         let refFallback: ProviderResult | null = null;
         // Providers that actually answered — the only ones a "no references"
         // notice may claim to have checked.
         const coverageChecked: ProviderName[] = ['ncbi'];
+        // Each runs under a share: OpenAlex can follow Europe PMC, and the rows'
+        // ESummary follows an answer from either.
         const refAttempts: Array<{
           provider: 'europepmc' | 'openalex';
-          run: () => Promise<ProviderResult>;
+          run: (stepDeadline: CallDeadline) => Promise<ProviderResult>;
         }> = [
           {
             provider: 'europepmc',
-            run: () =>
-              epmcProvider(canonicalPmid, 'references', input.offset, maxResults, ctx.signal),
+            run: (stepDeadline) =>
+              epmcProvider(
+                canonicalPmid,
+                'references',
+                input.offset,
+                maxResults,
+                ctx.signal,
+                stepDeadline,
+              ),
           },
           {
             provider: 'openalex',
-            run: () =>
-              openAlexProvider(canonicalPmid, 'references', input.offset + maxResults, ctx.signal),
+            run: (stepDeadline) =>
+              openAlexProvider(
+                canonicalPmid,
+                'references',
+                input.offset + maxResults,
+                ctx.signal,
+                stepDeadline,
+              ),
           },
         ];
         for (const attempt of refAttempts) {
           try {
-            const result = await attempt.run();
+            const result = await attempt.run(shareDeadline(deadline));
             coverageChecked.push(attempt.provider);
             if (result.allPmids.length > 0) {
               refFallback = result;
@@ -703,7 +834,7 @@ export const findRelatedTool = tool('pubmed_find_related', {
             }
           } catch (err) {
             if (ctx.signal.aborted) throw err;
-            ctx.log.warning('References fallback provider failed', {
+            ctx.log.warning('References fallback provider did not answer', {
               provider: attempt.provider,
               err: describeError(err),
             });
@@ -840,48 +971,49 @@ export const findRelatedTool = tool('pubmed_find_related', {
       };
     }
 
-    // Enrich the window with ESummary. When a fallback answered because NCBI is
-    // down, eSummary hits the same host and may also fail — degrade to bare PMIDs
-    // (the article metadata fields are all optional) rather than failing the whole
-    // request, so the chain's resilience survives the enrichment step.
-    try {
-      // Version 2.0 is what carries a Bookshelf record's venue: the version 1
-      // DocSum format has no BookTitle, PublisherName or DocType element, and
-      // names editors without the AuthType that separates them from the
-      // record's own authors. On that older format a book row reports an empty
-      // Source and no book fields at all. (#114)
-      const summaryResult = await ncbi.eSummary(
-        { db: 'pubmed', version: '2.0', retmode: 'xml', id: window.join(',') },
-        { signal: ctx.signal },
-      );
-      const briefSummaries = await extractBriefSummaries(summaryResult);
-      const summaryMap = new Map(briefSummaries.map((bs) => [bs.pmid, bs]));
-      const articles = window.map((pmid) => summaryRow(summaryMap.get(pmid) ?? { pmid }));
-      emitNotice(notices, nextOffset);
-      return {
-        sourcePmid: input.pmid,
-        relationship: input.relationship,
-        offset: input.offset,
-        articles,
-        totalCount,
-      };
-    } catch (err) {
-      if (ctx.signal.aborted) throw err;
-      ctx.log.warning('ESummary enrichment failed; returning related PMIDs without metadata', {
-        err: describeError(err),
-      });
+    // Enrich the window with ESummary, the chain's last step, under the call's own
+    // deadline. When a fallback answered because NCBI is down, eSummary hits the
+    // same host and may also fail — degrade to bare PMIDs (the article metadata
+    // fields are all optional) rather than failing the whole request, so the
+    // chain's resilience survives the enrichment step. With no time left it is
+    // never asked, and its notice says so rather than reporting it failed.
+    let summaryMap: Map<string, ParsedBriefSummary> | undefined;
+    if (isSpent(deadline)) {
+      ctx.signal.throwIfAborted();
       notices.push(
-        'Article metadata is temporarily unavailable (NCBI eSummary did not respond); returning related PMIDs only. Retry for full metadata, or use pubmed_fetch_articles.',
+        "Article metadata was not fetched — this call's deadline ran out before NCBI eSummary was asked; returning related PMIDs only. Use pubmed_fetch_articles for full metadata.",
       );
-      emitNotice(notices, nextOffset);
-      return {
-        sourcePmid: input.pmid,
-        relationship: input.relationship,
-        offset: input.offset,
-        articles: window.map((pmid) => summaryRow({ pmid })),
-        totalCount,
-      };
+    } else {
+      try {
+        // Version 2.0 is what carries a Bookshelf record's venue: the version 1
+        // DocSum format has no BookTitle, PublisherName or DocType element, and
+        // names editors without the AuthType that separates them from the
+        // record's own authors. On that older format a book row reports an empty
+        // Source and no book fields at all. (#114)
+        const summaryResult = await ncbi.eSummary(
+          { db: 'pubmed', version: '2.0', retmode: 'xml', id: window.join(',') },
+          { signal: ctx.signal, deadline },
+        );
+        const briefSummaries = await extractBriefSummaries(summaryResult);
+        summaryMap = new Map(briefSummaries.map((bs) => [bs.pmid, bs]));
+      } catch (err) {
+        if (ctx.signal.aborted) throw err;
+        ctx.log.warning('ESummary enrichment failed; returning related PMIDs without metadata', {
+          err: describeError(err),
+        });
+        notices.push(
+          'Article metadata is temporarily unavailable (NCBI eSummary did not respond); returning related PMIDs only. Retry for full metadata, or use pubmed_fetch_articles.',
+        );
+      }
     }
+    emitNotice(notices, nextOffset);
+    return {
+      sourcePmid: input.pmid,
+      relationship: input.relationship,
+      offset: input.offset,
+      articles: window.map((pmid) => summaryRow(summaryMap?.get(pmid) ?? { pmid })),
+      totalCount,
+    };
   },
 
   format: (result) => {
@@ -893,9 +1025,10 @@ export const findRelatedTool = tool('pubmed_find_related', {
     if (result.articles.length === 0) {
       lines.push('No related articles found.');
     } else {
-      // The title, author, editor and meta lines of an item are one paragraph,
-      // and the authors sit inside this server's own `*…*`, so every value takes
-      // the paragraph escape: a lone `*` in two of them would pair. (#261)
+      // The title, author, editor, language and meta lines of an item are one
+      // paragraph, and the authors sit inside this server's own `*…*`, so every
+      // value takes the paragraph escape: a lone `*` in two of them would pair.
+      // (#261)
       const escaped = (part: string | undefined) => (part ? escapeMarkdownInParagraph(part) : '');
       for (const a of result.articles) {
         // The item opens on its identifiers: the PubMed link, then the DOI as
@@ -912,6 +1045,9 @@ export const findRelatedTool = tool('pubmed_find_related', {
         if (a.title) lines.push(`  ${escapeMarkdownLineStart(escaped(a.title))}`);
         if (a.authors) lines.push(`  *${escaped(a.authors)}*`);
         if (a.editors?.length) lines.push(`  edited by ${escaped(a.editors.join(', '))}`);
+        // Its own line above the meta line, which stays the item's last (#297):
+        // a comma-joined list would read as more meta segments. (#309)
+        if (a.languages?.length) lines.push(`  Language: ${escaped(a.languages.join(', '))}`);
         // A Bookshelf record has no journal: its book and publisher stand in
         // for the source so the row still names a venue. (#114)
         const book = [escaped(a.bookTitle), escaped(a.publisherName)].filter(Boolean).join(' — ');

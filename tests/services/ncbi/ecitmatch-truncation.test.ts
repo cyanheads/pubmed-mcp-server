@@ -10,10 +10,12 @@
 import { JsonRpcErrorCode, McpError } from '@cyanheads/mcp-ts-core/errors';
 import { createPacer } from '@cyanheads/mcp-ts-core/utils';
 import { afterEach, describe, expect, it, type Mock, vi } from 'vitest';
+import type { CallDeadline } from '@/services/call-deadline.js';
 import type { NcbiApiClient } from '@/services/ncbi/api-client.js';
 import { NcbiService } from '@/services/ncbi/ncbi-service.js';
 import type { NcbiResponseHandler } from '@/services/ncbi/response-handler.js';
 import type { ECitMatchCitation } from '@/services/ncbi/types.js';
+import { driveUntilSettled, track } from './_fake-clock.js';
 
 vi.mock('@cyanheads/mcp-ts-core/utils', async (importOriginal) => {
   const actual = await importOriginal<typeof import('@cyanheads/mcp-ts-core/utils')>();
@@ -369,6 +371,97 @@ describe('NcbiService.eCitMatch truncation recovery (#193)', () => {
 
       expect((await settled).map((r) => r.status)).toEqual(['not_found', 'matched']);
       expect(makeRequest).toHaveBeenCalledTimes(3);
+    });
+
+    /**
+     * The call's deadline is the earlier of NCBI's own and the tool call's (#310); an
+     * expiry reports the length of whichever it was.
+     */
+    describe('under a tool call’s deadline (#310)', () => {
+      /** The tool call deadline's length. Each test hands it over partway through. */
+      const CALL_MS = 50_000;
+
+      /** A tool call deadline {@link CALL_MS} long with `leftMs` left on it now. */
+      const deadlineWith = (leftMs: number): CallDeadline => ({
+        expiresAt: Date.now() + leftMs,
+        totalMs: CALL_MS,
+      });
+
+      const deadlineExceeded = (deadlineMs: number) => ({
+        ok: false,
+        error: {
+          code: JsonRpcErrorCode.Timeout,
+          data: { reason: 'ncbi_deadline_exceeded', deadlineMs },
+        },
+      });
+
+      it('fails at the tool call deadline’s instant when it ends before NCBI’s, reporting its length', async () => {
+        vi.useFakeTimers();
+        const makeRequest = slowRequest();
+        // Two 200 ms requests with 300 ms left on the tool call: both fit NCBI's own
+        // 60 s deadline, but not the tool call's.
+        const { service } = createHarness({ makeRequest });
+        const startedAt = Date.now();
+
+        const outcome = await driveUntilSettled(
+          track(service.eCitMatch([MISS, PNAS], { deadline: deadlineWith(300) })),
+        );
+
+        expect(outcome).toMatchObject(deadlineExceeded(CALL_MS));
+        expect(Date.now() - startedAt).toBe(300);
+        expect(makeRequest).toHaveBeenCalledTimes(2);
+      });
+
+      it('fails at NCBI’s own deadline when that ends first, reporting its length', async () => {
+        vi.useFakeTimers();
+        const makeRequest = slowRequest();
+        const { service } = createHarness({ deadlineMs: 300, makeRequest });
+        const startedAt = Date.now();
+
+        const outcome = await driveUntilSettled(
+          track(service.eCitMatch([MISS, PNAS], { deadline: deadlineWith(10_000) })),
+        );
+
+        expect(outcome).toMatchObject(deadlineExceeded(300));
+        expect(Date.now() - startedAt).toBe(300);
+        expect(makeRequest).toHaveBeenCalledTimes(2);
+      });
+
+      it.each([0, 1])(
+        'sends nothing and arms no timer on a deadline with %i ms left',
+        async (leftMs) => {
+          vi.useFakeTimers();
+          const { service, makeRequest } = createHarness();
+
+          const error = await service
+            .eCitMatch([MISS, PNAS], { deadline: deadlineWith(leftMs) })
+            .catch((e: unknown) => e);
+
+          expect({ ok: false, error }).toMatchObject(deadlineExceeded(CALL_MS));
+          expect(makeRequest).not.toHaveBeenCalled();
+          expect(vi.getTimerCount()).toBe(0);
+        },
+      );
+
+      it('sends no re-request once the tool call’s deadline is spent', async () => {
+        vi.useFakeTimers();
+        // The first request answers 1 ms before the deadline, leaving the re-request none.
+        const makeRequest = vi.fn(
+          (_endpoint: string, params: { bdata?: string }) =>
+            new Promise((resolve) => setTimeout(() => resolve(String(params.bdata)), 299)),
+        );
+        const { service } = createHarness({ makeRequest });
+        const startedAt = Date.now();
+
+        const outcome = await driveUntilSettled(
+          track(service.eCitMatch([MISS, PNAS], { deadline: deadlineWith(300) })),
+        );
+
+        expect(outcome).toMatchObject(deadlineExceeded(CALL_MS));
+        expect(Date.now() - startedAt).toBe(299);
+        expect(makeRequest).toHaveBeenCalledTimes(1);
+        expect(vi.getTimerCount()).toBe(0);
+      });
     });
   });
 });

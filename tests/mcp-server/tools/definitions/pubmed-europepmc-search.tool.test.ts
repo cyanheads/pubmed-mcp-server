@@ -21,6 +21,13 @@ vi.mock('@/services/europe-pmc/europe-pmc-service.js', () => ({
   getEuropePmcService: () => mockGetEpmc(),
 }));
 
+// The real deadline, recorded, so a test can tell which object the handler started.
+vi.mock('@/services/call-deadline.js', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('@/services/call-deadline.js')>();
+  return { ...actual, startCallDeadline: vi.fn(actual.startCallDeadline) };
+});
+
+const { startCallDeadline } = await import('@/services/call-deadline.js');
 const { pubmedEuropepmcSearchTool } = await import(
   '@/mcp-server/tools/definitions/pubmed-europepmc-search.tool.js'
 );
@@ -87,6 +94,29 @@ describe('pubmedEuropepmcSearchTool', () => {
       ctx,
     );
     expect(mockSearch).toHaveBeenCalledWith(expect.objectContaining({ query: '  malaria  ' }));
+  });
+
+  /**
+   * The handler starts one deadline before any upstream request and hands that
+   * same object to the search, beside `ctx.signal`, which goes down unchanged.
+   * 50 s at default config. (#310)
+   */
+  it('hands the search the deadline it started, and ctx.signal', async () => {
+    vi.mocked(startCallDeadline).mockClear();
+    mockSearch.mockResolvedValue({ hits: [], hitCount: 0, cursorMark: '*', query: 'malaria' });
+    const ctx = createMockContext({ errors: pubmedEuropepmcSearchTool.errors });
+    await pubmedEuropepmcSearchTool.handler(
+      pubmedEuropepmcSearchTool.input.parse({ query: 'malaria' }),
+      ctx,
+    );
+
+    expect(startCallDeadline).toHaveBeenCalledTimes(1);
+    const deadline = vi.mocked(startCallDeadline).mock.results[0]?.value;
+    expect(deadline).toMatchObject({ totalMs: 50_000 });
+    expect(mockSearch).toHaveBeenCalledTimes(1);
+    const params = mockSearch.mock.calls[0]?.[0];
+    expect(params.deadline).toBe(deadline);
+    expect(params.signal).toBe(ctx.signal);
   });
 
   it('passes default sources (MED, PMC, PPR) when none provided', async () => {

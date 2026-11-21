@@ -5,6 +5,7 @@
  */
 
 import { resource, z } from '@cyanheads/mcp-ts-core';
+import { startCallDeadline } from '@/services/call-deadline.js';
 import { NCBI_SERVICE_ERRORS } from '@/services/error-contracts.js';
 import { getNcbiService } from '@/services/ncbi/ncbi-service.js';
 import { ensureArray, getOptionalText, getText } from '@/services/ncbi/parsing/xml-helpers.js';
@@ -35,12 +36,13 @@ export const databaseInfoResource = resource('pubmed://database/info', {
   errors: [...NCBI_SERVICE_ERRORS] as const,
 
   async handler(_params, ctx) {
+    const deadline = startCallDeadline();
     ctx.log.info('Fetching PubMed database info');
 
-    const raw = (await getNcbiService().eInfo({ db: 'pubmed' }, { signal: ctx.signal })) as Record<
-      string,
-      unknown
-    >;
+    const raw = (await getNcbiService().eInfo(
+      { db: 'pubmed' },
+      { signal: ctx.signal, deadline },
+    )) as Record<string, unknown>;
 
     const eInfoResult = (raw.eInfoResult ?? raw) as Record<string, unknown>;
     const dbInfo = (eInfoResult.DbInfo ?? eInfoResult) as Record<string, unknown>;

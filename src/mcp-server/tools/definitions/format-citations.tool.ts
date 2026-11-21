@@ -7,6 +7,7 @@
  */
 
 import { tool, z } from '@cyanheads/mcp-ts-core';
+import { startCallDeadline } from '@/services/call-deadline.js';
 import { NCBI_SERVICE_ERRORS } from '@/services/error-contracts.js';
 import {
   CITATION_NOTICE_TYPES,
@@ -142,6 +143,7 @@ export const formatCitationsTool = tool('pubmed_format_citations', {
   },
 
   async handler(input, ctx) {
+    const deadline = startCallDeadline();
     const formats: CitationStyle[] = Array.isArray(input.format) ? input.format : [input.format];
     ctx.log.debug('Fetching articles for citation generation', {
       pmids: input.pmids,
@@ -153,7 +155,7 @@ export const formatCitationsTool = tool('pubmed_format_citations', {
     const requested = [...new Set(input.pmids.map(normalizePmid))];
     const raw = await getNcbiService().eFetch(
       { db: 'pubmed', id: requested.join(','), retmode: 'xml' },
-      { retmode: 'xml', usePost: requested.length >= 25, signal: ctx.signal },
+      { retmode: 'xml', usePost: requested.length >= 25, signal: ctx.signal, deadline },
     );
     // Reads both members of the set. Taking `PubmedArticleSet.PubmedArticle`
     // alone discards every NCBI Bookshelf record, leaving a chapter or book

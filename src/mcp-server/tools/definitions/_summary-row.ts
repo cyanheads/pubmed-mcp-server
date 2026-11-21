@@ -2,8 +2,8 @@
  * @fileoverview The brief-summary row `pubmed_search_articles` summaries and
  * `pubmed_find_related` rows share: one schema, one set of field descriptions,
  * and one builder from the ESummary parse ({@link ParsedBriefSummary}), so the
- * two tools carry the same identifiers, links, and dates. Each tool keeps its
- * own `format()` layout. (#293, #297)
+ * two tools carry the same identifiers, links, dates, and languages. Each tool
+ * keeps its own `format()` layout. (#293, #297, #309)
  * @module src/mcp-server/tools/definitions/_summary-row
  */
 
@@ -44,6 +44,12 @@ export const summaryRowSchema = z.object({
     .optional()
     .describe(
       'What PubMed classifies this record as: "chapter" or "book" for an NCBI Bookshelf record, "citation" for an ordinary journal article. Absent when PubMed supplies none.',
+    ),
+  languages: z
+    .array(z.string().describe('One NLM three-letter language code, e.g. "eng"'))
+    .optional()
+    .describe(
+      'Languages the article is published in, as NLM three-letter codes in NCBI\'s order (e.g. ["eng"], ["ger"], ["eng", "spa"]) — the codes `pubmed_fetch_articles` returns in its `languages`. A record in another language that NLM has indexed carries NLM\'s English translation as `title`, usually in square brackets; a recent record not yet indexed can carry its original-language title. Absent only when ESummary did not describe the record, as for a PMID it does not know.',
     ),
   editors: z
     .array(z.string().describe('One editor, "Surname Initials" as ESummary renders it'))
@@ -99,6 +105,7 @@ export function summaryRow(summary: ParsedBriefSummary): SummaryRow {
     bookTitle,
     publisherName,
     docType,
+    languages,
     editors,
     pubDate,
     epubDate,
@@ -113,6 +120,7 @@ export function summaryRow(summary: ParsedBriefSummary): SummaryRow {
     ...(bookTitle !== undefined && { bookTitle }),
     ...(publisherName !== undefined && { publisherName }),
     ...(docType !== undefined && { docType }),
+    ...(languages !== undefined && { languages }),
     ...(editors !== undefined && { editors }),
     ...(pubDate !== undefined && { pubDate }),
     ...(epubDate !== undefined && { epubDate }),

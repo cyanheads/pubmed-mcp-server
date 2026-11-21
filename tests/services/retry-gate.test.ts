@@ -43,8 +43,15 @@ const { OpenAlexService } = await import('@/services/openalex/openalex-service.j
 const MAX_RETRIES = 2;
 const EXHAUSTED_ATTEMPTS = MAX_RETRIES + 1;
 
-/** `EUROPEPMC_TOTAL_DEADLINE_MS`'s default, the shorter of the two service deadlines. */
+/** `EUROPEPMC_TOTAL_DEADLINE_MS`'s default, the deadline Europe PMC and OpenAlex run under. */
 const EUROPEPMC_DEADLINE_MS = 45_000;
+
+/**
+ * Timers at or past this never fire: above the 30 s backoff cap, below every total
+ * deadline. OpenAlex arms each request's deadline with the time its call has left,
+ * a millisecond or more short of 45 s, so a ceiling at 45 s would fire it at once.
+ */
+const NEVER_FIRES_MS = 40_000;
 
 /**
  * The error `fetchWithTimeout` throws on a non-2xx. Built from the real
@@ -71,12 +78,12 @@ beforeEach(() => {
   mockFetchWithTimeout.mockRejectedValue(new Error('unmocked fetchWithTimeout'));
   fetchSpy = vi.spyOn(globalThis, 'fetch').mockRejectedValue(new Error('unmocked fetch'));
   // Fire backoff sleeps immediately so an exhausted retry chain doesn't actually wait.
-  // The total-deadline clocks (NCBI's 60 s, Europe PMC's 45 s) never fire.
+  // The total-deadline clocks (NCBI's 60 s, Europe PMC's and OpenAlex's 45 s) never fire.
   setTimeoutSpy = vi.spyOn(globalThis, 'setTimeout').mockImplementation(((
     fn: () => void,
     ms?: number,
   ) => {
-    if (typeof ms === 'number' && ms >= EUROPEPMC_DEADLINE_MS) {
+    if (typeof ms === 'number' && ms >= NEVER_FIRES_MS) {
       return 0 as unknown as ReturnType<typeof setTimeout>;
     }
     fn();
@@ -108,7 +115,11 @@ function buildEuropePmcService() {
 }
 
 function buildOpenAlexService() {
-  return new OpenAlexService(new OpenAlexApiClient({ timeoutMs: 20_000 }), MAX_RETRIES);
+  return new OpenAlexService(
+    new OpenAlexApiClient({ timeoutMs: 20_000 }),
+    MAX_RETRIES,
+    EUROPEPMC_DEADLINE_MS,
+  );
 }
 
 describe('NcbiService retry gate', () => {
@@ -215,7 +226,11 @@ describe('OpenAlexService retry gate', () => {
     it('reports a single attempt in the singular when no retries are configured', async () => {
       mockFetchWithTimeout.mockRejectedValue(await fetchHttpError(503));
 
-      const err = (await new OpenAlexService(new OpenAlexApiClient({ timeoutMs: 20_000 }), 0)
+      const err = (await new OpenAlexService(
+        new OpenAlexApiClient({ timeoutMs: 20_000 }),
+        0,
+        EUROPEPMC_DEADLINE_MS,
+      )
         .similar('31295471', 10)
         .catch((e: unknown) => e)) as McpError;
 

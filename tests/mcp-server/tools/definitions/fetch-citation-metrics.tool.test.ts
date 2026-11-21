@@ -30,9 +30,17 @@ vi.mock('@/services/icite/icite-service.js', async (importOriginal) => {
   return { ...actual, getIciteService: () => service };
 });
 
+// The real deadline, watched, so a case can see the object the handler started.
+vi.mock('@/services/call-deadline.js', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('@/services/call-deadline.js')>();
+  return { ...actual, startCallDeadline: vi.fn(actual.startCallDeadline) };
+});
+
 const { fetchCitationMetricsTool } = await import(
   '@/mcp-server/tools/definitions/fetch-citation-metrics.tool.js'
 );
+const { getIciteService } = await import('@/services/icite/icite-service.js');
+const { startCallDeadline } = await import('@/services/call-deadline.js');
 
 type Structured = {
   records: {
@@ -57,6 +65,7 @@ async function call(pmids: string[], options: { includeClinicalCitations?: boole
 
 afterEach(() => {
   vi.unstubAllGlobals();
+  vi.restoreAllMocks();
 });
 
 describe('input schema', () => {
@@ -536,6 +545,62 @@ describe('errors', () => {
     expect(recovery).toMatch(/smaller batches/);
     expect(recovery).not.toMatch(/retry/i);
     expect(text.trimEnd()).toMatch(/\(reason icite_unrequested_record · not retryable\)$/);
+  });
+
+  /** One deadline per tool call, started by the handler and passed to iCite. (#310) */
+  it('passes the iCite call the deadline the handler starts, 50 s at default config', async () => {
+    stubIciteFetch();
+    const fetchRecords = vi.spyOn(getIciteService(), 'fetchRecords');
+    vi.mocked(startCallDeadline).mockClear();
+
+    await call(['23456789']);
+
+    expect(startCallDeadline).toHaveBeenCalledOnce();
+    const started = vi.mocked(startCallDeadline).mock.results[0]?.value;
+    expect(started).toMatchObject({ totalMs: 50_000, expiresAt: expect.any(Number) });
+    expect(fetchRecords).toHaveBeenCalledOnce();
+    expect(fetchRecords.mock.calls[0]?.[2]).toBe(started);
+  });
+
+  it('surfaces an expired deadline as icite_deadline_exceeded with the contract recovery', async () => {
+    const fetchMock = stubIciteFetch();
+    vi.mocked(startCallDeadline).mockReturnValueOnce({ expiresAt: Date.now(), totalMs: 50_000 });
+
+    const { result, text } = await call(['23456789']);
+
+    expect(result.isError).toBe(true);
+    expect(fetchMock).not.toHaveBeenCalled();
+    const hint =
+      'Retry after a brief delay; NIH iCite did not answer within the deadline and may be under temporary load. For a large batch, split the PMIDs across smaller calls.';
+    expect(result.structuredContent).toMatchObject({
+      error: {
+        code: JsonRpcErrorCode.Timeout,
+        message: 'NIH iCite request deadline (50000ms) exceeded',
+        data: { reason: 'icite_deadline_exceeded', deadlineMs: 50_000, recovery: { hint } },
+      },
+    });
+    expect(text).toContain('Error: NIH iCite request deadline (50000ms) exceeded');
+    expect(text).toContain(`Recovery: ${hint}`);
+    expect(text.trimEnd()).toMatch(/\(reason icite_deadline_exceeded\)$/);
+  });
+
+  it('surfaces attempts that end on a timeout as icite_timed_out with the contract recovery', async () => {
+    stubIciteFetch(() => new Response('gateway timeout', { status: 504 }));
+
+    const { result, text } = await call(['23456789']);
+
+    expect(result.isError).toBe(true);
+    const hint =
+      'Retry after a brief delay; NIH iCite did not answer in time on the attempts this call made and may be under temporary load.';
+    expect(result.structuredContent).toMatchObject({
+      error: {
+        code: JsonRpcErrorCode.Timeout,
+        data: { reason: 'icite_timed_out', retryAttempts: 1, recovery: { hint } },
+      },
+    });
+    expect(text).toContain(`Recovery: ${hint}`);
+    expect(text.trimEnd()).toMatch(/\(reason icite_timed_out\)$/);
+    expect(text).not.toContain('retry_deadline_exceeded');
   });
 });
 

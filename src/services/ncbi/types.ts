@@ -4,6 +4,8 @@
  * @module src/services/ncbi/types
  */
 
+import type { CallDeadline } from '@/services/call-deadline.js';
+
 // ─── NCBI API Constants & Request Types ─────────────────────────────────────
 
 /** Base URL for all NCBI E-utility endpoints. */
@@ -26,6 +28,8 @@ export interface NcbiRequestParams {
  * Options controlling how an NCBI request is made and how the response is handled.
  */
 export interface NcbiRequestOptions {
+  /** The tool call's deadline; omitted, the NCBI deadline applies alone. */
+  deadline?: CallDeadline;
   /** Desired response format. */
   retmode?: 'xml' | 'json' | 'text';
   /** Specific return type (e.g. 'abstract', 'medline'). */
@@ -57,6 +61,8 @@ export interface NcbiRequestOptions {
  * Lets callers thread `ctx.signal` (from tool handlers) through the retry layer.
  */
 export interface NcbiCallOptions {
+  /** The tool call's deadline; omitted, the NCBI deadline applies alone. */
+  deadline?: CallDeadline;
   /** Caller-provided abort signal; combined with the service's internal deadline. */
   signal?: AbortSignal;
 }
@@ -747,7 +753,12 @@ export interface ESummaryDocumentSummary {
   History?: ESummaryHistory[] | { PubMedPubDate: ESummaryHistory[] | ESummaryHistory };
   ISSN?: string;
   Issue?: string;
-  Lang?: string[];
+  /**
+   * NLM language codes, one `<string>` each: the parser collapses a lone code
+   * to a scalar (`{ string: 'ger' }`) and keeps several as a list (`{ string:
+   * ['eng', 'spa'] }`), both within one batch. (#309)
+   */
+  Lang?: { string: string | string[] };
   LastAuthor?: string;
   Pages?: string;
   PubDate?: string;
@@ -813,6 +824,14 @@ export interface ParsedBriefSummary {
    * (#293)
    */
   epubDate?: string;
+  /**
+   * ESummary `Lang`: NLM three-letter codes in NCBI's order and casing, the
+   * codes EFetch's `Language` carries (`["eng", "spa"]`). Read from a version
+   * 2.0 `DocumentSummary` only, since a version 1 DocSum names each language
+   * (`English`) instead. Absent on a record ESummary did not describe; never
+   * an empty list. (#309)
+   */
+  languages?: string[];
   pmcId?: string;
   pmid: string;
   /**
@@ -890,6 +909,38 @@ export interface ESearchResult {
 // ─── ESpell Types ───────────────────────────────────────────────────────────
 
 /**
+ * Most NCBI requests the record-count checks on one ESpell answer may send,
+ * beyond the ESpell call itself. (#316)
+ */
+export const ESPELL_CHECK_MAX_REQUESTS = 12;
+
+/** Time the record-count checks on one ESpell answer may take across all their requests, in ms. (#316) */
+export const ESPELL_CHECK_TIME_LIMIT_MS = 10_000;
+
+/**
+ * Why a check did not run: an NCBI request failed, the next one would pass
+ * {@link ESPELL_CHECK_MAX_REQUESTS}, or the checks ran out of time —
+ * {@link ESPELL_CHECK_TIME_LIMIT_MS}, or the tool call's deadline when it had less left.
+ */
+export type ESpellCheckSkipReason = 'request_failed' | 'request_cap' | 'time_limit';
+
+/** A record-count check on ESpell's answer that did not run, and what stood in its place. */
+export interface ESpellSkippedCheck {
+  /**
+   * `count`: `replacement` was applied as ESpell wrote it, its PubMed record
+   * count never compared with `word`'s. `mesh`: `word` was kept as written —
+   * `replacement` has under a tenth of its records — without ESpell's MeSH
+   * dictionary being asked for a more common spelling.
+   */
+  check: 'count' | 'mesh';
+  reason: ESpellCheckSkipReason;
+  /** ESpell's `db=pubmed` replacement for `word`. */
+  replacement: string;
+  /** The caller's text the replacement stands for, as written in `original`. */
+  word: string;
+}
+
+/**
  * Normalized ESpell result. The response is read with the ordered parser (a
  * `JatsNodeList`), so no raw container type is declared for it.
  */
@@ -900,6 +951,11 @@ export interface ESpellResult {
   hasSuggestion: boolean;
   /** The query as ESpell echoed it. */
   original: string;
+  /**
+   * The checks that did not run — every `count` one in query order, then every
+   * `mesh` one. Absent when each check ran. (#316)
+   */
+  skippedChecks?: ESpellSkippedCheck[];
 }
 
 // ─── EFetch Types ───────────────────────────────────────────────────────────

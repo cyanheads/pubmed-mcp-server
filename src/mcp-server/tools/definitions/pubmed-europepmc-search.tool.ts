@@ -22,6 +22,7 @@
 import { tool, z } from '@cyanheads/mcp-ts-core';
 import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
 import { sanitization } from '@cyanheads/mcp-ts-core/utils';
+import { startCallDeadline } from '@/services/call-deadline.js';
 import { EUROPEPMC_SERVICE_ERRORS, QUERY_INPUT_ERRORS } from '@/services/error-contracts.js';
 import { getEuropePmcService } from '@/services/europe-pmc/europe-pmc-service.js';
 import {
@@ -78,9 +79,12 @@ export const pubmedEuropepmcSearchTool = tool('pubmed_europepmc_search', {
     'https://github.com/cyanheads/pubmed-mcp-server/blob/main/src/mcp-server/tools/definitions/pubmed-europepmc-search.tool.ts',
 
   errors: [
-    // Only the outage recoveries are this tool's own: they name the other search. (#288, #305)
+    // Only the outage recoveries are this tool's own: they name the other search.
+    // A rate limit keeps the shared hint, which says to wait out `retryAfter`. (#288, #305, #315)
     ...EUROPEPMC_SERVICE_ERRORS.map((entry) =>
-      entry.reason === 'europepmc_unreachable' || entry.reason === 'europepmc_deadline_exceeded'
+      entry.reason === 'europepmc_unreachable' ||
+      entry.reason === 'europepmc_deadline_exceeded' ||
+      entry.reason === 'europepmc_timed_out'
         ? {
             ...entry,
             recovery:
@@ -272,6 +276,8 @@ export const pubmedEuropepmcSearchTool = tool('pubmed_europepmc_search', {
   },
 
   async handler(input, ctx) {
+    // One deadline for the whole call, started before any upstream request. (#310)
+    const deadline = startCallDeadline();
     ctx.log.info('Executing pubmed_europepmc_search', { query: input.query });
     // `min(1)` counts whitespace, and the source wrapper trims a blank query to
     // `() AND (SRC:"MED")`, which Europe PMC answers with every record of that
@@ -317,6 +323,7 @@ export const pubmedEuropepmcSearchTool = tool('pubmed_europepmc_search', {
       sources,
       ...(input.sort && { sort: input.sort }),
       ...(ctx.signal && { signal: ctx.signal }),
+      deadline,
     });
 
     const hits = result.hits.map((h) => {

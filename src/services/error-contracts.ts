@@ -49,7 +49,7 @@ export const NCBI_SERVICE_ERRORS = [
   {
     reason: 'ncbi_unreachable',
     code: JsonRpcErrorCode.ServiceUnavailable,
-    when: 'NCBI E-utilities failed on every attempt the retry budget allowed — retries ran out, the next backoff would overrun the total deadline, or the call made one attempt without retrying because the previous call to the same E-utility had failed on every attempt.',
+    when: 'NCBI E-utilities failed on every attempt the retry budget allowed — no connection, no answer within the per-request timeout, an HTTP 5xx other than 501 and 504, or a backend failure NCBI reported in its response — and the call stopped there: retries ran out, the next backoff would overrun the total deadline, the Retry-After NCBI named outlasts the time left or the 30-second backoff cap, or the call made one attempt without retrying because the previous call to the same E-utility had failed on every attempt.',
     recovery: 'Retry after a brief delay; NCBI failed on every attempt this call made.',
     retryable: true,
     thrownBy: 'service',
@@ -66,17 +66,27 @@ export const NCBI_SERVICE_ERRORS = [
   {
     reason: 'ncbi_deadline_exceeded',
     code: JsonRpcErrorCode.Timeout,
-    when: 'The total NCBI request deadline expired before NCBI answered successfully — mid-request, while queued, or during a retry backoff.',
+    when: 'The deadline for the NCBI call expired before NCBI answered successfully — mid-request, while queued, during a retry backoff, or before the next request could be sent. That deadline is the total NCBI request deadline, or the time the tool call had left when that was shorter; `deadlineMs` names its length.',
     recovery:
       'Retry after a brief delay; NCBI may be under temporary load. For a large batch, split it into smaller calls.',
     retryable: true,
     thrownBy: 'service',
   },
   {
+    reason: 'ncbi_timed_out',
+    code: JsonRpcErrorCode.Timeout,
+    when: 'NCBI answered HTTP 504 (gateway timeout), 408 (request timeout), or 425 (too early) and the call stopped on it — retries ran out, the next backoff would overrun the total deadline, or the Retry-After NCBI named outlasts the time left or the 30-second backoff cap.',
+    recovery:
+      'Retry after a brief delay; NCBI did not answer in time on the attempts this call made and may be under temporary load. For a large batch, split it into smaller calls.',
+    retryable: true,
+    thrownBy: 'service',
+  },
+  {
     reason: 'ncbi_invalid_response',
     code: JsonRpcErrorCode.SerializationError,
-    when: 'NCBI returned a body that could not be parsed (invalid XML/JSON).',
-    recovery: 'Retry the request; NCBI returned a malformed response that could not be parsed.',
+    when: 'NCBI returned a body that could not be parsed (invalid XML/JSON), or a well-formed document that is not the answer the request asked for (no result element, or an ESearch result with no numeric count).',
+    recovery:
+      'Retry the request; NCBI returned a malformed response that could not be read as an answer.',
     retryable: true,
     thrownBy: 'service',
   },
@@ -140,9 +150,18 @@ export const OPENALEX_SERVICE_ERRORS = [
   {
     reason: 'openalex_unreachable',
     code: JsonRpcErrorCode.ServiceUnavailable,
-    when: 'OpenAlex was unreachable after all retry attempts.',
+    when: 'OpenAlex was unreachable on every attempt the retry budget allowed, and the call stopped there: retries ran out, the next backoff would overrun the deadline, or a Retry-After OpenAlex named outlasts the time left or the 30-second backoff cap.',
     recovery:
       'Retry after a brief delay; OpenAlex was unreachable. NCBI and Europe PMC remain available.',
+    retryable: true,
+    thrownBy: 'service',
+  },
+  {
+    reason: 'openalex_deadline_exceeded',
+    code: JsonRpcErrorCode.Timeout,
+    when: "The deadline for the OpenAlex call expired before OpenAlex answered successfully — mid-request, during a retry backoff, or before a request was sent when no time was left. One deadline covers every request the call makes. `deadlineMs` is the length of the deadline that expired: the tool call's own, or OpenAlex's total deadline when that left less time.",
+    recovery:
+      'Retry after a brief delay; OpenAlex did not answer within the deadline and may be under temporary load. NCBI and Europe PMC remain available.',
     retryable: true,
     thrownBy: 'service',
   },
@@ -165,9 +184,27 @@ export const ICITE_SERVICE_ERRORS = [
   {
     reason: 'icite_unreachable',
     code: JsonRpcErrorCode.ServiceUnavailable,
-    when: 'NIH iCite failed on every attempt the retry budget allowed — a network failure or an HTTP 5xx.',
+    when: 'NIH iCite failed on every attempt the retry budget allowed — a network failure or an HTTP 5xx — and the call stopped there: retries ran out, or the next backoff would overrun the deadline.',
     recovery:
       'Retry after a brief delay; NIH iCite was unreachable. The other pubmed_* tools do not depend on it.',
+    retryable: true,
+    thrownBy: 'service',
+  },
+  {
+    reason: 'icite_deadline_exceeded',
+    code: JsonRpcErrorCode.Timeout,
+    when: "The deadline for the NIH iCite call expired before iCite answered successfully — mid-request, during a retry backoff, or before the request was sent when the tool call had no time left. `deadlineMs` is the length of the deadline that expired: the tool call's own, or iCite's total deadline when that left less time.",
+    recovery:
+      'Retry after a brief delay; NIH iCite did not answer within the deadline and may be under temporary load. For a large batch, split the PMIDs across smaller calls.',
+    retryable: true,
+    thrownBy: 'service',
+  },
+  {
+    reason: 'icite_timed_out',
+    code: JsonRpcErrorCode.Timeout,
+    when: 'NIH iCite failed on every attempt the retry budget allowed, the last one by timing out — no answer within the per-request timeout, or an HTTP 504, 408, or 425 — and the call stopped there: retries ran out, or the next backoff would overrun the deadline.',
+    recovery:
+      'Retry after a brief delay; NIH iCite did not answer in time on the attempts this call made and may be under temporary load.',
     retryable: true,
     thrownBy: 'service',
   },
@@ -199,7 +236,7 @@ export const EUROPEPMC_SERVICE_ERRORS = [
   {
     reason: 'europepmc_unreachable',
     code: JsonRpcErrorCode.ServiceUnavailable,
-    when: 'Europe PMC failed on every retry attempt — unreachable, an HTTP 404 or 5xx other than a 504 timeout from its search endpoint, or an empty response with no results.',
+    when: 'Europe PMC failed on every retry attempt — unreachable, an HTTP 404 or 5xx other than a 504 timeout from its search endpoint, or an empty response with no results; or it answered an HTTP 5xx other than a 504 whose Retry-After outlasts the time left or the 30-second backoff cap, and the call stopped on it without retrying.',
     recovery: 'Retry after a brief delay; Europe PMC failed on every attempt this call made.',
     retryable: true,
     thrownBy: 'service',
@@ -207,9 +244,27 @@ export const EUROPEPMC_SERVICE_ERRORS = [
   {
     reason: 'europepmc_deadline_exceeded',
     code: JsonRpcErrorCode.Timeout,
-    when: 'The total Europe PMC request deadline expired before Europe PMC answered successfully — mid-request, while queued, or during a retry backoff.',
+    when: "The deadline the Europe PMC call ran under expired before Europe PMC answered successfully — mid-request, while queued, or during a retry backoff — or had already run out when the call started, so no request was sent. That deadline is Europe PMC's own total request deadline, or the tool call's deadline when less of it remained; `deadlineMs` is the full length of whichever applied.",
     recovery:
       "Retry after a brief delay; Europe PMC did not answer within the call's deadline and may be under temporary load.",
+    retryable: true,
+    thrownBy: 'service',
+  },
+  {
+    reason: 'europepmc_timed_out',
+    code: JsonRpcErrorCode.Timeout,
+    when: 'Europe PMC failed on every attempt the retry budget allowed, the last one by timing out — no answer within the per-request timeout, or an HTTP 504, 408, or 425 — and the call stopped there: retries ran out, or the next backoff would overrun the total deadline; or it answered an HTTP 504 whose Retry-After outlasts the time left or the 30-second backoff cap, and the call stopped on it without retrying.',
+    recovery:
+      'Retry after a brief delay; Europe PMC did not answer in time on the attempts this call made and may be under temporary load.',
+    retryable: true,
+    thrownBy: 'service',
+  },
+  {
+    reason: 'europepmc_rate_limited',
+    code: JsonRpcErrorCode.RateLimited,
+    when: 'Europe PMC answered HTTP 429 (too many requests) and the call stopped on it — retries ran out, the next backoff would overrun the total deadline, or the Retry-After Europe PMC named outlasts the time left or the 30-second backoff cap.',
+    recovery:
+      "Wait as long as `retryAfter` says when present (a number of seconds or an HTTP date), otherwise a few seconds, then retry; Europe PMC is throttling this server's requests.",
     retryable: true,
     thrownBy: 'service',
   },

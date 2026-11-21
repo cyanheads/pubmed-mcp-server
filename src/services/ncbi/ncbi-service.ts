@@ -2,8 +2,9 @@
  * @fileoverview High-level service for interacting with NCBI E-utilities.
  * Orchestrates the API client, request queue, and response handler to provide
  * typed methods for each E-utility endpoint. Every call runs as a retry loop around
- * the shared request queue — each attempt re-queued and re-paced — under one total
- * deadline that covers queue wait, attempts, and backoff. Once a call to an endpoint
+ * the shared request queue — each attempt re-queued and re-paced — under one deadline
+ * that covers queue wait, attempts, and backoff: NCBI's own, or the time the tool call
+ * has left when that is less. Once a call to an endpoint
  * fails on every attempt, later calls to that endpoint make one attempt each until
  * one succeeds. Uses init/accessor pattern.
  * @module src/services/ncbi/ncbi-service
@@ -27,6 +28,7 @@ import {
 } from '@cyanheads/mcp-ts-core/utils';
 
 import { getServerConfig } from '@/config/server-config.js';
+import { type CallDeadline, upstreamBound } from '@/services/call-deadline.js';
 import { NcbiApiClient } from './api-client.js';
 import { fieldTagKind } from './field-tags.js';
 import {
@@ -51,7 +53,11 @@ import {
   type ESearchResponseContainer,
   type ESearchResult,
   type ESearchWarningList,
+  ESPELL_CHECK_MAX_REQUESTS,
+  ESPELL_CHECK_TIME_LIMIT_MS,
+  type ESpellCheckSkipReason,
   type ESpellResult,
+  type ESpellSkippedCheck,
   type ESummaryResponseContainer,
   type ESummaryResult,
   type IdConvertRecord,
@@ -168,6 +174,13 @@ export interface SpelledSegment {
   text: string;
 }
 
+/** A span of the caller's text, `[start, end)`, and the replacement written over it. */
+interface SpelledReplacement {
+  end: number;
+  replacement: string;
+  start: number;
+}
+
 /**
  * Whether `a` is within `k` single-character edits of `b`. At the first
  * mismatch any edit script must substitute, delete, or insert there, so three
@@ -260,35 +273,32 @@ function fieldTagRanges(query: string): [start: number, end: number][] {
 }
 
 /**
- * Rebuild ESpell's suggestion over the caller's own text. `<CorrectedQuery>`
- * lowercases the query and drops digits, field tags, and operator casing, so it
- * cannot be re-run as written. `<SpelledQuery>` interleaves the caller's text
- * verbatim (`Original`) with replacements (`Replaced`); the caller's text between
- * two `Original`s is the span the `Replaced` between them stands for. A span
- * that overlaps a field tag keeps its text and the rebuild continues past it:
- * ESpell rewrites tag text it doesn't recognize (`risk[tiab] AND alzhiemer` →
- * `risk[tia] AND alzheimer`), and PubMed then ignores the tag (#250). So does a
- * span that overlaps the value of an indexed field ({@link fieldTagRanges}):
- * ESpell's dictionary is not the field's index, and it rewrites correctly
- * spelled values into ones the field doesn't hold (`free full text[sb]` →
- * `fred full text[sb]`, `aged[mh]` → `age[mh]`); a free-text field's value
- * (`diabetis[tiab]`) is corrected like any other text (#259). Spans
- * that hold a digit or non-ASCII character, are all uppercase, differ only in
- * case, or are one letter replaced by one letter also keep their text; the first
- * span that can't be placed or judged ends the rebuild, and the caller's text
- * runs unchanged from there. Linear in the query and the segments. (#241)
- *
- * @internal exported for direct unit tests
+ * The replacements in ESpell's suggestion that apply to the caller's own text,
+ * in query order. `<CorrectedQuery>` lowercases the query and drops digits,
+ * field tags, and operator casing, so it cannot be re-run as written.
+ * `<SpelledQuery>` interleaves the caller's text verbatim (`Original`) with
+ * replacements (`Replaced`); the caller's text between two `Original`s is the
+ * span the `Replaced` between them stands for. A span that overlaps a field tag
+ * keeps its text and the rebuild continues past it: ESpell rewrites tag text it
+ * doesn't recognize (`risk[tiab] AND alzhiemer` → `risk[tia] AND alzheimer`),
+ * and PubMed then ignores the tag (#250). So does a span that overlaps the
+ * value of an indexed field ({@link fieldTagRanges}): ESpell's dictionary is
+ * not the field's index, and it rewrites correctly spelled values into ones the
+ * field doesn't hold (`free full text[sb]` → `fred full text[sb]`, `aged[mh]` →
+ * `age[mh]`); a free-text field's value (`diabetis[tiab]`) is corrected like
+ * any other text (#259). Spans that hold a digit or non-ASCII character, are
+ * all uppercase, differ only in case, or are one letter replaced by one letter
+ * also keep their text; the first span that can't be placed or judged ends the
+ * rebuild, and the caller's text runs unchanged from there. Linear in the query
+ * and the segments. (#241)
  */
-export function rebuildSpelledQuery(
+function spelledReplacements(
   query: string,
   segments: readonly SpelledSegment[],
-): { corrected: string; hasSuggestion: boolean } {
-  let corrected = '';
+): SpelledReplacement[] {
+  const applied: SpelledReplacement[] = [];
   let cursor = 0;
-  let hasSuggestion = false;
   let pending: string | undefined;
-  const finish = () => ({ corrected: corrected + query.slice(cursor), hasSuggestion });
 
   const tags = fieldTagRanges(query);
   let tagIndex = 0;
@@ -306,11 +316,11 @@ export function rebuildSpelledQuery(
   /** Settle the pending replacement against `query[cursor, end)`; false stops the rebuild. */
   const settle = (end: number): boolean => {
     if (pending === undefined) return true;
-    const span = query.slice(cursor, end);
-    const verdict = overlapsTag(cursor, end) ? 'keep' : judgeReplacement(span, pending);
+    const verdict = overlapsTag(cursor, end)
+      ? 'keep'
+      : judgeReplacement(query.slice(cursor, end), pending);
     if (verdict === 'stop') return false;
-    corrected += verdict === 'apply' ? pending : span;
-    hasSuggestion ||= verdict === 'apply';
+    if (verdict === 'apply') applied.push({ start: cursor, end, replacement: pending });
     cursor = end;
     pending = undefined;
     return true;
@@ -318,7 +328,7 @@ export function rebuildSpelledQuery(
 
   for (const segment of segments) {
     if (segment.kind === 'Replaced') {
-      if (pending !== undefined) return finish();
+      if (pending !== undefined) return applied;
       pending = segment.text;
       continue;
     }
@@ -328,13 +338,53 @@ export function rebuildSpelledQuery(
           ? cursor
           : -1
         : query.indexOf(segment.text, cursor);
-    if (at < 0 || !settle(at)) return finish();
-    corrected += segment.text;
+    if (at < 0 || !settle(at)) return applied;
     cursor += segment.text.length;
   }
   settle(query.length);
-  return finish();
+  return applied;
 }
+
+/** `query` with each replacement written over its span; `replacements` are in query order. */
+function applyReplacements(query: string, replacements: readonly SpelledReplacement[]): string {
+  let corrected = '';
+  let cursor = 0;
+  for (const { start, end, replacement } of replacements) {
+    corrected += query.slice(cursor, start) + replacement;
+    cursor = end;
+  }
+  return corrected + query.slice(cursor);
+}
+
+/**
+ * ESpell's suggestion rebuilt over the caller's own text: every replacement
+ * {@link spelledReplacements} accepts, written in place, before any record-count
+ * check. `hasSuggestion` is whether one was.
+ *
+ * @internal exported for direct unit tests
+ */
+export function rebuildSpelledQuery(
+  query: string,
+  segments: readonly SpelledSegment[],
+): { corrected: string; hasSuggestion: boolean } {
+  const replacements = spelledReplacements(query, segments);
+  return {
+    corrected: applyReplacements(query, replacements),
+    hasSuggestion: replacements.length > 0,
+  };
+}
+
+/**
+ * A replacement with fewer than one PubMed record for every this many of the
+ * word it replaces is dropped. Over a 74-query corpus, a good correction's word
+ * held at most 1.0002 times its replacement's records — ESearch's automatic term
+ * mapping gives many misspellings the count of the word they mean — and a bad
+ * one's at least 12 times. (#316)
+ */
+const RARER_REPLACEMENT_FACTOR = 10;
+
+/** A check's read: the value NCBI gave, or why the check got none. */
+type CheckRead<T> = { ok: true; value: T } | { ok: false; reason: ESpellCheckSkipReason };
 
 /** The text of an ordered-parser element: its text children joined, whitespace kept. */
 function nodeText(node: JatsNode | undefined): string | undefined {
@@ -346,10 +396,30 @@ function nodeText(node: JatsNode | undefined): string | undefined {
  * sends several, so splitting the call into more requests never extends either.
  */
 interface CallBudget {
-  /** `Date.now()` at which the call's deadline expires. */
-  readonly expiresAt: number;
+  /**
+   * The call's deadline: NCBI's own, started with the call, or the tool call's when
+   * that expires first. `totalMs` is the length an expiry reports.
+   */
+  readonly deadline: CallDeadline;
   /** Retries the call may still spend; each request's retries come off as it settles. */
   retriesLeft: number;
+}
+
+/**
+ * The expiry of the deadline a call ran under, `deadlineMs` long: what
+ * {@link toServiceError} maps a fired deadline to, and what a call whose deadline is
+ * already spent fails with before it sends anything.
+ */
+function deadlineExceeded(deadlineMs: number, cause?: unknown, ncbiErrors?: unknown): McpError {
+  return timeout(
+    `NCBI request deadline (${deadlineMs}ms) exceeded`,
+    {
+      reason: 'ncbi_deadline_exceeded',
+      deadlineMs,
+      ...(ncbiErrors !== undefined && { ncbiErrors }),
+    },
+    cause === undefined ? undefined : { cause },
+  );
 }
 
 /** Ceiling on one backoff sleep, so a high retry count cannot grow it without bound. */
@@ -373,18 +443,25 @@ const QUEUE_WAIT_MARGIN_MS = 1;
 const isTransient = (error: unknown): boolean =>
   error instanceof McpError && defaultIsTransient(error);
 
-/** The reason each code a retry loop can end on is stamped with; a Timeout gets none. */
+/**
+ * The reason each transient code a retry loop can stop on is reported under. Each is
+ * declared for that code alone, so a 504 stays a Timeout and never reads as
+ * `ncbi_unreachable`.
+ */
 const REASON_BY_CODE = new Map<JsonRpcErrorCode, string>([
   [JsonRpcErrorCode.ServiceUnavailable, 'ncbi_unreachable'],
+  [JsonRpcErrorCode.Timeout, 'ncbi_timed_out'],
   [JsonRpcErrorCode.RateLimited, 'ncbi_rate_limited'],
 ]);
 
 /**
- * A retry loop that ran out, reported as its last attempt's failure: that attempt's
- * code with `endpoint`, `attempts`, and NCBI's `ncbiErrors` when the attempt carried
- * them. A ServiceUnavailable is stamped `ncbi_unreachable`; a RateLimited is stamped
- * `ncbi_rate_limited` and keeps the `retryAfter` its 429 named; a Timeout keeps its
- * code with no reason.
+ * A retry loop that ran out, reported as its last attempt's failure: that attempt's code
+ * under the reason {@link REASON_BY_CODE} names for it, with `endpoint`, `attempts`, and
+ * NCBI's `ncbiErrors` and the upstream `retryAfter` when the attempt carried them. A
+ * ServiceUnavailable is `ncbi_unreachable`; a Timeout — an HTTP 504, 408, or 425 — is
+ * `ncbi_timed_out`; a RateLimited is `ncbi_rate_limited`, its 429's `retryAfter` telling
+ * the caller how long to wait. A request the client's per-request timeout ended arrives
+ * as the client's ServiceUnavailable, so it is `ncbi_unreachable`.
  */
 function retriesSpent(
   last: McpError,
@@ -394,7 +471,6 @@ function retriesSpent(
   cause: unknown,
 ): McpError {
   const reason = REASON_BY_CODE.get(last.code);
-  const retryAfter = last.code === JsonRpcErrorCode.RateLimited ? last.data?.retryAfter : undefined;
   return new McpError(
     last.code,
     message,
@@ -403,7 +479,7 @@ function retriesSpent(
       endpoint,
       attempts,
       ...(last.data?.ncbiErrors !== undefined && { ncbiErrors: last.data.ncbiErrors }),
-      ...(retryAfter !== undefined && { retryAfter }),
+      ...(last.data?.retryAfter !== undefined && { retryAfter: last.data.retryAfter }),
     },
     { cause },
   );
@@ -413,7 +489,7 @@ function retriesSpent(
 interface LoopOutcome {
   /** Whether that deadline fired — the loop's own signal, never inferred from the error. */
   deadlineFired: boolean;
-  /** The loop's total deadline. */
+  /** Length of the deadline the loop ran under: NCBI's own, or the tool call's when it had less left. */
   deadlineMs: number;
   /**
    * Whether the loop was held to one attempt because the endpoint's previous call spent
@@ -442,11 +518,15 @@ interface LoopOutcome {
  *   the client's ServiceUnavailable, and timers can fire early), so `deadlineFired` — the
  *   loop's own signal — does. (#174)
  * - Retries exhausted → retries spent: the last attempt's code and message (the
- *   framework appends the attempt count) with `endpoint`, `attempts`, and `ncbiErrors`.
- *   A fail-fast loop's one attempt also says why it never retried. (#287)
- * - A 429 never retried because its `Retry-After` outlasts the time left or the backoff
- *   cap → the attempt's own error, stamped `ncbi_rate_limited`.
- * - Anything else — a failure that was never retried — passes through unchanged.
+ *   framework appends the attempt count) with `endpoint`, `attempts`, `ncbiErrors`, and
+ *   `retryAfter`. A fail-fast loop's one attempt also says why it never retried. (#287)
+ * - A transient failure never retried → the attempt's own error, `retryAfter` intact,
+ *   under the reason {@link REASON_BY_CODE} names for its code: a 429 is
+ *   `ncbi_rate_limited`, a 503 `ncbi_unreachable`, a 504 `ncbi_timed_out`. The loop
+ *   throws a transient failure unretried only when its `Retry-After` outlasts the time
+ *   left or the backoff cap. It carries no `attempts`, so it never arms fail-fast.
+ * - Anything else never retried — a non-transient failure, such as a 501 — passes
+ *   through unchanged.
  */
 function toServiceError(error: unknown, endpoint: string, loop: LoopOutcome): unknown {
   if (!(error instanceof McpError)) return error;
@@ -478,15 +558,7 @@ function toServiceError(error: unknown, endpoint: string, loop: LoopOutcome): un
         error,
       );
     }
-    return timeout(
-      `NCBI request deadline (${loop.deadlineMs}ms) exceeded`,
-      {
-        reason: 'ncbi_deadline_exceeded',
-        deadlineMs: loop.deadlineMs,
-        ...(loop.ncbiErrors !== undefined && { ncbiErrors: loop.ncbiErrors }),
-      },
-      { cause: error },
-    );
+    return deadlineExceeded(loop.deadlineMs, error, loop.ncbiErrors);
   }
 
   if (typeof data.retryAttempts === 'number') {
@@ -496,13 +568,9 @@ function toServiceError(error: unknown, endpoint: string, loop: LoopOutcome): un
         : error.message;
     return retriesSpent(error, message, data.retryAttempts, endpoint, error.cause ?? error);
   }
-  if (error.code === JsonRpcErrorCode.RateLimited) {
-    return new McpError(
-      error.code,
-      error.message,
-      { ...data, reason: 'ncbi_rate_limited' },
-      { cause: error },
-    );
+  const reason = REASON_BY_CODE.get(error.code);
+  if (reason !== undefined && isTransient(error)) {
+    return new McpError(error.code, error.message, { ...data, reason }, { cause: error });
   }
   return error;
 }
@@ -533,15 +601,36 @@ export class NcbiService {
 
   async eSearch(params: NcbiRequestParams, options?: NcbiCallOptions): Promise<ESearchResult> {
     const response = await this.performRequest<ESearchResponseContainer>('esearch', params, {
+      ...options,
       retmode: 'xml',
-      ...(options?.signal && { signal: options.signal }),
     });
 
     const esResult = response.eSearchResult;
+    // A well-formed document with another root (an XHTML error page behind an XML
+    // prolog) parses cleanly but answers nothing; read past here it is a TypeError.
+    if (esResult === undefined) {
+      throw serializationError('NCBI ESearch returned a document with no eSearchResult element.', {
+        reason: 'ncbi_invalid_response',
+        endpoint: 'esearch',
+      });
+    }
+    // Every answer without an `<ERROR>` carries a `<Count>`, which the parser coerces
+    // to a number; one missing or not a number, read as zero, reports a false empty
+    // result. A `rettype=count` answer legitimately has no `<RetMax>` or `<RetStart>`.
+    const count = String(esResult.Count);
+    if (!/^\d+$/.test(count)) {
+      throw serializationError(
+        'NCBI ESearch returned an eSearchResult element with no numeric Count.',
+        {
+          reason: 'ncbi_invalid_response',
+          endpoint: 'esearch',
+        },
+      );
+    }
     const errorList = normalizeDiagnosticList(esResult.ErrorList);
     const warningList = normalizeDiagnosticList(esResult.WarningList);
     return {
-      count: parseInt(esResult.Count, 10) || 0,
+      count: Number(count),
       retmax: parseInt(esResult.RetMax, 10) || 0,
       retstart: parseInt(esResult.RetStart, 10) || 0,
       ...(esResult.QueryKey !== undefined && { queryKey: esResult.QueryKey }),
@@ -556,8 +645,8 @@ export class NcbiService {
   async eSummary(params: NcbiRequestParams, options?: NcbiCallOptions): Promise<ESummaryResult> {
     const retmode = params.version === '2.0' && params.retmode === 'json' ? 'json' : 'xml';
     const response = await this.performRequest<ESummaryResponseContainer>('esummary', params, {
+      ...options,
       retmode,
-      ...(options?.signal && { signal: options.signal }),
     });
     return response.eSummaryResult;
   }
@@ -575,24 +664,74 @@ export class NcbiService {
     params: NcbiRequestParams,
     options?: NcbiCallOptions,
   ): Promise<T> {
-    return this.performRequest<T>('elink', params, {
-      retmode: 'xml',
-      ...(options?.signal && { signal: options.signal }),
-    });
+    return this.performRequest<T>('elink', params, { ...options, retmode: 'xml' });
   }
 
+  /**
+   * ESpell's correction of a PubMed query, rebuilt over the caller's text
+   * ({@link spelledReplacements}) with each replacement checked against PubMed
+   * ({@link checkReplacements}). A query ESpell leaves as written costs this one
+   * request, which runs under the tool call's `deadline`; checking the replacements
+   * of one that it changes costs at most {@link ESPELL_CHECK_MAX_REQUESTS} more,
+   * within {@link ESPELL_CHECK_TIME_LIMIT_MS} or the time the deadline has left,
+   * whichever is less. A check that cannot run degrades and is reported in
+   * `skippedChecks`; the caller's abort rejects.
+   */
   async eSpell(params: NcbiRequestParams, options?: NcbiCallOptions): Promise<ESpellResult> {
+    const { original, segments } = await this.spelledQuery(params, options);
+    const replacements = spelledReplacements(original, segments);
+    const { applied, skippedChecks } =
+      replacements.length > 0
+        ? await this.checkReplacements(original, replacements, options)
+        : { applied: replacements, skippedChecks: [] };
+    const corrected = applyReplacements(original, applied);
+    const hasSuggestion = applied.length > 0;
+
+    logger.debug(
+      'ESpell result parsed.',
+      requestContextService.createRequestContext({
+        operation: 'NcbiESpell',
+        additionalContext: {
+          original,
+          corrected,
+          hasSuggestion,
+          skippedChecks: skippedChecks.length,
+        },
+      }),
+    );
+
+    return {
+      original,
+      corrected,
+      hasSuggestion,
+      ...(skippedChecks.length > 0 && { skippedChecks }),
+    };
+  }
+
+  /** One ESpell request: the query as ESpell echoed it, and its `<SpelledQuery>` segments in order. */
+  private async spelledQuery(
+    params: NcbiRequestParams,
+    options: NcbiCallOptions | undefined,
+  ): Promise<{ original: string; segments: SpelledSegment[] }> {
     // The ordered parser keeps `<SpelledQuery>`'s segments in document order with
     // their whitespace, and keeps every value text: ESpell echoes the caller's
     // term in `<Query>`, and a coercing parse turns `007` / `1e5` / `33306283`
     // into numbers before this method runs. (#108, #241)
     const response = await this.performRequest<JatsNodeList>('espell', params, {
+      ...options,
       retmode: 'xml',
       useOrderedParser: true,
-      ...(options?.signal && { signal: options.signal }),
     });
 
     const spellResult = findOne(response, 'eSpellResult');
+    // A well-formed document with another root parses cleanly, and read past here it
+    // answers "nothing to correct".
+    if (spellResult === undefined) {
+      throw serializationError('NCBI ESpell returned a document with no eSpellResult element.', {
+        reason: 'ncbi_invalid_response',
+        endpoint: 'espell',
+      });
+    }
     const original = nodeText(findOne(spellResult, 'Query')) ?? String(params.term ?? '');
     const segments = childrenOf(findOne(spellResult, 'SpelledQuery') ?? {}).flatMap(
       (node): SpelledSegment[] => {
@@ -602,24 +741,178 @@ export class NcbiService {
           : [];
       },
     );
-    const { corrected, hasSuggestion } = rebuildSpelledQuery(original, segments);
+    return { original, segments };
+  }
 
-    logger.debug(
-      'ESpell result parsed.',
-      requestContextService.createRequestContext({
-        operation: 'NcbiESpell',
-        additionalContext: { original, corrected, hasSuggestion },
-      }),
-    );
+  /**
+   * Checks ESpell's `db=pubmed` replacements against PubMed, in query order
+   * (#316). ESpell's dictionary is built from PubMed text, typos included, so it
+   * can rewrite a correctly spelled word into one PubMed barely holds
+   * (`tirzepatide` → `irzepatide`). Each replacement's ESearch record count is
+   * compared with the caller's word's, both sent as the bare word with automatic
+   * term mapping on; one under a tenth of it ({@link RARER_REPLACEMENT_FACTOR})
+   * is dropped and the caller's word kept. For dropped words alone, ESpell's
+   * `db=mesh` dictionary is then asked once for the whole query, and its
+   * replacement for a dropped word's exact span is used when PubMed holds more
+   * records of it than of the caller's word. ESearch gives no per-term counts for
+   * a query of several terms, so each count is its own request; one already
+   * counted in this call is not sent again.
+   *
+   * Every read goes through the shared queue, at most
+   * {@link ESPELL_CHECK_MAX_REQUESTS} of them, all under one bound this method
+   * owns (its timer and the signal joined with the caller's):
+   * {@link ESPELL_CHECK_TIME_LIMIT_MS}, or the time the tool call's `deadline` has
+   * left when that is less. The reads take that bound in place of the deadline, so
+   * whichever of the two ends the checks, they end the same way; a spent deadline
+   * leaves them no time at all. Once a read would pass the cap or the bound runs
+   * out, nothing after it is checked: a replacement left unchecked is applied as
+   * ESpell wrote it, and a dropped word left without its `db=mesh` lookup stays as
+   * written. A read that fails with a classified NCBI error degrades the same way
+   * for that word alone. Each is reported in `skippedChecks`. The caller's abort
+   * rejects with its reason, and any other error rejects as thrown.
+   */
+  private async checkReplacements(
+    query: string,
+    replacements: readonly SpelledReplacement[],
+    options: NcbiCallOptions | undefined,
+  ): Promise<{ applied: SpelledReplacement[]; skippedChecks: ESpellSkippedCheck[] }> {
+    const callerSignal = options?.signal;
+    const limit = upstreamBound(ESPELL_CHECK_TIME_LIMIT_MS, options?.deadline);
+    const bound = new AbortController();
+    if (limit.spent) bound.abort();
+    const timer = limit.spent ? undefined : setTimeout(() => bound.abort(), limit.remainingMs);
+    const signal = callerSignal ? AbortSignal.any([callerSignal, bound.signal]) : bound.signal;
+    const counts = new Map<string, number>();
+    let sent = 0;
+    let stopped: ESpellCheckSkipReason | undefined;
 
-    return { original, corrected, hasSuggestion };
+    /**
+     * Why the checks have ended, once they have: the bound ran out, or `requests` more
+     * would pass the cap. A cancelled caller rejects instead, even where no read is left
+     * to observe it, as on a spent deadline.
+     */
+    const halted = (requests: number): ESpellCheckSkipReason | undefined => {
+      callerSignal?.throwIfAborted();
+      if (stopped === undefined && bound.signal.aborted) stopped = 'time_limit';
+      if (stopped === undefined && sent + requests > ESPELL_CHECK_MAX_REQUESTS) {
+        stopped = 'request_cap';
+      }
+      return stopped;
+    };
+    /** How many of `terms` this call has not counted yet. */
+    const uncounted = (...terms: string[]): number =>
+      new Set(terms.filter((term) => !counts.has(term))).size;
+
+    const read = async <T>(run: (signal: AbortSignal) => Promise<T>): Promise<CheckRead<T>> => {
+      sent += 1;
+      try {
+        return { ok: true, value: await run(signal) };
+      } catch (error: unknown) {
+        if (callerSignal?.aborted) throw callerSignal.reason;
+        if (bound.signal.aborted) {
+          stopped = 'time_limit';
+          return { ok: false, reason: stopped };
+        }
+        if (error instanceof McpError) return { ok: false, reason: 'request_failed' };
+        throw error;
+      }
+    };
+    const count = async (term: string): Promise<CheckRead<number>> => {
+      const known = counts.get(term);
+      if (known !== undefined) return { ok: true, value: known };
+      const got = await read((s) =>
+        this.eSearch({ db: 'pubmed', term, rettype: 'count' }, { signal: s }),
+      );
+      if (!got.ok) return got;
+      counts.set(term, got.value.count);
+      return { ok: true, value: got.value.count };
+    };
+
+    // What each replacement's span becomes; `undefined` keeps the caller's word.
+    const chosen: (string | undefined)[] = replacements.map((r) => r.replacement);
+    const dropped: { index: number; span: SpelledReplacement; word: string; wordCount: number }[] =
+      [];
+    const skippedChecks: ESpellSkippedCheck[] = [];
+
+    try {
+      for (const [index, span] of replacements.entries()) {
+        const word = query.slice(span.start, span.end);
+        const skip = (reason: ESpellCheckSkipReason) =>
+          skippedChecks.push({ check: 'count', word, replacement: span.replacement, reason });
+
+        const stop = halted(uncounted(word, span.replacement));
+        if (stop) {
+          skip(stop);
+          continue;
+        }
+        const wordCount = await count(word);
+        if (!wordCount.ok) {
+          skip(wordCount.reason);
+          continue;
+        }
+        // No replacement is rarer than a word PubMed holds no record of.
+        if (wordCount.value === 0) continue;
+        const replacementCount = await count(span.replacement);
+        if (!replacementCount.ok) {
+          skip(replacementCount.reason);
+          continue;
+        }
+        if (replacementCount.value * RARER_REPLACEMENT_FACTOR < wordCount.value) {
+          chosen[index] = undefined;
+          dropped.push({ index, span, word, wordCount: wordCount.value });
+        }
+      }
+
+      if (dropped.length > 0) {
+        const keep = (entry: (typeof dropped)[number], reason: ESpellCheckSkipReason) =>
+          skippedChecks.push({
+            check: 'mesh',
+            word: entry.word,
+            replacement: entry.span.replacement,
+            reason,
+          });
+
+        const stop = halted(1);
+        const mesh: CheckRead<{ segments: SpelledSegment[] }> = stop
+          ? { ok: false, reason: stop }
+          : await read((s) => this.spelledQuery({ db: 'mesh', term: query }, { signal: s }));
+        if (!mesh.ok) {
+          for (const entry of dropped) keep(entry, mesh.reason);
+        } else {
+          const meshByStart = new Map(
+            spelledReplacements(query, mesh.value.segments).map((r) => [r.start, r]),
+          );
+          for (const entry of dropped) {
+            const candidate = meshByStart.get(entry.span.start);
+            // The MeSH dictionary offers no replacement for this exact span.
+            if (candidate?.end !== entry.span.end) continue;
+            const meshStop = halted(uncounted(candidate.replacement));
+            if (meshStop) {
+              keep(entry, meshStop);
+              continue;
+            }
+            const candidateCount = await count(candidate.replacement);
+            if (!candidateCount.ok) {
+              keep(entry, candidateCount.reason);
+              continue;
+            }
+            if (candidateCount.value > entry.wordCount) chosen[entry.index] = candidate.replacement;
+          }
+        }
+      }
+    } finally {
+      clearTimeout(timer);
+    }
+
+    const applied = replacements.flatMap((span, i) => {
+      const replacement = chosen[i];
+      return replacement === undefined ? [] : [{ ...span, replacement }];
+    });
+    return { applied, skippedChecks };
   }
 
   eInfo(params: NcbiRequestParams, options?: NcbiCallOptions): Promise<unknown> {
-    return this.performRequest('einfo', params, {
-      retmode: 'xml',
-      ...(options?.signal && { signal: options.signal }),
-    });
+    return this.performRequest('einfo', params, { ...options, retmode: 'xml' });
   }
 
   /**
@@ -638,7 +931,8 @@ export class NcbiService {
    * `not_found`, and the lines after it are requested again without it, until
    * every line has a result. A complete response costs one request, each
    * dropped line at most one more — 25 requests for 25 such citations. Every
-   * request draws on one deadline and one retry allowance for the whole call.
+   * request draws on one deadline and one retry allowance for the whole call; the
+   * deadline is NCBI's own, or the tool call's `deadline` when that expires first.
    * A line with no row ahead of one that has a row is not a stop and is never
    * re-requested; it stays `not_found`, as every missing row did before. (#54, #193)
    */
@@ -646,8 +940,9 @@ export class NcbiService {
     citations: ECitMatchCitation[],
     options?: NcbiCallOptions,
   ): Promise<ECitMatchResult[]> {
+    const bound = upstreamBound(this.totalDeadlineMs, options?.deadline);
     const budget: CallBudget = {
-      expiresAt: Date.now() + this.totalDeadlineMs,
+      deadline: { expiresAt: Date.now() + bound.remainingMs, totalMs: bound.deadlineMs },
       retriesLeft: this.maxRetries,
     };
     const rowByIndex = new Map<number, ECitMatchResult>();
@@ -730,7 +1025,7 @@ export class NcbiService {
 
     let text: string;
     try {
-      text = await this.runPaced('idconv', options?.signal, (signal) =>
+      text = await this.runPaced('idconv', options, (signal) =>
         this.apiClient.makeExternalRequest(NCBI_PMC_IDCONV_URL, params, signal),
       );
     } catch (error: unknown) {
@@ -768,19 +1063,24 @@ export class NcbiService {
   /**
    * Runs one NCBI call: a retry loop around the shared request queue, so every
    * attempt re-queues and is re-paced (and a 429 closes the gate for all callers,
-   * not just this one). One deadline covers queue wait, attempts, and backoff. Its
-   * signal — joined with the caller's — reaches the queue wait, the backoff sleep,
-   * and the HTTP request, and each attempt offers the queue only the time left, so
-   * a call that cannot start in time is shed at once instead of waiting it out.
+   * not just this one). One deadline covers queue wait, attempts, and backoff: NCBI's
+   * own, or the time the tool call's `deadline` has left when that is less
+   * ({@link upstreamBound}), and an expiry reports the length of whichever it was. Its
+   * signal — joined with the caller's — reaches the queue wait, the backoff sleep, and
+   * the HTTP request, and each attempt offers the queue only the time left, so a call
+   * that cannot start in time is shed at once instead of waiting it out. A call that
+   * starts on a spent deadline sends nothing and arms no timer: it fails at once as
+   * that deadline's expiry.
    *
    * With a `budget`, the request is one of several in a call: its deadline is the
-   * time the call has left and its retries are the ones the call has not spent,
-   * which it then spends from. A failure is still reported against the call's
-   * full deadline.
+   * budget's, which already holds the earlier of NCBI's and the tool call's, so
+   * `deadline` is not read; its retries are the ones the call has not spent, which it
+   * then spends from.
    *
-   * A caller abort rethrows the caller's own reason; every other failure is mapped
-   * onto this service's reasons by {@link toServiceError}, after the loop. Once the
-   * caller is ruled out, the loop's signal has aborted only if the deadline fired.
+   * A caller abort rethrows the caller's own reason, on a spent deadline too; every
+   * other failure is mapped onto this service's reasons by {@link toServiceError},
+   * after the loop. Once the caller is ruled out, the loop's signal has aborted only if
+   * the deadline fired.
    *
    * A call to an endpoint in {@link failingEndpoints}, read once as the call starts,
    * makes one attempt instead of its ladder — unless it had no retries to give up
@@ -791,10 +1091,17 @@ export class NcbiService {
    */
   private async runPaced<T>(
     endpoint: string,
-    callerSignal: AbortSignal | undefined,
+    options: NcbiCallOptions | undefined,
     execute: (signal: AbortSignal) => Promise<T>,
     budget?: CallBudget,
   ): Promise<T> {
+    const callerSignal = options?.signal;
+    const bound = upstreamBound(this.totalDeadlineMs, budget?.deadline ?? options?.deadline);
+    // `withRetry` still calls its function once on a 0 ms deadline, and the queue starts
+    // it, so a spent deadline would still send the request.
+    if (bound.spent) {
+      throw callerSignal?.aborted ? callerSignal.reason : deadlineExceeded(bound.deadlineMs);
+    }
     const allowedRetries = budget?.retriesLeft ?? this.maxRetries;
     const failFast = allowedRetries > 0 && this.failingEndpoints.has(endpoint);
     const maxRetries = failFast ? 0 : allowedRetries;
@@ -831,7 +1138,7 @@ export class NcbiService {
         {
           maxRetries,
           maxDelayMs: MAX_BACKOFF_MS,
-          deadlineMs: budget ? Math.max(0, budget.expiresAt - Date.now()) : this.totalDeadlineMs,
+          deadlineMs: bound.remainingMs,
           isTransient,
           operation: `NCBI ${endpoint}`,
           ...(callerSignal && { signal: callerSignal }),
@@ -842,7 +1149,7 @@ export class NcbiService {
     } catch (error: unknown) {
       if (callerSignal?.aborted) throw callerSignal.reason;
       const failure = toServiceError(error, endpoint, {
-        deadlineMs: this.totalDeadlineMs,
+        deadlineMs: bound.deadlineMs,
         deadlineFired: loopSignal?.aborted === true,
         failFast,
         ncbiErrors,
@@ -874,7 +1181,7 @@ export class NcbiService {
   ): Promise<T> {
     return this.runPaced(
       endpoint,
-      options?.signal,
+      options,
       async (signal) => {
         const text = await this.apiClient
           .makeRequest(endpoint, params, { ...options, signal })

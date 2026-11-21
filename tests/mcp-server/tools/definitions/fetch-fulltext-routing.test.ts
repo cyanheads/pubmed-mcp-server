@@ -22,13 +22,16 @@
  * staying on the chain rather than reaching the caller as an error (#168),
  * the Europe PMC tier's parallel fan-out staying within four requests in flight
  * (#163), `pmcids`, `pmids`, and `dois` in one call, each tier working a
- * record once for every id that reaches it (#192), and articles returned, cut,
- * and deferred in routing order whatever order PMC EFetch answers in (#235).
+ * record once for every id that reaches it (#192), articles returned, cut,
+ * and deferred in routing order whatever order PMC EFetch answers in (#235),
+ * and the whole chain settling inside one call deadline against hung upstreams
+ * (#310).
  * @module tests/mcp-server/tools/definitions/fetch-fulltext-routing.test
  */
 
+import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
 import { createMockContext, getEnrichment, runToolContract } from '@cyanheads/mcp-ts-core/testing';
-import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { textBlocks } from '../../../_helpers.js';
 
@@ -1731,5 +1734,186 @@ describe('Europe PMC fan-out', () => {
 
     expect(epmcQueries()).toHaveLength(8);
     expect(peak).toBe(4);
+  });
+});
+
+// ─── #310: one deadline across the tier chain ────────────────────────────────
+
+describe('the call deadline across the tier chain (issue #310)', () => {
+  /**
+   * A request that never answers, as a socket that accepts and stays silent: it
+   * settles only by rejecting with its signal's reason once that signal aborts.
+   */
+  const silent = (init: RequestInit | undefined) =>
+    new Promise<Response>((_resolve, reject) => {
+      const signal = init?.signal;
+      signal?.addEventListener('abort', () => reject(signal.reason), { once: true });
+    });
+
+  /** Leave every request `hung` picks unanswered; the stub answers the rest. */
+  function hangWhere(hung: (url: URL) => boolean) {
+    fetchSpy.mockImplementation(async (input: Parameters<typeof fetch>[0], init?: RequestInit) => {
+      const url = new URL(String(input));
+      return hung(url) ? silent(init) : upstream(url);
+    });
+  }
+
+  /**
+   * Run `call` on a fake clock, firing its timers one at a time until it settles,
+   * so how long it took reads off the clock exactly. Fails rather than spinning
+   * once the clock passes the MCP SDK client's 60 s request timeout, or when the
+   * call is pending with no timer left to fire.
+   */
+  async function settleOnFakeClock<T>(call: () => Promise<T>) {
+    vi.useFakeTimers();
+    // Fresh request pacers, which read the clock: one left by an earlier test
+    // holds start times from a clock that has since moved, or been put back.
+    initServices();
+    const startedAt = Date.now();
+    let outcome: { value: T } | { error: unknown } | undefined;
+    call().then(
+      (value) => {
+        outcome = { value };
+      },
+      (error: unknown) => {
+        outcome = { error };
+      },
+    );
+    for (;;) {
+      // Let the call's promise chain run on, without moving the clock, until it
+      // settles or next waits on a timer: the chain from one tier's last timer to
+      // the next tier's first runs longer than one step's own flush.
+      await vi.advanceTimersByTimeAsync(0);
+      if (outcome !== undefined) break;
+      const elapsedMs = Date.now() - startedAt;
+      if (elapsedMs > 60_000) throw new Error(`Call still pending ${elapsedMs}ms in.`);
+      if (vi.getTimerCount() === 0) {
+        throw new Error(`Call still pending ${elapsedMs}ms in, with no timer left to fire.`);
+      }
+      await vi.advanceTimersToNextTimerAsync();
+    }
+    return { outcome, elapsedMs: Date.now() - startedAt };
+  }
+
+  /** The call's result, or its rejection rethrown. */
+  function settledValue<T>(outcome: { value: T } | { error: unknown }): T {
+    if ('error' in outcome) throw outcome.error;
+    return outcome.value;
+  }
+
+  function initServices() {
+    initNcbiService();
+    initEuropePmcService();
+    initUnpaywallService();
+  }
+
+  afterEach(() => {
+    vi.useRealTimers();
+    initServices();
+    fetchSpy.mockImplementation(async (input: Parameters<typeof fetch>[0]) =>
+      upstream(new URL(String(input))),
+    );
+  });
+
+  it('settles a pmcids call with every upstream hung inside the call deadline, each tier failing on its share', async () => {
+    hangWhere(() => true);
+    const pmcids = [GENBANK.pmcid, SECOND.pmcid];
+    const { outcome, elapsedMs } = await settleOnFakeClock(() => fetchFulltext({ pmcids }));
+
+    // PMC EFetch holds 25 s, Europe PMC 12.5 s, the DOI backfill 6.25 s; with no
+    // DOI found, Unpaywall sends nothing.
+    expect(elapsedMs).toBe(43_750);
+    const { result, text } = settledValue(outcome);
+    expect(result.articles).toEqual([]);
+    const triedTiers = [
+      {
+        tier: 'pmc',
+        outcome: 'service-error',
+        detail: 'ncbi_deadline_exceeded: NCBI request deadline (25000ms) exceeded',
+      },
+      {
+        tier: 'europepmc',
+        outcome: 'service-error',
+        detail: 'europepmc_deadline_exceeded: Europe PMC request deadline (12500ms) exceeded',
+      },
+      {
+        tier: 'unpaywall',
+        outcome: 'doi-lookup-failed',
+        detail: 'ncbi_deadline_exceeded: NCBI request deadline (6250ms) exceeded',
+      },
+    ];
+    expect(result.unavailable).toEqual(
+      pmcids.map((id) => ({ id, idType: 'pmcid', reason: 'doi-lookup-failed', triedTiers })),
+    );
+    expect(text).toContain(`- [pmcid] ${GENBANK.pmcid} — doi-lookup-failed`);
+    expect(unpaywallLookups()).toHaveLength(0);
+  });
+
+  it('returns Europe PMC’s article when PMC EFetch hangs, once PMC’s share of the deadline runs out', async () => {
+    const pmcid = 'PMC9200001';
+    epmcHits.set(`PMCID:${pmcid}`, { id: pmcid, source: 'PMC', pmcid, ...openAccess(pmcid) });
+    epmcFullText.set(pmcid, jats(pmcid, 'Served by Europe PMC'));
+    hangWhere((url) => url.pathname.endsWith('/efetch.fcgi'));
+
+    const { outcome, elapsedMs } = await settleOnFakeClock(() =>
+      fetchFulltext({ pmcids: [pmcid] }),
+    );
+
+    const { result } = settledValue(outcome);
+    expect(pmcArticle(result)).toMatchObject({ pmcId: pmcid, viaSource: 'europepmc' });
+    expect(result.unavailable).toBeUndefined();
+    // PMC EFetch held its 25 s share; Europe PMC answered right after it.
+    expect(elapsedMs).toBeGreaterThanOrEqual(25_000);
+    expect(elapsedMs).toBeLessThan(26_000);
+  });
+
+  it('ends a pmids call whose routing lookup hangs at the call deadline, with the declared NCBI reason', async () => {
+    hangWhere(() => true);
+    const { outcome, elapsedMs } = await settleOnFakeClock(() =>
+      fetchFulltext({ pmids: [String(GENBANK.pmid)] }),
+    );
+
+    expect(elapsedMs).toBe(50_000);
+    expect('error' in outcome && outcome.error).toMatchObject({
+      code: JsonRpcErrorCode.Timeout,
+      data: { reason: 'ncbi_deadline_exceeded', deadlineMs: 50_000 },
+    });
+  });
+
+  it('settles a pmids call inside the call deadline when the routing lookup answers and every tier after it hangs', async () => {
+    converter.set(String(GENBANK.pmid), GENBANK);
+    hangWhere((url) => !url.pathname.includes('/idconv/'));
+
+    const { outcome, elapsedMs } = await settleOnFakeClock(() =>
+      fetchFulltext({ pmids: [String(GENBANK.pmid)] }),
+    );
+
+    // PMC EFetch holds 25 s and Europe PMC 12.5 s; Unpaywall, the last tier,
+    // takes the 12.5 s left.
+    expect(elapsedMs).toBe(50_000);
+    expect(settledValue(outcome).result.unavailable).toEqual([
+      {
+        id: String(GENBANK.pmid),
+        idType: 'pmid',
+        reason: 'service-error',
+        triedTiers: [
+          {
+            tier: 'pmc',
+            outcome: 'service-error',
+            detail: 'ncbi_deadline_exceeded: NCBI request deadline (25000ms) exceeded',
+          },
+          {
+            tier: 'europepmc',
+            outcome: 'service-error',
+            detail: 'europepmc_deadline_exceeded: Europe PMC request deadline (12500ms) exceeded',
+          },
+          {
+            tier: 'unpaywall',
+            outcome: 'service-error',
+            detail: 'unpaywall_deadline_exceeded: Unpaywall request deadline (50000ms) exceeded',
+          },
+        ],
+      },
+    ]);
   });
 });

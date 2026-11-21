@@ -37,7 +37,7 @@ const ServerConfigSchema = z.object({
     .number()
     .min(5000)
     .max(600000)
-    .default(60000)
+    .default(50000)
     .describe('Total deadline across all retry attempts for one NCBI call, in ms'),
   unpaywallEmail: z
     .email()
@@ -48,7 +48,9 @@ const ServerConfigSchema = z.object({
     .min(1000)
     .max(120000)
     .default(20000)
-    .describe('Per-request HTTP timeout for Unpaywall lookups and content fetches, in ms'),
+    .describe(
+      'Per-request HTTP timeout for Unpaywall lookups and content fetches, in ms, or the time the tool call has left when that is less',
+    ),
   europepmcEnabled: z
     .stringbool()
     .default(true)
@@ -70,20 +72,20 @@ const ServerConfigSchema = z.object({
     .min(0)
     .max(10)
     .default(3)
-    .describe('Max retry attempts for failed Europe PMC requests'),
+    .describe('Max retry attempts for failed Europe PMC, OpenAlex, and iCite requests'),
   europepmcTimeoutMs: z.coerce
     .number()
     .min(1000)
     .max(120000)
     .default(20000)
-    .describe('Per-request HTTP timeout for Europe PMC calls, in ms'),
+    .describe('Per-request HTTP timeout for Europe PMC, OpenAlex, and iCite calls, in ms'),
   europepmcTotalDeadlineMs: z.coerce
     .number()
     .min(5000)
     .max(600000)
     .default(45000)
     .describe(
-      'Total deadline for one Europe PMC call across queue wait, retry attempts, and backoff, in ms',
+      'Total deadline for one Europe PMC or OpenAlex call across queue wait, retry attempts, and backoff, in ms',
     ),
 });
 

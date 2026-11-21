@@ -16,7 +16,7 @@ const DEFAULT_MAX_QUEUE_DEPTH = 100;
 /**
  * Gate closed on an NCBI 429: one second — the width of NCBI's rate window — doubled
  * per consecutive 429 and reset by the first success. An honored `Retry-After` is capped
- * by the same ceiling, a quarter of the default total deadline, so a caller queued
+ * by the same 15 s ceiling, under a third of the default total deadline, so a caller queued
  * behind the longest gate still has budget left for its request.
  */
 const RATE_LIMIT_COOLDOWN = { baseMs: 1_000, maxMs: 15_000 };
