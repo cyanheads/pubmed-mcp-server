@@ -2,6 +2,10 @@
 
 All notable changes to this project. Each entry links to its full per-version file in [changelog/](changelog/).
 
+## [2.12.3](changelog/2.12.x/2.12.3.md) — 2026-11-21
+
+Each tool call runs under one 50 s deadline, so a call against hung upstreams settles before an MCP client's 60 s default timeout. Search summaries and related-article rows report languages, pubmed_spell_check drops replacements PubMed barely holds, and Unpaywall reads stop at 50 MiB.
+
 ## [2.12.2](changelog/2.12.x/2.12.2.md) — 2026-11-13 · 🛡️ Security
 
 pubmed_fetch_articles returns languages, original-language titles, and indexed substances. DOI links and doi: forms are accepted as DOIs, Europe PMC calls end at a 45 s total deadline, Unpaywall HTML extraction runs off the serving thread, and DOI validation runs in linear time.
