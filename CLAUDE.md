@@ -31,6 +31,7 @@ Tailor suggestions to what's actually missing or stale — don't recite the full
 ## Core Rules
 
 - **Logic throws, framework catches.** Tool/resource handlers are pure — throw on failure, no `try/catch`. Plain `Error` is fine; the framework catches, classifies, and formats. Use error factories (`notFound()`, `validationError()`, etc.) when the error code matters.
+- **One deadline per call.** Every tool or resource handler starts it with `startCallDeadline()` (`src/services/call-deadline.ts`) before any upstream call and passes that same object, beside `ctx.signal`, to every service call it makes. A chain step with fallbacks after it runs under `shareDeadline(deadline)`.
 - **Use `ctx.log`** for request-scoped logging. No `console` calls.
 - **Use `ctx.state`** for tenant-scoped storage. Never access persistence directly.
 - **Need input the caller didn't supply?** `return ctx.requestInput(...)` and read `ctx.inputs` when the handler is re-entered. Never `await` for user input mid-handler.
@@ -46,6 +47,7 @@ Tailor suggestions to what's actually missing or stale — don't recite the full
 
 ```ts
 import { tool, z } from '@cyanheads/mcp-ts-core';
+import { startCallDeadline } from '@/services/call-deadline.js';
 import { getNcbiService } from '@/services/ncbi/ncbi-service.js';
 
 export const spellCheckTool = tool('pubmed_spell_check', {
@@ -63,8 +65,12 @@ export const spellCheckTool = tool('pubmed_spell_check', {
   }),
 
   async handler(input, ctx) {
+    const deadline = startCallDeadline();
     ctx.log.info('Executing pubmed_spell_check tool', { query: input.query });
-    const result = await getNcbiService().eSpell({ db: 'pubmed', term: input.query });
+    const result = await getNcbiService().eSpell(
+      { db: 'pubmed', term: input.query },
+      { signal: ctx.signal, deadline },
+    );
     return { original: result.original, corrected: result.corrected, hasSuggestion: result.hasSuggestion };
   },
 
@@ -81,6 +87,7 @@ export const spellCheckTool = tool('pubmed_spell_check', {
 
 ```ts
 import { resource, z } from '@cyanheads/mcp-ts-core';
+import { startCallDeadline } from '@/services/call-deadline.js';
 import { getNcbiService } from '@/services/ncbi/ncbi-service.js';
 
 export const databaseInfoResource = resource('pubmed://database/info', {
@@ -92,8 +99,9 @@ export const databaseInfoResource = resource('pubmed://database/info', {
   output: OutputSchema,
 
   async handler(_params, ctx) {
+    const deadline = startCallDeadline();
     ctx.log.info('Fetching PubMed database info');
-    const raw = await getNcbiService().eInfo({ db: 'pubmed' });
+    const raw = await getNcbiService().eInfo({ db: 'pubmed' }, { signal: ctx.signal, deadline });
     // ... parse XML response ...
     return { dbName, description, count, lastUpdate, fields };
   },

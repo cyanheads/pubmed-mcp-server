@@ -68,6 +68,7 @@ Biomedical literature from PubMed, PubMed Central, and Europe PMC. Search it, fe
 - `query` is optional: with an author, journal, MeSH, or publication-type filter, the filters alone make the search (a journal's output over a date range, for example)
 - Up to 1,000 results per page and offsets up to 9,998, or `maxResults: 0` for the match count alone; `summaryCount` adds briefs for up to 50 hits. A larger page size is served at the cap with a notice naming where to continue; a page that reaches PubMed's 9,999-record window says how many matches no `offset` can reach and advises narrowing or splitting the query by `dateRange`
 - Reports `totalCount`, the `effectiveQuery` PubMed ran, and the `appliedFilters`
+- Each summary carries `languages` (NLM three-letter codes, e.g. `["ger"]`), so a result set can be screened by language without fetching the records; a record in another language has NLM's English translation as its `title` once NLM has indexed it, and its original-language title until then
 - Rejects blank filter values, impossible dates, and reversed date ranges before PubMed is called
 
 ---
@@ -85,8 +86,9 @@ Biomedical literature from PubMed, PubMed Central, and Europe PMC. Search it, fe
 ### `pubmed_fetch_fulltext` <sub>tool</sub>
 
 - `pmcids`, `pmids`, and `dois` in any mix, up to 50 distinct identifiers per call: the first 10 are fetched and the rest returned in `overLimit` for a follow-up call. A DOI may be sent bare, as a resolver link (`https://doi.org/…`), or with the `doi:` scheme; each is read as the bare DOI, which is what the response echoes. Each is tried against PMC, then Europe PMC, then Unpaywall (needs `UNPAYWALL_EMAIL`); an article several of them name is fetched and returned once, and `viaSource` names the tier that answered
-- `source: "pmc"` returns sections (the body, then back matter such as acknowledgments, declarations, and appendices), tables, and figures; `source: "unpaywall"` returns a best-effort HTML or PDF text body
+- `source: "pmc"` returns sections (the body, then back matter such as acknowledgments, declarations, and appendices), tables, and figures; `source: "unpaywall"` returns a best-effort HTML or PDF text body; each read is held to 50 MiB, and an open-access copy over that is a `fetch-failed` miss (a PDF over it falls through to the publisher landing page)
 - Europe PMC full text is fetched for records Europe PMC marks open access, preprints included; articles carry the `licenses` their PMC JATS states
+- The tiers share the call's one deadline: a tier with a later one behind it gets half the time left, a tier the deadline cut names the provider's `*_deadline_exceeded` reason in its `detail`, and one it left no time for is `not-attempted`
 - Misses carry a typed `reason` and `triedTiers`; `sections`, `maxSections`, `maxCharacters`, `overflowMode`, and `maxResponseCharacters` bound the response, `truncation` reports what was cut, and `sectionCap` names the sections `maxSections` cut
 - A `sections` filter that matches an article only in part adds a notice naming, per article, the terms that matched no section or subsection title there and pointing at `overflowMode: "outline"` to list its headings
 
@@ -130,8 +132,8 @@ Biomedical literature from PubMed, PubMed Central, and Europe PMC. Search it, fe
 ### `pubmed_find_related` <sub>tool</sub>
 
 - `similar`, `cited_by`, or `references`, up to 50 per page with offset pagination. A larger page size is served at the cap with a notice naming where to continue
-- Rows carry the same identifiers as search summaries: `doi`, `pmcId` and `pmcUrl` when the record has them, and a `pubmedUrl` on every row
-- Falls back to Europe PMC, then OpenAlex, and names the provider that answered; fails as `all_providers_failed` if none can
+- Rows carry the same identifiers as search summaries: `doi`, `pmcId` and `pmcUrl` when the record has them, and a `pubmedUrl` on every row, plus `languages`
+- Falls back to Europe PMC, then OpenAlex, and names the provider that answered; fails as `all_providers_failed` if none can. The chain shares the call's one deadline: each step with another behind it (a fallback provider, then the rows' ESummary) gets half the time left, a provider the deadline left no time to ask is reported `not_reached`, and with none left for the ESummary the rows are `pmid` and `pubmedUrl` only, with a notice
 
 ---
 
@@ -139,6 +141,7 @@ Biomedical literature from PubMed, PubMed Central, and Europe PMC. Search it, fe
 
 - Returns `original`, `corrected`, and `hasSuggestion`; corrections land in place, so field tags, operators, spacing, and gene symbols stay as written, and a single letter such as an author initial is never swapped for another
 - Values of indexed field tags (`aged[mh]`, `zhang y[au]`, `free full text[sb]`) are kept as written; free-text fields (`[tiab]`, `[ti]`, `[tw]`) are still corrected
+- Each correction is checked against PubMed: one with under a tenth of the PubMed records of the word it replaces is dropped and the word kept (`tirzepatide` stays, where ESpell alone returns `irzepatide`), unless ESpell's MeSH dictionary offers a spelling PubMed holds more often than the word (`tirzepatid` → `tirzepatide`). A query ESpell leaves unchanged costs one NCBI request; a corrected one sends up to 12 more, within 10 seconds or the time the tool call has left. A check that cannot run leaves ESpell's correction applied (or the dropped word as written) and a `notice` names it
 - Run it after a zero-hit or thin search, then retry `pubmed_search_articles` with `corrected`
 
 ---
@@ -185,6 +188,7 @@ PubMed-specific:
 
 - NCBI E-utilities (ESearch, EFetch, ESummary, ELink, ESpell, EInfo, ECitMatch) and the PMC ID Converter, with Europe PMC, OpenAlex, and Unpaywall filling the gaps
 - Shared NCBI request queue: paced request starts, capped concurrency, a cooldown that holds every caller after an NCBI 429, one deadline covering queue wait and retries, and fail-fast for an endpoint whose retries were just spent on an outage: later calls to it make one attempt each until one succeeds
+- One deadline per tool call, 50 s: every upstream request a call makes runs under the smaller of its provider's own deadline and the time the call has left, so a tool that sends several requests or falls back between providers settles inside it, ahead of the 60 s at which MCP clients give up by default
 - XML parsing built for PubMed's inconsistent records: structured abstracts, missing fields, varying date formats
 - Forgiving identifiers: a zero-padded PMID resolves as the PMID it spells in every tool that takes one; `pubmed_fetch_fulltext` also matches DOIs case-insensitively and PMC IDs with or without the `PMC` prefix; `pubmed_convert_ids` and `pubmed_fetch_fulltext` read a DOI link or `doi:` form as the bare DOI
 - Hand-rolled citation formatters (APA, MLA, BibTeX, RIS, Vancouver) with no dependencies
@@ -234,15 +238,15 @@ An [NCBI API key](https://www.ncbi.nlm.nih.gov/account/settings/) in `NCBI_API_K
 | `NCBI_MAX_CONCURRENT` | Max concurrent in-flight NCBI requests. | `8` |
 | `NCBI_MAX_RETRIES` | Retry attempts for failed NCBI requests. An endpoint whose last call failed unreachable on every attempt gets one attempt per call until one succeeds. | `6` |
 | `NCBI_TIMEOUT_MS` | Per-request HTTP timeout, in ms. | `30000` |
-| `NCBI_TOTAL_DEADLINE_MS` | Deadline for one NCBI call across queue wait, retries, and backoff, in ms. A call that can't start in time is rejected at once. | `60000` |
+| `NCBI_TOTAL_DEADLINE_MS` | Deadline for one NCBI call across queue wait, retries, and backoff, in ms. A call that can't start in time is rejected at once. A tool call as a whole runs under 50 s, or the larger of this and `EUROPEPMC_TOTAL_DEADLINE_MS` when either is set higher; a value below 50 s still ends the NCBI call at its own. | `50000` |
 | `UNPAYWALL_EMAIL` | Contact email for Unpaywall. Setting it enables the Unpaywall tier of `pubmed_fetch_fulltext` for non-PMC DOIs. | none |
-| `UNPAYWALL_TIMEOUT_MS` | Per-request timeout for Unpaywall lookups and content fetches, in ms. | `20000` |
+| `UNPAYWALL_TIMEOUT_MS` | Per-request timeout for Unpaywall lookups and content fetches, in ms, or the time the tool call has left when that is less. Each content read is held to 50 MiB. | `20000` |
 | `EUROPEPMC_ENABLED` | Set `false` to disable every Europe PMC call: both Europe PMC tools go unregistered, `pubmed_fetch_fulltext` skips that tier, and `pubmed_find_related` skips that fallback. | `true` |
 | `EUROPEPMC_EMAIL` | Optional contact email sent with Europe PMC requests. | none |
 | `EUROPEPMC_REQUEST_DELAY_MS` | Minimum gap between Europe PMC request starts, in ms. | `200` |
-| `EUROPEPMC_MAX_RETRIES` | Retry attempts for failed Europe PMC requests. | `3` |
-| `EUROPEPMC_TIMEOUT_MS` | Per-request timeout for Europe PMC calls, in ms. | `20000` |
-| `EUROPEPMC_TOTAL_DEADLINE_MS` | Deadline for one Europe PMC call across queue wait, retries, and backoff, in ms. | `45000` |
+| `EUROPEPMC_MAX_RETRIES` | Retry attempts for failed Europe PMC, OpenAlex, and iCite requests. | `3` |
+| `EUROPEPMC_TIMEOUT_MS` | Per-request timeout for Europe PMC, OpenAlex, and iCite calls, in ms. | `20000` |
+| `EUROPEPMC_TOTAL_DEADLINE_MS` | Deadline for one Europe PMC or OpenAlex call across queue wait, retries, and backoff, in ms. iCite calls keep a fixed 50 s deadline. | `45000` |
 | `MCP_TRANSPORT_TYPE` | Transport: `stdio` or `http`. | `stdio` |
 | `MCP_HTTP_PORT` | HTTP server port. | `3010` |
 | `MCP_SESSION_MODE` | HTTP session mode: `stateless`, `stateful`, or `auto`. | `stateless` |
@@ -303,7 +307,7 @@ The image defaults to HTTP transport, stateless session mode, and logs to `/var/
 | `src/mcp-server/prompts` | Prompt definitions. Research plan prompt. |
 | `src/services/ncbi` | NCBI E-utilities service layer — API client, queue, parser, formatter. |
 | `src/services/europe-pmc` | Europe PMC service — search + `fullTextXML` JATS retrieval. Reuses the NCBI JATS parser. |
-| `src/services/unpaywall` | Unpaywall service — DOI → OA location resolution and content fetch (HTML/PDF). HTML extraction runs off-thread: a worker thread per extraction, a 10 s deadline, two at a time per process. |
+| `src/services/unpaywall` | Unpaywall service — DOI → OA location resolution and content fetch (HTML/PDF). HTML extraction runs off-thread: a worker thread per extraction, a 10 s deadline or the time the tool call has left when that is less, two at a time per process. Each content read is held to 50 MiB. |
 | `src/services/openalex` | OpenAlex service — last-resort provider for `pubmed_find_related`. |
 | `src/config` | Server-specific environment variable parsing and validation with Zod. |
 | `tests/` | Unit and integration tests, mirroring the `src/` structure. |

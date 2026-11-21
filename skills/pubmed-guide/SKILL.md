@@ -4,7 +4,7 @@ description: PubMed query syntax, identifier crosswalks, and gates for the pubme
 license: Apache-2.0
 metadata:
   author: cyanheads
-  version: "1.0"
+  version: "1.1"
 ---
 
 ## Scope
@@ -52,6 +52,8 @@ Crosswalks:
 | `pubmed pmc[sb]` | records with a PMC copy |
 
 - **Read `notice` before using a count.** It flags a field tag PubMed did not recognize and searched as free text (`heart failure[xyz]` returned 385,186 unrestricted records) and a clause that matched nothing, with advice by the clause's field: resolve a MeSH-vocabulary clause with `pubmed_lookup_mesh` and search its `searchTerm`, give a journal as its NLM abbreviation (`N Engl J Med`) or ISSN, and a language as its English name or three-letter code (`english`, `eng`; `en` matches nothing). Fix the query; never report that count. A page that reaches PubMed's 9,999-record window says how many matches no `offset` reaches; split the query by `dateRange`.
+- **Screen by language from the results.** Search summaries and `pubmed_find_related` rows carry `languages` (NLM codes such as `ger`), so `pubmed_fetch_articles` is not needed for it. A record in another language that NLM has indexed has an English `title`, usually in square brackets; a recent one not yet indexed can still show its original-language title, so screen on `languages`, not on the title.
+- **Read `pubmed_spell_check`'s `notice`.** A correction PubMed barely holds (under a tenth of the word's records) is dropped and the word kept; `notice` names any correction applied without that check because it could not run, and any word kept without its MeSH-spelling check. Verify those with a search before relying on `corrected`.
 - **A MeSH term is the descriptor `name`, never a synonym.** `"SGLT2 inhibitors"[MeSH Terms]` matched nothing although the descriptor lists it as an entry term; `Sodium-Glucose Transporter 2 Inhibitors` is the name. Look the concept up first and search the record's `searchTerm`: a supplementary concept (a specific drug or chemical) is searched as `"Name"[nm]`, because no `[mh]` clause matches it, and `meshTerms` takes headings only, so it goes in `query`.
 - **A heading introduced inside the searched dates can miss earlier literature.** A record with `yearIntroduced` inside the date range was indexed before then under the headings in its `previousIndexing`. Look each up with `pubmed_lookup_mesh` by name, without its years, and search the `searchTerm` returned. A current heading returns its own; a retired one matches nothing as `[mh]` and resolves to the heading that holds its records: `"Heart Failure, Congestive"[mh]` matched 0 with `2000:2005[dp]`, and the lookup returns `"Heart Failure"[mh]`, which matched 15,780.
 - **MeSH misses the newest records.** Indexing lags, so for records added 2026-10-01 to 2026-11-02 `"Heart Failure"[mh]` matched 212 and `"heart failure"[tiab]` 1,747. OR each MeSH clause with `[tiab]` synonyms from the descriptor's entry terms whenever recent work counts.
@@ -70,7 +72,7 @@ Crosswalks:
 
 - **`cited_by` is not a citation count.** For 31535829, `pubmed_find_related` `cited_by` totals 3,381, iCite's `citationCount` 5,579, and Europe PMC's `citedByCount` 5,400. Report iCite's count or RCR for how cited a paper is; use `cited_by` to list citing PubMed records.
 - **A `sections` filter that matched in part is not a missing section.** When some terms matched an article and others did not, the `notice` names the unmatched terms per article; a results section titled "Findings" misses a filter on "Results". Call again with `overflowMode` `outline`, a small `maxCharacters`, and no `sections` to read the article's headings, then filter by those.
-- **An `unavailable` entry is not proof that no free full text exists.** `unqueriedTiers` names a tier this deployment skipped that could have served it (Unpaywall without `UNPAYWALL_EMAIL`), and `service-error` is an upstream failure: Europe PMC answered PPR829124's full text with HTTP 500 although its search hit set `hasFullTextXml`. Say which tiers answered.
+- **An `unavailable` entry is not proof that no free full text exists.** `unqueriedTiers` names a tier this deployment skipped that could have served it (Unpaywall without `UNPAYWALL_EMAIL`), `fetch-failed` can mean an Unpaywall copy over the 50 MiB read limit (the tier `detail` says), a `not-attempted` tier whose `detail` says the tool call's deadline left it no time was never asked (call again for that id alone), and `service-error` is an upstream failure: Europe PMC answered PPR829124's full text with HTTP 500 although its search hit set `hasFullTextXml`. Say which tiers answered.
 
 ## Workflows
 
