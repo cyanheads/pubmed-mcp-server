@@ -2,7 +2,8 @@
  * @fileoverview Handles parsing of NCBI E-utility responses and NCBI-specific error extraction.
  * Creates an NCBI-specific XMLParser instance with `isArray` callback support for handling
  * NCBI's inconsistent XML structures where single-element lists are collapsed to scalars.
- * Also reads the `<ERROR>` envelope of a failed eutils response: a backend failure is
+ * Also reads the captured body of a failed eutils response: an `<ERROR>` envelope reporting
+ * a backend failure, and an EFetch 400 that opens a result document with no `<ERROR>`, are
  * reclassified as transient, and EFetch's all-invalid-ID rejection becomes the empty set
  * NCBI returns for an unknown ID.
  * @module src/services/ncbi/response-handler
@@ -142,6 +143,9 @@ const ERROR_PATHS = [
  * `proxy_stream()` is the EFetch front end's own backend-proxy method: it prefixes
  * every failure relayed from the service behind it (a 502 page, "Failed to connect
  * to PubOne service"), so a client-side 400 cannot carry it. (#155)
+ *
+ * A backend failure that arrives with no `<ERROR>` at all is recognized by the result
+ * document it cuts short instead — see {@link EFETCH_RESULT_OPENING}. (#314)
  */
 const NCBI_TRANSIENT_ERROR_PATTERNS: RegExp[] = [
   /External viewer error/i,
@@ -170,6 +174,18 @@ const EMPTY_EFETCH_RESULTS: Readonly<Record<string, string>> = {
     '<?xml version="1.0" ?>\n<!DOCTYPE PubmedArticleSet PUBLIC "-//NLM//DTD PubMedArticle, 1st January 2025//EN" "https://dtd.nlm.nih.gov/ncbi/pubmed/out/pubmed_250101.dtd">\n<PubmedArticleSet></PubmedArticleSet>\n',
   pmc: '<?xml version="1.0" ?>\n<!DOCTYPE pmc-articleset PUBLIC "-//NLM//DTD ARTICLE SET 2.0//EN" "https://dtd.nlm.nih.gov/ncbi/pmc/articleset/nlm-articleset-2.0.dtd">\n<pmc-articleset></pmc-articleset>\n',
 };
+
+/**
+ * The opening of an EFetch result document — `<PubmedArticleSet` (`db=pubmed`) or
+ * `<pmc-articleset` (`db=pmc`), the roots {@link EMPTY_EFETCH_RESULTS} wraps — after an
+ * optional XML declaration and DOCTYPE. EFetch intermittently answers a valid request
+ * with HTTP 400 and a body that starts this document, then runs into a fragment of an
+ * HTML page, with no `<ERROR>`; the same request sent again is served. Every caller
+ * error EFetch answers with 400 is an `<eFetchResult><ERROR>` envelope instead.
+ * Anchored at the start of the bounded error-body capture. (#314)
+ */
+const EFETCH_RESULT_OPENING =
+  /^\s*(?:<\?xml[^>]*>\s*)?(?:<!DOCTYPE[^>]*>\s*)?<(?:PubmedArticleSet|pmc-articleset)[\s>]/;
 
 /**
  * The `<ERROR>` messages in the captured body of a non-2xx eutils response, as plain
@@ -207,32 +223,51 @@ export function emptyEFetchResultFor(
 }
 
 /**
- * Reclassifies an HTTP error from a eutils request whose captured body is an NCBI
- * `<ERROR>` envelope reporting a backend failure. The status-derived code reads such a
- * response as caller error (400 → InvalidParams), which the retry gate never retries.
- * Any other error — including a genuine invalid-parameter 400 — is returned unchanged.
- * Matches the body text rather than parsing it, since the framework captures only a
- * bounded prefix. (#153, #155)
+ * Reclassifies an HTTP error from a eutils request whose captured body reports a backend
+ * failure as `ncbi_unreachable`. The status-derived code reads such a response as caller
+ * error (400 → InvalidParams), which the retry gate never retries. Two bodies qualify:
+ *
+ * - an NCBI `<ERROR>` envelope whose message names a backend failure, kept as
+ *   `ncbiErrors` (#153, #155);
+ * - an EFetch 400 that opens a result document ({@link EFETCH_RESULT_OPENING}) and
+ *   carries no `<ERROR>`. Its message and `data` carry nothing of the body, which is a
+ *   fragment of an HTML page. (#314)
+ *
+ * Any other error — a genuine invalid-parameter 400, an empty or HTML body, another
+ * status, another endpoint's 400 — is returned unchanged. Matches the body text rather
+ * than parsing it, since the framework captures only a bounded prefix.
  */
 export function reclassifyNcbiHttpError(error: unknown, endpoint: string): unknown {
+  if (!(error instanceof McpError)) return error;
   const ncbiErrors = ncbiErrorTexts(error);
-  if (
-    !(error instanceof McpError) ||
-    !ncbiErrors?.some((msg) => NCBI_TRANSIENT_ERROR_PATTERNS.some((p) => p.test(msg)))
-  ) {
-    return error;
+  if (ncbiErrors?.some((msg) => NCBI_TRANSIENT_ERROR_PATTERNS.some((p) => p.test(msg)))) {
+    return serviceUnavailable(
+      `NCBI API Error: ${ncbiErrors.join('; ')}`,
+      {
+        reason: 'ncbi_unreachable',
+        endpoint,
+        status: error.data?.status,
+        ncbiErrors,
+      },
+      { cause: error },
+    );
   }
 
-  return serviceUnavailable(
-    `NCBI API Error: ${ncbiErrors.join('; ')}`,
-    {
-      reason: 'ncbi_unreachable',
-      endpoint,
-      status: error.data?.status,
-      ncbiErrors,
-    },
-    { cause: error },
-  );
+  const body = error.data?.body;
+  if (
+    endpoint === 'efetch' &&
+    error.data?.status === 400 &&
+    typeof body === 'string' &&
+    ncbiErrors?.length === 0 &&
+    EFETCH_RESULT_OPENING.test(body)
+  ) {
+    return serviceUnavailable(
+      'NCBI EFetch returned HTTP 400 with a truncated result document and no error message, a backend failure rather than a rejected request.',
+      { reason: 'ncbi_unreachable', endpoint, status: 400 },
+      { cause: error },
+    );
+  }
+  return error;
 }
 
 /**

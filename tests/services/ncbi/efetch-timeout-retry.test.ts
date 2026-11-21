@@ -322,6 +322,202 @@ describe('EFetch "ID list is empty" envelope (issue #155)', () => {
   });
 });
 
+/**
+ * EFetch's intermittent HTTP 400 that opens the database's result document, then runs
+ * into a fragment of an HTML stylesheet, with no `<ERROR>` element. The same IDs sent
+ * again return every record. (#314)
+ */
+const STYLESHEET_FRAGMENT =
+  'in-top:1em;\n      line-height:1.5;\n      padding-left:3ch;\n    }\n    .usa-list:last-child{\n      margin-bottom:0;\n    }\n';
+const TRUNCATED_PUBMED_SET = `<?xml version="1.0" ?>\n<!DOCTYPE PubmedArticleSet PUBLIC "-//NLM//DTD PubMedArticle, 1st January 2025//EN" "https://dtd.nlm.nih.gov/ncbi/pubmed/out/pubmed_250101.dtd">\n<PubmedArticleSet>${STYLESHEET_FRAGMENT}`;
+const TRUNCATED_PMC_SET = `<?xml version="1.0" ?>\n<!DOCTYPE pmc-articleset PUBLIC "-//NLM//DTD ARTICLE SET 2.0//EN" "https://dtd.nlm.nih.gov/ncbi/pmc/articleset/nlm-articleset-2.0.dtd">\n<pmc-articleset>${STYLESHEET_FRAGMENT}`;
+
+describe('EFetch HTTP 400 carrying a truncated result document (issue #314)', () => {
+  let setTimeoutSpy: ReturnType<typeof vi.spyOn>;
+
+  beforeEach(() => {
+    setTimeoutSpy = vi.spyOn(globalThis, 'setTimeout').mockImplementation(((
+      fn: () => void,
+      ms?: number,
+    ) => {
+      if (typeof ms === 'number' && ms >= 50_000) {
+        return 0 as unknown as ReturnType<typeof setTimeout>;
+      }
+      fn();
+      return 0 as unknown as ReturnType<typeof setTimeout>;
+    }) as unknown as typeof setTimeout);
+  });
+
+  afterEach(() => {
+    setTimeoutSpy.mockRestore();
+  });
+
+  /** The terminal error carries no markup and none of the body: message and `data` alike. */
+  function expectNoMarkup(error: McpError) {
+    expect(error.message).not.toMatch(/[<>]|line-height|PubmedArticleSet|pmc-articleset/);
+    expect(error.data).not.toHaveProperty('ncbiErrors');
+    expect(error.data).not.toHaveProperty('body');
+    expect(JSON.stringify(error.data)).not.toMatch(/[<>]|line-height/);
+  }
+
+  it.each([
+    { db: 'pubmed', id: PMID, body: TRUNCATED_PUBMED_SET, options: undefined },
+    {
+      db: 'pmc',
+      id: 'PMC3531190',
+      body: TRUNCATED_PMC_SET,
+      options: { retmode: 'xml', useOrderedParser: true } as const,
+    },
+  ])(
+    'retries a db=$db 400 that opens its result document to exhaustion as ncbi_unreachable',
+    async ({ db, id, body, options }) => {
+      const spy = stubFetch({ body, status: 400 });
+
+      const error = (await buildService(2)
+        .eFetch({ db, id }, options)
+        .catch((e: unknown) => e)) as McpError;
+
+      expect(error).toMatchObject({
+        code: JsonRpcErrorCode.ServiceUnavailable,
+        message: expect.stringMatching(/\(failed after 3 attempts\)$/),
+        data: { reason: 'ncbi_unreachable', endpoint: 'efetch', attempts: 3 },
+      });
+      expectNoMarkup(error);
+      expect(spy).toHaveBeenCalledTimes(3);
+    },
+  );
+
+  it.each([
+    {
+      label: 'no XML declaration',
+      body: `<!DOCTYPE PubmedArticleSet PUBLIC "-//NLM//DTD PubMedArticle, 1st January 2025//EN" "https://dtd.nlm.nih.gov/ncbi/pubmed/out/pubmed_250101.dtd">\n<PubmedArticleSet>${STYLESHEET_FRAGMENT}`,
+    },
+    {
+      label: 'no DOCTYPE',
+      body: `<?xml version="1.0" ?>\n<PubmedArticleSet>${STYLESHEET_FRAGMENT}`,
+    },
+  ])(
+    'retries a 400 whose result document has $label to exhaustion as ncbi_unreachable',
+    async ({ body }) => {
+      const spy = stubFetch({ body, status: 400 });
+
+      await expect(buildService(2).eFetch({ db: 'pubmed', id: PMID })).rejects.toMatchObject({
+        code: JsonRpcErrorCode.ServiceUnavailable,
+        data: { reason: 'ncbi_unreachable', endpoint: 'efetch', attempts: 3 },
+      });
+      expect(spy).toHaveBeenCalledTimes(3);
+    },
+  );
+
+  it('returns the records when the same request succeeds on attempt 2, after exactly 2 requests', async () => {
+    const spy = stubFetch(
+      { body: TRUNCATED_PUBMED_SET, status: 400 },
+      { body: ARTICLE_SET, status: 200 },
+    );
+
+    const result = await buildService(2).eFetch({ db: 'pubmed', id: PMID });
+
+    expect(result.PubmedArticleSet?.PubmedArticle).toHaveLength(1);
+    expect(spy).toHaveBeenCalledTimes(2);
+    for (const url of requestedUrls(spy)) {
+      expect(new URL(url).searchParams.get('id')).toBe(PMID);
+    }
+  });
+
+  /**
+   * An exhausted reclassified 400 ends `ncbi_unreachable` with `attempts`, like any
+   * other spent EFetch ladder, so the next EFetch call makes one attempt. (#287)
+   */
+  it('holds the next EFetch call to one attempt once a call spends its retries on it', async () => {
+    const spy = stubFetch({ body: TRUNCATED_PUBMED_SET, status: 400 });
+    const service = buildService(2);
+
+    await expect(service.eFetch({ db: 'pubmed', id: PMID })).rejects.toMatchObject({
+      data: { reason: 'ncbi_unreachable', attempts: 3 },
+    });
+    expect(spy).toHaveBeenCalledTimes(3);
+
+    const next = (await service
+      .eFetch({ db: 'pubmed', id: PMID })
+      .catch((e: unknown) => e)) as McpError;
+    expect(next).toMatchObject({
+      code: JsonRpcErrorCode.ServiceUnavailable,
+      message: expect.stringMatching(
+        /\(failed after 1 attempt, without retrying: the previous efetch call failed on every attempt\)$/,
+      ),
+      data: { reason: 'ncbi_unreachable', endpoint: 'efetch', attempts: 1 },
+    });
+    expectNoMarkup(next);
+    expect(spy).toHaveBeenCalledTimes(4);
+  });
+
+  it.each([
+    {
+      label: 'an HTML error page',
+      body: '<html><head><title>400 Bad Request</title></head><body><h1>Bad Request</h1></body></html>',
+    },
+    {
+      label: 'a result document that carries an <ERROR>',
+      body: '<?xml version="1.0" ?>\n<PubmedArticleSet><ERROR>Invalid id parameter</ERROR></PubmedArticleSet>',
+    },
+    {
+      label: 'an envelope that names the result document only in its prolog',
+      body: `<?xml version="1.0" ?>\n<!DOCTYPE PubmedArticleSet PUBLIC "-//NLM//DTD PubMedArticle, 1st January 2025//EN" "https://dtd.nlm.nih.gov/ncbi/pubmed/out/pubmed_250101.dtd">\n<eFetchResult>${STYLESHEET_FRAGMENT}`,
+    },
+    {
+      label: 'an HTML page that opens the result document after its own markup',
+      body: `<html><head><title>400 Bad Request</title></head><body><PubmedArticleSet>${STYLESHEET_FRAGMENT}`,
+    },
+    {
+      label: 'a document whose root name only begins with the result document’s',
+      body: `<?xml version="1.0" ?>\n<PubmedArticleSetError>${STYLESHEET_FRAGMENT}`,
+    },
+  ])('keeps a 400 carrying $label InvalidParams, with one attempt', async ({ body }) => {
+    const spy = stubFetch({ body, status: 400 });
+
+    await expect(buildService(2).eFetch({ db: 'pubmed', id: PMID })).rejects.toMatchObject({
+      code: JsonRpcErrorCode.InvalidParams,
+    });
+    expect(spy).toHaveBeenCalledTimes(1);
+  });
+
+  /** Only a 400 is rescued: another status keeps its own code and retry path. */
+  it.each([
+    {
+      status: 403,
+      expected: { code: JsonRpcErrorCode.Forbidden },
+      requests: 1,
+    },
+    {
+      status: 429,
+      expected: {
+        code: JsonRpcErrorCode.RateLimited,
+        data: { reason: 'ncbi_rate_limited', attempts: 3 },
+      },
+      requests: 3,
+    },
+  ])(
+    'keeps an EFetch $status carrying a truncated result document on its own path',
+    async ({ status, expected, requests }) => {
+      const spy = stubFetch({ body: TRUNCATED_PUBMED_SET, status });
+
+      await expect(buildService(2).eFetch({ db: 'pubmed', id: PMID })).rejects.toMatchObject(
+        expected,
+      );
+      expect(spy).toHaveBeenCalledTimes(requests);
+    },
+  );
+
+  it('keeps a non-EFetch 400 carrying the same body InvalidParams, with one attempt', async () => {
+    const spy = stubFetch({ body: TRUNCATED_PUBMED_SET, status: 400 });
+
+    await expect(buildService(2).eSummary({ db: 'pubmed', id: PMID })).rejects.toMatchObject({
+      code: JsonRpcErrorCode.InvalidParams,
+    });
+    expect(spy).toHaveBeenCalledTimes(1);
+  });
+});
+
 describe('EFetch backend-timeout envelope under the service deadline (issue #153)', () => {
   let randomSpy: ReturnType<typeof vi.spyOn>;
 
@@ -357,6 +553,32 @@ describe('EFetch backend-timeout envelope under the service deadline (issue #153
         ncbiErrors: [TIMEOUT_MESSAGE],
       },
     });
+    expect(spy).toHaveBeenCalledTimes(2);
+  });
+
+  it('retries a truncated result document 400 only inside the total deadline (#314)', async () => {
+    // Same ladder as the envelope above: attempts at 0 and 1000ms, and the 2000ms
+    // backoff the 3000ms deadline cuts short. No third request goes out.
+    vi.useFakeTimers();
+    const spy = stubFetch({ body: TRUNCATED_PUBMED_SET, status: 400 });
+    const service = buildService(10, 3000);
+    const t0 = Date.now();
+    let settledAt: number | undefined;
+
+    const settled = service
+      .eFetch({ db: 'pubmed', id: PMID })
+      .catch((e: unknown) => e)
+      .finally(() => {
+        settledAt = Date.now() - t0;
+      });
+    await vi.advanceTimersByTimeAsync(10_000);
+
+    expect(await settled).toMatchObject({
+      code: JsonRpcErrorCode.Timeout,
+      message: 'NCBI request deadline (3000ms) exceeded',
+      data: { reason: 'ncbi_deadline_exceeded', deadlineMs: 3000 },
+    });
+    expect(settledAt).toBe(3000);
     expect(spy).toHaveBeenCalledTimes(2);
   });
 
