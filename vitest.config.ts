@@ -8,6 +8,8 @@ export default mergeConfig(
       alias: { '@/': new URL('./src/', import.meta.url).pathname },
     },
     test: {
+      // Vitest's fork pool calls `channel.unref()` on each worker's IPC channel, which Bun lacks; Node keeps forks.
+      ...(process.versions.bun && { pool: 'threads' as const }),
       include: ['tests/**/*.test.ts'],
     },
   }),
