@@ -38,18 +38,21 @@
  * Unpaywall article takes its title from Unpaywall's record, else the Europe
  * PMC record the chain searched, else (HTML only) the page itself.
  *
- * Europe PMC and Unpaywall failures are folded into each id's `triedTiers`
- * rather than thrown, so the declared `errors[]` covers the NCBI ID routing
- * alone.
+ * Every upstream failure is folded into each id's `triedTiers` rather than
+ * thrown. A failed PMC ID Converter lookup is the `pmc` tier's `service-error`
+ * for each `pmids` or `dois` entry it was resolving, and those ids go on to
+ * Europe PMC and Unpaywall as ids with no PMC counterpart do. The call fails
+ * only on its input or the caller's cancellation, so the declared `errors[]`
+ * covers the handler's own input check alone. (#168, #319)
  *
- * The whole chain runs under one deadline, started as the handler starts. The
- * ID routing, whose failure ends the call, runs under all of it; each tier after
- * it that a later tier could still back up runs under half the time left as it
- * starts, and the last under the rest. A tier the deadline left no time to start
- * sends nothing and is recorded `not-attempted`; one whose upstream request it
- * cut records its usual failure with the provider's `*_deadline_exceeded` reason,
- * and an Unpaywall copy whose text extraction it stopped, or left no time to
- * start, records `parse-failed`. (#310)
+ * The whole chain runs under one deadline, started as the handler starts. Each
+ * step that a later tier could still back up, the ID routing included, runs
+ * under half the time left as it starts, and the last under the rest. A tier
+ * the deadline left no time to start sends nothing and is recorded
+ * `not-attempted`; one whose upstream request it cut records its usual failure
+ * with the provider's `*_deadline_exceeded` reason, and an Unpaywall copy whose
+ * text extraction it stopped, or left no time to start, records `parse-failed`.
+ * (#310, #319)
  *
  * @module src/mcp-server/tools/definitions/fetch-fulltext.tool
  */
@@ -64,7 +67,6 @@ import {
   shareDeadline,
   startCallDeadline,
 } from '@/services/call-deadline.js';
-import { NCBI_SERVICE_ERRORS } from '@/services/error-contracts.js';
 import {
   type EuropePmcService,
   getEuropePmcService,
@@ -77,6 +79,7 @@ import { findAll, findOne, type JatsNodeList } from '@/services/ncbi/parsing/pmc
 import { europePmcTitleText, toDisplayText } from '@/services/ncbi/parsing/text-helpers.js';
 import { ensureArray } from '@/services/ncbi/parsing/xml-helpers.js';
 import type {
+  IdConvertRecord,
   ParsedPmcArticle,
   ParsedPmcAsset,
   ParsedPmcTable,
@@ -2034,13 +2037,12 @@ export const fetchFulltextTool = tool('pubmed_fetch_fulltext', {
   sourceUrl:
     'https://github.com/cyanheads/pubmed-mcp-server/blob/main/src/mcp-server/tools/definitions/fetch-fulltext.tool.ts',
 
-  // Only the ID routing's `idConvert` calls run unwrapped. Every Europe PMC and
-  // Unpaywall call sits behind a catch that folds the failure into
-  // `unavailable[].triedTiers`, so their service reasons never reach a caller
-  // and are not declared here. (#168) `blank_filter` is the handler's own input
+  // Every upstream call sits behind a catch that folds the failure into
+  // `unavailable[].triedTiers` — the ID routing's `idConvert` lookups as the
+  // `pmc` tier's outcome — so no service reason reaches a caller, and none is
+  // declared here. (#168, #319) `blank_filter` is the handler's own input
   // check, raised before any upstream request. (#186)
   errors: [
-    ...NCBI_SERVICE_ERRORS,
     {
       reason: 'blank_filter',
       code: JsonRpcErrorCode.ValidationError,
@@ -2408,17 +2410,75 @@ export const fetchFulltextTool = tool('pubmed_fetch_fulltext', {
     const dois = [...new Set(chainKeyByDoi.values())];
     for (const key of [...pmids, ...dois]) chainByInput.set(key, []);
 
-    // The two lookups are independent; their answers are placed in field order.
-    // They run under the whole deadline: their failure ends the call, so no tier
-    // after them could use time they left.
-    const convertOptions = { signal: ctx.signal, deadline };
-    const [pmidRecords, doiRecords] = await Promise.all([
-      pmids.length > 0 ? getNcbiService().idConvert(pmids, 'pmid', convertOptions) : [],
-      dois.length > 0 ? getNcbiService().idConvert(dois, 'doi', convertOptions) : [],
+    // The fallback tiers this deployment runs, read up front: whether a later
+    // tier could still serve what a step misses decides that step's deadline.
+    const epmc = getEuropePmcService();
+    const unpaywall = getUnpaywallService();
+    /**
+     * The deadline a tier runs under, taken as it starts: half the time left
+     * while a later tier could still serve what this one misses, so a tier that
+     * hangs leaves the rest time to answer; the rest of the deadline otherwise.
+     */
+    const tierDeadline = (laterTier: boolean): CallDeadline =>
+      laterTier ? shareDeadline(deadline) : deadline;
+
+    // The two lookups are independent, and their answers are placed in field
+    // order. A lookup that fails is the `pmc` tier's outcome for every id it was
+    // resolving, and those ids go on to Europe PMC and Unpaywall the way an id
+    // the converter has no record for does; the other lookup's answer is placed
+    // as usual. Both run under one share of the deadline while a later tier can
+    // still serve an id (PMC EFetch for a PMC ID in the call, or a fallback
+    // tier), so a hung lookup leaves that tier time, and under the whole
+    // deadline otherwise. (#319)
+    const lookupOptions = {
+      signal: ctx.signal,
+      deadline: tierDeadline(pmcIds.length > 0 || epmc !== undefined || unpaywall !== undefined),
+    };
+    /**
+     * One routing lookup's records, and on any failure but the caller's
+     * cancellation, the `pmc` entry every id it was resolving takes in place of
+     * the converter's "no record" note.
+     */
+    const routingLookup = async (
+      ids: string[],
+      idType: 'pmid' | 'doi',
+    ): Promise<{ records: IdConvertRecord[]; failure?: z.infer<typeof TriedTierSchema> }> => {
+      if (ids.length === 0) return { records: [] };
+      try {
+        return { records: await getNcbiService().idConvert(ids, idType, lookupOptions) };
+      } catch (error: unknown) {
+        if (ctx.signal.aborted) throw error;
+        const detail = tierFailureDetail(error, 'ID Converter lookup failed');
+        ctx.log.warning('ID Converter routing lookup failed; its ids go on to the fallback tiers', {
+          idType,
+          idCount: ids.length,
+          error: detail,
+        });
+        return { records: [], failure: { tier: 'pmc', outcome: 'service-error', detail } };
+      }
+    };
+    const [pmidLookup, doiLookup] = await Promise.all([
+      routingLookup(pmids, 'pmid'),
+      routingLookup(dois, 'doi'),
     ]);
+    /**
+     * The `pmc` entry for an id its lookup left unresolved: that lookup's
+     * failure, else the converter's "no record" note.
+     */
+    const unresolvedEntry = (
+      failure: z.infer<typeof TriedTierSchema> | undefined,
+      kind: 'PMID' | 'DOI',
+    ): z.infer<typeof TriedTierSchema> =>
+      failure
+        ? { ...failure }
+        : {
+            tier: 'pmc',
+            outcome: 'not-attempted',
+            detail: `ID Converter returned no record for this ${kind}`,
+          };
 
     const seenPmids = new Set<string>();
-    for (const r of pmidRecords) {
+    for (const r of pmidLookup.records) {
       if (r.pmid === undefined) continue;
       const pmid = String(r.pmid);
       seenPmids.add(pmid);
@@ -2436,17 +2496,13 @@ export const fetchFulltextTool = tool('pubmed_fetch_fulltext', {
     }
     for (const requested of pmids) {
       if (!seenPmids.has(requested)) {
-        chainByInput.get(requested)?.push({
-          tier: 'pmc',
-          outcome: 'not-attempted',
-          detail: 'ID Converter returned no record for this PMID',
-        });
+        chainByInput.get(requested)?.push(unresolvedEntry(pmidLookup.failure, 'PMID'));
         pending.pmid.push({ idType: 'pmid', id: requested });
       }
     }
 
     const seenDois = new Set<string>();
-    for (const r of doiRecords) {
+    for (const r of doiLookup.records) {
       // Match on the echoed `requested-id`, not `r.doi`: the record's own DOI
       // can be cased differently from anything the caller sent.
       const doi = chainKeyByDoi.get(String(r['requested-id']).toLowerCase());
@@ -2466,11 +2522,7 @@ export const fetchFulltextTool = tool('pubmed_fetch_fulltext', {
     }
     for (const requested of dois) {
       if (!seenDois.has(requested)) {
-        chainByInput.get(requested)?.push({
-          tier: 'pmc',
-          outcome: 'not-attempted',
-          detail: 'ID Converter returned no record for this DOI',
-        });
+        chainByInput.get(requested)?.push(unresolvedEntry(doiLookup.failure, 'DOI'));
         pending.doi.push({ idType: 'doi', id: requested, doi: requested });
       }
     }
@@ -2489,18 +2541,6 @@ export const fetchFulltextTool = tool('pubmed_fetch_fulltext', {
         pending[idType].push({ idType, id: owner, ...(doi && { doi }) });
       }
     };
-
-    // The fallback tiers this deployment runs, read up front: whether a later
-    // tier could still serve what a tier misses decides that tier's deadline.
-    const epmc = getEuropePmcService();
-    const unpaywall = getUnpaywallService();
-    /**
-     * The deadline a tier runs under, taken as it starts: half the time left
-     * while a later tier could still serve what this one misses, so a tier that
-     * hangs leaves the rest time to answer; the rest of the deadline otherwise.
-     */
-    const tierDeadline = (laterTier: boolean): CallDeadline =>
-      laterTier ? shareDeadline(deadline) : deadline;
 
     // ── Stage 1: PMC EFetch ─────────────────────────────────────────────────
     // Wrapped so transient NCBI failures fall through to EPMC/Unpaywall rather
@@ -3064,11 +3104,15 @@ export const fetchFulltextTool = tool('pubmed_fetch_fulltext', {
           anyUnqueried = true;
           lines.push(`  Not queried: ${formatUnqueriedTiers(u.unqueriedTiers, u.triedTiers)}`);
         }
+        // Each detail reads as `structuredContent` carries it: its producer has
+        // already cut any request URL to its origin. The escape keeps its delimiters
+        // from pairing with the id and the other details in the item's paragraph.
+        // (#255, #261, #318)
         const chain = u.triedTiers
-          .map((t) => {
-            const detail = t.detail ? sanitizeChainDetail(t.detail) : undefined;
-            return `${t.tier}:${t.outcome}${detail ? ` (${detail})` : ''}`;
-          })
+          .map(
+            (t) =>
+              `${t.tier}:${t.outcome}${t.detail ? ` (${escapeMarkdownInParagraph(t.detail)})` : ''}`,
+          )
           .join(' → ');
         if (chain) lines.push(`  chain: ${chain}`);
       }
@@ -3911,12 +3955,14 @@ function hasTimeLeft(deadline: CallDeadline, signal: AbortSignal): boolean {
 }
 
 /**
- * A tier failure's `detail`: the error's message, led by the provider's
+ * A tier failure's `detail`: the error's message, after the `step` of the tier
+ * that failed when the tier's name alone does not say it, led by the provider's
  * `*_deadline_exceeded` reason when a deadline cut the tier, so a cut reads
- * apart from an upstream that failed on its own. (#310)
+ * apart from an upstream that failed on its own. (#310, #319)
  */
-function tierFailureDetail(error: unknown): string {
-  const message = error instanceof Error ? error.message : String(error);
+function tierFailureDetail(error: unknown, step?: string): string {
+  const errorMessage = error instanceof Error ? error.message : String(error);
+  const message = step ? `${step}: ${errorMessage}` : errorMessage;
   const reason = error instanceof McpError ? error.data?.reason : undefined;
   return typeof reason === 'string' && reason.endsWith('_deadline_exceeded')
     ? `${reason}: ${message}`
@@ -4047,8 +4093,8 @@ const UNQUERIED_TIER_LABELS: Record<z.infer<typeof UnqueriedTierSchema>, string>
 /**
  * Name each unqueried tier with the reason its chain entry gave for skipping it,
  * so a `content[]` reader learns which setting is missing without decoding the
- * chain line. The detail goes through the same sanitizer the chain does — it is
- * the same upstream string. (#110)
+ * chain line. The detail is escaped as the chain line escapes it — it is the
+ * same string, in the same paragraph. (#110, #318)
  */
 function formatUnqueriedTiers(
   tiers: z.infer<typeof UnqueriedTierSchema>[],
@@ -4058,7 +4104,7 @@ function formatUnqueriedTiers(
     .map((tier) => {
       const detail = chain.find((t) => t.tier === tier && t.outcome === 'not-attempted')?.detail;
       const label = UNQUERIED_TIER_LABELS[tier];
-      return detail ? `${label} (${sanitizeChainDetail(detail)})` : label;
+      return detail ? `${label} (${escapeMarkdownInParagraph(detail)})` : label;
     })
     .join(', ');
 }
@@ -4546,18 +4592,4 @@ function formatSection(
   section.subsections?.forEach((sub, i) => {
     formatSection(sub, lines, depth + 1, ledger?.subsections?.[i]);
   });
-}
-
-/**
- * A chain detail string as `content[]` renders it: absolute URLs stripped, then
- * Markdown-escaped. Upstream errors (e.g. `Fetch failed for <eutils URL>.
- * Status: 400`) leak endpoint paths and query strings without adding
- * actionable signal — the status code is the useful part. The escape keeps the
- * `<upstream>` placeholder from rendering as a raw HTML tag, which shows
- * nothing, and the upstream text's own delimiters from pairing with each other
- * or with the id and other details sharing the entry's paragraph. (#255, #261)
- * The raw detail is preserved in `structuredContent` for clients that want it.
- */
-function sanitizeChainDetail(detail: string): string {
-  return escapeMarkdownInParagraph(detail.replace(/https?:\/\/\S+/g, '<upstream>'));
 }

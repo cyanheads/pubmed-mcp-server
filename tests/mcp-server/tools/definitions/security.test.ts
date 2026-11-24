@@ -2,14 +2,18 @@
  * @fileoverview Security tests for all MCP tool definitions. Covers injection
  * attempts (query injection, path traversal), oversized inputs, and an explicit
  * assertion that no secret, API key, or env value leaks into any tool output or
- * error message. All external HTTP is mocked — no real network calls.
+ * error message — for `pubmed_fetch_fulltext`'s tier details, through the real
+ * NCBI, Europe PMC, and Unpaywall services. All external HTTP is mocked or
+ * stubbed — no real network calls.
  * @module tests/mcp-server/tools/definitions/security.test
  */
 
+import type { ContentBlock } from '@cyanheads/mcp-ts-core';
 import { JsonRpcErrorCode, McpError } from '@cyanheads/mcp-ts-core/errors';
-import { createMockContext, getEnrichment } from '@cyanheads/mcp-ts-core/testing';
+import { createMockContext, getEnrichment, runToolContract } from '@cyanheads/mcp-ts-core/testing';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
+import { getServerConfig } from '@/config/server-config.js';
 import type { IciteRecord } from '@/services/icite/types.js';
 import type { ParsedBriefSummary } from '@/services/ncbi/types.js';
 
@@ -31,9 +35,23 @@ const mockEInfo = vi.fn();
 const mockECitMatch = vi.fn();
 const mockIdConvert = vi.fn();
 const mockExtractBriefSummaries = vi.fn((): Promise<ParsedBriefSummary[]> => Promise.resolve([]));
-const mockGetUnpaywallService = vi.fn(() => undefined);
-/** Loosely typed so a test can model a Europe PMC service that throws, not only an absent one. */
+/**
+ * The service accessors are loosely typed so a test can hand the tools a real
+ * service, or model a Europe PMC service that throws, not only an absent one.
+ */
+const mockGetUnpaywallService = vi.fn((): unknown => undefined);
 const mockGetEpmcService = vi.fn((): unknown => undefined);
+const mockNcbiService = {
+  eSearch: mockESearch,
+  eSummary: mockESummary,
+  eFetch: mockEFetch,
+  eSpell: mockESpell,
+  eLink: mockELink,
+  eInfo: mockEInfo,
+  eCitMatch: mockECitMatch,
+  idConvert: mockIdConvert,
+};
+const mockGetNcbiService = vi.fn((): unknown => mockNcbiService);
 const mockIciteFetchRecords = vi.fn(
   (_pmids: readonly string[]): Promise<IciteRecord[]> => Promise.resolve([]),
 );
@@ -42,16 +60,7 @@ vi.mock('@/services/icite/icite-service.js', () => ({
   getIciteService: () => ({ fetchRecords: mockIciteFetchRecords }),
 }));
 vi.mock('@/services/ncbi/ncbi-service.js', () => ({
-  getNcbiService: () => ({
-    eSearch: mockESearch,
-    eSummary: mockESummary,
-    eFetch: mockEFetch,
-    eSpell: mockESpell,
-    eLink: mockELink,
-    eInfo: mockEInfo,
-    eCitMatch: mockECitMatch,
-    idConvert: mockIdConvert,
-  }),
+  getNcbiService: () => mockGetNcbiService(),
 }));
 vi.mock('@/services/ncbi/parsing/esummary-parser.js', () => ({
   extractBriefSummaries: mockExtractBriefSummaries,
@@ -97,6 +106,7 @@ beforeEach(() => {
   mockIdConvert.mockReset();
   mockExtractBriefSummaries.mockReset();
   mockExtractBriefSummaries.mockResolvedValue([]);
+  mockGetNcbiService.mockReturnValue(mockNcbiService);
   mockGetUnpaywallService.mockReturnValue(undefined);
   mockGetEpmcService.mockReturnValue(undefined);
   mockIciteFetchRecords.mockReset();
@@ -521,6 +531,251 @@ describe('no secret leaks in tool outputs', () => {
   });
 });
 
+// ─── fetch-fulltext tier details: redacted at the source ─────────────────────
+
+/**
+ * `pubmed_fetch_fulltext` prints each tier's `detail` on `content[]` exactly as
+ * `structuredContent` carries it, so what keeps a credential off both surfaces is
+ * the services' own redaction of every request URL a failure message can quote.
+ * The real NCBI, Europe PMC, and Unpaywall services run here behind a stubbed
+ * global fetch, built with credentials nothing else in this suite uses, and every
+ * request a tier sends fails: by HTTP status, and by a rejection quoting the whole
+ * request URL, as Bun's `Malformed_HTTP_Response` does. (#318)
+ */
+describe('fetch-fulltext tier details carry no credential on either surface (#318)', () => {
+  const NCBI_API_KEY = 'LeakCheckNcbiKey7f3a';
+  const NCBI_TOOL = 'leakcheck-tool-7f3a';
+  const NCBI_EMAIL = 'leakcheck-ncbi@example.org';
+  const EPMC_EMAIL = 'leakcheck-epmc@example.org';
+  const UNPAYWALL_EMAIL = 'leakcheck-unpaywall@example.org';
+  /** Each credential in a form URL encoding leaves intact: an email by its local part. */
+  const CREDENTIALS = [
+    NCBI_API_KEY,
+    NCBI_TOOL,
+    'leakcheck-ncbi',
+    'leakcheck-epmc',
+    'leakcheck-unpaywall',
+  ];
+  const LEAK_MARKERS = [...CREDENTIALS, 'api_key=', 'email=', 'tool='];
+
+  /** Unpaywall fails to resolve it. */
+  const RESOLVE_DOI = '10.5555/oa-resolve-fails';
+  /** Europe PMC lists an open-access preprint for it and Unpaywall an OA copy; both downloads fail. */
+  const CONTENT_DOI = '10.5555/oa-content-fails';
+  const OA_COPY = 'https://publisher.example/article/1?token=publisher-token';
+
+  type FailureMode = 'status' | 'rejection';
+  const requested: string[] = [];
+
+  /** A failed request: an error status, or a rejection quoting the whole request URL. */
+  function fail(url: URL, mode: FailureMode, status: number): Response {
+    if (mode === 'status') return new Response('upstream down', { status });
+    throw new Error(`Malformed_HTTP_Response fetching "${url.href}"`);
+  }
+
+  /**
+   * The ID Converter places the PMID and the DOIs outside PMC, so each runs the
+   * whole chain. Every other request fails, apart from the two answers that send
+   * Europe PMC and Unpaywall on to downloads that then fail.
+   */
+  function upstream(url: URL, mode: FailureMode): Response {
+    const idtype = url.searchParams.get('idtype');
+    if (url.pathname.includes('/idconv/') && (idtype === 'pmid' || idtype === 'doi')) {
+      const ids = (url.searchParams.get('ids') ?? '').split(',');
+      return Response.json({
+        status: 'ok',
+        records: ids.map((id) => ({
+          'requested-id': id,
+          ...(idtype === 'pmid' ? { pmid: Number(id) } : { doi: id }),
+          status: 'error',
+          errmsg: 'Identifier not found in PMC',
+        })),
+      });
+    }
+    const query = url.searchParams.get('query') ?? '';
+    if (url.hostname === 'www.ebi.ac.uk' && url.pathname.endsWith('/search')) {
+      if (query.includes(CONTENT_DOI)) {
+        return Response.json({
+          hitCount: 1,
+          request: { queryString: query },
+          resultList: {
+            result: [
+              {
+                id: 'PPR900001',
+                source: 'PPR',
+                doi: CONTENT_DOI,
+                title: 'Preprint',
+                isOpenAccess: 'Y',
+                fullTextIdList: { fullTextId: ['PPR900001'] },
+              },
+            ],
+          },
+        });
+      }
+    }
+    if (
+      url.hostname === 'api.unpaywall.org' &&
+      decodeURIComponent(url.pathname).endsWith(CONTENT_DOI)
+    ) {
+      return Response.json({
+        doi: CONTENT_DOI,
+        is_oa: true,
+        best_oa_location: { url: OA_COPY, url_for_pdf: OA_COPY },
+      });
+    }
+    return fail(url, mode, url.hostname === 'publisher.example' ? 403 : 503);
+  }
+
+  /** Hands the tools real services carrying the credentials above, every other setting as configured. */
+  async function useRealServices() {
+    const [{ NcbiService }, { EuropePmcService }, { UnpaywallService }] = await Promise.all([
+      vi.importActual<typeof import('@/services/ncbi/ncbi-service.js')>(
+        '@/services/ncbi/ncbi-service.js',
+      ),
+      vi.importActual<typeof import('@/services/europe-pmc/europe-pmc-service.js')>(
+        '@/services/europe-pmc/europe-pmc-service.js',
+      ),
+      vi.importActual<typeof import('@/services/unpaywall/unpaywall-service.js')>(
+        '@/services/unpaywall/unpaywall-service.js',
+      ),
+    ]);
+    const { NcbiApiClient } = await import('@/services/ncbi/api-client.js');
+    const { createNcbiRequestQueue } = await import('@/services/ncbi/request-queue.js');
+    const { NcbiResponseHandler } = await import('@/services/ncbi/response-handler.js');
+    const { EuropePmcApiClient } = await import('@/services/europe-pmc/api-client.js');
+    const { createEuropePmcRequestQueue } = await import('@/services/europe-pmc/request-queue.js');
+    const config = getServerConfig();
+    mockGetNcbiService.mockReturnValue(
+      new NcbiService(
+        new NcbiApiClient({
+          apiKey: NCBI_API_KEY,
+          adminEmail: NCBI_EMAIL,
+          toolIdentifier: NCBI_TOOL,
+          timeoutMs: config.timeoutMs,
+        }),
+        createNcbiRequestQueue({
+          minStartGapMs: config.requestDelayMs,
+          maxConcurrent: config.maxConcurrent,
+        }),
+        new NcbiResponseHandler(),
+        config.maxRetries,
+        config.totalDeadlineMs,
+      ),
+    );
+    mockGetEpmcService.mockReturnValue(
+      new EuropePmcService(
+        new EuropePmcApiClient({ email: EPMC_EMAIL, timeoutMs: config.europepmcTimeoutMs }),
+        createEuropePmcRequestQueue(config.europepmcRequestDelayMs),
+        config.europepmcMaxRetries,
+        config.europepmcTotalDeadlineMs,
+      ),
+    );
+    mockGetUnpaywallService.mockReturnValue(
+      new UnpaywallService(UNPAYWALL_EMAIL, config.unpaywallTimeoutMs),
+    );
+  }
+
+  /**
+   * Runs `call` on a fake clock, firing its timers one at a time until it settles,
+   * so every tier's retries and backoff run inside the call's one deadline.
+   */
+  async function settleOnFakeClock<T>(call: () => Promise<T>): Promise<T> {
+    let outcome: { value: T } | { error: unknown } | undefined;
+    call().then(
+      (value) => {
+        outcome = { value };
+      },
+      (error: unknown) => {
+        outcome = { error };
+      },
+    );
+    const startedAt = Date.now();
+    for (;;) {
+      // The chain from one tier's last timer to the next tier's first runs longer
+      // than one step's own flush.
+      await vi.advanceTimersByTimeAsync(0);
+      if (outcome !== undefined) break;
+      const elapsedMs = Date.now() - startedAt;
+      if (elapsedMs > 60_000) throw new Error(`Call still pending ${elapsedMs}ms in.`);
+      if (vi.getTimerCount() === 0) {
+        throw new Error(`Call still pending ${elapsedMs}ms in, with no timer left to fire.`);
+      }
+      await vi.advanceTimersToNextTimerAsync();
+    }
+    if ('error' in outcome) throw outcome.error;
+    return outcome.value;
+  }
+
+  it.each(['status', 'rejection'] as const)(
+    'every tier failing by %s leaves no credential on either surface, and content[] reads each detail as structuredContent carries it',
+    async (mode) => {
+      requested.length = 0;
+      const fetchSpy = vi
+        .spyOn(globalThis, 'fetch')
+        .mockImplementation(async (input: Parameters<typeof fetch>[0]) => {
+          const url = new URL(String(input));
+          requested.push(url.href);
+          return upstream(url, mode);
+        });
+      vi.useFakeTimers();
+      try {
+        // The request pacers read the clock, so the services are built on the faked one.
+        await useRealServices();
+        const result = await settleOnFakeClock(() =>
+          runToolContract(fetchFulltextTool, {
+            pmcids: ['PMC7612345'],
+            pmids: ['12345678'],
+            dois: [RESOLVE_DOI, CONTENT_DOI],
+          }),
+        );
+
+        expect(result.isError).toBeFalsy();
+        const { unavailable = [] } = result.structuredContent as {
+          unavailable?: Array<{
+            triedTiers: Array<{ tier: string; outcome: string; detail?: string }>;
+          }>;
+        };
+        const failedTiers = new Set(
+          unavailable.flatMap((u) =>
+            u.triedTiers.filter((t) => t.detail).map((t) => `${t.tier}:${t.outcome}`),
+          ),
+        );
+        expect([...failedTiers]).toEqual(
+          expect.arrayContaining([
+            'pmc:service-error',
+            'europepmc:service-error',
+            'unpaywall:doi-lookup-failed',
+            'unpaywall:service-error',
+            'unpaywall:fetch-failed',
+          ]),
+        );
+        // Both downloads ran, and every credential rode a request URL, so a detail
+        // quoting one would carry it.
+        expect(requested.some((u) => u.endsWith('/PPR900001/fullTextXML'))).toBe(true);
+        expect(requested.some((u) => u.startsWith('https://publisher.example/'))).toBe(true);
+        expect(CREDENTIALS.filter((c) => !requested.some((u) => u.includes(c)))).toEqual([]);
+
+        const surfaces = JSON.stringify(result);
+        expect(LEAK_MARKERS.filter((marker) => surfaces.includes(marker))).toEqual([]);
+
+        const text = textBlocks(result.content as ContentBlock[])
+          .map((b) => b.text)
+          .join('\n');
+        const lines = readCommonMark(text).split('\n');
+        for (const { triedTiers } of unavailable) {
+          const chain = triedTiers
+            .map((t) => `${t.tier}:${t.outcome}${t.detail ? ` (${t.detail})` : ''}`)
+            .join(' → ');
+          expect(lines).toContain(`chain: ${chain}`);
+        }
+      } finally {
+        vi.useRealTimers();
+        fetchSpy.mockRestore();
+      }
+    },
+  );
+});
+
 // ─── format() output: no internal path leaks ─────────────────────────────────
 
 describe('format() output sanitization', () => {
@@ -560,75 +815,6 @@ describe('format() output sanitization', () => {
     expect(text).not.toMatch(/at Object\./);
     expect(text).not.toMatch(/Error:/);
     expect(text).not.toMatch(/\/Users\//);
-  });
-
-  it('fetch-fulltext format() sanitizes upstream URLs in chain details', () => {
-    const blocks = textBlocks(
-      fetchFulltextTool.format!({
-        articles: [],
-        totalReturned: 0,
-        unavailable: [
-          {
-            id: 'PMC9999',
-            idType: 'pmcid',
-            reason: 'service-error',
-            triedTiers: [
-              {
-                tier: 'pmc',
-                outcome: 'service-error',
-                detail:
-                  'Fetch failed for https://eutils.ncbi.nlm.nih.gov/entrez/eutils/efetch.fcgi?db=pmc&id=9999&api_key=MYSECRET. Status: 500',
-              },
-            ],
-          },
-        ],
-      }),
-    );
-    const text = blocks[0]?.text ?? '';
-    // The sanitizeChainDetail helper should replace the URL with <upstream>
-    expect(text).not.toContain('eutils.ncbi.nlm.nih.gov');
-    expect(text).not.toContain('api_key=MYSECRET');
-    expect(text).toContain('<upstream>');
-  });
-
-  it('fetch-fulltext format() sanitizes chain details on an entry with unqueried tiers', () => {
-    const blocks = textBlocks(
-      fetchFulltextTool.format!({
-        articles: [],
-        totalReturned: 0,
-        unavailable: [
-          {
-            id: '40058719',
-            idType: 'pmid',
-            reason: 'no-epmc-fulltext',
-            triedTiers: [
-              {
-                tier: 'europepmc',
-                outcome: 'no-fulltext',
-                detail:
-                  'No fullTextXML at https://www.ebi.ac.uk/europepmc/webservices/rest/search?email=ops@example.test',
-              },
-              {
-                tier: 'unpaywall',
-                outcome: 'not-attempted',
-                detail:
-                  'UNPAYWALL_EMAIL is not set; would have queried https://api.unpaywall.org/v2?email=ops@example.test',
-              },
-            ],
-            unqueriedTiers: ['unpaywall'],
-          },
-        ],
-      }),
-    );
-    const text = blocks[0]?.text ?? '';
-    expect(text).toContain('no-epmc-fulltext');
-    // The unqueried-tier line reads its label out of the same chain detail, so
-    // it has to go through the same sanitizer.
-    expect(text).toContain('Not queried: Unpaywall');
-    expect(text).not.toContain('ebi.ac.uk');
-    expect(text).not.toContain('api.unpaywall.org');
-    expect(text).not.toContain('ops@example.test');
-    expect(text).toContain('<upstream>');
   });
 
   it('fetch-articles format() neutralizes Markdown markup in an upstream title', () => {

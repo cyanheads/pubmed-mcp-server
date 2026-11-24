@@ -6,7 +6,12 @@
 import { readFileSync } from 'node:fs';
 import { type ContentBlock, z } from '@cyanheads/mcp-ts-core';
 import { JsonRpcErrorCode, serviceUnavailable, timeout } from '@cyanheads/mcp-ts-core/errors';
-import { createMockContext, getEnrichment, runToolContract } from '@cyanheads/mcp-ts-core/testing';
+import {
+  createMockContext,
+  getEnrichment,
+  type MockContextLogger,
+  runToolContract,
+} from '@cyanheads/mcp-ts-core/testing';
 import { XMLParser } from 'fast-xml-parser';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { CallDeadline } from '@/services/call-deadline.js';
@@ -103,6 +108,23 @@ function openAccess(fullTextId: string) {
   return { isOpenAccess: 'Y', fullTextIdList: { fullTextId: [fullTextId] } };
 }
 const OA_PMC42 = openAccess('PMC42');
+
+/** Hand the handler the mocked Europe PMC service. */
+function withEpmc() {
+  mockGetEpmcService.mockReturnValue({
+    search: mockEpmcSearch,
+    fullTextXml: mockEpmcFullTextXml,
+    parseFullTextXml: mockEpmcParseFullTextXml,
+  });
+}
+
+/** Hand the handler the mocked Unpaywall service. */
+function withUnpaywall() {
+  mockGetUnpaywallService.mockReturnValue({
+    resolve: mockUnpaywallResolve,
+    fetchContent: mockUnpaywallFetchContent,
+  });
+}
 
 /** The deadline the chain hands each Europe PMC and Unpaywall request beside the signal. (#310) */
 const ANY_DEADLINE = expect.objectContaining({
@@ -416,23 +438,180 @@ describe('fetchFulltextTool', () => {
     });
   });
 
-  describe('declared error surface (issue #168)', () => {
-    it('declares the NCBI reasons the unwrapped ID routing can surface, plus the blank-section rejection', () => {
-      // Every Europe PMC and Unpaywall call sits behind a catch that folds the
-      // failure into `unavailable[].triedTiers`, so none of their reasons can
-      // reach the caller. `blank_filter` is raised by the handler itself, before
-      // any upstream request. (#186)
-      expect(fetchFulltextTool.errors?.map((entry) => entry.reason)).toEqual([
-        'queue_full',
-        'ncbi_unreachable',
-        'ncbi_rate_limited',
-        'ncbi_deadline_exceeded',
-        'ncbi_timed_out',
-        'ncbi_invalid_response',
-        'ncbi_resource_not_found',
-        'blank_filter',
+  describe('declared error surface (issues #168, #319)', () => {
+    it('declares the blank-section rejection alone', () => {
+      // Every upstream call, the ID Converter routing lookup's included, sits
+      // behind a catch that folds the failure into `unavailable[].triedTiers`, so
+      // no service reason can reach the caller. `blank_filter` is raised by the
+      // handler itself, before any upstream request. (#186)
+      expect(fetchFulltextTool.errors?.map((entry) => entry.reason)).toEqual(['blank_filter']);
+    });
+  });
+
+  describe('a failed routing lookup (issue #319)', () => {
+    /** What the routing lookup throws once NCBI answered HTTP 503 on every attempt. */
+    const LOOKUP_FAILURE = serviceUnavailable('NCBI returned HTTP 503. (failed after 4 attempts)', {
+      reason: 'ncbi_unreachable',
+      attempts: 4,
+    });
+
+    /** Every log call, at any level, reporting a failed routing lookup. */
+    const lookupFailureLogs = (ctx: ReturnType<typeof createMockContext>) =>
+      (ctx.log as MockContextLogger).calls.filter((entry) =>
+        entry.msg.startsWith('ID Converter routing lookup failed'),
+      );
+
+    /**
+     * Records whose most specific signal comes from a tier after the routing
+     * lookup, each arranged with the tiers that report it, and the records the
+     * lookup returns when it answers.
+     */
+    const SHAPES = {
+      'a PMID no upstream has': {
+        answer: [],
+        arrange: () => {
+          withEpmc();
+          withUnpaywall();
+          mockEpmcSearch.mockResolvedValue({ hits: [], hitCount: 0 });
+          mockEFetchBy({ pubmedDois: {} });
+        },
+      },
+      'a PMID whose record carries no DOI': {
+        answer: [{ 'requested-id': '42', pmid: '42' }],
+        arrange: () => {
+          withUnpaywall();
+          mockEFetchBy({ pubmedDois: {} });
+        },
+      },
+      'a record with no body': {
+        answer: [{ 'requested-id': '42', pmid: '42' }],
+        arrange: () => {
+          withEpmc();
+          mockEpmcSearch.mockResolvedValue({
+            hits: [
+              { id: '42', source: 'MED', pmid: '42', pmcid: 'PMC42', doi: '10.1/x', ...OA_PMC42 },
+            ],
+            hitCount: 1,
+          });
+          mockEpmcFullTextXml.mockResolvedValue({
+            kind: 'found',
+            xml: '<article/>',
+            epmcId: 'PMC42',
+            source: 'MED',
+          });
+          mockEpmcParseFullTextXml.mockReturnValue({ article: [{ front: [] }] });
+          mockParsePmcArticle.mockReturnValue({
+            pmcId: 'PMC42',
+            pmcUrl: 'https://pmc.ncbi.nlm.nih.gov/articles/PMC42/',
+            title: 'Front matter only',
+            sections: [],
+          });
+        },
+      },
+    } as const;
+
+    it.each([
+      ['a PMID no upstream has', 'not-found', 'answers'],
+      ['a PMID no upstream has', 'not-found', 'fails'],
+      ['a PMID whose record carries no DOI', 'no-doi', 'answers'],
+      ['a PMID whose record carries no DOI', 'no-doi', 'fails'],
+      ['a record with no body', 'no-body', 'answers'],
+      ['a record with no body', 'no-body', 'fails'],
+    ] as const)('%s reports %s when its routing lookup %s', async (shape, reason, lookup) => {
+      const { answer, arrange } = SHAPES[shape];
+      arrange();
+      if (lookup === 'answers') mockIdConvert.mockResolvedValue(answer);
+      else mockIdConvert.mockRejectedValue(LOOKUP_FAILURE);
+
+      const ctx = createMockContext({ errors: fetchFulltextTool.errors });
+      const result = await fetchFulltextTool.handler(
+        fetchFulltextTool.input.parse({ pmids: ['42'] }),
+        ctx,
+      );
+      const text = textBlocks(fetchFulltextTool.format!(result))
+        .map((block) => block.text)
+        .join('\n');
+
+      const [entry] = result.unavailable ?? [];
+      expect(entry?.reason).toBe(reason);
+      expect(entry?.triedTiers[0]).toEqual(
+        lookup === 'fails'
+          ? {
+              tier: 'pmc',
+              outcome: 'service-error',
+              detail:
+                'ID Converter lookup failed: NCBI returned HTTP 503. (failed after 4 attempts)',
+            }
+          : expect.objectContaining({ tier: 'pmc', outcome: 'not-attempted' }),
+      );
+      expect(text).toContain(`- [pmid] 42 — ${reason}`);
+      if (lookup === 'fails') {
+        expect(text).toContain(
+          'chain: pmc:service-error (ID Converter lookup failed: NCBI returned HTTP 503. (failed after 4 attempts)) → europepmc:',
+        );
+      }
+    });
+
+    it('logs one warning for the lookup that failed, naming its id type and id count', async () => {
+      // The PMID lookup fails; the DOI lookup answers with no record.
+      mockIdConvert.mockImplementation(async (_ids: string[], idType: string) => {
+        if (idType === 'pmid') throw LOOKUP_FAILURE;
+        return [];
+      });
+
+      const ctx = createMockContext({ errors: fetchFulltextTool.errors });
+      await fetchFulltextTool.handler(
+        fetchFulltextTool.input.parse({ pmids: ['42', '43'], dois: ['10.1/x'] }),
+        ctx,
+      );
+
+      expect(lookupFailureLogs(ctx)).toEqual([
+        {
+          level: 'warning',
+          msg: 'ID Converter routing lookup failed; its ids go on to the fallback tiers',
+          data: {
+            idType: 'pmid',
+            idCount: 2,
+            error: 'ID Converter lookup failed: NCBI returned HTTP 503. (failed after 4 attempts)',
+          },
+        },
       ]);
     });
+
+    it.each(['pmids', 'dois'] as const)(
+      'rethrows the caller’s cancellation during the %s lookup when no tier can run after it, logging no lookup failure',
+      async (field) => {
+        const started = Promise.withResolvers<void>();
+        // The lookup answers only by rejecting with the caller's reason once it aborts.
+        mockIdConvert.mockImplementation(
+          (_ids: string[], _idType: string, { signal }: { signal: AbortSignal }) =>
+            new Promise((_resolve, reject) => {
+              signal.addEventListener('abort', () => reject(signal.reason), { once: true });
+              started.resolve();
+            }),
+        );
+        const controller = new AbortController();
+        const reason = new DOMException('The client went away', 'AbortError');
+        const ctx = createMockContext({
+          errors: fetchFulltextTool.errors,
+          signal: controller.signal,
+        });
+
+        // No PMC ID in the call and no fallback tier configured: no step after the
+        // lookup checks the signal, so only the lookup's own rethrow ends the call.
+        const call = fetchFulltextTool.handler(
+          fetchFulltextTool.input.parse({ [field]: [field === 'pmids' ? '42' : '10.1/x'] }),
+          ctx,
+        );
+        await started.promise;
+        controller.abort(reason);
+
+        await expect(call).rejects.toBe(reason);
+        expect(lookupFailureLogs(ctx)).toEqual([]);
+        expect(mockIdConvert).toHaveBeenCalledTimes(1);
+        expect(mockEFetch).not.toHaveBeenCalled();
+      },
+    );
   });
 
   describe('PMC path (existing behavior)', () => {
@@ -2135,21 +2314,6 @@ describe('fetchFulltextTool', () => {
   });
 
   describe('DOI evidence and failed DOI lookups (issue #119)', () => {
-    function withEpmc() {
-      mockGetEpmcService.mockReturnValue({
-        search: mockEpmcSearch,
-        fullTextXml: mockEpmcFullTextXml,
-        parseFullTextXml: mockEpmcParseFullTextXml,
-      });
-    }
-
-    function withUnpaywall() {
-      mockGetUnpaywallService.mockReturnValue({
-        resolve: mockUnpaywallResolve,
-        fetchContent: mockUnpaywallFetchContent,
-      });
-    }
-
     /** A MED-source EPMC hit carrying a DOI and no PMC counterpart. */
     function medHit(pmid: string, doi: string) {
       return { hits: [{ id: pmid, source: 'MED', pmid, doi }], hitCount: 1, cursorMark: '*' };
@@ -2382,7 +2546,7 @@ describe('fetchFulltextTool', () => {
                 tier: 'pmc' as const,
                 outcome: 'service-error' as const,
                 detail:
-                  'Fetch failed for https://eutils.ncbi.nlm.nih.gov/entrez/eutils/efetch.fcgi?db=pmc&id=123 Status: 400 *retry* later',
+                  'Fetch failed for https://eutils.ncbi.nlm.nih.gov/…?…. Status: 400 *retry* later',
               },
             ],
           },
@@ -2404,16 +2568,16 @@ describe('fetchFulltextTool', () => {
       };
       const format = () => textBlocks(fetchFulltextTool.format!(output))[0]?.text ?? '';
 
-      it('escapes the id, the sanitized chain details and the resend ids', () => {
+      it('escapes the id, the chain details and the resend ids', () => {
         const text = format();
 
         expect(text).toContain(
-          'pmc:service-error (Fetch failed for \\<upstream> Status: 400 \\*retry\\* later)',
+          'pmc:service-error (Fetch failed for https://eutils.ncbi.nlm.nih.gov/…?…. Status: 400 \\*retry\\* later)',
         );
         // The id shares its entry's paragraph, so its non-intraword `_` is escaped too. (#261)
         expect(text).toContain('- [doi] 10.1000/a_b\\_\\*c\\* — not-found');
         expect(text).toContain(
-          'Not queried: Unpaywall (UNPAYWALL_EMAIL is not set — see \\<upstream>)',
+          'Not queried: Unpaywall (UNPAYWALL_EMAIL is not set — see https://unpaywall.org/products/api)',
         );
         expect(text).toContain('each under its own field — `pmcids`: PMC9; `dois`: 10.1/\\_x\\_');
       });
@@ -2422,11 +2586,54 @@ describe('fetchFulltextTool', () => {
         const visible = renderedText(format());
 
         expect(visible).toContain(
-          'pmc:service-error (Fetch failed for <upstream> Status: 400 *retry* later)',
+          'pmc:service-error (Fetch failed for https://eutils.ncbi.nlm.nih.gov/…?…. Status: 400 *retry* later)',
         );
         expect(visible).toContain('[doi] 10.1000/a_b_*c* — not-found');
-        expect(visible).toContain('Unpaywall (UNPAYWALL_EMAIL is not set — see <upstream>)');
+        expect(visible).toContain(
+          'Unpaywall (UNPAYWALL_EMAIL is not set — see https://unpaywall.org/products/api)',
+        );
         expect(visible).toContain('pmcids: PMC9; dois: 10.1/_x_');
+      });
+
+      /**
+       * The detail a producer redacts at the source, URL origin included, reaches
+       * `content[]` whole: a full stop after the URL and the quotes around one stay
+       * where `structuredContent` has them. (#318)
+       */
+      it('reads back as CommonMark exactly as structuredContent carries each detail', () => {
+        const searchDetail =
+          'Europe PMC search request failed: Fetch failed for https://www.ebi.ac.uk/…?…. Status: 503 (failed after 4 attempts)';
+        const quotedDetail =
+          'Network error during fetch GET https://www.ebi.ac.uk/…?…: Malformed_HTTP_Response fetching "https://www.ebi.ac.uk/…?…" (failed after 4 attempts)';
+        const text =
+          textBlocks(
+            fetchFulltextTool.format!({
+              ...output,
+              unavailable: [
+                ...output.unavailable,
+                {
+                  id: 'PMC7612345',
+                  idType: 'pmcid',
+                  reason: 'service-error',
+                  triedTiers: [
+                    { tier: 'europepmc', outcome: 'service-error', detail: searchDetail },
+                    { tier: 'unpaywall', outcome: 'fetch-failed', detail: quotedDetail },
+                  ],
+                },
+              ],
+            }),
+          )[0]?.text ?? '';
+
+        const lines = readCommonMark(text).split('\n');
+        expect(lines).toContain(
+          `chain: pmc:service-error (${output.unavailable[0]?.triedTiers[0]?.detail})`,
+        );
+        expect(lines).toContain(
+          `Not queried: Unpaywall (${output.unavailable[1]?.triedTiers[0]?.detail})`,
+        );
+        expect(lines).toContain(
+          `chain: europepmc:service-error (${searchDetail}) → unpaywall:fetch-failed (${quotedDetail})`,
+        );
       });
 
       const article = {
@@ -10934,18 +11141,6 @@ describe('fetchFulltextTool call deadline (issue #310)', () => {
   /** Moves the frozen clock on by `ms`, as an upstream that took that long to answer. */
   const elapse = (ms: number) => vi.setSystemTime(Date.now() + ms);
 
-  const withEpmc = () =>
-    mockGetEpmcService.mockReturnValue({
-      search: mockEpmcSearch,
-      fullTextXml: mockEpmcFullTextXml,
-      parseFullTextXml: mockEpmcParseFullTextXml,
-    });
-  const withUnpaywall = () =>
-    mockGetUnpaywallService.mockReturnValue({
-      resolve: mockUnpaywallResolve,
-      fetchContent: mockUnpaywallFetchContent,
-    });
-
   beforeEach(() => {
     for (const mock of [
       mockEFetch,
@@ -10984,7 +11179,7 @@ describe('fetchFulltextTool call deadline (issue #310)', () => {
     return { ctx, result, text };
   }
 
-  it('hands both ID Converter routing lookups the deadline it starts, beside ctx.signal', async () => {
+  it('hands both ID Converter routing lookups the call deadline itself when no tier can run after them, beside ctx.signal', async () => {
     mockIdConvert.mockResolvedValue([]);
     const { ctx } = await run({ pmids: ['42'], dois: ['10.1/x'] });
 
@@ -10999,6 +11194,84 @@ describe('fetchFulltextTool call deadline (issue #310)', () => {
     expect(doiOptions.signal).toBe(ctx.signal);
     expect(doiOptions.deadline).toBe(pmidOptions.deadline);
   });
+
+  it('returns the PMC article for a PMID whose routing lookup answers 30 s in when no tier can run after it, past what a share of the deadline holds (#319)', async () => {
+    // The converter answers 30 s in with the PMID's PMC ID. A lookup whose
+    // deadline ends sooner is cut off there, as the NCBI service cuts it.
+    const answeredAt = STARTED_AT + 30_000;
+    mockIdConvert.mockImplementation(
+      async (_ids: string[], _idType: string, { deadline }: { deadline: CallDeadline }) => {
+        if (deadline.expiresAt < answeredAt) {
+          vi.setSystemTime(deadline.expiresAt);
+          throw timeout(`NCBI request deadline (${deadline.totalMs}ms) exceeded`, {
+            reason: 'ncbi_deadline_exceeded',
+            deadlineMs: deadline.totalMs,
+          });
+        }
+        vi.setSystemTime(answeredAt);
+        return [{ 'requested-id': '42', pmid: '42', pmcid: 'PMC42' }];
+      },
+    );
+    mockEFetchBy({ pmc: [{ 'pmc-articleset': [{ article: [] }] }] });
+    mockParsePmcArticle.mockReturnValue({
+      pmcId: 'PMC42',
+      pmcUrl: 'https://pmc.ncbi.nlm.nih.gov/articles/PMC42/',
+      pmid: '42',
+      title: 'Served After A Slow Lookup',
+      sections: [{ title: 'Introduction', text: 'Body text.' }],
+    });
+
+    const { result, text } = await run({ pmids: ['42'] });
+
+    expect(result.totalReturned).toBe(1);
+    expect(result.articles).toEqual([
+      expect.objectContaining({
+        source: 'pmc',
+        viaSource: 'pmc',
+        pmcId: 'PMC42',
+        title: 'Served After A Slow Lookup',
+      }),
+    ]);
+    expect(result.unavailable).toBeUndefined();
+    expect(text).toContain('**Articles Returned:** 1');
+    expect(text).toContain('Served After A Slow Lookup');
+    expect(text).toContain('PMC42');
+    expect(text).not.toContain('**Unavailable');
+    expect(mockEFetch.mock.calls.map(([params]) => params)).toEqual([
+      { db: 'pmc', id: '42', retmode: 'xml' },
+    ]);
+  });
+
+  it.each([
+    ['Europe PMC', {}, () => withEpmc()],
+    ['Unpaywall', {}, () => withUnpaywall()],
+    [
+      'PMC EFetch, for a PMC ID in the call',
+      { pmcids: ['PMC1'] },
+      () => mockEFetch.mockResolvedValue(EMPTY_PMC_SET),
+    ],
+  ] as const)(
+    'hands both ID Converter routing lookups one share of the deadline when %s can still run after them (#319)',
+    async (_laterTier, pmcids, arrange) => {
+      arrange();
+      mockIdConvert.mockResolvedValue([]);
+      mockEpmcSearch.mockResolvedValue({ hits: [], hitCount: 0 });
+      mockUnpaywallResolve.mockResolvedValue({ kind: 'no-oa', reason: 'No open-access copy' });
+      const { ctx } = await run({ ...pmcids, pmids: ['42'], dois: ['10.1/x'] });
+
+      const routing = mockIdConvert.mock.calls.filter(([, idType]) => idType !== 'pmcid');
+      expect(routing.map(([, idType]) => idType)).toEqual(['pmid', 'doi']);
+      const [pmidOptions, doiOptions] = routing.map(([, , options]) => options);
+      // Half the 50 s call deadline, so a hung lookup leaves the rest to the tiers after it.
+      expect(pmidOptions).toEqual({
+        signal: ctx.signal,
+        deadline: { expiresAt: STARTED_AT + 25_000, totalMs: 25_000 },
+      });
+      expect(pmidOptions.signal).toBe(ctx.signal);
+      expect(doiOptions.signal).toBe(ctx.signal);
+      expect(doiOptions.deadline).toBe(pmidOptions.deadline);
+    },
+  );
 
   it('gives each tier with a later one half the time left as it starts, and the last tier the call deadline itself', async () => {
     withEpmc();
