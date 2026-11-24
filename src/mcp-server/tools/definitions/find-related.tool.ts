@@ -373,6 +373,20 @@ function summarizeOutcomes(entries: readonly { provider: ProviderName; reason: s
 }
 
 /**
+ * Every coverage failure with its reason and whether a retry can reach it, as the
+ * `content[]` trailer prints `coverageFailures`: `Europe PMC (europepmc_unreachable,
+ * retryable), OpenAlex (unclassified_error, not retryable)`.
+ */
+function summarizeCoverageFailures(failures: readonly CoverageFailure[]): string {
+  return failures
+    .map(
+      (f) =>
+        `${PROVIDER_LABELS[f.provider]} (${f.reason}, ${f.retryable ? 'retryable' : 'not retryable'})`,
+    )
+    .join(', ');
+}
+
+/**
  * Trailing clause naming the providers configuration turned off, which no retry
  * brings back. Empty when every entry is a transient failure.
  */
@@ -402,20 +416,31 @@ function notReachedSentence(
 }
 
 /**
+ * Retry guidance for the coverage providers that failed: a retry completes the
+ * check when every one of them is retryable, and reaches only the ones it names
+ * when just some are. Empty when none is.
+ */
+function retryClause(failed: readonly CoverageFailure[]): string {
+  const retryable = failed.filter((f) => f.retryable);
+  if (retryable.length === 0) return '';
+  if (retryable.length === failed.length) {
+    return ' Retry after a brief delay to complete the coverage check.';
+  }
+  return ` Retry after a brief delay to check ${retryable.map((f) => PROVIDER_LABELS[f.provider]).join(' and ')}.`;
+}
+
+/**
  * Disclosure for a `references` answer whose coverage check came back short.
- * Names each provider that failed and its reason, separates a
- * configuration-disabled provider from the transient failures worth retrying,
- * names a provider the deadline never reached apart from both, and never
- * describes a failed provider as having answered.
+ * Names each provider that failed and its reason, offers a retry only for the
+ * failures a retry can reach, separates a configuration-disabled provider from
+ * the transient failures, names a provider the deadline never reached apart from
+ * both, and never describes a failed provider as having answered.
  */
 function coverageIncompleteNotice(failures: readonly CoverageFailure[]): string {
   const failed = failures.filter((f) => !wasNotReached(f));
-  const retryClause = failed.some((f) => f.retryable)
-    ? ' Retry after a brief delay to complete the coverage check.'
-    : '';
   const answered =
     failed.length > 0
-      ? `${summarizeOutcomes(failed)} did not answer.${retryClause}${disabledClause(failed)}`
+      ? `${summarizeOutcomes(failed)} did not answer.${retryClause(failed)}${disabledClause(failed)}`
       : '';
   const outcomes = [answered, notReachedSentence(failures)].filter(Boolean).join(' ');
   return `Reference coverage could not be fully checked — ${outcomes}`;
@@ -571,7 +596,7 @@ export const findRelatedTool = tool('pubmed_find_related', {
   enrichmentTrailer: {
     source: { label: 'Source' },
     coverageFailures: {
-      render: (value = []) => `**Coverage not checked:** ${summarizeOutcomes(value)}`,
+      render: (value = []) => `**Coverage not checked:** ${summarizeCoverageFailures(value)}`,
     },
   },
 

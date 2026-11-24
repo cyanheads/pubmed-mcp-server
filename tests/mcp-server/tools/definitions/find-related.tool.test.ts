@@ -5,8 +5,9 @@
  * OpenAlex Timeout or RateLimited reports — named by its code — and the reason
  * Europe PMC declares for one, in the coverage summary and the all-providers-failed
  * attempts (#160, #315), a `maxResults` past the cap served at the cap on every
- * return path (#232), and the one call deadline every step shares, with a step that
- * had no time left reported not reached (#310).
+ * return path (#232), the one call deadline every step shares, with a step that
+ * had no time left reported not reached (#310), and whether a retry can reach each
+ * failed coverage fallback, in the trailer and the notice's retry guidance (#318).
  * @module tests/mcp-server/tools/definitions/find-related.tool.test
  */
 
@@ -1559,6 +1560,116 @@ describe('findRelatedTool', () => {
         { provider: 'openalex', reason: 'unclassified_error', retryable: false },
       ]);
       expect(String(enrichment.notice)).not.toContain('Retry after a brief delay');
+    });
+
+    describe('whether a retry can reach each failed fallback (issue #318)', () => {
+      const epmcUnreachable = new McpError(JsonRpcErrorCode.ServiceUnavailable, 'EPMC down', {
+        reason: 'europepmc_unreachable',
+      });
+      const epmcInvalidInput = new McpError(JsonRpcErrorCode.ValidationError, 'EPMC refused', {
+        reason: 'europepmc_invalid_input',
+      });
+      const oaUnreachable = new McpError(JsonRpcErrorCode.ServiceUnavailable, 'OA down', {
+        reason: 'openalex_unreachable',
+      });
+      // What the OpenAlex client rethrows for an HTTP 501: no reason, not retryable.
+      const oaNotImplemented = new McpError(
+        JsonRpcErrorCode.ServiceUnavailable,
+        'Fetch failed. Status: 501',
+        { status: 501, retryable: false },
+      );
+
+      /**
+       * Both fallbacks fail as given (`undefined` turns Europe PMC off by
+       * configuration): the `coverageFailures` they leave, the trailer line, and the
+       * coverage sentence that ends the notice.
+       */
+      const SETS = [
+        [
+          'every failed fallback is retryable',
+          epmcUnreachable,
+          oaUnreachable,
+          [
+            { provider: 'europepmc', reason: 'europepmc_unreachable', retryable: true },
+            { provider: 'openalex', reason: 'openalex_unreachable', retryable: true },
+          ],
+          '**Coverage not checked:** Europe PMC (europepmc_unreachable, retryable), OpenAlex (openalex_unreachable, retryable)',
+          'Europe PMC (europepmc_unreachable), OpenAlex (openalex_unreachable) did not answer. Retry after a brief delay to complete the coverage check.',
+        ],
+        [
+          'no failed fallback is retryable',
+          epmcInvalidInput,
+          oaNotImplemented,
+          [
+            { provider: 'europepmc', reason: 'europepmc_invalid_input', retryable: false },
+            { provider: 'openalex', reason: 'unclassified_error', retryable: false },
+          ],
+          '**Coverage not checked:** Europe PMC (europepmc_invalid_input, not retryable), OpenAlex (unclassified_error, not retryable)',
+          'Europe PMC (europepmc_invalid_input), OpenAlex (unclassified_error) did not answer.',
+        ],
+        [
+          'only Europe PMC is retryable',
+          epmcUnreachable,
+          oaNotImplemented,
+          [
+            { provider: 'europepmc', reason: 'europepmc_unreachable', retryable: true },
+            { provider: 'openalex', reason: 'unclassified_error', retryable: false },
+          ],
+          '**Coverage not checked:** Europe PMC (europepmc_unreachable, retryable), OpenAlex (unclassified_error, not retryable)',
+          'Europe PMC (europepmc_unreachable), OpenAlex (unclassified_error) did not answer. Retry after a brief delay to check Europe PMC.',
+        ],
+        [
+          'only OpenAlex is retryable, Europe PMC turned off',
+          undefined,
+          oaUnreachable,
+          [
+            { provider: 'europepmc', reason: 'provider_disabled', retryable: false },
+            { provider: 'openalex', reason: 'openalex_unreachable', retryable: true },
+          ],
+          '**Coverage not checked:** Europe PMC (provider_disabled, not retryable), OpenAlex (openalex_unreachable, retryable)',
+          'Europe PMC (provider_disabled), OpenAlex (openalex_unreachable) did not answer. Retry after a brief delay to check OpenAlex. Europe PMC is turned off by server configuration and will not recover on retry.',
+        ],
+      ] as const;
+
+      async function checkCoverage(epmcFailure: McpError | undefined, oaFailure: McpError) {
+        if (epmcFailure) mockEpmcReferences.mockRejectedValue(epmcFailure);
+        else mockGetEpmcService.mockReturnValue(undefined);
+        mockOaReferences.mockRejectedValue(oaFailure);
+        const result = await runToolContract(findRelatedTool, referencesInput);
+        const structured = result.structuredContent as {
+          coverageFailures?: unknown[];
+          notice?: string;
+        };
+        const notice = structured.notice ?? '';
+        return {
+          coverage: notice.slice(notice.indexOf('Reference coverage could not be fully checked')),
+          coverageFailures: structured.coverageFailures,
+          text: textBlocks(result.content as ContentBlock[])
+            .map((b) => b.text)
+            .join('\n'),
+        };
+      }
+
+      it.each(SETS)(
+        'marks every trailer entry retryable or not when %s',
+        async (_label, epmc, oa, coverageFailures, trailer) => {
+          const result = await checkCoverage(epmc, oa);
+
+          expect(result.coverageFailures).toEqual(coverageFailures);
+          expect(result.text.split('\n')).toContain(trailer);
+        },
+      );
+
+      it.each(SETS)(
+        'retries in the notice only what a retry can reach when %s',
+        async (_label, epmc, oa, _coverageFailures, _trailer, outcomes) => {
+          const result = await checkCoverage(epmc, oa);
+
+          const sentence = `Reference coverage could not be fully checked — ${outcomes}`;
+          expect(result.coverage).toBe(sentence);
+          expect(result.text).toContain(sentence);
+        },
+      );
     });
 
     it('names an all-providers-failed attempt by its code when it carries no reason', async () => {
@@ -3637,7 +3748,7 @@ describe('findRelatedTool call deadline (issue #310)', () => {
       const text = contractText(result);
       expect(text).toContain(`> ${notice}`);
       expect(text).toContain(
-        '**Coverage not checked:** Europe PMC (not_reached), OpenAlex (not_reached)',
+        '**Coverage not checked:** Europe PMC (not_reached, retryable), OpenAlex (not_reached, retryable)',
       );
       expect(mockEpmcReferences).not.toHaveBeenCalled();
       expect(mockOaReferences).not.toHaveBeenCalled();
@@ -3754,7 +3865,7 @@ describe('findRelatedTool call deadline (issue #310)', () => {
           { provider: 'openalex', reason: 'not_reached', retryable: true },
         ],
         `Europe PMC (provider_disabled) did not answer. Europe PMC is turned off by server configuration and will not recover on retry. OpenAlex was not reached: ${NOT_REACHED_ONE}`,
-        '**Coverage not checked:** Europe PMC (provider_disabled), OpenAlex (not_reached)',
+        '**Coverage not checked:** Europe PMC (provider_disabled, not retryable), OpenAlex (not_reached, retryable)',
       ],
       [
         'OpenAlex',
@@ -3763,7 +3874,7 @@ describe('findRelatedTool call deadline (issue #310)', () => {
           { provider: 'openalex', reason: 'provider_disabled', retryable: false },
         ],
         `OpenAlex (provider_disabled) did not answer. OpenAlex is turned off by server configuration and will not recover on retry. Europe PMC was not reached: ${NOT_REACHED_ONE}`,
-        '**Coverage not checked:** Europe PMC (not_reached), OpenAlex (provider_disabled)',
+        '**Coverage not checked:** Europe PMC (not_reached, retryable), OpenAlex (provider_disabled, not retryable)',
       ],
     ] as const)(
       'reports a reference-coverage %s that configuration turned off as provider_disabled and not retryable on both surfaces, never not_reached, when the deadline ran out before it',
