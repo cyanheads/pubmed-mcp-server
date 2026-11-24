@@ -4,7 +4,7 @@ All notable changes to this project. Each entry links to its full per-version fi
 
 ## [2.12.4](changelog/2.12.x/2.12.4.md) — 2026-11-24
 
-pubmed_fetch_fulltext continues to Europe PMC and Unpaywall when the PMC ID Converter lookup fails or hangs, and pubmed_europepmc_search POSTs searches over 2,000 characters where they failed with an opaque HTTP 400 or 414. Tier details and retryable flags now reach content[].
+pubmed_fetch_fulltext continues to Europe PMC and Unpaywall when the PMC ID Converter lookup fails or hangs, and pubmed_europepmc_search POSTs a query over 2,000 characters, so a long one no longer fails with an opaque HTTP 400 or 414. Tier details and retryable flags now reach content[].
 
 ## [2.12.3](changelog/2.12.x/2.12.3.md) — 2026-11-21
 
