@@ -4,9 +4,10 @@
  * typed methods for each E-utility endpoint. Every call runs as a retry loop around
  * the shared request queue — each attempt re-queued and re-paced — under one deadline
  * that covers queue wait, attempts, and backoff: NCBI's own, or the time the tool call
- * has left when that is less. Once a call to an endpoint
- * fails on every attempt, later calls to that endpoint make one attempt each until
- * one succeeds. Uses init/accessor pattern.
+ * has left when that is less. Once a call to an endpoint fails on every attempt, having
+ * made all its retries or as many attempts as half of NCBI's own deadline always fits,
+ * later calls to that endpoint make one attempt each until one succeeds. Uses
+ * init/accessor pattern.
  * @module src/services/ncbi/ncbi-service
  */
 
@@ -422,8 +423,33 @@ function deadlineExceeded(deadlineMs: number, cause?: unknown, ncbiErrors?: unkn
   );
 }
 
-/** Ceiling on one backoff sleep, so a high retry count cannot grow it without bound. */
-const MAX_BACKOFF_MS = 30_000;
+/**
+ * The backoff a retry loop sleeps before retry i + 1: `baseDelayMs`·2^i, capped at
+ * `maxDelayMs` so a high retry count cannot grow it without bound, then drawn within
+ * ±`jitter` of that. {@link runPaced} hands it to `withRetry` whole and
+ * {@link attemptsAlwaysFitting} reads it, so the ladder and the fail-fast threshold
+ * follow one schedule.
+ */
+const BACKOFF = { baseDelayMs: 1_000, maxDelayMs: 30_000, jitter: 0.25 } as const;
+
+/**
+ * The attempts a retry loop under a `budgetMs` deadline always makes when each attempt
+ * fails at once: the most, up to `maxAttempts`, whose backoffs before them sum to no more
+ * than `budgetMs` with every backoff at its {@link BACKOFF} jitter maximum. `withRetry`
+ * stops before a backoff that would overrun its deadline, so such a loop makes at least
+ * this many.
+ */
+function attemptsAlwaysFitting(budgetMs: number, maxAttempts: number): number {
+  let attempts = 1;
+  let startMs = 0;
+  while (attempts < maxAttempts) {
+    const backoffMs = Math.min(BACKOFF.baseDelayMs * 2 ** (attempts - 1), BACKOFF.maxDelayMs);
+    startMs += backoffMs * (1 + BACKOFF.jitter);
+    if (startMs > budgetMs) break;
+    attempts += 1;
+  }
+  return attempts;
+}
 
 /**
  * Margin added to the time left on the deadline when it is offered to the queue as a
@@ -585,9 +611,10 @@ function toServiceError(error: unknown, endpoint: string, loop: LoopOutcome): un
  */
 export class NcbiService {
   /**
-   * Endpoints, by their `runPaced` label, whose latest call ended `ncbi_unreachable`
-   * with its retries spent. A call to one makes a single attempt; any success on that
-   * endpoint removes it.
+   * Endpoints, by their `runPaced` label, where a call ended `ncbi_unreachable` after all
+   * its retries or as many attempts as half of NCBI's own deadline always fits, and none
+   * has succeeded since. A call to one makes a single attempt; any success on that
+   * endpoint removes it. {@link runPaced} sets the bar. (#287, #320)
    */
   private readonly failingEndpoints = new Set<string>();
 
@@ -1086,8 +1113,14 @@ export class NcbiService {
    * makes one attempt instead of its ladder — unless it had no retries to give up
    * (`NCBI_MAX_RETRIES=0`, or a budget already spent). A call already running keeps
    * its ladder. Success removes the endpoint; a call that ends `ncbi_unreachable` with
-   * its retries spent adds it. A caller abort, a deadline expiry, a rate limit, a shed,
-   * and a failure that was never retried leave the set as it was. (#287)
+   * its retries spent adds it, once it made as many attempts as half of NCBI's own
+   * deadline always fits ({@link attemptsAlwaysFitting}), or every attempt its retries
+   * allowed when that is fewer — one for a fail-fast call or a spent budget. Half is
+   * what a tool call hands the first of several chain steps (`shareDeadline`), so a call
+   * holding the whole deadline or a first step's share still arms, and a later step's
+   * smaller share, whose ladder its deadline cut short, does not. A caller abort, a
+   * deadline expiry, a rate limit, a shed, and a failure that was never retried leave
+   * the set as it was. (#287, #320)
    */
   private async runPaced<T>(
     endpoint: string,
@@ -1136,8 +1169,8 @@ export class NcbiService {
             });
         },
         {
+          ...BACKOFF,
           maxRetries,
-          maxDelayMs: MAX_BACKOFF_MS,
           deadlineMs: bound.remainingMs,
           isTransient,
           operation: `NCBI ${endpoint}`,
@@ -1154,11 +1187,13 @@ export class NcbiService {
         failFast,
         ncbiErrors,
       });
-      // Only a retries-spent failure carries `attempts`; one that ends unreachable arms.
+      // Only a retries-spent failure carries `attempts`; one that ends unreachable arms
+      // once the ladder was long enough to count as spent.
       if (
         failure instanceof McpError &&
         failure.data?.reason === 'ncbi_unreachable' &&
-        typeof failure.data.attempts === 'number'
+        typeof failure.data.attempts === 'number' &&
+        failure.data.attempts >= attemptsAlwaysFitting(this.totalDeadlineMs / 2, maxRetries + 1)
       ) {
         this.failingEndpoints.add(endpoint);
       }

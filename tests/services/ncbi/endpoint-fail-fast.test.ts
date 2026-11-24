@@ -1,17 +1,19 @@
 /**
  * @fileoverview Regression for issue #287 — once a call to an E-utility endpoint spends
  * its whole retry ladder on `ncbi_unreachable`, later calls to that endpoint make one
- * attempt each until one succeeds, while every other endpoint keeps its full ladder.
- * Drives the production wiring (`initNcbiService`: real client, queue, retry, and
- * response handler) against a stubbed global fetch that answers per endpoint, under
- * fake timers with backoff jitter pinned, so every assertion reads when each upstream
- * request actually started.
+ * attempt each until one succeeds, while every other endpoint keeps its full ladder —
+ * and for issue #320: a ladder a small share of the tool call's deadline cut short does
+ * not count as spent. Drives the production wiring (`initNcbiService`: real client,
+ * queue, retry, and response handler) against a stubbed global fetch that answers per
+ * endpoint, under fake timers with backoff jitter pinned, so every assertion reads when
+ * each upstream request actually started.
  * @module tests/services/ncbi/endpoint-fail-fast.test
  */
 
 import { JsonRpcErrorCode, type McpError } from '@cyanheads/mcp-ts-core/errors';
 import { runToolContract } from '@cyanheads/mcp-ts-core/testing';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import type { CallDeadline } from '@/services/call-deadline.js';
 import { NCBI_SERVICE_ERRORS } from '@/services/error-contracts.js';
 import { readCommonMark, textBlocks } from '../../_helpers.js';
 import { driveUntilSettled, type Outcome, track } from './_fake-clock.js';
@@ -30,16 +32,22 @@ vi.mock('@cyanheads/mcp-ts-core/utils', async () => {
 /** Fake-clock origin. Nonzero so no scheduler reads a zero timestamp as "never started". */
 const T0 = 1_000_000;
 
-/** Request starts of a full ladder under the defaults (6 retries, 60 s deadline, no jitter). */
+/**
+ * Request starts of a full ladder under the defaults (6 retries, 50 s deadline) with
+ * jitter pinned to its midpoint. The seventh attempt would start at 61 s, so the
+ * backoff before it never fits.
+ */
 const LADDER = [0, 1_000, 3_000, 7_000, 15_000, 31_000];
 
 const PMID = '23193287';
 
-type Endpoint = 'esearch' | 'efetch' | 'idconv';
+type Endpoint = 'esearch' | 'efetch' | 'elink' | 'ecitmatch.cgi' | 'idconv';
 
 const OK_BODY: Record<Endpoint, string> = {
   esearch: `<?xml version="1.0" encoding="UTF-8" ?>\n<eSearchResult><Count>1</Count><RetMax>1</RetMax><RetStart>0</RetStart><IdList><Id>${PMID}</Id></IdList><QueryTranslation>test</QueryTranslation></eSearchResult>`,
   efetch: `<?xml version="1.0"?><PubmedArticleSet><PubmedArticle><MedlineCitation><PMID>${PMID}</PMID></MedlineCitation></PubmedArticle></PubmedArticleSet>`,
+  elink: `<?xml version="1.0"?><eLinkResult><LinkSet><DbFrom>pubmed</DbFrom><IdList><Id>${PMID}</Id></IdList></LinkSet></eLinkResult>`,
+  'ecitmatch.cgi': `proc natl acad sci u s a|1991|88|3248|mann bj|1|${PMID}\n`,
   idconv: '{"status":"ok","records":[]}',
 };
 
@@ -48,6 +56,7 @@ const STATUS_TEXT = new Map([
   [429, 'Too Many Requests'],
   [500, 'Internal Server Error'],
   [501, 'Not Implemented'],
+  [503, 'Service Unavailable'],
 ]);
 
 /**
@@ -78,7 +87,8 @@ function answer(endpoint: Endpoint, ...replies: Reply[]): number[] {
 
 function endpointOf(url: URL): Endpoint | undefined {
   if (url.pathname.startsWith('/tools/idconv/')) return 'idconv';
-  return /^\/entrez\/eutils\/(esearch|efetch)\.fcgi$/.exec(url.pathname)?.[1] as
+  if (url.pathname === '/entrez/eutils/ecitmatch.cgi') return 'ecitmatch.cgi';
+  return /^\/entrez\/eutils\/(esearch|efetch|elink)\.fcgi$/.exec(url.pathname)?.[1] as
     | Endpoint
     | undefined;
 }
@@ -114,7 +124,7 @@ async function buildService(env: Record<string, string> = {}): Promise<NcbiServi
     NCBI_REQUEST_DELAY_MS: '50',
     // The server defaults, pinned so the ladder timings above hold.
     NCBI_MAX_RETRIES: '6',
-    NCBI_TOTAL_DEADLINE_MS: '60000',
+    NCBI_TOTAL_DEADLINE_MS: '50000',
     ...env,
   };
   for (const [name, value] of Object.entries(settings)) vi.stubEnv(name, value);
@@ -151,7 +161,7 @@ afterEach(() => {
   vi.unstubAllEnvs();
 });
 
-/** Drives one call to settlement; no call outlives the 60 s deadline. */
+/** Drives one call to settlement; no call outlives NCBI's 50 s deadline. */
 const settle = (call: Promise<unknown>): Promise<Outcome> => driveUntilSettled(track(call), 60_000);
 
 const search = (service: NcbiService, term = 'aspirin', signal?: AbortSignal) =>
@@ -161,8 +171,8 @@ const fetchArticle = (service: NcbiService) => service.eFetch({ db: 'pubmed', id
 
 const convert = (service: NcbiService) => service.idConvert(['PMC3531190'], 'pmcid');
 
-const failFastMessage = (endpoint: string) =>
-  `NCBI returned HTTP 500 Internal Server Error. (failed after 1 attempt, without retrying: the previous ${endpoint} call failed on every attempt)`;
+const failFastMessage = (endpoint: string, status = 500) =>
+  `NCBI returned HTTP ${status} ${STATUS_TEXT.get(status)}. (failed after 1 attempt, without retrying: the previous ${endpoint} call failed on every attempt)`;
 
 const errorOf = (outcome: Outcome): McpError => {
   if (outcome.ok) throw new Error('Expected the call to fail.');
@@ -499,5 +509,188 @@ describe('fail-fast on an endpoint that keeps failing (issue #287)', () => {
       });
     }
     expect(starts).toEqual([0, 50]);
+  });
+});
+
+/**
+ * Issue #320: a ladder a small share of the tool call's deadline cut short is no
+ * evidence an endpoint is down. A retries-spent `ncbi_unreachable` arms only when the
+ * call made as many attempts as half of NCBI's deadline always fits, each backoff at its
+ * +25 % jitter maximum, or every attempt its retries allowed when that is fewer. At the
+ * defaults that is 5: attempts start by 0, 1.25, 3.75, 8.75, and 18.75 s, inside 25 s,
+ * where the sixth can start as late as 38.75 s.
+ */
+describe('arming after a ladder the deadline cut short (issue #320)', () => {
+  /** An esearch under a tool call's deadline with `leftMs` to go, as a handler hands it down. */
+  const searchWithin = (service: NcbiService, leftMs: number) =>
+    service.eSearch(
+      { db: 'pubmed', term: 'cancer' },
+      { deadline: { expiresAt: Date.now() + leftMs, totalMs: 50_000 } },
+    );
+
+  /**
+   * Reads whether esearch is armed with one call answering 503, then 200: armed, it makes
+   * its one attempt and fails fast; unarmed, it retries and succeeds.
+   */
+  async function isArmed(service: NcbiService): Promise<boolean> {
+    const probe = answer('esearch', 503, 200);
+    const outcome = await settle(search(service));
+    if (outcome.ok) {
+      expect(probe).toHaveLength(2);
+      return false;
+    }
+    expect(errorOf(outcome).message).toBe(failFastMessage('esearch', 503));
+    expect(probe).toHaveLength(1);
+    return true;
+  }
+
+  it('leaves esearch its ladder after a call with 6.25 s left spends 3 attempts', async () => {
+    const service = await buildService();
+    const starts = answer('esearch', 503);
+
+    expect(errorOf(await settle(searchWithin(service, 6_250)))).toMatchObject({
+      code: JsonRpcErrorCode.ServiceUnavailable,
+      message: 'NCBI returned HTTP 503 Service Unavailable. (failed after 3 attempts)',
+      data: { reason: 'ncbi_unreachable', endpoint: 'esearch', attempts: 3 },
+    });
+    expect(starts).toEqual([0, 1_000, 3_000]);
+
+    // A call holding NCBI's whole deadline spends its full ladder, and that arms.
+    const next = answer('esearch', 503);
+    expect(errorOf(await settle(search(service)))).toMatchObject({
+      message: 'NCBI returned HTTP 503 Service Unavailable. (failed after 6 attempts)',
+      data: { reason: 'ncbi_unreachable', endpoint: 'esearch', attempts: 6 },
+    });
+    expect(next).toEqual(LADDER.map((ms) => ms + 3_050));
+
+    const third = answer('esearch', 503);
+    expect(errorOf(await settle(search(service))).message).toBe(failFastMessage('esearch', 503));
+    expect(third).toHaveLength(1);
+  });
+
+  /**
+   * The threshold, tabled once at its seam: the requests a call makes when every attempt
+   * meets HTTP 503 with `leftMs` to go, with backoff jitter pinned low (−25 %), at its
+   * midpoint, and high (just under +25 %), and whether that leaves esearch armed.
+   */
+  it.each<[string, number, number, number, boolean]>([
+    ['low', 0, 900, 2, false],
+    ['low', 0, 6_250, 4, false],
+    ['low', 0, 12_500, 5, true],
+    ['low', 0, 25_000, 6, true],
+    ['low', 0, 50_000, 7, true],
+    ['mid', 0.5, 900, 1, false],
+    ['mid', 0.5, 6_250, 3, false],
+    ['mid', 0.5, 12_500, 4, false],
+    ['mid', 0.5, 25_000, 5, true],
+    ['mid', 0.5, 50_000, 6, true],
+    ['high', 0.9999, 900, 1, false],
+    ['high', 0.9999, 6_250, 3, false],
+    ['high', 0.9999, 12_500, 4, false],
+    ['high', 0.9999, 25_000, 5, true],
+    ['high', 0.9999, 50_000, 6, true],
+  ])(
+    'jitter %s (Math.random %d), %d ms left: %d request(s), armed: %s',
+    async (_jitter, random, leftMs, requests, armed) => {
+      vi.spyOn(Math, 'random').mockReturnValue(random);
+      const service = await buildService();
+      const starts = answer('esearch', 503);
+
+      expect(errorOf(await settle(searchWithin(service, leftMs)))).toMatchObject({
+        data: { reason: 'ncbi_unreachable', endpoint: 'esearch', attempts: requests },
+      });
+      expect(starts).toHaveLength(requests);
+      expect(await isArmed(service)).toBe(armed);
+    },
+  );
+
+  it('arms after a call whose retries ran out, whatever its deadline (NCBI_MAX_RETRIES=2, 6.25 s left)', async () => {
+    const service = await buildService({ NCBI_MAX_RETRIES: '2' });
+    const starts = answer('esearch', 503);
+
+    expect(errorOf(await settle(searchWithin(service, 6_250)))).toMatchObject({
+      message: 'NCBI returned HTTP 503 Service Unavailable. (failed after 3 attempts)',
+      data: { reason: 'ncbi_unreachable', attempts: 3 },
+    });
+    expect(starts).toEqual([0, 1_000, 3_000]);
+    expect(await isArmed(service)).toBe(true);
+  });
+
+  it('takes the threshold from NCBI_TOTAL_DEADLINE_MS: at 120 s, 5 attempts in a 25 s share leave esearch unarmed', async () => {
+    // Half of 120 s always fits 6 attempts; at the defaults the same call arms.
+    const service = await buildService({ NCBI_TOTAL_DEADLINE_MS: '120000' });
+    const starts = answer('esearch', 503);
+
+    expect(errorOf(await settle(searchWithin(service, 25_000)))).toMatchObject({
+      data: { reason: 'ncbi_unreachable', attempts: 5 },
+    });
+    expect(starts).toEqual([0, 1_000, 3_000, 7_000, 15_000]);
+    expect(await isArmed(service)).toBe(false);
+  });
+
+  it('counts each backoff at its jitter maximum: at 70 s, 5 attempts in a 35 s share with jitter high arm', async () => {
+    // Half of 70 s fits a sixth attempt at nominal backoff (31 s) but not at +25 % (38.75 s).
+    vi.spyOn(Math, 'random').mockReturnValue(0.9999);
+    const service = await buildService({ NCBI_TOTAL_DEADLINE_MS: '70000' });
+    const starts = answer('esearch', 503);
+
+    expect(errorOf(await settle(searchWithin(service, 35_000)))).toMatchObject({
+      data: { reason: 'ncbi_unreachable', attempts: 5 },
+    });
+    expect(starts).toHaveLength(5);
+    expect(await isArmed(service)).toBe(true);
+  });
+
+  it("arms elink after a call under pubmed_find_related's half of the deadline spends 5 attempts", async () => {
+    const service = await buildService();
+    const { shareDeadline, startCallDeadline } = await import('@/services/call-deadline.js');
+    const link = (options?: { deadline: CallDeadline }) =>
+      service.eLink(
+        { dbfrom: 'pubmed', db: 'pubmed', id: PMID, cmd: 'neighbor', linkname: 'pubmed_pubmed' },
+        options,
+      );
+    const starts = answer('elink', 503);
+
+    // The tool starts its 50 s deadline and hands ELink half of it.
+    expect(
+      errorOf(await settle(link({ deadline: shareDeadline(startCallDeadline()) }))),
+    ).toMatchObject({ data: { reason: 'ncbi_unreachable', endpoint: 'elink', attempts: 5 } });
+    expect(starts).toEqual([0, 1_000, 3_000, 7_000, 15_000]);
+
+    const next = answer('elink', 503);
+    expect(errorOf(await settle(link()))).toMatchObject({
+      message: failFastMessage('elink', 503),
+      data: { reason: 'ncbi_unreachable', endpoint: 'elink', attempts: 1 },
+    });
+    expect(next).toHaveLength(1);
+  });
+
+  it('arms ecitmatch.cgi when a request the call has no retries left for fails its one attempt', async () => {
+    const service = await buildService({ NCBI_MAX_RETRIES: '2' });
+    const citation = (key: string, firstPage: string) => ({
+      key,
+      journal: 'proc natl acad sci u s a',
+      year: '1991',
+      volume: '88',
+      firstPage,
+      authorName: 'mann bj',
+    });
+    const citations = [citation('a', '3248'), citation('b', '3249'), citation('c', '3250')];
+    // The first request spends both retries, then its 200 answers only the first line:
+    // the second is not_found, and the third goes out again with no retries left.
+    const starts = answer('ecitmatch.cgi', 503, 503, 200, 503);
+
+    expect(errorOf(await settle(service.eCitMatch(citations)))).toMatchObject({
+      message: 'NCBI returned HTTP 503 Service Unavailable. (failed after 1 attempt)',
+      data: { reason: 'ncbi_unreachable', endpoint: 'ecitmatch.cgi', attempts: 1 },
+    });
+    expect(starts).toEqual([0, 1_000, 3_000, 3_050]);
+
+    const next = answer('ecitmatch.cgi', 503);
+    expect(errorOf(await settle(service.eCitMatch(citations.slice(0, 1))))).toMatchObject({
+      message: failFastMessage('ecitmatch.cgi', 503),
+      data: { reason: 'ncbi_unreachable', endpoint: 'ecitmatch.cgi', attempts: 1 },
+    });
+    expect(next).toHaveLength(1);
   });
 });
