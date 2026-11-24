@@ -2,14 +2,21 @@
  * @fileoverview Low-level HTTP client for Europe PMC's REST API. Builds URLs and
  * the source-filtered search query (`buildSearchQuery`, shared with the service
  * so it can report the query it sent), injects the optional contact email, and
- * exposes single-attempt search, fullTextXML, and citation-link calls.
- * Classifies each endpoint's HTTP failures — a failed search as
- * `europepmc_unreachable`, a fullTextXML 404 as `not-available` — while
- * retry logic lives in `EuropePmcService`.
+ * exposes single-attempt search, fullTextXML, and citation-link calls. A search
+ * goes out as a GET, or as a form POST to `/searchPOST` once its parameters
+ * outgrow a URL. Classifies each endpoint's HTTP failures — a failed search as
+ * `europepmc_unreachable`, a search too long to accept as
+ * `europepmc_invalid_input`, a fullTextXML 404 as `not-available` — while retry
+ * logic lives in `EuropePmcService`.
  * @module src/services/europe-pmc/api-client
  */
 
-import { JsonRpcErrorCode, McpError, serviceUnavailable } from '@cyanheads/mcp-ts-core/errors';
+import {
+  JsonRpcErrorCode,
+  McpError,
+  serviceUnavailable,
+  validationError,
+} from '@cyanheads/mcp-ts-core/errors';
 import { fetchWithTimeout, logger, requestContextService } from '@cyanheads/mcp-ts-core/utils';
 
 import { readBody } from '@/services/fetch-redaction.js';
@@ -21,6 +28,19 @@ import {
 } from './types.js';
 
 const USER_AGENT = 'pubmed-mcp-server (+https://github.com/cyanheads/pubmed-mcp-server)';
+
+/**
+ * Composed search query-string length, in characters, past which a search is
+ * POSTed — the rule `NcbiApiClient` applies to E-utilities. Europe PMC refuses a
+ * URL several times longer, with HTTP 400 or 414 at a length that shifts with
+ * the request's headers, so the margin absorbs header and config drift on its
+ * side.
+ */
+const POST_THRESHOLD = 2000;
+
+/** Next step for a search Europe PMC refuses as too long. */
+const TOO_LONG_RECOVERY_HINT =
+  'Shorten the query: split its OR-joined clauses across several searches and merge the hits by `epmcId`.';
 
 export interface EuropePmcApiClientConfig {
   email?: string;
@@ -42,7 +62,8 @@ export type EuropePmcFullTextFetchResult =
  * status-mapped `McpError` for any non-2xx rather than returning the failing
  * `Response`, so a `!response.ok` check after the call can never run. A status
  * that needs graceful handling is converted in the catch block by inspecting
- * `error.code` — see `fullTextXml`'s 404 → `not-available`. (#90)
+ * `error.code` or `error.data.status` — see `fullTextXml`'s 404 →
+ * `not-available` and `search`'s 413 or 414 → `europepmc_invalid_input`. (#90, #321)
  */
 export class EuropePmcApiClient {
   constructor(private readonly config: EuropePmcApiClientConfig) {}
@@ -52,18 +73,29 @@ export class EuropePmcApiClient {
    * `EuropePmcService` can parse and surface SerializationError consistently
    * when the body is malformed.
    *
-   * A failed `/search` is an outage, never "no match" — a genuine zero-hit
+   * The search is a GET to `/search` while its composed query string — every
+   * parameter it sends, source filter and encoding included — is at most
+   * {@link POST_THRESHOLD} characters, and past that a POST of the same string
+   * to `/searchPOST` as an `application/x-www-form-urlencoded` body, which
+   * Europe PMC answers alike. Every search — each attempt, each first-page probe,
+   * each record lookup — makes that choice from its own parameters. (#321)
+   *
+   * A failed search is never "no match" — a genuine zero-hit
    * query is HTTP 200 with `hitCount: 0`. A 404 is reclassified from its
    * status-mapped `NotFound` to `ServiceUnavailable` so the service retries it.
    * A retryable 5xx keeps its code, so a 504 stays `Timeout`. Only a failure
    * that ends up `ServiceUnavailable` carries `europepmc_unreachable`, the one
    * code that reason is declared for. An upstream
-   * `retryAfter` is kept. A 429 and every other 4xx pass through unchanged, as
-   * does a 501, whose `data.retryable: false` keeps it out of the retry loop.
-   * (#152)
+   * `retryAfter` is kept. An HTTP 413 or 414 is the search being too long for
+   * Europe PMC to accept: it fails as non-retryable `europepmc_invalid_input`
+   * with a hint to split the query. A 429 and every other 4xx pass through
+   * unchanged — a bare 400 included, which Europe PMC also answers other
+   * malformed requests with — as does a 501, whose `data.retryable: false`
+   * keeps it out of the retry loop. (#152, #321)
    */
   async search(params: EuropePmcSearchParams): Promise<string> {
-    const url = this.buildSearchUrl(params);
+    const form = this.buildSearchForm(params);
+    const usePost = form.length > POST_THRESHOLD;
     const ctx = requestContextService.createRequestContext({
       operation: 'EuropePmcSearch',
       additionalContext: { query: params.query },
@@ -71,13 +103,35 @@ export class EuropePmcApiClient {
 
     let response: Response;
     try {
-      response = await fetchWithTimeout(url, this.config.timeoutMs, ctx, {
-        headers: { Accept: 'application/json', 'User-Agent': USER_AGENT },
-        ...(params.signal && { signal: params.signal }),
-      });
+      response = await fetchWithTimeout(
+        usePost ? `${EUROPEPMC_API_BASE}/searchPOST` : `${EUROPEPMC_API_BASE}/search?${form}`,
+        this.config.timeoutMs,
+        ctx,
+        {
+          ...(usePost && { method: 'POST', body: form }),
+          headers: {
+            Accept: 'application/json',
+            'User-Agent': USER_AGENT,
+            ...(usePost && { 'Content-Type': 'application/x-www-form-urlencoded' }),
+          },
+          ...(params.signal && { signal: params.signal }),
+        },
+      );
     } catch (error: unknown) {
       if (error instanceof McpError) {
         const status = error.data?.status;
+        if (status === 413 || status === 414) {
+          throw validationError(
+            `Europe PMC refused the search as too long to accept (HTTP ${status}).`,
+            {
+              reason: 'europepmc_invalid_input',
+              retryable: false,
+              status,
+              recovery: { hint: TOO_LONG_RECOVERY_HINT },
+            },
+            { cause: error },
+          );
+        }
         const isOutage =
           status === 404 ||
           (typeof status === 'number' && status >= 500 && error.data?.retryable !== false);
@@ -219,7 +273,12 @@ export class EuropePmcApiClient {
     return readBody(response.text());
   }
 
-  private buildSearchUrl(params: EuropePmcSearchParams): string {
+  /**
+   * The composed query string a search sends — on the URL of a GET, or as the
+   * body of a POST: the source-filtered query, the fixed format, result type,
+   * page size, cursor, and the optional sort and contact email, encoded.
+   */
+  private buildSearchForm(params: EuropePmcSearchParams): string {
     const finalParams: Record<string, string> = {
       query: buildSearchQuery(params),
       format: 'json',
@@ -230,7 +289,7 @@ export class EuropePmcApiClient {
     if (params.sort) finalParams.sort = params.sort;
     if (this.config.email) finalParams.email = this.config.email;
 
-    return `${EUROPEPMC_API_BASE}/search?${new URLSearchParams(finalParams).toString()}`;
+    return new URLSearchParams(finalParams).toString();
   }
 }
 

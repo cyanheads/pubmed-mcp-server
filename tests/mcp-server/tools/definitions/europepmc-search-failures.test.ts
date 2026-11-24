@@ -58,6 +58,16 @@ const SEARCH_UNREACHABLE_HINT =
 const FETCH_UNREACHABLE_HINT =
   "Retry after a brief delay, or pass a `MED` record's `epmcId`, which is its PMID, to pubmed_fetch_articles in `pmids`. That tool reads PubMed only, so it does not reach `PMC`, `PPR`, `PAT`, or `AGR` records.";
 
+/**
+ * 300 OR-joined `TITLE_ABS` clauses, about 9 KB: a search past the 2,000-character
+ * composed length at which it is POSTed, and past the URL length Europe PMC
+ * accepts. (#321)
+ */
+const LONG_QUERY = Array.from({ length: 300 }, (_, i) => `TITLE_ABS:"term${i + 1} therapy"`).join(
+  ' OR ',
+);
+const SEARCH_POST_URL = 'https://www.ebi.ac.uk/europepmc/webservices/rest/searchPOST';
+
 type Reply = { status: number; body?: unknown; headers?: Record<string, string> };
 
 const ENVELOPE: Reply = { status: 200, body: { version: '6.9' } };
@@ -94,6 +104,22 @@ type ErrorEnvelope = {
   message: string;
   data?: { reason?: string; retryAfter?: string; recovery?: { hint: string } };
 };
+
+/**
+ * The search parameters a request carried, whichever method sent them: the URL's
+ * query on a GET, the form body on a POST. (#321)
+ */
+function paramsOf(input: unknown, init?: RequestInit): URLSearchParams {
+  return init?.method === 'POST'
+    ? new URLSearchParams(String(init.body))
+    : new URL(String(input)).searchParams;
+}
+
+/** The parameters of each request the stubbed `fetch` received, in order. */
+const sentParams = (): URLSearchParams[] =>
+  fetchSpy.mock.calls.map((call: unknown[]) =>
+    paramsOf(call[0], call[1] as RequestInit | undefined),
+  );
 
 /** The error envelope, and the `content[]` text as a CommonMark parse reads it back. */
 function errorOf(result: Awaited<ReturnType<typeof runToolContract>>) {
@@ -308,9 +334,15 @@ describe.each([
  * before the call arms its first timer. (#305, #306)
  */
 describe.each([
-  ['pubmed_europepmc_search', () => search({}), SEARCH_UNREACHABLE_HINT],
-  ['pubmed_europepmc_fetch', fetchRecords, FETCH_UNREACHABLE_HINT],
-])('%s against a Europe PMC that never answers (#305)', (_name, run, outageHint) => {
+  ['pubmed_europepmc_search', () => search({}), SEARCH_UNREACHABLE_HINT, 'GET'],
+  [
+    'pubmed_europepmc_search, its query long enough to POST (#321),',
+    () => search({ query: LONG_QUERY }),
+    SEARCH_UNREACHABLE_HINT,
+    'POST',
+  ],
+  ['pubmed_europepmc_fetch', fetchRecords, FETCH_UNREACHABLE_HINT, 'GET'],
+])('%s against a Europe PMC that never answers (#305)', (_name, run, outageHint, method) => {
   beforeAll(async () => {
     await sanitization.sanitizeString('CRISPR', { context: 'text' });
   });
@@ -361,6 +393,9 @@ describe.each([
     );
     // Two requests run out their own 20 s timeout; the deadline cuts the third.
     expect(fetchSpy).toHaveBeenCalledTimes(3);
+    expect(
+      fetchSpy.mock.calls.map((call: unknown[]) => (call[1] as RequestInit).method ?? 'GET'),
+    ).toEqual([method, method, method]);
   });
 });
 
@@ -397,7 +432,7 @@ describe('pubmed_europepmc_search sort handling (#159)', () => {
     const result = await search({ sort: 'ID asc' });
 
     expect(result.isError).toBeFalsy();
-    expect(new URL(String(fetchSpy.mock.calls[0]?.[0])).searchParams.get('sort')).toBe('ID asc');
+    expect(sentParams()[0]?.get('sort')).toBe('ID asc');
     expect(fetchSpy).toHaveBeenCalledTimes(1);
   });
 
@@ -411,10 +446,6 @@ describe('pubmed_europepmc_search sort handling (#159)', () => {
     expect(fetchSpy).toHaveBeenCalledTimes(1);
   });
 });
-
-/** The URL parameters of each request the stubbed `fetch` received, in order. */
-const sentParams = (): URLSearchParams[] =>
-  fetchSpy.mock.calls.map((call: unknown[]) => new URL(String(call[0])).searchParams);
 
 describe('pubmed_europepmc_search sorts Europe PMC refuses (#239)', () => {
   /** Europe PMC's answer to a sort it cannot use — byte-identical to its outage answer. */
@@ -433,8 +464,8 @@ describe('pubmed_europepmc_search sorts Europe PMC refuses (#239)', () => {
   function stubFetchBySort(sorted: Reply[], unsorted: Reply[]) {
     let sortedCalls = 0;
     let unsortedCalls = 0;
-    fetchSpy = vi.spyOn(globalThis, 'fetch').mockImplementation((input) => {
-      const hasSort = new URL(String(input)).searchParams.has('sort');
+    fetchSpy = vi.spyOn(globalThis, 'fetch').mockImplementation((input, init) => {
+      const hasSort = paramsOf(input, init).has('sort');
       const replies = hasSort ? sorted : unsorted;
       const index = hasSort ? sortedCalls++ : unsortedCalls++;
       const reply = replies[Math.min(index, replies.length - 1)] as Reply;
@@ -586,8 +617,8 @@ const allText = (result: Awaited<ReturnType<typeof runToolContract>>) =>
 describe('pubmed_europepmc_search single-source query (#175)', () => {
   /** Answers like Europe PMC: one hit, and a `request.queryString` echo of the query sent. */
   function stubEchoingFetch() {
-    fetchSpy = vi.spyOn(globalThis, 'fetch').mockImplementation((input) => {
-      const queryString = new URL(String(input)).searchParams.get('query');
+    fetchSpy = vi.spyOn(globalThis, 'fetch').mockImplementation((input, init) => {
+      const queryString = paramsOf(input, init).get('query');
       const body = {
         version: '6.9',
         hitCount: 1,
@@ -646,8 +677,8 @@ describe('pubmed_europepmc_search cursorMark (#180)', () => {
   function stubFetchByCursor(cursorPage: Reply[], firstPage: Reply[]) {
     let cursorCalls = 0;
     let firstPageCalls = 0;
-    fetchSpy = vi.spyOn(globalThis, 'fetch').mockImplementation((input) => {
-      const isFirstPage = new URL(String(input)).searchParams.get('cursorMark') === '*';
+    fetchSpy = vi.spyOn(globalThis, 'fetch').mockImplementation((input, init) => {
+      const isFirstPage = paramsOf(input, init).get('cursorMark') === '*';
       const replies = isFirstPage ? firstPage : cursorPage;
       const index = isFirstPage ? firstPageCalls++ : cursorCalls++;
       const reply = replies[Math.min(index, replies.length - 1)] as Reply;
@@ -758,4 +789,90 @@ describe('pubmed_europepmc_search cursorMark (#180)', () => {
     expect(fetchSpy).toHaveBeenCalledTimes(1);
     expect(sentParams()[0]?.get('cursorMark')).toBe(issued);
   });
+});
+
+/**
+ * A search too long for a URL goes to `/searchPOST` as a form body and is served
+ * like any other; a 413 or 414 that still arrives is the caller's input, reported
+ * with a hint to split the query. The method choice and its edges are tabled at
+ * the service seam; these prove the wiring through the tool. (#321)
+ */
+describe('pubmed_europepmc_search query too long for a URL (#321)', () => {
+  const TOO_LONG_HINT =
+    'Shorten the query: split its OR-joined clauses across several searches and merge the hits by `epmcId`.';
+
+  it('declares the too-long case under the shared europepmc_invalid_input', () => {
+    const entry = EUROPEPMC_SERVICE_ERRORS.find((e) => e.reason === 'europepmc_invalid_input');
+    expect(entry?.when).toMatch(/; or a search too long for it to accept \(HTTP 413 or 414\)\.$/);
+  });
+
+  it('POSTs a 300-clause query to /searchPOST and returns its hits on both paths', async () => {
+    fetchSpy = vi.spyOn(globalThis, 'fetch').mockImplementation((input, init) => {
+      const params = paramsOf(input, init);
+      const body = {
+        version: '6.9',
+        hitCount: 4575,
+        nextCursorMark: 'AoIIQGHhvig1NjkyMjI1MQ==',
+        request: { queryString: params.get('query'), cursorMark: params.get('cursorMark') },
+        resultList: {
+          result: [{ id: 'PMC13690717', source: 'PMC', pmcid: 'PMC13690717', title: 'A' }],
+        },
+      };
+      return Promise.resolve(
+        new Response(JSON.stringify(body), {
+          status: 200,
+          headers: { 'content-type': 'application/json' },
+        }),
+      );
+    });
+
+    const result = await search({ query: LONG_QUERY, pageSize: 1 });
+
+    expect(result.isError).toBeFalsy();
+    expect(fetchSpy).toHaveBeenCalledTimes(1);
+    const [input, init] = fetchSpy.mock.calls[0] as [unknown, RequestInit];
+    expect(String(input)).toBe(SEARCH_POST_URL);
+    expect(init.method).toBe('POST');
+    expect(new Headers(init.headers).get('content-type')).toBe('application/x-www-form-urlencoded');
+    const sentQuery = `(${LONG_QUERY}) AND (SRC:"MED" OR SRC:"PMC" OR SRC:"PPR")`;
+    expect(sentParams()[0]?.get('query')).toBe(sentQuery);
+
+    expect(result.structuredContent).toMatchObject({
+      query: sentQuery,
+      totalCount: 4575,
+      nextCursorMark: 'AoIIQGHhvig1NjkyMjI1MQ==',
+      hits: [expect.objectContaining({ epmcId: 'PMC13690717', source: 'PMC' })],
+    });
+    const text = allText(result);
+    expect(text).toContain('PMC13690717');
+    expect(text).toContain('**Returned:** 1 of 4575');
+  });
+
+  it.each([
+    ['a 414 on a short query', 414, 'TITLE_ABS:"music therapy"', 'GET'],
+    ['a 413 on a POSTed query', 413, LONG_QUERY, 'POST'],
+  ])(
+    'ends %s as non-retryable europepmc_invalid_input with the split hint on both paths',
+    async (_label, status, query, method) => {
+      stubFetch([{ status, body: 'Request Entity Too Large' }]);
+      const { error, text } = errorOf(await search({ query }));
+
+      const message = `Europe PMC refused the search as too long to accept (HTTP ${status}).`;
+      expect(error.code).toBe(JsonRpcErrorCode.ValidationError);
+      expect(error.message).toBe(message);
+      expect(error.data).toMatchObject({
+        reason: 'europepmc_invalid_input',
+        retryable: false,
+        recovery: { hint: TOO_LONG_HINT },
+      });
+      expect(text).toBe(
+        `Error: ${message}\n\nRecovery: ${TOO_LONG_HINT}\n\n(reason europepmc_invalid_input · not retryable)`,
+      );
+      expect(text).not.toContain(SEARCH_UNREACHABLE_HINT);
+      // Not retried: one request, sent by the method its length picks.
+      expect(fetchSpy).toHaveBeenCalledTimes(1);
+      const [, sentInit] = fetchSpy.mock.calls[0] as [unknown, RequestInit | undefined];
+      expect(sentInit?.method ?? 'GET').toBe(method);
+    },
+  );
 });

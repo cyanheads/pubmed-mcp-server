@@ -4,9 +4,11 @@
  * publishes full text for (`epmcFullTextId`) and where each result type keeps
  * the journal name (`epmcJournal`).
  *
- * See https://europepmc.org/RestfulWebService for the full API. We use only
- * the search endpoint (`/webservices/rest/search`) and the fullText endpoint
- * (`/webservices/rest/{id}/fullTextXML`).
+ * See https://europepmc.org/RestfulWebService for the full API. We use the
+ * search endpoint (`/webservices/rest/search`, or `/webservices/rest/searchPOST`
+ * for a search whose parameters pass 2,000 characters), the fullText endpoint
+ * (`/webservices/rest/{id}/fullTextXML`), and the citations and references
+ * endpoints (`/webservices/rest/MED/{pmid}/citations|references`).
  *
  * @module src/services/europe-pmc/types
  */

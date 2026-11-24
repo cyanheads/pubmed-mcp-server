@@ -67,6 +67,40 @@ function httpErrorRejection(
   });
 }
 
+/**
+ * The search parameters a request carried, whichever method sent them: the URL's
+ * query on a GET, the form body on a POST. (#321)
+ */
+function paramsOf(url: string, init?: RequestInit): URLSearchParams {
+  return init?.method === 'POST'
+    ? new URLSearchParams(String(init.body))
+    : new URL(url).searchParams;
+}
+
+/** The parameters of every request the stubbed `fetchWithTimeout` received, in order. */
+const sentParams = (): URLSearchParams[] =>
+  mockFetchWithTimeout.mock.calls.map(([url, , , init]) =>
+    paramsOf(String(url), init as RequestInit | undefined),
+  );
+
+/** How each request the stubbed `fetchWithTimeout` received was sent: method and URL. */
+const sentRoutes = (): string[] =>
+  mockFetchWithTimeout.mock.calls.map(
+    ([url, , , init]) => `${(init as RequestInit | undefined)?.method ?? 'GET'} ${String(url)}`,
+  );
+
+const EPMC_REST = 'https://www.ebi.ac.uk/europepmc/webservices/rest';
+const POST_ROUTE = `POST ${EPMC_REST}/searchPOST`;
+
+/**
+ * 300 OR-joined `TITLE_ABS` clauses, about 9 KB: past the 2,000-character
+ * composed length at which a search is POSTed, and past the URL length Europe
+ * PMC accepts. (#321)
+ */
+const LONG_QUERY = Array.from({ length: 300 }, (_, i) => `TITLE_ABS:"term${i + 1} therapy"`).join(
+  ' OR ',
+);
+
 /** The error a 503 ends as when no retries are configured. */
 const UNREACHABLE_AFTER_ONE_503 = {
   code: JsonRpcErrorCode.ServiceUnavailable,
@@ -78,9 +112,17 @@ const UNREACHABLE_AFTER_ONE_503 = {
 const DEADLINE_MS = 45_000;
 
 function makeService(
-  opts: { maxRetries?: number; minStartGapMs?: number; totalDeadlineMs?: number } = {},
+  opts: {
+    email?: string;
+    maxRetries?: number;
+    minStartGapMs?: number;
+    totalDeadlineMs?: number;
+  } = {},
 ) {
-  const client = new EuropePmcApiClient({ timeoutMs: 20000 });
+  const client = new EuropePmcApiClient({
+    timeoutMs: 20000,
+    ...(opts.email && { email: opts.email }),
+  });
   const queue = createEuropePmcRequestQueue(opts.minStartGapMs ?? 0);
   return new EuropePmcService(
     client,
@@ -448,6 +490,238 @@ describe('EuropePmcService.search — source clause (#175)', () => {
 });
 
 /**
+ * A search whose composed query string — every parameter it sends, source
+ * filter and encoding included — passes 2,000 characters goes to `/searchPOST`
+ * as a form body; one at or under 2,000 keeps its GET. Europe PMC refuses a long
+ * URL with HTTP 400 or 414 and serves the same parameters posted. A 413 or 414
+ * that still arrives is the caller's input, not an outage. (#321)
+ */
+describe('EuropePmcService.search — GET or POST by composed length (#321)', () => {
+  const USER_AGENT = 'pubmed-mcp-server (+https://github.com/cyanheads/pubmed-mcp-server)';
+  /** `query=` plus the four fixed parameters of a first-page core search: 6 + 12 + 16 + 12 + 13. */
+  const FIXED_CHARS = 59;
+  const FIXED_TAIL = '&format=json&resultType=core&pageSize=25&cursorMark=*';
+
+  /** The one request sent: its URL and init. */
+  const onlyCall = () => {
+    expect(mockFetchWithTimeout).toHaveBeenCalledTimes(1);
+    const [url, timeoutMs, , init] = mockFetchWithTimeout.mock.calls[0] as [
+      string,
+      number,
+      unknown,
+      RequestInit,
+    ];
+    return { url, timeoutMs, init };
+  };
+
+  /** The init of a POSTed search, its signal aside. */
+  const postInit = (body: string) => ({
+    method: 'POST',
+    headers: {
+      Accept: 'application/json',
+      'User-Agent': USER_AGENT,
+      'Content-Type': 'application/x-www-form-urlencoded',
+    },
+    body,
+  });
+
+  const settle = (promise: Promise<unknown>) =>
+    promise.then(
+      () => undefined,
+      (e: unknown) => e as McpError,
+    );
+
+  beforeEach(() => {
+    mockFetchWithTimeout.mockReset();
+    mockFetchWithTimeout.mockImplementation(() => Promise.resolve(jsonResponse({ hitCount: 0 })));
+  });
+
+  it('sends a short search as the same GET it always has: URL, timeout, and headers', async () => {
+    await makeService().search({
+      query: 'TITLE_ABS:"music therapy" AND PUB_YEAR:2024',
+      sources: ['MED', 'PMC', 'PPR'],
+    });
+
+    const { url, timeoutMs, init } = onlyCall();
+    expect(url).toBe(
+      `${EPMC_REST}/search?query=%28TITLE_ABS%3A%22music+therapy%22+AND+PUB_YEAR%3A2024%29+AND+%28SRC%3A%22MED%22+OR+SRC%3A%22PMC%22+OR+SRC%3A%22PPR%22%29${FIXED_TAIL}`,
+    );
+    expect(timeoutMs).toBe(20000);
+    expect(Object.keys(init).sort()).toEqual(['headers', 'signal']);
+    expect(init.headers).toEqual({ Accept: 'application/json', 'User-Agent': USER_AGENT });
+  });
+
+  it('keeps a search whose composed query string is exactly 2,000 characters on GET', async () => {
+    const query = 'a'.repeat(2000 - FIXED_CHARS);
+    await makeService().search({ query });
+
+    const { url, init } = onlyCall();
+    const queryString = `query=${query}${FIXED_TAIL}`;
+    expect(queryString).toHaveLength(2000);
+    expect(url).toBe(`${EPMC_REST}/search?${queryString}`);
+    expect(init.method).toBeUndefined();
+    expect(init.body).toBeUndefined();
+  });
+
+  it('POSTs a search whose composed query string is 2,001 characters, carrying it as the form body', async () => {
+    const query = 'a'.repeat(2001 - FIXED_CHARS);
+    await makeService().search({ query });
+
+    const { url, init } = onlyCall();
+    const body = `query=${query}${FIXED_TAIL}`;
+    expect(body).toHaveLength(2001);
+    expect(url).toBe(`${EPMC_REST}/searchPOST`);
+    expect(init).toEqual({ ...postInit(body), signal: expect.any(AbortSignal) });
+  });
+
+  it.each([
+    ['the source filter', { query: 'a'.repeat(1900), sources: ['MED'] as const }, 1900],
+    ['percent-encoding', { query: 'a b:'.repeat(400) }, 1600],
+  ])(
+    'POSTs a caller query under 2,000 characters that %s pushes past it',
+    async (_label, params, rawLength) => {
+      expect(params.query).toHaveLength(rawLength);
+      await makeService().search(params);
+
+      expect(sentRoutes()).toEqual([POST_ROUTE]);
+      const sentQuery = sentParams()[0]?.get('query');
+      expect(sentQuery).toBe(
+        'sources' in params ? `(${params.query}) AND (SRC:"MED" OR SRC:"MED")` : params.query,
+      );
+    },
+  );
+
+  it('counts the configured contact email: the same query is a GET without it and a POST with it, the email in the body', async () => {
+    // 1,990 composed characters without the email; `&email=ops%40example.org` adds 24.
+    const query = 'a'.repeat(1990 - FIXED_CHARS);
+
+    await makeService().search({ query });
+    await makeService({ email: 'ops@example.org' }).search({ query });
+
+    expect(sentRoutes()).toEqual([
+      `GET ${EPMC_REST}/search?query=${query}${FIXED_TAIL}`,
+      POST_ROUTE,
+    ]);
+    const init = mockFetchWithTimeout.mock.calls[1]?.[3] as RequestInit;
+    expect(init.body).toBe(`query=${query}${FIXED_TAIL}&email=ops%40example.org`);
+    expect(sentParams()[1]?.get('email')).toBe('ops@example.org');
+  });
+
+  it('carries exactly the parameters a GET would, in the same order, and nothing on the URL', async () => {
+    await makeService({ email: 'ops@example.org' }).search({
+      query: LONG_QUERY,
+      sources: ['MED', 'PPR'],
+      resultType: 'lite',
+      pageSize: 10,
+      cursorMark: 'AoIIQGHhvig1NjkyMjI1MQ==',
+      sort: 'CITED desc',
+    });
+
+    expect(sentRoutes()).toEqual([POST_ROUTE]);
+    const params = sentParams()[0] as URLSearchParams;
+    expect([...params.entries()]).toEqual([
+      ['query', `(${LONG_QUERY}) AND (SRC:"MED" OR SRC:"PPR")`],
+      ['format', 'json'],
+      ['resultType', 'lite'],
+      ['pageSize', '10'],
+      ['cursorMark', 'AoIIQGHhvig1NjkyMjI1MQ=='],
+      ['sort', 'CITED desc'],
+      ['email', 'ops@example.org'],
+    ]);
+  });
+
+  it('pages a POSTed search by cursor: the first page hands back its cursor, and the next request posts it', async () => {
+    const page = (ids: string[], next: string) =>
+      jsonResponse({
+        hitCount: 4575,
+        nextCursorMark: next,
+        request: { queryString: `(${LONG_QUERY})`, cursorMark: '*' },
+        resultList: { result: ids.map((id) => ({ id, source: 'MED', pmid: id })) },
+      });
+    const firstIds = Array.from({ length: 25 }, (_, i) => `${42000000 + i}`);
+    const secondIds = Array.from({ length: 25 }, (_, i) => `${41000000 + i}`);
+    mockFetchWithTimeout
+      .mockResolvedValueOnce(page(firstIds, 'AoIIQGHhvig1NjkyMjI1MQ=='))
+      .mockResolvedValueOnce(page(secondIds, 'AoIIQFYnlSg1NTk3MjkwMQ=='));
+
+    const service = makeService();
+    const first = await service.search({ query: LONG_QUERY });
+    const second = await service.search({
+      query: LONG_QUERY,
+      cursorMark: first.nextCursorMark as string,
+    });
+
+    expect(first).toMatchObject({ hitCount: 4575, nextCursorMark: 'AoIIQGHhvig1NjkyMjI1MQ==' });
+    expect(second).toMatchObject({
+      hitCount: 4575,
+      cursorMark: 'AoIIQGHhvig1NjkyMjI1MQ==',
+      nextCursorMark: 'AoIIQFYnlSg1NTk3MjkwMQ==',
+    });
+    expect(second.hits.map((h) => h.id)).toEqual(secondIds);
+    expect(sentRoutes()).toEqual([POST_ROUTE, POST_ROUTE]);
+    expect(sentParams().map((p) => p.get('cursorMark'))).toEqual(['*', 'AoIIQGHhvig1NjkyMjI1MQ==']);
+  });
+
+  it('POSTs a fetchRecords batch whose lookup query passes the threshold', async () => {
+    const ids = Array.from({ length: 25 }, (_, i) => `PMC${String(i).padStart(62, '0')}`);
+    await makeService().fetchRecords(ids.map((epmcId) => ({ source: 'PMC' as const, epmcId })));
+
+    expect(sentRoutes()).toEqual([POST_ROUTE]);
+    expect(sentParams()[0]?.get('query')).toBe(
+      ids.map((id) => `(EXT_ID:${id} AND SRC:PMC) OR (PMCID:${id})`).join(' OR '),
+    );
+    expect(sentParams()[0]?.get('pageSize')).toBe('25');
+  });
+
+  /** The recovery a search too long for Europe PMC carries. */
+  const TOO_LONG_HINT =
+    'Shorten the query: split its OR-joined clauses across several searches and merge the hits by `epmcId`.';
+
+  it.each([
+    ['a 414 on a GET', 414, 'TITLE_ABS:"music therapy"', 'GET'],
+    ['a 413 on a POST', 413, LONG_QUERY, 'POST'],
+  ])(
+    'ends %s as non-retryable europepmc_invalid_input naming the split, with no retry',
+    async (_label, status, query, method) => {
+      mockFetchWithTimeout.mockReset();
+      mockFetchWithTimeout.mockRejectedValue(
+        httpErrorRejection(status, JsonRpcErrorCode.InvalidRequest, '<html>Too Large</html>'),
+      );
+
+      const err = await settle(makeService({ maxRetries: 3 }).search({ query }));
+
+      expect(err).toBeInstanceOf(McpError);
+      expect(err?.code).toBe(JsonRpcErrorCode.ValidationError);
+      expect(err?.message).toBe(
+        `Europe PMC refused the search as too long to accept (HTTP ${status}).`,
+      );
+      expect(err?.data).toMatchObject({
+        reason: 'europepmc_invalid_input',
+        retryable: false,
+        status,
+        recovery: { hint: TOO_LONG_HINT },
+      });
+      expect(defaultIsTransient(err)).toBe(false);
+      expect(mockFetchWithTimeout).toHaveBeenCalledTimes(1);
+      expect(sentRoutes()[0]?.split(' ')[0]).toBe(method);
+    },
+  );
+
+  it('keeps a bare 400 on a POSTed search at InvalidParams, unretried and with no reason', async () => {
+    mockFetchWithTimeout.mockReset();
+    mockFetchWithTimeout.mockRejectedValue(
+      httpErrorRejection(400, JsonRpcErrorCode.InvalidParams, 'HTTP Status 400 – Bad Request'),
+    );
+
+    const err = await settle(makeService({ maxRetries: 3 }).search({ query: LONG_QUERY }));
+
+    expect(err?.code).toBe(JsonRpcErrorCode.InvalidParams);
+    expect(err?.data?.reason).toBeUndefined();
+    expect(sentRoutes()).toEqual([POST_ROUTE]);
+  });
+});
+
+/**
  * Upstream failures (#152) and the empty `{ version }` envelope (#159) both run
  * inside the service's retry loop. These drive the real client, queue, and retry
  * loop with a stubbed `fetchWithTimeout` and zero-delay backoff, and count the
@@ -791,9 +1065,8 @@ describe('EuropePmcService.search — upstream failures and empty envelopes (#15
         '{"errMsg":"Search service is temporarily unavailable. Please retry later."}',
       );
 
-    /** The URL parameters of every request sent, in order. */
-    const sent = () =>
-      mockFetchWithTimeout.mock.calls.map((call) => new URL(String(call[0])).searchParams);
+    /** The parameters of every request sent, in order. */
+    const sent = sentParams;
     const sentCursors = () => sent().map((params) => params.get('cursorMark'));
 
     /**
@@ -806,12 +1079,14 @@ describe('EuropePmcService.search — upstream failures and empty envelopes (#15
     ) {
       let cursorCalls = 0;
       let firstPageCalls = 0;
-      mockFetchWithTimeout.mockImplementation((url: string) => {
-        const isFirstPage = new URL(url).searchParams.get('cursorMark') === '*';
-        const replies = isFirstPage ? firstPage : cursorPage;
-        const index = isFirstPage ? firstPageCalls++ : cursorCalls++;
-        return (replies[Math.min(index, replies.length - 1)] as () => Promise<Response>)();
-      });
+      mockFetchWithTimeout.mockImplementation(
+        (url: string, _timeoutMs: number, _ctx: unknown, init?: RequestInit) => {
+          const isFirstPage = paramsOf(url, init).get('cursorMark') === '*';
+          const replies = isFirstPage ? firstPage : cursorPage;
+          const index = isFirstPage ? firstPageCalls++ : cursorCalls++;
+          return (replies[Math.min(index, replies.length - 1)] as () => Promise<Response>)();
+        },
+      );
     }
 
     const reject503 = () => Promise.reject(cursor503());
@@ -859,6 +1134,37 @@ describe('EuropePmcService.search — upstream failures and empty envelopes (#15
       expect(probe?.get('cursorMark')).toBe('*');
       expect(probe?.get('pageSize')).toBe('1');
       // The same query: source clause and sort included.
+      expect(probe?.get('query')).toBe(original?.get('query'));
+      expect(probe?.get('sort')).toBe('CITED desc');
+      expect(retry?.toString()).toBe(original?.toString());
+    });
+
+    it('diagnoses the cursor the same way on a search long enough to POST, probing by POST too (#321)', async () => {
+      routeByCursor([reject503], [resolveResults]);
+
+      const err = await settle(
+        service().search({
+          query: LONG_QUERY,
+          sources: ['MED'],
+          cursorMark: 'abc',
+          pageSize: 10,
+          sort: 'CITED desc',
+        }),
+      );
+
+      expect(err?.code).toBe(JsonRpcErrorCode.ValidationError);
+      expect(err?.data).toMatchObject({
+        reason: 'europepmc_invalid_input',
+        cursorMark: 'abc',
+        retryable: false,
+        status: 503,
+      });
+      // The cursor request, the first-page probe, and the confirming retry, all posted.
+      expect(sentRoutes()).toEqual([POST_ROUTE, POST_ROUTE, POST_ROUTE]);
+      const [original, probe, retry] = sent();
+      expect(original?.get('query')).toBe(`(${LONG_QUERY}) AND (SRC:"MED" OR SRC:"MED")`);
+      expect(probe?.get('cursorMark')).toBe('*');
+      expect(probe?.get('pageSize')).toBe('1');
       expect(probe?.get('query')).toBe(original?.get('query'));
       expect(probe?.get('sort')).toBe('CITED desc');
       expect(retry?.toString()).toBe(original?.toString());
@@ -1010,7 +1316,7 @@ describe('EuropePmcService.search — upstream failures and empty envelopes (#15
       const reason = new Error('caller went away');
       mockFetchWithTimeout.mockImplementation(
         (url: string, _timeoutMs: number, _ctx: unknown, init?: RequestInit) => {
-          if (new URL(url).searchParams.get('cursorMark') !== '*') return reject503();
+          if (paramsOf(url, init).get('cursorMark') !== '*') return reject503();
           // The probe is in flight: the caller cancels, and the fetch honors its signal.
           return new Promise<Response>((_resolve, reject) => {
             init?.signal?.addEventListener('abort', () => reject(init.signal?.reason), {
@@ -1043,9 +1349,8 @@ describe('EuropePmcService.search — upstream failures and empty envelopes (#15
         '{"errCode":503,"errMsg":"Search service is temporarily unavailable. Please retry later."}',
       );
 
-    /** The URL parameters of every request sent, in order. */
-    const sent = () =>
-      mockFetchWithTimeout.mock.calls.map((call) => new URL(String(call[0])).searchParams);
+    /** The parameters of every request sent, in order. */
+    const sent = sentParams;
 
     type Reply = () => Promise<Response>;
     const reject503: Reply = () => Promise.reject(refused503());
@@ -1058,12 +1363,14 @@ describe('EuropePmcService.search — upstream failures and empty envelopes (#15
     function routeBySort(sorted: Reply[], unsorted: Reply[]) {
       let sortedCalls = 0;
       let unsortedCalls = 0;
-      mockFetchWithTimeout.mockImplementation((url: string) => {
-        const hasSort = new URL(url).searchParams.has('sort');
-        const replies = hasSort ? sorted : unsorted;
-        const index = hasSort ? sortedCalls++ : unsortedCalls++;
-        return (replies[Math.min(index, replies.length - 1)] as Reply)();
-      });
+      mockFetchWithTimeout.mockImplementation(
+        (url: string, _timeoutMs: number, _ctx: unknown, init?: RequestInit) => {
+          const hasSort = paramsOf(url, init).has('sort');
+          const replies = hasSort ? sorted : unsorted;
+          const index = hasSort ? sortedCalls++ : unsortedCalls++;
+          return (replies[Math.min(index, replies.length - 1)] as Reply)();
+        },
+      );
     }
 
     const settle = (promise: Promise<unknown>) =>
@@ -1114,6 +1421,32 @@ describe('EuropePmcService.search — upstream failures and empty envelopes (#15
       expect(probe?.get('cursorMark')).toBe('*');
       expect(probe?.get('pageSize')).toBe('1');
       expect(probe?.get('query')).toBe(original?.get('query'));
+      expect(retry?.toString()).toBe(original?.toString());
+    });
+
+    it('diagnoses the sort the same way on a search long enough to POST, probing by POST too (#321)', async () => {
+      routeBySort([reject503], [resolveResults]);
+
+      const err = await settle(
+        service().search({ query: LONG_QUERY, sources: ['MED'], sort: 'FOOBAR desc' }),
+      );
+
+      expect(err?.code).toBe(JsonRpcErrorCode.ValidationError);
+      expect(err?.data).toMatchObject({
+        reason: 'europepmc_invalid_input',
+        retryable: false,
+        sort: 'FOOBAR desc',
+        status: 503,
+      });
+      expect(hintOf(err)).toBe(SORT_HINT);
+      // The sorted request, the unsorted first-page probe, and the confirming retry, all posted.
+      expect(sentRoutes()).toEqual([POST_ROUTE, POST_ROUTE, POST_ROUTE]);
+      const [original, probe, retry] = sent();
+      expect(original?.get('sort')).toBe('FOOBAR desc');
+      expect(probe?.has('sort')).toBe(false);
+      expect(probe?.get('cursorMark')).toBe('*');
+      expect(probe?.get('pageSize')).toBe('1');
+      expect(probe?.get('query')).toBe(`(${LONG_QUERY}) AND (SRC:"MED" OR SRC:"MED")`);
       expect(retry?.toString()).toBe(original?.toString());
     });
 
@@ -1538,9 +1871,15 @@ describe('EuropePmcService.search — upstream failures and empty envelopes (#15
           expect(leastGrowth).toBeLessThan(4 * (n / 5_000));
         }
         expect(largestMs).toBeLessThan(maxLength > 80_000 ? 1_600 : 400);
-        // Each timed call reached the request, sort and all.
-        const lastUrl = new URL(String(mockFetchWithTimeout.mock.lastCall?.[0]));
-        expect(lastUrl.searchParams.get('sort')).toBe(build(maxLength));
+        // Each timed call reached the request, sort and all — POSTed at these lengths.
+        const [url, , , init] = mockFetchWithTimeout.mock.lastCall as [
+          string,
+          number,
+          unknown,
+          RequestInit,
+        ];
+        expect(`${init.method} ${url}`).toBe(POST_ROUTE);
+        expect(paramsOf(url, init).get('sort')).toBe(build(maxLength));
       });
     });
 
@@ -1612,10 +1951,12 @@ describe('EuropePmcService request pacing', () => {
 
   /** Records each request's start instant, then answers with `reply`. */
   function recordStarts(reply: (query: string | null) => Promise<Response>) {
-    mockFetchWithTimeout.mockImplementation((url: string) => {
-      starts.push(Date.now() - t0);
-      return reply(new URL(url).searchParams.get('query'));
-    });
+    mockFetchWithTimeout.mockImplementation(
+      (url: string, _timeoutMs: number, _ctx: unknown, init?: RequestInit) => {
+        starts.push(Date.now() - t0);
+        return reply(paramsOf(url, init).get('query'));
+      },
+    );
   }
 
   it('holds in-flight requests to four across search, fullTextXml, and the link calls', async () => {
@@ -1751,12 +2092,14 @@ describe('EuropePmcService request pacing', () => {
   });
 
   it('paces the first-page probe for a 503 cursor through the queue like any request (#180)', async () => {
-    mockFetchWithTimeout.mockImplementation((url: string) => {
-      starts.push(Date.now() - t0);
-      return new URL(url).searchParams.get('cursorMark') === '*'
-        ? Promise.resolve(results())
-        : Promise.reject(unavailable());
-    });
+    mockFetchWithTimeout.mockImplementation(
+      (url: string, _timeoutMs: number, _ctx: unknown, init?: RequestInit) => {
+        starts.push(Date.now() - t0);
+        return paramsOf(url, init).get('cursorMark') === '*'
+          ? Promise.resolve(results())
+          : Promise.reject(unavailable());
+      },
+    );
     const service = makeService({ maxRetries: 3, minStartGapMs: 200 });
 
     const outcome = expect(service.search({ query: 'a', cursorMark: 'abc' })).rejects.toMatchObject(
@@ -1783,7 +2126,7 @@ describe('EuropePmcService request pacing', () => {
     mockFetchWithTimeout.mockImplementation(
       (url: string, _timeoutMs: number, _ctx: unknown, init?: RequestInit) => {
         starts.push(Date.now() - t0);
-        if (!new URL(url).searchParams.has('sort')) return Promise.resolve(results());
+        if (!paramsOf(url, init).has('sort')) return Promise.resolve(results());
         return new Promise<Response>((_resolve, reject) => {
           setTimeout(() => reject(unavailable()), latencyMs);
           init?.signal?.addEventListener('abort', () => reject(init.signal?.reason), {
@@ -2056,14 +2399,40 @@ describe('EuropePmcService total deadline (#305)', () => {
     },
   );
 
+  it('ends a search long enough to POST at the deadline when /searchPOST never answers, as a GET search ends (#321)', async () => {
+    mockFetchWithTimeout.mockImplementation(realFetchWithTimeout);
+    const starts: number[] = [];
+    const aborts: number[] = [];
+    const routes: string[] = [];
+    vi.spyOn(globalThis, 'fetch').mockImplementation((url, init) => {
+      starts.push(elapsed());
+      routes.push(`${init?.method ?? 'GET'} ${String(url)}`);
+      return hangUntilAborted(init, () => aborts.push(elapsed()));
+    });
+
+    const settled = settle(makeService({ maxRetries: 3 }).search({ query: LONG_QUERY }));
+    await vi.advanceTimersByTimeAsync(DEADLINE_MS);
+
+    expect(await settled).toMatchObject({
+      settledAt: DEADLINE_MS,
+      error: deadlineExceeded('search'),
+    });
+    expect(routes).toEqual([POST_ROUTE, POST_ROUTE, POST_ROUTE]);
+    expect(starts).toEqual([0, 21_000, 43_000]);
+    expect(aborts).toEqual([20_000, 41_000, DEADLINE_MS]);
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
   it('ends a call still waiting for a request slot at its deadline, never sending it', async () => {
     // Four calls hold every slot with requests that never settle; a fifth, started
     // 10 s later, waits in the queue until its own deadline.
     const sent: Array<string | null> = [];
-    mockFetchWithTimeout.mockImplementation((url: string) => {
-      sent.push(new URL(url).searchParams.get('query'));
-      return new Promise<Response>(() => {});
-    });
+    mockFetchWithTimeout.mockImplementation(
+      (url: string, _timeoutMs: number, _ctx: unknown, init?: RequestInit) => {
+        sent.push(paramsOf(url, init).get('query'));
+        return new Promise<Response>(() => {});
+      },
+    );
     const service = makeService();
     for (const query of ['a', 'b', 'c', 'd']) void service.search({ query });
     await vi.advanceTimersByTimeAsync(10_000);
@@ -2211,17 +2580,23 @@ describe('EuropePmcService total deadline (#305)', () => {
   );
 
   it.each([
-    ['a caller cursor (#180)', { cursorMark: 'abc' }],
-    ['an undocumented sort (#239)', { sort: 'BOGUS desc' }],
+    ['a caller cursor (#180)', { cursorMark: 'abc' }, 'GET'],
+    ['an undocumented sort (#239)', { sort: 'BOGUS desc' }, 'GET'],
+    ['a caller cursor on a POSTed search (#321)', { cursorMark: 'abc', query: LONG_QUERY }, 'POST'],
+    [
+      'an undocumented sort on a POSTed search (#321)',
+      { sort: 'BOGUS desc', query: LONG_QUERY },
+      'POST',
+    ],
   ])(
     'ends a search at the deadline while the first-page probe for %s hangs',
-    async (_suspect, input) => {
+    async (_suspect, input, method) => {
       // The search draws HTTP 503, which sends a probe of the first page (`pageSize`
       // 1); the probe never answers until the deadline aborts it.
       const aborts: number[] = [];
       mockFetchWithTimeout.mockImplementation(
         (url: string, _timeoutMs: number, _ctx: unknown, init?: RequestInit) =>
-          new URL(url).searchParams.get('pageSize') === '1'
+          paramsOf(url, init).get('pageSize') === '1'
             ? hangUntilAborted(init, () => aborts.push(elapsed()))
             : Promise.reject(httpErrorRejection(503, JsonRpcErrorCode.ServiceUnavailable, 'down')),
       );
@@ -2236,6 +2611,7 @@ describe('EuropePmcService total deadline (#305)', () => {
         error: deadlineExceeded('search'),
       });
       expect(mockFetchWithTimeout).toHaveBeenCalledTimes(2);
+      expect(sentRoutes().map((route) => route.split(' ')[0])).toEqual([method, method]);
       expect(aborts).toEqual([DEADLINE_MS]);
     },
   );
@@ -2450,7 +2826,7 @@ describe('EuropePmcService total deadline (#305)', () => {
         const aborts: number[] = [];
         mockFetchWithTimeout.mockImplementation(
           (url: string, _timeoutMs: number, _ctx: unknown, init?: RequestInit) =>
-            new URL(url).searchParams.get('pageSize') === '1'
+            paramsOf(url, init).get('pageSize') === '1'
               ? hangUntilAborted(init, () => aborts.push(elapsed()))
               : Promise.reject(
                   httpErrorRejection(503, JsonRpcErrorCode.ServiceUnavailable, 'down'),

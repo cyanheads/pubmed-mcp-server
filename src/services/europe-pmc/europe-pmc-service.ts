@@ -29,7 +29,9 @@
  * blamed only when a retry draws the 503 again while that first page was
  * served. A documented sort is never blamed: its 503s are retried as an outage.
  * A search reports the effective query Europe PMC echoes back, or — with no
- * echo — the source-filtered query it sent.
+ * echo — the source-filtered query it sent. A search whose parameters outgrow a
+ * URL is POSTed by the client, so attempts, first-page probes, and record
+ * lookups behave alike whichever method carries them.
  *
  * Optional service: only constructed when `EUROPEPMC_ENABLED=true` (the
  * default). `getEuropePmcService()` returns `undefined` when disabled so
@@ -542,10 +544,10 @@ export class EuropePmcService {
     // not the caller's bare query, which searches every source. (#150)
     const echoed = parsed.request?.queryString ?? buildSearchQuery(params);
 
-    // EPMC's `request.cursorMark` echo is URL-encoded (the wire form), while
-    // `nextCursorMark` in the JSON body is raw. Use the caller's input as the
-    // current cursor so the echo is consistent and the equality check below
-    // (used to detect "no more pages") compares like-for-like. A page shorter
+    // The current cursor is the caller's input rather than EPMC's
+    // `request.cursorMark` echo, which repeats it raw but is absent from a
+    // response with no `request` block; the equality check below (used to
+    // detect "no more pages") compares it with `nextCursorMark`. A page shorter
     // than the one asked for is the last: Europe PMC still hands back a fresh
     // cursor on the short last page of a cursor walk, and it leads only to an
     // empty page.
